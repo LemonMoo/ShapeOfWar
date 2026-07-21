@@ -6,7 +6,7 @@ primitive shapes (circles, squares, triangles, diamonds).
 
 - **Macro scale:** a procedurally generated Earth-like world (fractal-noise
   continents and oceans), carved into fictional **factions** — each belonging to
-  an invented **species** — with a relationship graph (ally / neutral / enemy)
+  a fantasy **species** (Humans, Elves, Dwarves, Orcs, Goblins) — with a relationship graph (ally / neutral / enemy)
   derived from who borders whom. Every launch (and the **Generate New World**
   button) makes a fresh world. The panel's **View** button cycles three map
   modes: **Political**, **Fertility** (a barren→lush ecology heatmap that sets
@@ -69,7 +69,7 @@ app/
   core/  events.py      pub/sub hub — new systems hook in without edits
   world/ nation.py      a faction (free-form stats/meta dicts, incl. species)
          world_map.py   factions + relationship graph, Stance constants
-         lexicon.py     invented species + faction/county/settlement/village
+         lexicon.py     fantasy species + faction/county/settlement/village
                         name generators
          worldgen.py    procedural world: elevation, water, fertility, rivers,
                         river-aware territories/counties, settlements, and

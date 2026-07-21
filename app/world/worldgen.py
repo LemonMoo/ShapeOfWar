@@ -144,8 +144,9 @@ def _generate_counties(world, rng, base_cost):
                                 key=lambda i: (p[0] - seeds[i][0]) ** 2
                                 + (p[1] - seeds[i][1]) ** 2)
 
+        species = world.factions[fac_idx].meta["species"]
         base = len(world.counties)
-        objs = [County(base + i, fac_idx, namer()) for i in range(len(seeds))]
+        objs = [County(base + i, fac_idx, namer(species)) for i in range(len(seeds))]
         for (x, y), i in assign.items():
             world.county_grid[y][x] = base + i
             objs[i].cells.append((x, y))
@@ -439,6 +440,7 @@ def _generate_settlements(world, rng):
     prox = lambda d, reach: math.exp(-d / reach)   # 1 at the feature, ->0 away
 
     for fac_idx, cells in cells_by_fac.items():
+        species = world.factions[fac_idx].meta["species"]
         taken = []                                 # placed positions (all kinds)
         for kind, t in SETTLEMENT_TYPES.items():
             count = max(t["min"], min(t["max"], len(cells) // t["per_cells"]))
@@ -467,7 +469,7 @@ def _generate_settlements(world, rng):
                 fert = world.fertility[y][x]
                 gen = round(rng.uniform(*t["gen"]) * (0.7 + 0.6 * fert))
                 drain = round(rng.uniform(*t["drain"]))
-                st = Settlement(len(world.settlements), kind, namer(kind),
+                st = Settlement(len(world.settlements), kind, namer(kind, species),
                                 (x, y), fac_idx, world.county_grid[y][x],
                                 gen, drain)
                 world.settlements.append(st)
@@ -553,6 +555,7 @@ def _generate_villages(world, rng):
         # at a time, so names need only be unique within a county (a handful
         # to ~50), not across the whole world's thousands of villages.
         namer = make_settlement_namer(rng)
+        species = world.factions[county.faction_idx].meta["species"]
         land_cells = [(x, y) for x, y in county.cells
                       if (x, y) not in world.river_cells
                       and (x, y) not in world.lake_cells]
@@ -599,7 +602,7 @@ def _generate_villages(world, rng):
             local_fert = sum(samples) / len(samples) if samples else world.fertility[y][x]
             farm = round(rng.uniform(*_VILLAGE_FARM_RANGE) * (0.5 + 1.2 * local_fert))
             v = Village(len(world.villages), county.id, county.faction_idx,
-                       namer("village"), (x, y), farm)
+                       namer("village", species), (x, y), farm)
             world.villages.append(v)
             vids.append(v.id)
 
@@ -617,6 +620,170 @@ def _generate_villages(world, rng):
             points.append(world.settlements[county.meta_settlements[0]].pos)
         edges = _mst_edges(points)
         world.roads_by_county[county.id] = [(points[a], points[b]) for a, b in edges]
+
+
+# Global trade routes: long-haul roads and sea lanes linking cities across the
+# whole world, as opposed to the straight-line village roads above (which only
+# ever need to look right within one small county). A route's *topology* (who
+# connects to whom) comes from a cheap Euclidean MST plus a few nearest-
+# neighbor edges for redundancy; its *geometry* (the actual line on the map)
+# comes from a real weighted Dijkstra so it can never cut straight through a
+# mountain range or across dry land — it has to wind around high ground the
+# way a real road would, or (for sea lanes) stay on open water the whole way.
+_ROAD_ELEV_START = 0.62   # elevation (0..1) above which roads start avoiding ground
+_ROAD_ELEV_PEN = 60.0     # steepness of that avoidance — pushes roads around peaks
+_ROAD_RIVER_PEN = 6.0     # crossing a river costs extra (a ford/bridge), not blocked
+_SEA_COAST_REACH = 3      # cells from open water a settlement still counts as a port
+_TRADE_BBOX_PAD = 26      # cells of slack around a route's bounding box for routing
+_TRADE_EXTRA_NEIGHBORS = 2   # extra nearest-neighbor edges added on top of the MST
+_DIAG = 2 ** 0.5
+
+
+def _path_dijkstra(cellset, cost_fn, start, goal):
+    """Single-source/single-target Dijkstra over `cellset` (a set of (x,y)
+    cells), 8-directional, diagonal steps costing sqrt(2) as much as
+    orthogonal ones so the resulting path is geometrically honest. Returns the
+    list of cells from start to goal (inclusive), or None if goal can't be
+    reached without leaving `cellset`."""
+    import heapq
+    if start not in cellset or goal not in cellset:
+        return None
+    dist = {start: 0.0}
+    parent = {}
+    pq = [(0.0, start)]
+    while pq:
+        d, cur = heapq.heappop(pq)
+        if d > dist.get(cur, 1e18):
+            continue
+        if cur == goal:
+            break
+        cx, cy = cur
+        for dx, dy in _NEIGH8:
+            nb = (cx + dx, cy + dy)
+            if nb not in cellset:
+                continue
+            step = cost_fn(nb) * (_DIAG if dx and dy else 1.0)
+            nd = d + step
+            if nd < dist.get(nb, 1e18):
+                dist[nb] = nd
+                parent[nb] = cur
+                heapq.heappush(pq, (nd, nb))
+    if goal not in dist:
+        return None
+    path = [goal]
+    while path[-1] != start:
+        path.append(parent[path[-1]])
+    path.reverse()
+    return path
+
+
+def _nearest_ocean_cell(world, pos, max_r=8):
+    """Search outward (ring by ring) from `pos` for the closest OCEAN cell —
+    a city's notional dock, used as the sea-lane endpoint just offshore."""
+    w, h = world.w, world.h
+    x0, y0 = pos
+    if world.owner[y0][x0] == OCEAN:
+        return pos
+    for r in range(1, max_r + 1):
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                if max(abs(dx), abs(dy)) != r:
+                    continue
+                x, y = x0 + dx, y0 + dy
+                if 0 <= x < w and 0 <= y < h and world.owner[y][x] == OCEAN:
+                    return (x, y)
+    return None
+
+
+def _generate_trade_routes(world, rng, base_cost):
+    """Weave a sparse network of trade routes between major cities: land
+    roads that bend around mountains and pay a toll to ford rivers, and sea
+    lanes between coastal cities that stick to open water. Unlike the
+    per-county village roads (straight lines, only ever seen up close), these
+    span the whole map, so their shape has to survive being seen from far
+    away — meaning real terrain-following pathfinding, not a straight line."""
+    w, h = world.w, world.h
+    cities = [s for s in world.settlements if s.kind == "city"]
+    world.trade_routes = []
+    if len(cities) < 2:
+        return
+
+    ocean_cells = [(x, y) for y in range(h) for x in range(w)
+                   if world.owner[y][x] == OCEAN]
+    coast_d = _bfs_distance(world, ocean_cells) if ocean_cells else None
+
+    def is_coastal(pos):
+        x, y = pos
+        return coast_d is not None and coast_d[y][x] <= _SEA_COAST_REACH
+
+    # Topology: an MST over all cities (by straight-line distance) so every
+    # city has at least one route, plus a couple of extra nearest-neighbor
+    # edges so the network has some redundancy like a real trade web instead
+    # of a single fragile tree.
+    pts = [c.pos for c in cities]
+    edges = set(_mst_edges(pts))
+    for i, p in enumerate(pts):
+        order = sorted(range(len(pts)), key=lambda j:
+                        (pts[j][0] - p[0]) ** 2 + (pts[j][1] - p[1]) ** 2)
+        added = 0
+        for j in order:
+            if added >= _TRADE_EXTRA_NEIGHBORS:
+                break
+            if j == i:
+                continue
+            edges.add((min(i, j), max(i, j)))
+            added += 1
+
+    def elev_cost(cell):
+        x, y = cell
+        cost = base_cost[y][x]
+        over = world.height[y][x] - _ROAD_ELEV_START
+        if over > 0:
+            cost += _ROAD_ELEV_PEN * over * over
+        if cell in world.river_cells or cell in world.lake_cells:
+            cost += _ROAD_RIVER_PEN
+        return cost
+
+    def sea_cost(cell):
+        x, y = cell
+        return 1.0 + 0.4 * base_cost[y][x] / 8.0   # mild wander, mostly direct
+
+    routes = []
+    for i, j in edges:
+        a, b = cities[i], cities[j]
+        ax, ay = a.pos
+        bx, by = b.pos
+        x0, x1 = sorted((ax, bx))
+        y0, y1 = sorted((ay, by))
+        bx0 = max(0, x0 - _TRADE_BBOX_PAD)
+        by0 = max(0, y0 - _TRADE_BBOX_PAD)
+        bx1 = min(w, x1 + _TRADE_BBOX_PAD + 1)
+        by1 = min(h, y1 + _TRADE_BBOX_PAD + 1)
+
+        land_cellset = {(x, y) for y in range(by0, by1) for x in range(bx0, bx1)
+                         if world.owner[y][x] != OCEAN}
+        path = None
+        if a.pos in land_cellset and b.pos in land_cellset:
+            path = _path_dijkstra(land_cellset, elev_cost, a.pos, b.pos)
+
+        kind = "land"
+        if path is None and is_coastal(a.pos) and is_coastal(b.pos):
+            dock_a = _nearest_ocean_cell(world, a.pos)
+            dock_b = _nearest_ocean_cell(world, b.pos)
+            if dock_a and dock_b:
+                sea_cellset = {(x, y) for y in range(by0, by1)
+                               for x in range(bx0, bx1)
+                               if world.owner[y][x] == OCEAN}
+                sea_path = _path_dijkstra(sea_cellset, sea_cost, dock_a, dock_b)
+                if sea_path is not None:
+                    path = [a.pos] + sea_path + [b.pos]
+                    kind = "sea"
+
+        if path is None:
+            continue
+        routes.append({"kind": kind, "cells": path, "a": a.id, "b": b.id})
+
+    world.trade_routes = routes
 
 
 def _water_distance(world):
@@ -682,13 +849,20 @@ class World:
         self.settlements = []          # list[Settlement]; index == id
         self.villages = []             # list[Village]; index == id
         self.roads_by_county = {}      # county_id -> [((x,y),(x,y)), ...] segments
+        self.trade_routes = []         # list of {"kind": "land"/"sea", "cells": [...]}
         self.sea_level = 0.5
         self.factions = []             # list[Nation], index == owner value
         self.world_map = WorldMap()    # holds factions + relationships
         self.seed = 0
+        self.player_faction_idx = None  # index into self.factions, or None
 
 
-def generate_world(width=440, height=264, seed=None, n_factions=14):
+def generate_world(width=440, height=264, seed=None, n_factions=14,
+                    player_species=None, player_name=None):
+    """Generate a world. If `player_species`/`player_name` are given, faction
+    0 is forced to that species and given that exact name (instead of a
+    random roll) and `world.player_faction_idx` is set to 0, so a "New Game"
+    flow can drop the player into a nation of their own choosing."""
     rng = random.Random(seed)
     nseed = rng.randint(0, 2 ** 31 - 1)
     world = World(width, height)
@@ -763,7 +937,8 @@ def generate_world(width=440, height=264, seed=None, n_factions=14):
                 sums[o][3] += world.fertility[y][x]
 
     for idx in range(len(capitals)):
-        species = rng.choice(species_names)
+        is_player = player_species is not None and idx == 0
+        species = player_species if is_player else rng.choice(species_names)
         traits = SPECIES[species]
         cells = max(1, sums[idx][0])
         fert_sum = sums[idx][3]
@@ -774,8 +949,9 @@ def generate_world(width=440, height=264, seed=None, n_factions=14):
         economy = max(15, min(99, int(rng.uniform(45, 70) + traits["eco"])))
         morale = max(15, min(99, int(rng.uniform(50, 75))))
         center = (sums[idx][1] / cells / width, sums[idx][2] / cells / height)
+        name = player_name if (is_player and player_name) else namer(species)
         nation = Nation(
-            namer(), color, territory=[], center=center,
+            name, color, territory=[], center=center,
             stats={"military": military, "economy": economy, "morale": morale,
                    # crop output: fertile land summed over the territory
                    "crops": round(fert_sum * _CROP_PER_FERTILITY)},
@@ -784,6 +960,9 @@ def generate_world(width=440, height=264, seed=None, n_factions=14):
                   "fertility": round(100 * fert_sum / cells)})  # avg %, 0..100
         world.factions.append(nation)
         world.world_map.add_nation(nation)
+
+    if player_species is not None:
+        world.player_faction_idx = 0
 
     # adjacency: neighboring owners share a border
     borders = set()
@@ -822,5 +1001,10 @@ def generate_world(width=440, height=264, seed=None, n_factions=14):
     # 9. sprinkle villages within each county, linked by simple dirt roads;
     #    each village's farm output tracks the fertility of its land
     _generate_villages(world, rng)
+
+    # 10. global trade routes: land roads between cities (pathfound around
+    #     mountains and rivers) and sea lanes between coastal cities
+    #     (pathfound over open water only)
+    _generate_trade_routes(world, rng, base_cost)
 
     return world

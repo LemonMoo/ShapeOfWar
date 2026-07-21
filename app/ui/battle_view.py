@@ -13,14 +13,16 @@ _SPEEDS = [1, 2, 4]     # sim sub-steps per frame (battle speed multiplier)
 
 
 class BattleView(tk.Frame):
-    def __init__(self, master, on_new_skirmish):
+    def __init__(self, master, on_new_skirmish, on_continue=None):
         super().__init__(master, bg=theme.BG)
         self.on_new_skirmish = on_new_skirmish
+        self.on_continue = on_continue
         self.battle = None
         self.running = False
         self._after_id = None
         self._log_lines = []
         self.speed = 1
+        self._continue_armed = False
 
         self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
         self.canvas.pack(side="left", fill="both", expand=True)
@@ -63,6 +65,7 @@ class BattleView(tk.Frame):
     # --- battle wiring -----------------------------------------------------
     def set_battle(self, battle, subtitle=""):
         self.stop()
+        self._disarm_continue()
         self.battle = battle
         self._log_lines = [subtitle] if subtitle else []
         self._render_log()
@@ -103,6 +106,8 @@ class BattleView(tk.Frame):
         if self.battle and not self.battle.over:
             self.battle.update(_DT)
             self.render()
+            if self.battle.over:
+                self._arm_continue()
 
     def _cycle_speed(self):
         self.speed = _SPEEDS[(_SPEEDS.index(self.speed) + 1) % len(_SPEEDS)]
@@ -118,8 +123,31 @@ class BattleView(tk.Frame):
         self.render()
         if self.battle.over:
             self.running = False
+            self._arm_continue()
             return
         self._after_id = self.after(_FRAME_MS, self._tick)
+
+    # --- "click any button to continue" after a battle ----------------------
+    def _arm_continue(self):
+        if self._continue_armed:
+            return
+        self._continue_armed = True
+        # bind_all so *any* click or keypress anywhere in the app dismisses
+        # the battle-over screen — not just clicks on this canvas.
+        self.bind_all("<Button-1>", self._on_continue, add="+")
+        self.bind_all("<Key>", self._on_continue, add="+")
+
+    def _disarm_continue(self):
+        if not self._continue_armed:
+            return
+        self._continue_armed = False
+        self.unbind_all("<Button-1>")
+        self.unbind_all("<Key>")
+
+    def _on_continue(self, event):
+        self._disarm_continue()
+        if self.on_continue:
+            self.on_continue()
 
     def _draw_equipment(self, c, u):
         """Sword ('t') in the right hand, shield ('o') in the left, oriented to
@@ -184,3 +212,5 @@ class BattleView(tk.Frame):
                                fill="#000000", stipple="gray50", outline="")
             c.create_text(w / 2, h / 2, text=msg, fill="#ffffff",
                           font=("Segoe UI", 18, "bold"))
+            c.create_text(w / 2, h - 22, text="Click any button to continue...",
+                          fill=theme.MUTED, font=("Segoe UI", 11, "bold"))

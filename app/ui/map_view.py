@@ -13,6 +13,7 @@ level at a time. Counties are the future unit of control for territory
 reassignment.
 """
 import math
+import time
 import tkinter as tk
 
 from PIL import Image, ImageTk
@@ -20,6 +21,12 @@ from PIL import Image, ImageTk
 from app.ui import theme
 from app.world.world_map import Stance
 from app.world.worldgen import OCEAN
+from app.world.territory import bordering_counties
+
+_FLASH_COLOR = (255, 236, 120)   # bright gold — county gained
+_FLASH_FAIL_COLOR = (232, 74, 62)  # bright red — county attack failed
+_FLASH_DURATION = 2.2            # seconds
+_FLASH_FREQ = 1.8                # blink cycles per second
 
 _LABEL_FONT = ("Segoe UI", 8, "bold")
 
@@ -90,6 +97,8 @@ _SETTLE_STYLE = {
 }
 _VILLAGE_STYLE = {"fill": "#c9a06a", "outline": "#4a3418", "r": 2}
 _ROAD_COLOR = "#8a6f4a"
+_TRADE_LAND_COLOR = "#d1a544"   # long-haul trade road — distinct gold from local dirt roads
+_TRADE_SEA_COLOR = "#bfe3f0"    # pale shipping-lane blue, dotted like a nautical chart
 # Above this many villages in a county, skip name labels (village view) so it
 # doesn't turn into unreadable text soup.
 _VILLAGE_LABEL_LIMIT = 24
@@ -120,10 +129,28 @@ class MapView(tk.Frame):
         self._anim_id = None
         self._animating = False
 
+        # Attack-target picking: when not None, we've zoomed to the shared
+        # border with `_attack_enemy` and clicking one of `_attack_frontier`
+        # counties launches the battle for it.
+        self.attack_mode = None
+        self._attack_enemy = None
+        self._attack_frontier = []
+
+        # Post-battle border flash (see flash_county()): "success" (gold) for
+        # a county gained, "failure" (red) for a failed attack.
+        self._flash_county = None
+        self._flash_outcome = "success"
+        self._flash_start = 0.0
+        self._flash_id = None
+        self._bottom_msg_after_id = None
+
         self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
         self.canvas.pack(side="left", fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda e: self.render())
         self.canvas.bind("<Button-1>", self._on_click)
+
+        self.bottom_msg = tk.Label(self, text="", bg="#0d1017", fg=theme.INK,
+                                   font=("Segoe UI", 13, "bold"), padx=18, pady=10)
 
         self._build_panel()
         self.set_world(world)
@@ -137,6 +164,14 @@ class MapView(tk.Frame):
         self.zoom_county = None
         self.selected_settlement = None
         self.selected_village = None
+        self.attack_mode = None
+        self._attack_enemy = None
+        self._attack_frontier = []
+        self._flash_county = None
+        if self._flash_id is not None:
+            self.after_cancel(self._flash_id)
+            self._flash_id = None
+        self._hide_bottom_message()
         self.view = [0.0, 0.0, world.w, world.h]
         self.view_target = list(self.view)
         self._base_img = self._base_key = None
@@ -146,6 +181,18 @@ class MapView(tk.Frame):
         for frame in (self.rel_frame, self.actions):
             for w in frame.winfo_children():
                 w.destroy()
+        self.render()
+
+    def refresh(self):
+        """Recompute cached tile colors and panel text after the World's
+        ownership data was mutated in place (e.g. a territory transfer),
+        without resetting the camera/selection the way set_world() does."""
+        self._precompute_colors()
+        self._base_img = self._base_key = None
+        if self.selected is not None:
+            self._show_faction(self.selected)
+        if self.selected_county is not None:
+            self._show_county(self.selected_county)
         self.render()
 
     def _precompute_colors(self):
@@ -280,10 +327,21 @@ class MapView(tk.Frame):
         self._base_key = None
         self.render()
 
+    def _player_faction(self):
+        idx = self.world.player_faction_idx
+        return self.world.factions[idx] if idx is not None else None
+
+    def _is_player(self, nation):
+        player = self._player_faction()
+        return player is not None and nation is player
+
     def _show_faction(self, nation):
-        self.title_lbl.config(text="Faction")
+        player = self._player_faction()
+        own = self._is_player(nation)
+        self.title_lbl.config(text="Your Realm" if own else "Foreign Realm")
         s = nation.stats
         n_counties = len(nation.meta.get("counties", []))
+        zoom_hint = "\nClick again to zoom in." if (own or player is None) else ""
         self.info.config(
             fg=theme.INK,
             text=f"{nation.name}\nSpecies: {nation.meta['species']} "
@@ -296,7 +354,7 @@ class MapView(tk.Frame):
                  f"-{s.get('res_drain', 0)} "
                  f"(net {s.get('res_gen', 0) - s.get('res_drain', 0)})\n"
                  f"{self._settle_counts(nation)}\n"
-                 f"{n_counties} counties — click again to zoom in.")
+                 f"{n_counties} counties.{zoom_hint}")
 
         self.rel_header.config(text="RELATIONSHIPS")
         for w in self.rel_frame.winfo_children():
@@ -317,16 +375,37 @@ class MapView(tk.Frame):
 
         for w in self.actions.winfo_children():
             w.destroy()
-        enemies = [r for r in rels if r["stance"] == Stance.ENEMY]
-        if not enemies:
-            tk.Label(self.actions, text="No enemies to fight.", bg=theme.PANEL,
-                     fg=theme.MUTED, font=theme.FONT).pack(anchor="w")
-        for r in enemies:
-            other = r["other"]
-            tk.Button(self.actions, text=f"Attack {other.name}",
-                      command=lambda o=other, n=nation: self.on_attack(n, o),
-                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                      relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+
+        if player is None:
+            # No player nation on this world (sandbox/legacy save) — keep the
+            # old behavior of managing any faction directly.
+            enemies = [r for r in rels if r["stance"] == Stance.ENEMY]
+            if not enemies:
+                tk.Label(self.actions, text="No enemies to fight.", bg=theme.PANEL,
+                         fg=theme.MUTED, font=theme.FONT).pack(anchor="w")
+            for r in enemies:
+                other = r["other"]
+                tk.Button(self.actions, text=f"Attack {other.name}",
+                          command=lambda o=other, n=nation: self.on_attack(n, o),
+                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                          relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+        elif own:
+            tk.Label(self.actions, text="This is your realm. Select a rival "
+                     "nation on the map to consider attacking it.",
+                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w")
+        else:
+            rel = self.world.world_map.get_relationship(player.id, nation.id)
+            if rel["stance"] == Stance.ENEMY:
+                tk.Button(self.actions, text=f"Attack {nation.name}",
+                          command=lambda n=nation: self._begin_attack_setup(n),
+                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                          relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+            else:
+                tk.Label(self.actions, text=f"You are {rel['stance']} with "
+                         f"{nation.name}.", bg=theme.PANEL, fg=theme.MUTED,
+                         font=theme.FONT, justify="left",
+                         wraplength=260).pack(anchor="w")
 
     def _settle_counts(self, nation):
         """'2 cities · 3 castles · 5 towns' summary for a faction."""
@@ -444,6 +523,105 @@ class MapView(tk.Frame):
             self._show_county(self.selected_county)
         self._start_zoom(self._padded_rect(self.zoom_faction.meta["bbox"]))
 
+    # --- attack targeting ----------------------------------------------------
+    def _begin_attack_setup(self, enemy):
+        """Zoom to the shared border with `enemy` and let the player pick
+        which of the enemy's frontline counties to attack."""
+        player = self._player_faction()
+        player_idx = self.world.factions.index(player)
+        enemy_idx = self.world.factions.index(enemy)
+        frontier = bordering_counties(self.world, player_idx, enemy_idx)
+        if not frontier:
+            self.info.config(fg=theme.MUTED,
+                             text=f"{enemy.name}\nNo shared border to attack "
+                                  "across right now.")
+            return
+
+        self.attack_mode = enemy
+        self._attack_enemy = enemy
+        self._attack_frontier = frontier
+        self.selected_county = None
+        self._base_key = None
+
+        xs = [x for county in frontier for x, y in county.cells]
+        ys = [y for county in frontier for x, y in county.cells]
+        bbox = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
+
+        self.title_lbl.config(text="Choose a Target")
+        self.info.config(fg=theme.MUTED,
+                         text=f"Attacking {enemy.name}.\nClick a highlighted "
+                              "county along the border to attack it.")
+        self._enter_ui("ATTACK", "← Cancel", self._cancel_attack_setup)
+        self._start_zoom(self._padded_rect(bbox, min_pad_frac=0.3, min_size=10))
+        self.render()
+
+    def _cancel_attack_setup(self):
+        self.attack_mode = None
+        self._attack_enemy = None
+        self._attack_frontier = []
+        self._exit_ui()
+        self._base_key = None
+        if self.selected:
+            self._show_faction(self.selected)
+        self._start_zoom([0.0, 0.0, self.world.w, self.world.h])
+
+    def _launch_attack(self, county):
+        enemy = self._attack_enemy
+        player = self._player_faction()
+        self.attack_mode = None
+        self._attack_enemy = None
+        self._attack_frontier = []
+        self._exit_ui()
+        self._base_key = None
+        if self.selected:
+            self._show_faction(self.selected)
+        # Camera is deliberately left zoomed on the border so, on return from
+        # battle, flash_county() can highlight the (possibly newly-won)
+        # county right where the player is already looking.
+        self.on_attack(player, enemy, county)
+
+    # --- post-battle conquest flash ------------------------------------------
+    def flash_county(self, county, outcome="success"):
+        """Briefly blink a county's border — gold for a county gained,
+        red for a failed attack — fading out over a couple of seconds. A
+        failed attack also zooms back out to the world view once the blink
+        finishes, since there's nothing new to look at up close."""
+        if self._flash_id is not None:
+            self.after_cancel(self._flash_id)
+            self._flash_id = None
+        self._flash_county = county
+        self._flash_outcome = outcome
+        self._flash_start = time.time()
+        self._flash_tick()
+
+    def _flash_tick(self):
+        if self._flash_county is None:
+            return
+        if time.time() - self._flash_start >= _FLASH_DURATION:
+            failed = self._flash_outcome == "failure"
+            self._flash_county = None
+            self._flash_id = None
+            if failed:
+                self._start_zoom([0.0, 0.0, self.world.w, self.world.h])
+            self.render()
+            return
+        self.render()
+        self._flash_id = self.after(40, self._flash_tick)
+
+    # --- bottom banner (acquisition outcome message) -------------------------
+    def show_bottom_message(self, text, ms=4200):
+        self.bottom_msg.config(text=text)
+        self.bottom_msg.place(relx=0.5, rely=0.97, anchor="s")
+        if self._bottom_msg_after_id is not None:
+            self.after_cancel(self._bottom_msg_after_id)
+        self._bottom_msg_after_id = self.after(ms, self._hide_bottom_message)
+
+    def _hide_bottom_message(self):
+        if self._bottom_msg_after_id is not None:
+            self.after_cancel(self._bottom_msg_after_id)
+            self._bottom_msg_after_id = None
+        self.bottom_msg.place_forget()
+
     # --- zoom animation ----------------------------------------------------
     def _start_zoom(self, target):
         self.view_target = list(target)
@@ -478,6 +656,13 @@ class MapView(tk.Frame):
         if not (0 <= gx < wd.w and 0 <= gy < wd.h):
             return
 
+        if self.attack_mode is not None:
+            # --- ATTACK-TARGET PICKING: zoomed to a shared border ---------
+            cid = wd.county_grid[gy][gx]
+            if any(c.id == cid for c in self._attack_frontier):
+                self._launch_attack(wd.counties[cid])
+            return
+
         if self.zoom_faction is None:
             # --- LEVEL 0: world view -------------------------------------
             o = wd.owner[gy][gx]
@@ -485,7 +670,11 @@ class MapView(tk.Frame):
                 return
             faction = wd.factions[o]
             if faction is self.selected:          # 2nd click -> zoom in
-                self._enter_county_view(faction)
+                player = self._player_faction()
+                if player is None or faction is player:
+                    self._enter_county_view(faction)
+                # foreign nations (with a player set) are diplomatic-only —
+                # no drilling into their counties/settlements.
             else:                                 # 1st click -> select country
                 self.selected = faction
                 self._base_key = None
@@ -713,10 +902,13 @@ class MapView(tk.Frame):
                               fill=theme.STANCE_COLOR.get(rel["stance"], theme.MUTED),
                               width=width)
 
+        self._draw_trade_routes(c, screen)
         self._draw_roads(c, screen)
         self._draw_settlements(c, screen)
         self._draw_villages(c, screen)
         self._draw_labels(c, screen)
+        self._draw_attack_targets(c, screen)
+        self._draw_flash(c, screen)
 
     def _draw_settlements(self, c, screen):
         """Markers: city = circle, castle = triangle, town = square. The world
@@ -754,6 +946,27 @@ class MapView(tk.Frame):
                               font=("Segoe UI", 7))
                 c.create_text(x, y + r + 7, text=st.name, fill="#e8e8e8",
                               font=("Segoe UI", 7))
+
+    def _draw_trade_routes(self, c, screen):
+        """Long-haul trade routes: land roads (solid gold, terrain-following)
+        and sea lanes (dotted pale-blue), shown at every zoom level since they
+        span the whole world rather than one county."""
+        width = max(1.0, self._place[2] * 0.22)
+        for r in self.world.trade_routes:
+            cells = r["cells"]
+            if len(cells) < 2:
+                continue
+            pts = []
+            for gx, gy in cells:
+                pts.extend(screen(gx + 0.5, gy + 0.5))
+            if r["kind"] == "sea":
+                c.create_line(*pts, fill=_TRADE_SEA_COLOR, width=max(1.0, width * 0.7),
+                              capstyle="round", joinstyle="round", dash=(1, 4),
+                              smooth=True)
+            else:
+                c.create_line(*pts, fill=_TRADE_LAND_COLOR, width=width,
+                              capstyle="round", joinstyle="round", dash=(7, 4),
+                              smooth=True)
 
     def _draw_roads(self, c, screen):
         """Simple straight dirt-road segments linking villages (and the
@@ -805,3 +1018,61 @@ class MapView(tk.Frame):
             lx, ly = screen(center[0] * wd.w, center[1] * wd.h)
             c.create_text(lx + 1, ly + 1, text=name, fill="#000000", font=_LABEL_FONT)
             c.create_text(lx, ly, text=name, fill="#ffffff", font=_LABEL_FONT)
+
+    def _county_border_segments(self, county):
+        """Screen-space-independent (x,y) edge list tracing a county's
+        outline: every cell-edge where the neighboring cell belongs to a
+        different county (or is off-map)."""
+        wd = self.world
+        cg = wd.county_grid
+        cid = county.id
+        segs = []
+        for x, y in county.cells:
+            for dx, dy, corners in (
+                    (1, 0, ((1, 0), (1, 1))), (-1, 0, ((0, 0), (0, 1))),
+                    (0, 1, ((0, 1), (1, 1))), (0, -1, ((0, 0), (1, 0)))):
+                nx, ny = x + dx, y + dy
+                n_cid = cg[ny][nx] if 0 <= nx < wd.w and 0 <= ny < wd.h else -999
+                if n_cid != cid:
+                    (ox0, oy0), (ox1, oy1) = corners
+                    segs.append((x + ox0, y + oy0, x + ox1, y + oy1))
+        return segs
+
+    def _draw_attack_targets(self, c, screen):
+        """While picking an attack target, outline every attackable frontier
+        county in red so it's obvious which land can be struck."""
+        if self.attack_mode is None:
+            return
+        wd = self.world
+        width = max(2.0, self._place[2] * 0.3)
+        for county in self._attack_frontier:
+            for x0, y0, x1, y1 in self._county_border_segments(county):
+                sx0, sy0 = screen(x0, y0)
+                sx1, sy1 = screen(x1, y1)
+                c.create_line(sx0, sy0, sx1, sy1, fill=theme.BAD, width=width,
+                              capstyle="round")
+            lx, ly = screen(county.center[0] * wd.w, county.center[1] * wd.h)
+            c.create_text(lx + 1, ly + 1, text=county.name, fill="#000000",
+                          font=_LABEL_FONT)
+            c.create_text(lx, ly, text=county.name, fill="#ffffff", font=_LABEL_FONT)
+
+    def _draw_flash(self, c, screen):
+        """Blinking outline around a county after a battle: gold for a
+        county gained, red for a failed attack — a few strobes that settle
+        down as the overall fade envelope runs out."""
+        if self._flash_county is None:
+            return
+        elapsed = time.time() - self._flash_start
+        envelope = max(0.0, 1.0 - elapsed / _FLASH_DURATION)
+        pulse = abs(math.sin(elapsed * _FLASH_FREQ * math.pi))
+        fade = envelope * (0.35 + 0.65 * pulse)
+        target = _FLASH_FAIL_COLOR if self._flash_outcome == "failure" else _FLASH_COLOR
+        base = _hex_to_rgb(theme.CANVAS)
+        color = "#%02x%02x%02x" % tuple(
+            int(base[j] + (target[j] - base[j]) * fade) for j in range(3))
+        width = max(2.0, self._place[2] * (0.18 + 0.35 * fade))
+        for x0, y0, x1, y1 in self._county_border_segments(self._flash_county):
+            sx0, sy0 = screen(x0, y0)
+            sx1, sy1 = screen(x1, y1)
+            c.create_line(sx0, sy0, sx1, sy1, fill=color, width=width,
+                          capstyle="round")
