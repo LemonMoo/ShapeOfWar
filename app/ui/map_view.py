@@ -80,6 +80,7 @@ def _elev_rgb(e):
 
 RIVER_COLOR = "#5fa8dc"
 _RIVER_RGB = _hex_to_rgb(RIVER_COLOR)
+_RIVER_SHADOW = "#101c26"     # dark casing drawn under every river
 
 # Settlement marker styling (drawn as canvas shapes — no art assets).
 _SETTLE_STYLE = {
@@ -194,17 +195,36 @@ class MapView(tk.Frame):
                 else:
                     relief = (h - sea) / (1 - sea) if sea < 1 else 0
                     base = _rgb(*_lighten(fcolors[o], 0.10 * relief))
+
+                    # coastline: any 4-neighbor is ocean or a lake, so every
+                    # landmass gets a dark outline against water, in any mode.
+                    coastal = False
+                    for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                        if 0 <= nx < wd.w and 0 <= ny < wd.h:
+                            no = wd.owner[ny][nx]
+                            if no == OCEAN or (nx, ny) in wd.lake_cells:
+                                coastal = True
+                                break
+
+                    fert_rgb = _fert_rgb(wd.fertility[y][x])
+                    elev_rgb = _elev_rgb(relief)
+                    if coastal:
+                        base = _rgb(*_shade(base, -0.8))
+                        fert_rgb = _rgb(*_shade(fert_rgb, -0.8))
+                        elev_rgb = _rgb(*_shade(elev_rgb, -0.8))
+
                     self._px_pol[i] = base
                     self._px_pol_hi[i] = _rgb(*_lighten(base, 0.4))
-                    self._px_fert[i] = _fert_rgb(wd.fertility[y][x])
-                    self._px_elev[i] = _elev_rgb(relief)
+                    self._px_fert[i] = fert_rgb
+                    self._px_elev[i] = elev_rgb
                     self._owner_flat[i] = o
 
                     cid = cg[y][x]
                     self._county_flat[i] = cid
                     shade = cshade[cid] if cid >= 0 else base
-                    # county border: any 4-neighbor in a different county
-                    border = False
+                    # county border: any 4-neighbor in a different county, or
+                    # the coastline itself
+                    border = coastal
                     for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
                         if not (0 <= nx < wd.w and 0 <= ny < wd.h) or cg[ny][nx] != cid:
                             border = True
@@ -601,30 +621,85 @@ class MapView(tk.Frame):
         def screen(gx, gy):
             return ((gx - vx0) * scale, (gy - vy0) * scale)
 
-        # Rivers: width grows with flow; the last few segments fade into the
-        # water they empty into (ocean or lake) for a seamless mouth.
+        # Rivers: width grows with flow; the tail fades into whatever water it
+        # actually empties into (ocean or lake — they're different colors) for
+        # a seamless mouth. The fade re-draws shrinking *suffixes* of the same
+        # point list, each with smooth=True like the base line, so the curve
+        # traced by the fade matches the base line's curve exactly (no seam) —
+        # unlike straight overdraw segments, which visibly kink against a
+        # smoothed base line wherever the river bends near its mouth.
+        #
+        # Full detail (shadow casing + gradient mouth) is ~6 canvas items per
+        # river; with 100+ rivers that's ~700-900 items and ~30-40ms per
+        # redraw — fine for a one-off click, but during the 60fps zoom
+        # animation render() runs every 16ms, so that cost alone tanks the
+        # framerate. While animating, skip the shadow and fade passes and
+        # draw just the plain colored line (1 item/river) — full detail comes
+        # back the instant the animation settles.
+        #
+        # (Caching these as persistent canvas items and repositioning them
+        # via coords()/itemconfigure() instead of recreating was tried and
+        # measured *slower*, not faster: Tk's canvas has to repaint almost
+        # the same screen area either way once the whole view rescales every
+        # frame — coords() only pays off for small local moves — and it adds
+        # a second Tcl call per item (coords + itemconfigure) versus one
+        # (create_line). So: plain create_line, gated by the LOD flag.)
+        river_width = lambda flow: max(1.0, scale * (0.35 + 0.18 * min(3.0, math.log10(flow + 1))))
+        full_detail = not self._animating
+
+        if full_detail:
+            # Pass 1: a dark casing under every river first, so they read as a
+            # carved channel (not a flat line on top of the terrain) and,
+            # where two different rivers run close or cross, their mouth-fade
+            # colors meet over a shared dark bed instead of clipping straight
+            # into each other.
+            for r in wd.rivers:
+                cells = r["cells"]
+                if len(cells) < 2:
+                    continue
+                w = river_width(r["flow"])
+                pts = []
+                for gx, gy in cells:
+                    pts.extend(screen(gx + 0.5, gy + 0.5))
+                c.create_line(*pts, fill=_RIVER_SHADOW, width=w + max(1.5, scale * 0.28),
+                              joinstyle="round", capstyle="round", smooth=True)
+
         for r in wd.rivers:
             cells = r["cells"]
-            if len(cells) < 2:
+            n = len(cells)
+            if n < 2:
                 continue
-            w = max(1.0, scale * (0.35 + 0.18 * min(3.0, math.log10(r["flow"] + 1))))
+
+            width = river_width(r["flow"])
             pts = []
             for gx, gy in cells:
                 pts.extend(screen(gx + 0.5, gy + 0.5))
-            c.create_line(*pts, fill=RIVER_COLOR, width=w, joinstyle="round",
+            c.create_line(*pts, fill=RIVER_COLOR, width=width, joinstyle="round",
                           capstyle="round", smooth=True)
-            # overdraw the mouth segments, blending toward the water color
-            n = len(cells)
-            for i in range(max(0, n - 4), n - 1):
-                d = (n - 1) - (i + 1)
-                blend = max(0.0, 1.0 - d / 3.0) * 0.9
-                gx0, gy0 = cells[i]
-                gx1, gy1 = cells[i + 1]
-                x0, y0 = screen(gx0 + 0.5, gy0 + 0.5)
-                x1, y1 = screen(gx1 + 0.5, gy1 + 0.5)
-                c.create_line(x0, y0, x1, y1,
-                              fill=_lerp_hex(_RIVER_RGB, _OCEAN_SHALLOW, blend),
-                              width=w, capstyle="round", joinstyle="round")
+
+            if not full_detail:
+                continue
+
+            mx, my = cells[-1]
+            if wd.owner[my][mx] == OCEAN:
+                dest_rgb = _OCEAN_SHALLOW
+            elif (mx, my) in wd.lake_cells:
+                dest_rgb = _LAKE_RGB
+            else:
+                dest_rgb = _RIVER_RGB    # never reached water; don't fade
+
+            fade_n = min(n - 1, 4)
+            for k in range(fade_n, 0, -1):
+                tail = cells[max(0, n - k - 1):]
+                if len(tail) < 2:
+                    continue
+                blend = 1.0 - (k - 1) / fade_n
+                tpts = []
+                for gx, gy in tail:
+                    tpts.extend(screen(gx + 0.5, gy + 0.5))
+                c.create_line(*tpts, fill=_lerp_hex(_RIVER_RGB, dest_rgb, blend),
+                              width=width, capstyle="round", joinstyle="round",
+                              smooth=True)
 
         # Relationship links (world view, selected faction only).
         if self.zoom_faction is None and self.selected:

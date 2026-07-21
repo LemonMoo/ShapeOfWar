@@ -208,23 +208,34 @@ _NEIGH8 = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
 # Border shaping. Region growth pays a per-cell traversal cost = 1 + noise
 # (for chaotic wander) with a big surcharge for crossing rivers/lakes, so the
 # frontiers where two regions meet settle onto rivers and lakeshores.
-_WARP_COST = 2.6          # how much the noise perturbs cost (border wiggle)
-_COST_FREQ_LO = 0.030
-_COST_FREQ_HI = 0.080
-_COUNTRY_RIVER_PEN = 12.0  # surcharge to cross water when growing countries
-_COUNTY_RIVER_PEN = 7.0    # ... and (weaker) when growing counties
+#
+# Three octaves, weighted toward the *finer* end on purpose: a border's local
+# shape is most sensitive to noise right where two regions' accumulated costs
+# are nearly tied, so short-wavelength detail is what actually produces jagged,
+# non-monotonic frontiers (bites, pockets, thin spurs) — a slow-varying octave
+# alone just gives the border a gentle, still-mostly-straight bend.
+_WARP_COST = 7.0              # how much the noise perturbs cost (border wiggle)
+_COST_FREQ_LO = 0.030         # broad wander (~33-cell wavelength)
+_COST_FREQ_MID = 0.085        # medium jaggedness (~12-cell wavelength)
+_COST_FREQ_HI = 0.35          # fine jaggedness (~3-cell wavelength)
+_COUNTRY_RIVER_PEN = 20.0     # surcharge to cross water when growing countries
+_COUNTY_RIVER_PEN = 12.0      # ... and (weaker) when growing counties
 
 
 def _cost_field(world, nseed):
-    """Per-cell base traversal cost: 1 plus two octaves of noise, so grown
-    borders wander instead of running straight."""
+    """Per-cell base traversal cost: 1 plus three octaves of noise (broad to
+    fine), so grown borders wander chaotically instead of running straight.
+    Weighted toward the fine end: that's what actually produces jagged, bitten
+    -into frontiers, since the border's local shape is decided right at the
+    zone where two regions' accumulated costs are nearly tied."""
     w, h = world.w, world.h
-    s1, s2 = nseed ^ 0xABCDEF, nseed ^ 0x054321
+    s1, s2, s3 = nseed ^ 0xABCDEF, nseed ^ 0x054321, nseed ^ 0x7A5D3E1
     cost = [[1.0] * w for _ in range(h)]
     for y in range(h):
         for x in range(w):
-            n = (0.7 * _vnoise(x * _COST_FREQ_LO, y * _COST_FREQ_LO, s1)
-                 + 0.3 * _vnoise(x * _COST_FREQ_HI, y * _COST_FREQ_HI, s2))
+            n = (0.20 * _vnoise(x * _COST_FREQ_LO, y * _COST_FREQ_LO, s1)
+                 + 0.30 * _vnoise(x * _COST_FREQ_MID, y * _COST_FREQ_MID, s2)
+                 + 0.50 * _vnoise(x * _COST_FREQ_HI, y * _COST_FREQ_HI, s3))
             cost[y][x] = 1.0 + _WARP_COST * n
     return cost
 
