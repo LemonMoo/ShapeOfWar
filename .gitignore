@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller build artifacts (regenerate via build.bat; the .exe itself is
+# also excluded since it's a large binary build output, not source)
+build/
+dist/
+*.spec
+
+# Local tool/editor config (machine-specific, not project source)
+.claude/settings.local.json
+
+# OS cruft
+Thumbs.db
+.DS_Store

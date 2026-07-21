@@ -1,0 +1,670 @@
+"""Procedural generator for an Earth-like fantasy world.
+
+Pipeline:
+  1. Fractal value-noise height field + radial falloff -> continents & oceans.
+  2. Threshold to land; scatter faction capitals on land.
+  3. Multi-source BFS grows each capital's territory over adjacent land.
+  4. Bordering territories become diplomatic relationships (species-aware).
+
+Returns a ``World`` holding the grids plus a ``WorldMap`` of factions (Nation
+objects) so the rest of the game is unchanged. The map view renders straight
+from the grids; battles read faction stats/colors.
+"""
+import colorsys
+import math
+import random
+
+from collections import deque, defaultdict
+
+from app.world.nation import Nation
+from app.world.world_map import WorldMap, Stance
+from app.world.lexicon import (SPECIES, make_faction_namer, make_county_namer,
+                               make_settlement_namer)
+
+
+# Settlement archetypes — pure data. "Resources" are deliberately generic for
+# now (crops fold into them); specialize later without touching the generator.
+#   gen / drain : base resource generation and upkeep ranges
+#   fert_w      : how strongly placement favors fertile land
+#   river_w     : ... proximity to rivers/lakes
+#   coast_w     : ... proximity to the sea
+#   border_w    : ... proximity to a foreign border (castles guard frontiers)
+#   elev_w      : ... high ground (castles like it, towns don't care)
+SETTLEMENT_TYPES = {
+    "city": {
+        "name": "City", "gen": (60, 110), "drain": (35, 60),
+        "fert_w": 1.0, "river_w": 0.8, "coast_w": 0.6, "border_w": 0.0,
+        "elev_w": 0.0, "per_cells": 600, "max": 4, "min": 1, "spacing": 14,
+    },
+    "castle": {
+        "name": "Castle", "gen": (15, 30), "drain": (30, 55),
+        "fert_w": 0.1, "river_w": 0.2, "coast_w": 0.0, "border_w": 1.2,
+        "elev_w": 0.8, "per_cells": 450, "max": 6, "min": 1, "spacing": 11,
+    },
+    "town": {
+        "name": "Town", "gen": (25, 45), "drain": (12, 25),
+        "fert_w": 0.7, "river_w": 0.5, "coast_w": 0.3, "border_w": 0.0,
+        "elev_w": 0.0, "per_cells": 250, "max": 10, "min": 2, "spacing": 7,
+    },
+}
+
+
+class Settlement:
+    """A city, castle or town. Generates and drains generic resources; the
+    exact resource system is intentionally unspecified for now."""
+
+    def __init__(self, sid, kind, name, pos, faction_idx, county_id, gen, drain):
+        self.id = sid
+        self.kind = kind               # "city" | "castle" | "town"
+        self.name = name
+        self.pos = pos                 # (x, y) grid cell
+        self.faction_idx = faction_idx
+        self.county_id = county_id
+        self.gen = gen                 # resources produced per (future) tick
+        self.drain = drain             # resources consumed per (future) tick
+
+    @property
+    def net(self):
+        return self.gen - self.drain
+
+
+class County:
+    """A sub-region of a faction's territory. The unit of control that will be
+    fought over once territory can change hands. Stats derive from the fertility
+    of the land it covers."""
+
+    def __init__(self, cid, faction_idx, name):
+        self.id = cid
+        self.faction_idx = faction_idx     # owning faction (index into factions)
+        self.name = name
+        self.cells = []                    # list of (x, y) grid cells
+        self.center = (0.5, 0.5)           # normalized 0..1
+        self.bbox = (0, 0, 1, 1)           # grid coords (x0, y0, x1, y1)
+        self.stats = {}                    # area, fertility %, crops
+
+    def finalize(self, world):
+        n = max(1, len(self.cells))
+        xs = [p[0] for p in self.cells]
+        ys = [p[1] for p in self.cells]
+        self.center = (sum(xs) / n / world.w, sum(ys) / n / world.h)
+        self.bbox = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
+        fert_sum = sum(world.fertility[y][x] for x, y in self.cells)
+        self.stats = {"area": len(self.cells),
+                      "fertility": round(100 * fert_sum / n),
+                      "crops": round(fert_sum * _CROP_PER_FERTILITY)}
+
+
+def _generate_counties(world, rng, base_cost):
+    """Bisect every faction into counties (min 2, scaled by size). Seeds are
+    spaced within the faction, then grown with the same river-aware weighted
+    flooding as countries, so county borders also follow rivers."""
+    cells_by_fac = defaultdict(list)
+    for y in range(world.h):
+        for x in range(world.w):
+            o = world.owner[y][x]
+            if o != OCEAN:
+                cells_by_fac[o].append((x, y))
+
+    namer = make_county_namer(rng)
+    for fac_idx, cells in cells_by_fac.items():
+        n_counties = max(2, min(10, len(cells) // 200))
+        min_d = max(3.0, (len(cells) / n_counties) ** 0.5 * 0.7)
+        shuffled = cells[:]
+        rng.shuffle(shuffled)
+        seeds = []
+        for p in shuffled:
+            if len(seeds) >= n_counties:
+                break
+            if all((p[0] - s[0]) ** 2 + (p[1] - s[1]) ** 2 >= min_d * min_d
+                   for s in seeds):
+                seeds.append(p)
+        if not seeds:
+            seeds = [cells[0]]
+
+        facset = set(cells)
+        assign = _grow_weighted(world, facset, seeds, base_cost, _COUNTY_RIVER_PEN)
+        for p in cells:                    # disconnected bits -> nearest seed
+            if p not in assign:
+                assign[p] = min(range(len(seeds)),
+                                key=lambda i: (p[0] - seeds[i][0]) ** 2
+                                + (p[1] - seeds[i][1]) ** 2)
+
+        base = len(world.counties)
+        objs = [County(base + i, fac_idx, namer()) for i in range(len(seeds))]
+        for (x, y), i in assign.items():
+            world.county_grid[y][x] = base + i
+            objs[i].cells.append((x, y))
+        ids = []
+        for cobj in objs:
+            cobj.finalize(world)
+            world.counties.append(cobj)
+            ids.append(cobj.id)
+        world.factions[fac_idx].meta["counties"] = ids
+        # faction bounding box (for zooming), from all its cells
+        xs = [p[0] for p in cells]
+        ys = [p[1] for p in cells]
+        world.factions[fac_idx].meta["bbox"] = (min(xs), min(ys),
+                                                 max(xs) + 1, max(ys) + 1)
+
+OCEAN = -1
+_CROP_PER_FERTILITY = 5   # crop-output units per unit of summed fertility
+
+# Fertility weighting — how much each factor contributes (should sum to 1).
+_FERT_MOISTURE = 0.40     # rainfall (noise layer)
+_FERT_LOWLAND = 0.30      # low elevation good; mountains barren
+_FERT_WATER = 0.30        # closeness to water (irrigation)
+_WATER_FALLOFF = 13.0     # cells; how fast the water bonus decays inland
+
+
+# --- value noise -----------------------------------------------------------
+def _vhash(ix, iy, seed):
+    n = (ix * 73856093) ^ (iy * 19349663) ^ (seed * 83492791)
+    n &= 0xFFFFFFFF
+    n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
+    n ^= (n >> 16)
+    return (n & 0xFFFF) / 0xFFFF
+
+
+def _vnoise(x, y, seed):
+    x0, y0 = math.floor(x), math.floor(y)
+    fx, fy = x - x0, y - y0
+    sx = fx * fx * (3 - 2 * fx)
+    sy = fy * fy * (3 - 2 * fy)
+    v00 = _vhash(x0, y0, seed)
+    v10 = _vhash(x0 + 1, y0, seed)
+    v01 = _vhash(x0, y0 + 1, seed)
+    v11 = _vhash(x0 + 1, y0 + 1, seed)
+    a = v00 + (v10 - v00) * sx
+    b = v01 + (v11 - v01) * sx
+    return a + (b - a) * sy
+
+
+def _hex(r, g, b):
+    return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
+
+
+def _hsv_hex(h_deg, s, v):
+    r, g, b = colorsys.hsv_to_rgb((h_deg % 360) / 360.0, s, v)
+    return _hex(r * 255, g * 255, b * 255)
+
+
+_NEIGH8 = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
+
+# Border shaping. Region growth pays a per-cell traversal cost = 1 + noise
+# (for chaotic wander) with a big surcharge for crossing rivers/lakes, so the
+# frontiers where two regions meet settle onto rivers and lakeshores.
+_WARP_COST = 2.6          # how much the noise perturbs cost (border wiggle)
+_COST_FREQ_LO = 0.030
+_COST_FREQ_HI = 0.080
+_COUNTRY_RIVER_PEN = 12.0  # surcharge to cross water when growing countries
+_COUNTY_RIVER_PEN = 7.0    # ... and (weaker) when growing counties
+
+
+def _cost_field(world, nseed):
+    """Per-cell base traversal cost: 1 plus two octaves of noise, so grown
+    borders wander instead of running straight."""
+    w, h = world.w, world.h
+    s1, s2 = nseed ^ 0xABCDEF, nseed ^ 0x054321
+    cost = [[1.0] * w for _ in range(h)]
+    for y in range(h):
+        for x in range(w):
+            n = (0.7 * _vnoise(x * _COST_FREQ_LO, y * _COST_FREQ_LO, s1)
+                 + 0.3 * _vnoise(x * _COST_FREQ_HI, y * _COST_FREQ_HI, s2))
+            cost[y][x] = 1.0 + _WARP_COST * n
+    return cost
+
+
+def _grow_weighted(world, cellset, seeds, base_cost, river_pen):
+    """Multi-source Dijkstra over `cellset`. Each region floods outward paying
+    base_cost per cell plus `river_pen` to enter a river/lake cell, so region
+    boundaries come to rest along waterways. Returns {cell: seed index}."""
+    import heapq
+    river, lake = world.river_cells, world.lake_cells
+    dist = {}
+    owner = {}
+    pq = []
+    for i, s in enumerate(seeds):
+        dist[s] = 0.0
+        owner[s] = i
+        heapq.heappush(pq, (0.0, s[0], s[1]))
+    while pq:
+        d, x, y = heapq.heappop(pq)
+        if d > dist.get((x, y), 1e18):
+            continue
+        oi = owner[(x, y)]
+        for dx, dy in _NEIGH8:
+            nb = (x + dx, y + dy)
+            if nb not in cellset:
+                continue
+            step = base_cost[nb[1]][nb[0]]
+            if nb in river or nb in lake:
+                step += river_pen
+            nd = d + step
+            if nd < dist.get(nb, 1e18):
+                dist[nb] = nd
+                owner[nb] = oi
+                heapq.heappush(pq, (nd, nb[0], nb[1]))
+    return owner
+
+
+def _assign_territories(world, land, capitals, base_cost):
+    """Grow each capital's territory with river-aware weighted flooding, so
+    country borders wander with the noise and snap onto rivers where present."""
+    w, h = world.w, world.h
+    landset = {(x, y) for y in range(h) for x in range(w) if land[y][x]}
+    owner = _grow_weighted(world, landset, capitals, base_cost, _COUNTRY_RIVER_PEN)
+    for (x, y), i in owner.items():
+        world.owner[y][x] = i
+    # any land unreached (islands) -> nearest capital by straight-line distance
+    for x, y in landset:
+        if world.owner[y][x] == OCEAN:
+            world.owner[y][x] = min(
+                range(len(capitals)),
+                key=lambda k: (x - capitals[k][0]) ** 2 + (y - capitals[k][1]) ** 2)
+
+
+_LAKE_DEPTH = 0.012       # filled-minus-original elevation that counts as lake
+
+
+def _generate_hydrology(world, land, rng):
+    """Proper drainage hydrology so rivers make sense:
+
+    1. Priority-flood fills depressions, guaranteeing every land cell drains to
+       the sea (no rivers cut short at random pits).
+    2. Basins that had to be filled become lakes (small/medium/large).
+    3. D8 flow directions + flow accumulation over the filled terrain; a cell
+       becomes river only once enough upstream area drains through it — so
+       rivers emerge in valleys and grow downstream instead of jutting out of
+       nowhere. Tributaries merge into trunks that run to the coast or a lake.
+    """
+    import heapq
+    w, h, H = world.w, world.h, world.height
+
+    # 1. priority-flood fill (Barnes) — filled DEM drains monotonically to sea.
+    filled = [row[:] for row in H]
+    done = [[not land[y][x] for x in range(w)] for y in range(h)]
+    pq = []
+    for y in range(h):
+        for x in range(w):
+            if not land[y][x]:                 # ocean cells are the outlets
+                heapq.heappush(pq, (H[y][x], x, y))
+    eps = 1e-5
+    while pq:
+        e, x, y = heapq.heappop(pq)
+        for dx, dy in _NEIGH8:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < w and 0 <= ny < h and not done[ny][nx]:
+                done[ny][nx] = True
+                ne = H[ny][nx] if H[ny][nx] > e + eps else e + eps
+                filled[ny][nx] = ne
+                heapq.heappush(pq, (ne, nx, ny))
+
+    # 2. lakes: land that had to be raised noticeably to drain sits underwater.
+    lake = set()
+    for y in range(h):
+        for x in range(w):
+            if land[y][x] and filled[y][x] - H[y][x] > _LAKE_DEPTH:
+                lake.add((x, y))
+
+    # 3a. D8 flow direction on the filled DEM (steepest descent).
+    land_cells = [(x, y) for y in range(h) for x in range(w) if land[y][x]]
+    down = {}
+    for x, y in land_cells:
+        best, be = None, filled[y][x]
+        for dx, dy in _NEIGH8:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < w and 0 <= ny < h:
+                fe = filled[ny][nx] if land[ny][nx] else H[ny][nx]
+                if fe < be:
+                    be, best = fe, (nx, ny)
+        down[(x, y)] = best
+
+    # 3b. flow accumulation: high cells first, push their water downstream.
+    acc = {p: 1.0 for p in land_cells}
+    for p in sorted(land_cells, key=lambda p: filled[p[1]][p[0]], reverse=True):
+        d = down[p]
+        if d is not None and land[d[1]][d[0]]:
+            acc[d] += acc[p]
+
+    thresh = max(35, len(land_cells) // 550)
+    river_cells = {p for p in land_cells if acc[p] >= thresh and p not in lake}
+
+    # 3c. build polylines: start at river heads, follow flow to the mouth.
+    drains_in = {down[p] for p in river_cells if down[p] in river_cells}
+    sources = [p for p in river_cells if p not in drains_in]
+    rivers = []
+    for s in sources:
+        cells = [s]
+        cur = s
+        for _ in range(4 * (w + h)):
+            d = down[cur]
+            if d is None:
+                break
+            cells.append(d)
+            if not land[d[1]][d[0]] or d in lake:   # reached sea or a lake
+                break
+            cur = d
+        if len(cells) >= 2:
+            rivers.append({"cells": cells,
+                           "flow": max(acc.get(c, 1.0) for c in cells
+                                       if land[c[1]][c[0]])})
+
+    world.rivers = rivers
+    world.river_cells = river_cells
+    world.lake_cells = lake
+
+
+def _bfs_distance(world, sources):
+    """Grid BFS distance (4-neighbor steps) from a set of source cells."""
+    w, h = world.w, world.h
+    INF = 10 ** 9
+    dist = [[INF] * w for _ in range(h)]
+    dq = deque()
+    for x, y in sources:
+        if 0 <= x < w and 0 <= y < h:
+            dist[y][x] = 0
+            dq.append((x, y))
+    while dq:
+        x, y = dq.popleft()
+        for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            if 0 <= nx < w and 0 <= ny < h and dist[ny][nx] > dist[y][x] + 1:
+                dist[ny][nx] = dist[y][x] + 1
+                dq.append((nx, ny))
+    return dist
+
+
+def _generate_settlements(world, rng):
+    """Found cities, castles and towns for every faction. Counts scale with
+    territory size; placement follows the map: cities seek fertile, riverside
+    or coastal land, castles guard frontiers and high ground, towns fill the
+    countryside. Each settlement generates and drains generic resources, and
+    totals aggregate up to its county and country."""
+    w, h = world.w, world.h
+    sea = world.sea_level
+    span = (1.0 - sea) or 1.0
+    namer = make_settlement_namer(rng)
+
+    # shared proximity fields
+    ocean_cells = [(x, y) for y in range(h) for x in range(w)
+                   if world.owner[y][x] == OCEAN]
+    coast_d = _bfs_distance(world, ocean_cells)
+    water_d = _bfs_distance(world, list(world.river_cells | world.lake_cells))
+    border_sources = []
+    for y in range(h):
+        for x in range(w):
+            o = world.owner[y][x]
+            if o == OCEAN:
+                continue
+            for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if 0 <= nx < w and 0 <= ny < h:
+                    o2 = world.owner[ny][nx]
+                    if o2 != OCEAN and o2 != o:
+                        border_sources.append((x, y))
+                        break
+    border_d = _bfs_distance(world, border_sources)
+
+    cells_by_fac = defaultdict(list)
+    for y in range(h):
+        for x in range(w):
+            o = world.owner[y][x]
+            if o != OCEAN and (x, y) not in world.lake_cells:
+                cells_by_fac[o].append((x, y))
+
+    prox = lambda d, reach: math.exp(-d / reach)   # 1 at the feature, ->0 away
+
+    for fac_idx, cells in cells_by_fac.items():
+        taken = []                                 # placed positions (all kinds)
+        for kind, t in SETTLEMENT_TYPES.items():
+            count = max(t["min"], min(t["max"], len(cells) // t["per_cells"]))
+            # score every candidate cell for this settlement type
+            scored = []
+            for x, y in cells:
+                if (x, y) in world.river_cells:
+                    continue                       # don't build in the river
+                elev = max(0.0, min(1.0, (world.height[y][x] - sea) / span))
+                s = (t["fert_w"] * world.fertility[y][x]
+                     + t["river_w"] * prox(water_d[y][x], 4.0)
+                     + t["coast_w"] * prox(coast_d[y][x], 4.0)
+                     + t["border_w"] * prox(border_d[y][x], 5.0)
+                     + t["elev_w"] * elev
+                     + 0.1 * rng.random())         # tie-break jitter
+                scored.append((s, x, y))
+            scored.sort(reverse=True)
+
+            placed = 0
+            sp2 = t["spacing"] ** 2
+            for s, x, y in scored:
+                if placed >= count:
+                    break
+                if any((x - px) ** 2 + (y - py) ** 2 < sp2 for px, py in taken):
+                    continue
+                fert = world.fertility[y][x]
+                gen = round(rng.uniform(*t["gen"]) * (0.7 + 0.6 * fert))
+                drain = round(rng.uniform(*t["drain"]))
+                st = Settlement(len(world.settlements), kind, namer(kind),
+                                (x, y), fac_idx, world.county_grid[y][x],
+                                gen, drain)
+                world.settlements.append(st)
+                taken.append((x, y))
+                placed += 1
+
+    # aggregate onto counties and factions
+    for c in world.counties:
+        c.stats["res_gen"] = 0
+        c.stats["res_drain"] = 0
+        c.meta_settlements = []
+    for f in world.factions:
+        f.stats["res_gen"] = 0
+        f.stats["res_drain"] = 0
+        f.meta["settlements"] = []
+    for st in world.settlements:
+        f = world.factions[st.faction_idx]
+        f.stats["res_gen"] += st.gen
+        f.stats["res_drain"] += st.drain
+        f.meta["settlements"].append(st.id)
+        if 0 <= st.county_id < len(world.counties):
+            c = world.counties[st.county_id]
+            c.stats["res_gen"] += st.gen
+            c.stats["res_drain"] += st.drain
+            c.meta_settlements.append(st.id)
+
+
+def _water_distance(world):
+    """Steps from each cell to the nearest water cell (multi-source BFS over
+    the ocean). Land cells get their distance-to-coast; water cells get 0."""
+    from collections import deque
+    w, h = world.w, world.h
+    INF = 10 ** 9
+    dist = [[INF] * w for _ in range(h)]
+    dq = deque()
+    for y in range(h):
+        for x in range(w):
+            # oceans, rivers and lakes all irrigate the land around them
+            if (world.owner[y][x] == OCEAN or (x, y) in world.river_cells
+                    or (x, y) in world.lake_cells):
+                dist[y][x] = 0
+                dq.append((x, y))
+    while dq:
+        x, y = dq.popleft()
+        for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            if 0 <= nx < w and 0 <= ny < h and dist[ny][nx] > dist[y][x] + 1:
+                dist[ny][nx] = dist[y][x] + 1
+                dq.append((nx, ny))
+    return dist
+
+
+def _compute_fertility(world, nseed):
+    """Fill world.fertility (0..1). Land only; water stays 0. Combines a
+    moisture noise layer, a lowland bonus (from elevation) and an irrigation
+    bonus (from distance to water)."""
+    w, h, sea = world.w, world.h, world.sea_level
+    mseed = nseed ^ 0x9E3779B9        # independent noise for rainfall
+    moct = [(0.045, 1.0), (0.10, 0.5), (0.20, 0.25)]
+    dist = _water_distance(world)
+    span = (1.0 - sea) or 1.0
+    for y in range(h):
+        for x in range(w):
+            if world.owner[y][x] == OCEAN or (x, y) in world.lake_cells:
+                continue                         # lakes are water, not farmland
+            elev = max(0.0, min(1.0, (world.height[y][x] - sea) / span))
+            lowland = 1.0 - elev                        # coasts/plains > peaks
+            moisture = sum(a * _vnoise(x * f, y * f, mseed) for f, a in moct)
+            moisture = max(0.0, min(1.0, moisture / 1.75))
+            water = math.exp(-dist[y][x] / _WATER_FALLOFF)
+            fert = (_FERT_MOISTURE * moisture + _FERT_LOWLAND * lowland
+                    + _FERT_WATER * water)
+            world.fertility[y][x] = max(0.0, min(1.0, fert))
+
+
+class World:
+    """Container the UI renders from."""
+    def __init__(self, w, h):
+        self.w = w
+        self.h = h
+        self.owner = [[OCEAN] * w for _ in range(h)]   # faction index or OCEAN
+        self.height = [[0.0] * w for _ in range(h)]     # elevation, 0..1
+        self.fertility = [[0.0] * w for _ in range(h)]  # 0..1 (land); 0 = water
+        self.rivers = []               # list of {"cells": [(x,y)...], "flow": f}
+        self.river_cells = set()       # all (x, y) cells a river runs through
+        self.lake_cells = set()        # (x, y) land cells that are lake surface
+        self.counties = []             # list[County]; index == county id
+        self.county_grid = [[-1] * w for _ in range(h)]  # county id, -1 = none
+        self.settlements = []          # list[Settlement]; index == id
+        self.sea_level = 0.5
+        self.factions = []             # list[Nation], index == owner value
+        self.world_map = WorldMap()    # holds factions + relationships
+        self.seed = 0
+
+
+def generate_world(width=440, height=264, seed=None, n_factions=14):
+    rng = random.Random(seed)
+    nseed = rng.randint(0, 2 ** 31 - 1)
+    world = World(width, height)
+    world.seed = nseed if seed is None else seed
+
+    # 1. height field: several octaves of value noise + radial falloff so the
+    #    map is oceans around continents rather than land to the edges.
+    octaves = [(0.028, 1.0), (0.060, 0.5), (0.130, 0.25), (0.260, 0.12)]
+    cx, cy = width / 2.0, height / 2.0
+    raw = [[0.0] * width for _ in range(height)]
+    lo, hi = 1e9, -1e9
+    for y in range(height):
+        for x in range(width):
+            v = sum(amp * _vnoise(x * f, y * f, nseed) for f, amp in octaves)
+            dx = (x - cx) / (width / 2.0)
+            dy = (y - cy) / (height / 2.0)
+            v -= 0.85 * (dx * dx + dy * dy)      # push edges underwater
+            raw[y][x] = v
+            lo = min(lo, v)
+            hi = max(hi, v)
+    span = (hi - lo) or 1.0
+    for y in range(height):
+        for x in range(width):
+            world.height[y][x] = (raw[y][x] - lo) / span
+
+    # threshold so land is ~40% of the map
+    flat = sorted(world.height[y][x] for y in range(height) for x in range(width))
+    world.sea_level = flat[int(len(flat) * 0.60)]
+    land = [[world.height[y][x] > world.sea_level for x in range(width)]
+            for y in range(height)]
+    land_cells = [(x, y) for y in range(height) for x in range(width) if land[y][x]]
+    if not land_cells:                # extremely unlucky seed; retry once
+        return generate_world(width, height, rng.random(), n_factions)
+
+    # 2. hydrology: fill basins, form lakes, and route flow-accumulated rivers
+    #    to the sea. Done before fertility so water can irrigate nearby land.
+    _generate_hydrology(world, land, rng)
+
+    # 3. scatter capitals with a minimum spacing
+    min_dist = max(6.0, math.sqrt(len(land_cells) / n_factions) * 0.9)
+    capitals = []
+    tries = 0
+    while len(capitals) < n_factions and tries < 6000:
+        tries += 1
+        x, y = rng.choice(land_cells)
+        if all((x - px) ** 2 + (y - py) ** 2 >= min_dist ** 2 for px, py in capitals):
+            capitals.append((x, y))
+    if not capitals:
+        capitals.append(rng.choice(land_cells))
+
+    # 4. assign territories by river-aware weighted growth from each capital:
+    #    noise in the cost keeps borders wandering, while a surcharge to cross
+    #    rivers/lakes makes frontiers settle onto waterways.
+    base_cost = _cost_field(world, nseed)
+    _assign_territories(world, land, capitals, base_cost)
+
+    # 5. ecology: fertility from moisture + elevation + distance to water/rivers.
+    _compute_fertility(world, nseed)
+
+    # 6. build factions (species, color, stats, centroid, crops) + adjacency
+    species_names = list(SPECIES.keys())
+    namer = make_faction_namer(rng)
+    # per faction: cell count, sum x, sum y, sum fertility
+    sums = [[0, 0, 0, 0.0] for _ in capitals]
+    for y in range(height):
+        for x in range(width):
+            o = world.owner[y][x]
+            if o != OCEAN:
+                sums[o][0] += 1
+                sums[o][1] += x
+                sums[o][2] += y
+                sums[o][3] += world.fertility[y][x]
+
+    for idx in range(len(capitals)):
+        species = rng.choice(species_names)
+        traits = SPECIES[species]
+        cells = max(1, sums[idx][0])
+        fert_sum = sums[idx][3]
+        color = _hsv_hex(traits["hue"] + rng.uniform(-14, 14),
+                         rng.uniform(0.55, 0.8), rng.uniform(0.65, 0.9))
+        military = max(15, min(99, int(rng.uniform(45, 72) + traits["mil"]
+                                       + min(20, cells / 40))))
+        economy = max(15, min(99, int(rng.uniform(45, 70) + traits["eco"])))
+        morale = max(15, min(99, int(rng.uniform(50, 75))))
+        center = (sums[idx][1] / cells / width, sums[idx][2] / cells / height)
+        nation = Nation(
+            namer(), color, territory=[], center=center,
+            stats={"military": military, "economy": economy, "morale": morale,
+                   # crop output: fertile land summed over the territory
+                   "crops": round(fert_sum * _CROP_PER_FERTILITY)},
+            meta={"species": species, "trait": traits["trait"],
+                  "cells": cells, "capital": capitals[idx],
+                  "fertility": round(100 * fert_sum / cells)})  # avg %, 0..100
+        world.factions.append(nation)
+        world.world_map.add_nation(nation)
+
+    # adjacency: neighboring owners share a border
+    borders = set()
+    for y in range(height):
+        for x in range(width):
+            o = world.owner[y][x]
+            if o == OCEAN:
+                continue
+            for nx, ny in ((x + 1, y), (x, y + 1)):
+                if 0 <= nx < width and 0 <= ny < height:
+                    o2 = world.owner[ny][nx]
+                    if o2 != OCEAN and o2 != o:
+                        borders.add((min(o, o2), max(o, o2)))
+
+    for a, b in borders:
+        na, nb = world.factions[a], world.factions[b]
+        same = na.meta["species"] == nb.meta["species"]
+        r = rng.random()
+        if same:
+            stance = Stance.ALLY if r < 0.7 else Stance.NEUTRAL
+        else:
+            stance = (Stance.ENEMY if r < 0.55 else
+                      Stance.NEUTRAL if r < 0.85 else Stance.ALLY)
+        tension = {Stance.ENEMY: rng.randint(40, 85),
+                   Stance.NEUTRAL: rng.randint(10, 40),
+                   Stance.ALLY: 0}[stance]
+        world.world_map.set_relationship(na.id, nb.id, stance, tension)
+
+    # 7. bisect each faction into counties (the future unit of control),
+    #    reusing the same river-aware growth so county borders follow rivers too
+    _generate_counties(world, rng, base_cost)
+
+    # 8. found cities, castles and towns; aggregate resource gen/drain
+    _generate_settlements(world, rng)
+
+    return world
