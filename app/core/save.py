@@ -90,3 +90,10 @@ def save_game(world, save_id, created_at=None):
 def load_game(save_id):
     with open(_world_path(save_id), "rb") as f:
         return pickle.load(f)
+
+
+def delete_save(save_id):
+    """Remove a save slot's world + metadata files. Missing files (already
+    deleted, or a metadata-only stub) are ignored rather than raising."""
+    for path in (_world_path(save_id), _meta_path(save_id)):
+        path.unlink(missing_ok=True)

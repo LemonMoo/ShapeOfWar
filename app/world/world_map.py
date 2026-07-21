@@ -10,10 +10,16 @@ class Stance:
     ENEMY = "enemy"
 
 
+#  Default "standing" (see app/world/diplomacy.py) for a relationship rolled
+# with a given stance and no explicit standing of its own.
+_STANCE_DEFAULT_STANDING = {Stance.ALLY: 60, Stance.NEUTRAL: 0, Stance.ENEMY: -60}
+
+
 class WorldMap:
     def __init__(self):
         self.nations = {}        # id -> Nation
-        self.relationships = {}  # frozenset({idA, idB}) -> {"stance", "tension"}
+        self.relationships = {}  # frozenset({idA, idB}) -> {"stance", "tension",
+                                  #                           "standing", "acted_turn"}
 
     def add_nation(self, nation):
         self.nations[nation.id] = nation
@@ -24,10 +30,14 @@ class WorldMap:
     def _key(a_id, b_id):
         return frozenset((a_id, b_id))
 
-    def set_relationship(self, a_id, b_id, stance=Stance.NEUTRAL, tension=0):
+    def set_relationship(self, a_id, b_id, stance=Stance.NEUTRAL, tension=0,
+                          standing=None, acted_turn=None):
         if a_id == b_id:
             return None
-        rel = {"stance": stance, "tension": tension}
+        if standing is None:
+            standing = _STANCE_DEFAULT_STANDING.get(stance, 0)
+        rel = {"stance": stance, "tension": tension, "standing": standing,
+               "acted_turn": acted_turn}
         self.relationships[self._key(a_id, b_id)] = rel
         bus.emit("relationship:changed",
                  {"a_id": a_id, "b_id": b_id, **rel})
@@ -35,7 +45,8 @@ class WorldMap:
 
     def get_relationship(self, a_id, b_id):
         return self.relationships.get(
-            self._key(a_id, b_id), {"stance": Stance.NEUTRAL, "tension": 0})
+            self._key(a_id, b_id),
+            {"stance": Stance.NEUTRAL, "tension": 0, "standing": 0, "acted_turn": None})
 
     def relationships_of(self, nation_id):
         """All relationships involving a nation, resolved to the other party."""

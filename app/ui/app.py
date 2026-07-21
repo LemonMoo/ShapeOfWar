@@ -11,7 +11,8 @@ from app.ui.load_game_menu import LoadGameMenuView
 from app.ui.map_view import MapView
 from app.ui.battle_view import BattleView
 from app.core.events import bus
-from app.core.save import save_game, load_game, has_save, list_saves, new_save_id
+from app.core.save import (save_game, load_game, has_save, list_saves,
+                           new_save_id, delete_save)
 from app.world.worldgen import generate_world
 from app.battle.battle import Battle, Army
 from app.battle.unit_types import UNIT_TYPES
@@ -50,6 +51,7 @@ class App(tk.Tk):
             self.content, on_play=self._start_new_game, on_back=self._goto_menu)
         self.load_game_view = LoadGameMenuView(
             self.content, on_load=self._load_selected_save,
+            on_delete=self._delete_selected_save,
             on_cancel=self._cancel_load_menu)
         self.pause_view = PauseMenuView(
             self.content, on_resume=self._resume_from_pause,
@@ -74,7 +76,8 @@ class App(tk.Tk):
         if self.map_view is None:
             self.map_view = MapView(self.content, self.world,
                                     on_attack=self.stage_battle,
-                                    on_regenerate=self.regenerate_world)
+                                    on_regenerate=self.regenerate_world,
+                                    on_end_turn=self.end_turn)
             self.battle_view = BattleView(self.content, on_new_skirmish=self.random_skirmish,
                                          on_continue=self._return_from_battle)
             for view in (self.map_view, self.battle_view):
@@ -106,6 +109,10 @@ class App(tk.Tk):
     def _cancel_load_menu(self):
         self.menu_view.tkraise()
 
+    def _delete_selected_save(self, save_id):
+        delete_save(save_id)
+        self.load_game_view.refresh(list_saves())
+
     def _load_selected_save(self, save_id):
         self.world = load_game(save_id)
         self._save_id = save_id
@@ -129,6 +136,10 @@ class App(tk.Tk):
         self._save_created_at = save_game(self.world, self._save_id, self._save_created_at)
         self.show_screen("map")
         self._update_status()
+
+    def end_turn(self):
+        from app.world.resources import advance_turn
+        advance_turn(self.world)
 
     # --- top bar -----------------------------------------------------------
     def _build_topbar(self):

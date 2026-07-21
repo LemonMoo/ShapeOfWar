@@ -21,7 +21,7 @@ class Nation:
         self.color = color
         self.territory = territory or []      # list of rings
         self._center = center
-        self.stats = {"military": 50, "morale": 50, "economy": 50, **(stats or {})}
+        self.stats = {"military": 50, "morale": 50, "gold": 0, **(stats or {})}
         self.meta = meta or {}
 
     @property

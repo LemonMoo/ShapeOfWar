@@ -22,9 +22,9 @@ from app.world.lexicon import (SPECIES, make_faction_namer, make_county_namer,
                                make_settlement_namer)
 
 
-# Settlement archetypes — pure data. "Resources" are deliberately generic for
-# now (crops fold into them); specialize later without touching the generator.
-#   gen / drain : base resource generation and upkeep ranges
+# Settlement archetypes — pure placement data (where they go); what they cost
+# to maintain each turn is SETTLEMENT_UPKEEP below, production itself is
+# county-level (biome-driven — see app/world/resources.py).
 #   fert_w      : how strongly placement favors fertile land
 #   river_w     : ... proximity to rivers/lakes
 #   coast_w     : ... proximity to the sea
@@ -32,40 +32,52 @@ from app.world.lexicon import (SPECIES, make_faction_namer, make_county_namer,
 #   elev_w      : ... high ground (castles like it, towns don't care)
 SETTLEMENT_TYPES = {
     "city": {
-        "name": "City", "gen": (60, 110), "drain": (35, 60),
+        "name": "City",
         "fert_w": 1.0, "river_w": 0.8, "coast_w": 0.6, "border_w": 0.0,
         "elev_w": 0.0, "per_cells": 600, "max": 4, "min": 1, "spacing": 14,
     },
     "castle": {
-        "name": "Castle", "gen": (15, 30), "drain": (30, 55),
+        "name": "Castle",
         "fert_w": 0.1, "river_w": 0.2, "coast_w": 0.0, "border_w": 1.2,
         "elev_w": 0.8, "per_cells": 450, "max": 6, "min": 1, "spacing": 11,
     },
     "town": {
-        "name": "Town", "gen": (25, 45), "drain": (12, 25),
+        "name": "Town",
         "fert_w": 0.7, "river_w": 0.5, "coast_w": 0.3, "border_w": 0.0,
         "elev_w": 0.0, "per_cells": 250, "max": 10, "min": 2, "spacing": 7,
     },
 }
 
+# Resources each settlement kind consumes per turn (population/garrison
+# upkeep) — ranges rolled once per settlement at placement time.
+SETTLEMENT_UPKEEP = {
+    "city":   {"Grain": (20, 35), "Fresh Water": (15, 25)},
+    "castle": {"Grain": (10, 18), "Fresh Water": (8, 14), "Iron": (2, 5)},
+    "town":   {"Grain": (6, 12), "Fresh Water": (5, 10)},
+}
+
+# Gold tax revenue per settlement kind per turn — same "rolled once at
+# placement" treatment as upkeep, just positive instead of negative.
+SETTLEMENT_TAX_INCOME = {
+    "city": (8, 14),
+    "castle": (3, 6),
+    "town": (2, 4),
+}
+
 
 class Settlement:
-    """A city, castle or town. Generates and drains generic resources; the
-    exact resource system is intentionally unspecified for now."""
+    """A city, castle or town. Purely a consumer (population/garrison
+    upkeep, rolled once at placement) — production is county-level."""
 
-    def __init__(self, sid, kind, name, pos, faction_idx, county_id, gen, drain):
+    def __init__(self, sid, kind, name, pos, faction_idx, county_id, upkeep, tax_income):
         self.id = sid
         self.kind = kind               # "city" | "castle" | "town"
         self.name = name
         self.pos = pos                 # (x, y) grid cell
         self.faction_idx = faction_idx
         self.county_id = county_id
-        self.gen = gen                 # resources produced per (future) tick
-        self.drain = drain             # resources consumed per (future) tick
-
-    @property
-    def net(self):
-        return self.gen - self.drain
+        self.upkeep = upkeep           # {resource: amount} consumed per turn
+        self.tax_income = tax_income   # gold generated per turn
 
 
 class Village:
@@ -95,7 +107,16 @@ class County:
         self.cells = []                    # list of (x, y) grid cells
         self.center = (0.5, 0.5)           # normalized 0..1
         self.bbox = (0, 0, 1, 1)           # grid coords (x0, y0, x1, y1)
-        self.stats = {}                    # area, fertility %, crops
+        self.stats = {}                    # area, fertility %
+        # Economy (see app/world/resources.py): biome_counts/dominant_climate
+        # are static geography, cached once here; settle_proximity is filled
+        # in after settlements exist and village_grain_base after villages
+        # do. `resources` is this county's most recent turn's yield.
+        self.biome_counts = {}
+        self.dominant_climate = "temperate"
+        self.settle_proximity = 0.5
+        self.village_grain_base = 0
+        self.resources = {}
 
     def finalize(self, world):
         n = max(1, len(self.cells))
@@ -105,8 +126,20 @@ class County:
         self.bbox = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
         fert_sum = sum(world.fertility[y][x] for x, y in self.cells)
         self.stats = {"area": len(self.cells),
-                      "fertility": round(100 * fert_sum / n),
-                      "crops": round(fert_sum * _CROP_PER_FERTILITY)}
+                      "fertility": round(100 * fert_sum / n)}
+
+        biome_counts = defaultdict(int)
+        climate_counts = defaultdict(int)
+        for x, y in self.cells:
+            biome = world.biome_grid[y][x]
+            if biome:
+                biome_counts[biome] += 1
+            climate = world.climate_grid[y][x]
+            if climate:
+                climate_counts[climate] += 1
+        self.biome_counts = dict(biome_counts)
+        self.dominant_climate = (max(climate_counts, key=climate_counts.get)
+                                  if climate_counts else "temperate")
 
 
 def _generate_counties(world, rng, base_cost):
@@ -163,7 +196,6 @@ def _generate_counties(world, rng, base_cost):
                                                  max(xs) + 1, max(ys) + 1)
 
 OCEAN = -1
-_CROP_PER_FERTILITY = 5   # crop-output units per unit of summed fertility
 
 # Fertility weighting — how much each factor contributes (should sum to 1).
 _FERT_MOISTURE = 0.40     # rainfall (noise layer)
@@ -400,12 +432,43 @@ def _bfs_distance(world, sources):
     return dist
 
 
+# Shared spatial-hash "occupancy" grid so settlement/village placement can
+# repel points from *other* factions/counties too, not just their own —
+# without it, e.g. two factions' frontier castles (which each independently
+# seek the border) can land right on top of each other. Bucket size is fixed
+# and decoupled from any one call's spacing value; the search radius scales
+# per call instead, so one grid works for every spacing (7-14 for
+# settlements, variable for villages).
+_OCCUPANCY_CELL = 8.0
+
+
+def _bucket_key(x, y):
+    return (int(x // _OCCUPANCY_CELL), int(y // _OCCUPANCY_CELL))
+
+
+def _too_close(occupied, x, y, min_dist):
+    min_d2 = min_dist * min_dist
+    r = int(min_dist // _OCCUPANCY_CELL) + 1
+    cx, cy = _bucket_key(x, y)
+    for bx in range(cx - r, cx + r + 1):
+        for by in range(cy - r, cy + r + 1):
+            for px, py in occupied.get((bx, by), ()):
+                if (px - x) ** 2 + (py - y) ** 2 < min_d2:
+                    return True
+    return False
+
+
+def _occupy(occupied, x, y):
+    occupied.setdefault(_bucket_key(x, y), []).append((x, y))
+
+
 def _generate_settlements(world, rng):
     """Found cities, castles and towns for every faction. Counts scale with
     territory size; placement follows the map: cities seek fertile, riverside
     or coastal land, castles guard frontiers and high ground, towns fill the
-    countryside. Each settlement generates and drains generic resources, and
-    totals aggregate up to its county and country."""
+    countryside. Each settlement rolls its per-turn upkeep (population/
+    garrison draw on the faction's resource stockpile); production itself is
+    county-level, computed later from biome/climate/season."""
     w, h = world.w, world.h
     sea = world.sea_level
     span = (1.0 - sea) or 1.0
@@ -439,9 +502,13 @@ def _generate_settlements(world, rng):
 
     prox = lambda d, reach: math.exp(-d / reach)   # 1 at the feature, ->0 away
 
+    # Shared across every faction (not reset per-faction) so a frontier
+    # castle from one side can't land on top of a rival's, right at the
+    # border both of them are drawn to.
+    occupied = {}
+
     for fac_idx, cells in cells_by_fac.items():
         species = world.factions[fac_idx].meta["species"]
-        taken = []                                 # placed positions (all kinds)
         for kind, t in SETTLEMENT_TYPES.items():
             count = max(t["min"], min(t["max"], len(cells) // t["per_cells"]))
             # score every candidate cell for this settlement type
@@ -460,41 +527,43 @@ def _generate_settlements(world, rng):
             scored.sort(reverse=True)
 
             placed = 0
-            sp2 = t["spacing"] ** 2
             for s, x, y in scored:
                 if placed >= count:
                     break
-                if any((x - px) ** 2 + (y - py) ** 2 < sp2 for px, py in taken):
+                if _too_close(occupied, x, y, t["spacing"]):
                     continue
-                fert = world.fertility[y][x]
-                gen = round(rng.uniform(*t["gen"]) * (0.7 + 0.6 * fert))
-                drain = round(rng.uniform(*t["drain"]))
+                upkeep = {res: round(rng.uniform(*rng_range))
+                          for res, rng_range in SETTLEMENT_UPKEEP[kind].items()}
+                tax_income = round(rng.uniform(*SETTLEMENT_TAX_INCOME[kind]))
                 st = Settlement(len(world.settlements), kind, namer(kind, species),
-                                (x, y), fac_idx, world.county_grid[y][x],
-                                gen, drain)
+                                (x, y), fac_idx, world.county_grid[y][x], upkeep,
+                                tax_income)
                 world.settlements.append(st)
-                taken.append((x, y))
+                _occupy(occupied, x, y)
                 placed += 1
 
-    # aggregate onto counties and factions
+    # aggregate settlement lists onto counties and factions
     for c in world.counties:
-        c.stats["res_gen"] = 0
-        c.stats["res_drain"] = 0
         c.meta_settlements = []
     for f in world.factions:
-        f.stats["res_gen"] = 0
-        f.stats["res_drain"] = 0
         f.meta["settlements"] = []
     for st in world.settlements:
         f = world.factions[st.faction_idx]
-        f.stats["res_gen"] += st.gen
-        f.stats["res_drain"] += st.drain
         f.meta["settlements"].append(st.id)
         if 0 <= st.county_id < len(world.counties):
-            c = world.counties[st.county_id]
-            c.stats["res_gen"] += st.gen
-            c.stats["res_drain"] += st.drain
-            c.meta_settlements.append(st.id)
+            world.counties[st.county_id].meta_settlements.append(st.id)
+
+    # settle_proximity: how close each county is to *any* settlement (0..1,
+    # 1 = right on top of one) — feeds the "remote areas are harder to
+    # acquire resources from" rule in app/world/resources.py.
+    settle_d = (_bfs_distance(world, [st.pos for st in world.settlements])
+                if world.settlements else None)
+    for county in world.counties:
+        if settle_d is None:
+            county.settle_proximity = 0.5
+            continue
+        avg_d = sum(settle_d[y][x] for x, y in county.cells) / len(county.cells)
+        county.settle_proximity = math.exp(-avg_d / 10.0)
 
 
 # Village generation. Count scales with county size: from ~3 villages for a
@@ -550,6 +619,14 @@ def _generate_villages(world, rng):
     w, h = world.w, world.h
     water_d = _bfs_distance(world, list(world.river_cells | world.lake_cells))
 
+    # Shared across every county (not reset per-county) and seeded with every
+    # existing settlement position, so villages repel both neighboring
+    # counties' villages *and* settlements instead of only their own county's
+    # other villages.
+    occupied = {}
+    for st in world.settlements:
+        _occupy(occupied, *st.pos)
+
     for county in world.counties:
         # A fresh namer per county: villages are only ever viewed one county
         # at a time, so names need only be unique within a county (a handful
@@ -577,14 +654,14 @@ def _generate_villages(world, rng):
         scored.sort(reverse=True)
 
         spacing = max(1.5, math.sqrt(area / max(1, n)) * 0.55)
-        sp2 = spacing * spacing
         placed = []
         for s, x, y in scored:
             if len(placed) >= n:
                 break
-            if any((x - px) ** 2 + (y - py) ** 2 < sp2 for px, py in placed):
+            if _too_close(occupied, x, y, spacing):
                 continue
             placed.append((x, y))
+            _occupy(occupied, x, y)
 
         vids = []
         for x, y in placed:
@@ -607,11 +684,10 @@ def _generate_villages(world, rng):
             vids.append(v.id)
 
         county.villages = vids
-        farm_total = sum(world.villages[i].farm_output for i in vids)
-        county.stats["farm_output"] = farm_total
-        county.stats["res_gen"] = county.stats.get("res_gen", 0) + farm_total
-        f = world.factions[county.faction_idx]
-        f.stats["res_gen"] = f.stats.get("res_gen", 0) + farm_total
+        # Villages are farms: their output feeds straight into this county's
+        # Grain yield each turn (app/world/resources.py), climate/season
+        # modulated same as everything else.
+        county.village_grain_base = sum(world.villages[i].farm_output for i in vids)
 
         # dirt roads: an MST over the villages, plus the county's first
         # settlement (if any) as an extra node so the network ties into town.
@@ -675,6 +751,27 @@ def _path_dijkstra(cellset, cost_fn, start, goal):
         path.append(parent[path[-1]])
     path.reverse()
     return path
+
+
+def _elev_cost(world, base_cost, cell):
+    """Standalone version of the land-routing cost `_generate_trade_routes`
+    uses internally (as a closure) — exposed at module level too so other
+    systems (e.g. app/world/trade.py, pathfinding post-generation) can route
+    around mountains/rivers the same way without duplicating the formula."""
+    x, y = cell
+    cost = base_cost[y][x]
+    over = world.height[y][x] - _ROAD_ELEV_START
+    if over > 0:
+        cost += _ROAD_ELEV_PEN * over * over
+    if cell in world.river_cells or cell in world.lake_cells:
+        cost += _ROAD_RIVER_PEN
+    return cost
+
+
+def _sea_cost(world, base_cost, cell):
+    """Standalone version of the sea-lane routing cost, see `_elev_cost`."""
+    x, y = cell
+    return 1.0 + 0.4 * base_cost[y][x] / 8.0
 
 
 def _nearest_ocean_cell(world, pos, max_r=8):
@@ -810,13 +907,27 @@ def _water_distance(world):
     return dist
 
 
+_MOISTURE_OCTAVES = [(0.045, 1.0), (0.10, 0.5), (0.20, 0.25)]
+
+
+def _compute_moisture(world, nseed):
+    """Fill world.moisture (0..1 rainfall noise), land cells only. Factored
+    out of fertility so biome/climate classification can share it too."""
+    w, h = world.w, world.h
+    mseed = nseed ^ 0x9E3779B9        # independent noise for rainfall
+    for y in range(h):
+        for x in range(w):
+            if world.owner[y][x] == OCEAN or (x, y) in world.lake_cells:
+                continue
+            m = sum(a * _vnoise(x * f, y * f, mseed) for f, a in _MOISTURE_OCTAVES)
+            world.moisture[y][x] = max(0.0, min(1.0, m / 1.75))
+
+
 def _compute_fertility(world, nseed):
-    """Fill world.fertility (0..1). Land only; water stays 0. Combines a
-    moisture noise layer, a lowland bonus (from elevation) and an irrigation
+    """Fill world.fertility (0..1). Land only; water stays 0. Combines the
+    moisture layer, a lowland bonus (from elevation) and an irrigation
     bonus (from distance to water)."""
     w, h, sea = world.w, world.h, world.sea_level
-    mseed = nseed ^ 0x9E3779B9        # independent noise for rainfall
-    moct = [(0.045, 1.0), (0.10, 0.5), (0.20, 0.25)]
     dist = _water_distance(world)
     span = (1.0 - sea) or 1.0
     for y in range(h):
@@ -825,12 +936,38 @@ def _compute_fertility(world, nseed):
                 continue                         # lakes are water, not farmland
             elev = max(0.0, min(1.0, (world.height[y][x] - sea) / span))
             lowland = 1.0 - elev                        # coasts/plains > peaks
-            moisture = sum(a * _vnoise(x * f, y * f, mseed) for f, a in moct)
-            moisture = max(0.0, min(1.0, moisture / 1.75))
             water = math.exp(-dist[y][x] / _WATER_FALLOFF)
-            fert = (_FERT_MOISTURE * moisture + _FERT_LOWLAND * lowland
+            fert = (_FERT_MOISTURE * world.moisture[y][x] + _FERT_LOWLAND * lowland
                     + _FERT_WATER * water)
             world.fertility[y][x] = max(0.0, min(1.0, fert))
+
+
+def _classify_biomes_and_climate(world):
+    """Fill world.biome_grid / world.climate_grid (land cells only) from
+    elevation relief, moisture, distance to the coast/rivers-and-lakes, and
+    a latitude-style "temperature" gradient (warm at the map's vertical
+    middle, cold at the top/bottom edges — a stand-in for a real pole
+    system, since this world has no globe to wrap around)."""
+    from app.world.resources import classify_biome, classify_climate
+
+    w, h, sea = world.w, world.h, world.sea_level
+    span = (1.0 - sea) or 1.0
+    ocean_cells = [(x, y) for y in range(h) for x in range(w)
+                   if world.owner[y][x] == OCEAN]
+    coast_d = _bfs_distance(world, ocean_cells) if ocean_cells else None
+    water_d = _bfs_distance(world, list(world.river_cells | world.lake_cells))
+
+    for y in range(h):
+        latitude_temp = 1.0 - abs(y / h - 0.5) * 2.0
+        for x in range(w):
+            if world.owner[y][x] == OCEAN or (x, y) in world.lake_cells:
+                continue
+            relief = max(0.0, min(1.0, (world.height[y][x] - sea) / span))
+            moisture = world.moisture[y][x]
+            cd = coast_d[y][x] if coast_d is not None else 10 ** 9
+            wd = water_d[y][x]
+            world.biome_grid[y][x] = classify_biome(relief, moisture, cd, wd)
+            world.climate_grid[y][x] = classify_climate(latitude_temp, moisture)
 
 
 class World:
@@ -841,6 +978,11 @@ class World:
         self.owner = [[OCEAN] * w for _ in range(h)]   # faction index or OCEAN
         self.height = [[0.0] * w for _ in range(h)]     # elevation, 0..1
         self.fertility = [[0.0] * w for _ in range(h)]  # 0..1 (land); 0 = water
+        self.moisture = [[0.0] * w for _ in range(h)]   # 0..1 rainfall noise (land)
+        self.biome_grid = [[None] * w for _ in range(h)]    # biome name or None (ocean)
+        self.climate_grid = [[None] * w for _ in range(h)]  # climate name or None
+        self.turn = 1
+        self.season = "Spring"
         self.rivers = []               # list of {"cells": [(x,y)...], "flow": f}
         self.river_cells = set()       # all (x, y) cells a river runs through
         self.lake_cells = set()        # (x, y) land cells that are lake surface
@@ -850,6 +992,13 @@ class World:
         self.villages = []             # list[Village]; index == id
         self.roads_by_county = {}      # county_id -> [((x,y),(x,y)), ...] segments
         self.trade_routes = []         # list of {"kind": "land"/"sea", "cells": [...]}
+        self.trade_caravans = []       # list[TradeCaravan] — see app/world/trade.py
+        self.trade_events = []         # this turn's dispatch/delivery/payment/loss events
+        self.castle_projects = []      # list[CastleProject] — see app/world/construction.py
+        self.road_projects = []        # list[RoadProject] — see app/world/construction.py
+        self.base_cost = None          # per-cell noise traversal cost (see _cost_field);
+                                        # persisted so trade.py can pathfind post-generation
+                                        # without recomputing the noise field from scratch
         self.sea_level = 0.5
         self.factions = []             # list[Nation], index == owner value
         self.world_map = WorldMap()    # holds factions + relationships
@@ -917,12 +1066,15 @@ def generate_world(width=440, height=264, seed=None, n_factions=14,
     #    noise in the cost keeps borders wandering, while a surcharge to cross
     #    rivers/lakes makes frontiers settle onto waterways.
     base_cost = _cost_field(world, nseed)
+    world.base_cost = base_cost    # persisted for on-demand pathfinding (trade.py)
     _assign_territories(world, land, capitals, base_cost)
 
     # 5. ecology: fertility from moisture + elevation + distance to water/rivers.
+    _compute_moisture(world, nseed)
     _compute_fertility(world, nseed)
+    _classify_biomes_and_climate(world)
 
-    # 6. build factions (species, color, stats, centroid, crops) + adjacency
+    # 6. build factions (species, color, stats, centroid) + adjacency
     species_names = list(SPECIES.keys())
     namer = make_faction_namer(rng)
     # per faction: cell count, sum x, sum y, sum fertility
@@ -944,17 +1096,17 @@ def generate_world(width=440, height=264, seed=None, n_factions=14,
         fert_sum = sums[idx][3]
         color = _hsv_hex(traits["hue"] + rng.uniform(-14, 14),
                          rng.uniform(0.55, 0.8), rng.uniform(0.65, 0.9))
+        # military is a placeholder here — resources.seed_initial_stockpiles()
+        # recomputes it for real from each faction's starting resource
+        # stockpile once counties/settlements/villages all exist.
         military = max(15, min(99, int(rng.uniform(45, 72) + traits["mil"]
                                        + min(20, cells / 40))))
-        economy = max(15, min(99, int(rng.uniform(45, 70) + traits["eco"])))
         morale = max(15, min(99, int(rng.uniform(50, 75))))
         center = (sums[idx][1] / cells / width, sums[idx][2] / cells / height)
         name = player_name if (is_player and player_name) else namer(species)
         nation = Nation(
             name, color, territory=[], center=center,
-            stats={"military": military, "economy": economy, "morale": morale,
-                   # crop output: fertile land summed over the territory
-                   "crops": round(fert_sum * _CROP_PER_FERTILITY)},
+            stats={"military": military, "morale": morale},
             meta={"species": species, "trait": traits["trait"],
                   "cells": cells, "capital": capitals[idx],
                   "fertility": round(100 * fert_sum / cells)})  # avg %, 0..100
@@ -1006,5 +1158,10 @@ def generate_world(width=440, height=264, seed=None, n_factions=14,
     #     mountains and rivers) and sea lanes between coastal cities
     #     (pathfound over open water only)
     _generate_trade_routes(world, rng, base_cost)
+
+    # 11. seed every faction's starting resource stockpile (and, from it,
+    #     their real military strength) — see app/world/resources.py
+    from app.world.resources import seed_initial_stockpiles
+    seed_initial_stockpiles(world)
 
     return world

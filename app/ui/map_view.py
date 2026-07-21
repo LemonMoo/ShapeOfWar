@@ -21,7 +21,10 @@ from PIL import Image, ImageTk
 from app.ui import theme
 from app.world.world_map import Stance
 from app.world.worldgen import OCEAN
-from app.world.territory import bordering_counties
+from app.world.territory import bordering_counties, naval_reachable_counties
+from app.world.resources import RESOURCES
+from app.world import diplomacy
+from app.world import construction
 
 _FLASH_COLOR = (255, 236, 120)   # bright gold — county gained
 _FLASH_FAIL_COLOR = (232, 74, 62)  # bright red — county attack failed
@@ -85,6 +88,34 @@ def _elev_rgb(e):
     return _ramp(e, _ELEV_STOPS)
 
 
+# Flat per-biome / per-climate colors for the "Biome"/"Climate" view modes —
+# these are the literal "sub-maps" for the resource economy in
+# app/world/resources.py (each biome/climate drives what a county yields).
+_BIOME_COLORS = {
+    "mountain": (150, 148, 150),
+    "forest": (40, 110, 58),
+    "plains": (168, 178, 84),
+    "coastal": (94, 168, 176),
+    "desert": (206, 178, 110),
+    "swamp": (78, 96, 66),
+}
+_CLIMATE_COLORS = {
+    "temperate": (94, 156, 96),
+    "arid": (196, 154, 82),
+    "cold": (156, 190, 214),
+    "humid": (70, 132, 122),
+}
+_NO_DATA_RGB = (40, 44, 52)   # ocean / unclassified cells in biome & climate modes
+
+
+def _biome_rgb(biome):
+    return _BIOME_COLORS.get(biome, _NO_DATA_RGB)
+
+
+def _climate_rgb(climate):
+    return _CLIMATE_COLORS.get(climate, _NO_DATA_RGB)
+
+
 RIVER_COLOR = "#5fa8dc"
 _RIVER_RGB = _hex_to_rgb(RIVER_COLOR)
 _RIVER_SHADOW = "#101c26"     # dark casing drawn under every river
@@ -99,9 +130,31 @@ _VILLAGE_STYLE = {"fill": "#c9a06a", "outline": "#4a3418", "r": 2}
 _ROAD_COLOR = "#8a6f4a"
 _TRADE_LAND_COLOR = "#d1a544"   # long-haul trade road — distinct gold from local dirt roads
 _TRADE_SEA_COLOR = "#bfe3f0"    # pale shipping-lane blue, dotted like a nautical chart
+# Moving caravan/ship markers — bright enough to stand out against the
+# (duller) static route line they travel along.
+_CARAVAN_STYLE = {"fill": "#fff3c4", "outline": "#5a4318", "r": 3}
+_SHIP_STYLE = {"fill": "#8fe3ff", "outline": "#154a5c", "r": 3}
 # Above this many villages in a county, skip name labels (village view) so it
 # doesn't turn into unreadable text soup.
 _VILLAGE_LABEL_LIMIT = 24
+
+
+def _fmt_amount(n):
+    """Compact number formatting for resource amounts (12345 -> '12.3k')."""
+    if n >= 10000:
+        return f"{n / 1000:.0f}k"
+    if n >= 1000:
+        return f"{n / 1000:.1f}k"
+    return str(n)
+
+
+def _format_resources(res):
+    """'Grain 64k · Iron 21k · ...', ordered by tier then name, for a
+    faction/county/settlement's resource dict."""
+    if not res:
+        return "None yet."
+    order = sorted(res.keys(), key=lambda r: (RESOURCES.get(r, {}).get("tier", 9), r))
+    return " · ".join(f"{r} {_fmt_amount(res[r])}" for r in order if res[r])
 
 
 def _lerp_hex(c0, c1, t):
@@ -111,10 +164,11 @@ def _lerp_hex(c0, c1, t):
 
 
 class MapView(tk.Frame):
-    def __init__(self, master, world, on_attack, on_regenerate):
+    def __init__(self, master, world, on_attack, on_regenerate, on_end_turn):
         super().__init__(master, bg=theme.BG)
         self.on_attack = on_attack
         self.on_regenerate = on_regenerate
+        self.on_end_turn = on_end_turn
         self.selected = None            # selected faction (world view)
         self.zoom_faction = None        # faction we've zoomed into (county view)
         self.selected_county = None
@@ -135,6 +189,10 @@ class MapView(tk.Frame):
         self.attack_mode = None
         self._attack_enemy = None
         self._attack_frontier = []
+
+        # Castle placement: when not None, holds the (own-territory) county
+        # the player is about to click a build site within.
+        self.building_mode = None
 
         # Post-battle border flash (see flash_county()): "success" (gold) for
         # a county gained, "failure" (red) for a failed attack.
@@ -167,6 +225,7 @@ class MapView(tk.Frame):
         self.attack_mode = None
         self._attack_enemy = None
         self._attack_frontier = []
+        self.building_mode = None
         self._flash_county = None
         if self._flash_id is not None:
             self.after_cancel(self._flash_id)
@@ -181,6 +240,7 @@ class MapView(tk.Frame):
         for frame in (self.rel_frame, self.actions):
             for w in frame.winfo_children():
                 w.destroy()
+        self._update_turn_label()
         self.render()
 
     def refresh(self):
@@ -193,6 +253,7 @@ class MapView(tk.Frame):
             self._show_faction(self.selected)
         if self.selected_county is not None:
             self._show_county(self.selected_county)
+        self._update_turn_label()
         self.render()
 
     def _precompute_colors(self):
@@ -203,6 +264,8 @@ class MapView(tk.Frame):
         self._px_pol_hi = [None] * n
         self._px_fert = [None] * n
         self._px_elev = [None] * n
+        self._px_biome = [None] * n
+        self._px_climate = [None] * n
         self._px_county = [None] * n
         self._px_county_hi = [None] * n
         self._owner_flat = [OCEAN] * n
@@ -229,6 +292,7 @@ class MapView(tk.Frame):
                                 * (1 - depth) for j in range(3)))
                     self._px_pol[i] = self._px_pol_hi[i] = px
                     self._px_fert[i] = self._px_elev[i] = px
+                    self._px_biome[i] = self._px_climate[i] = _rgb(*_NO_DATA_RGB)
                     self._px_county[i] = self._px_county_hi[i] = px
                 elif (x, y) in wd.lake_cells:
                     # lake surface: water in every mode, but keep owner/county
@@ -236,6 +300,7 @@ class MapView(tk.Frame):
                     lk = _rgb(*_LAKE_RGB)
                     self._px_pol[i] = self._px_pol_hi[i] = lk
                     self._px_fert[i] = self._px_elev[i] = lk
+                    self._px_biome[i] = self._px_climate[i] = lk
                     self._px_county[i] = self._px_county_hi[i] = lk
                     self._owner_flat[i] = o
                     self._county_flat[i] = cg[y][x]
@@ -260,10 +325,18 @@ class MapView(tk.Frame):
                         fert_rgb = _rgb(*_shade(fert_rgb, -0.8))
                         elev_rgb = _rgb(*_shade(elev_rgb, -0.8))
 
+                    biome_rgb = _rgb(*_biome_rgb(wd.biome_grid[y][x]))
+                    climate_rgb = _rgb(*_climate_rgb(wd.climate_grid[y][x]))
+                    if coastal:
+                        biome_rgb = _rgb(*_shade(biome_rgb, -0.5))
+                        climate_rgb = _rgb(*_shade(climate_rgb, -0.5))
+
                     self._px_pol[i] = base
                     self._px_pol_hi[i] = _rgb(*_lighten(base, 0.4))
                     self._px_fert[i] = fert_rgb
                     self._px_elev[i] = elev_rgb
+                    self._px_biome[i] = biome_rgb
+                    self._px_climate[i] = climate_rgb
                     self._owner_flat[i] = o
 
                     cid = cg[y][x]
@@ -313,19 +386,70 @@ class MapView(tk.Frame):
                                   activebackground=theme.ACCENT, relief="flat",
                                   font=theme.FONT)
         self.view_btn.pack(side="bottom", fill="x", padx=14)
+        tk.Button(p, text="End Turn", command=self._on_end_turn,
+                  bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                  relief="flat", font=theme.FONT).pack(side="bottom", fill="x",
+                                                       padx=14, pady=(4, 0))
+        self.turn_lbl = tk.Label(p, text="", bg=theme.PANEL, fg=theme.MUTED,
+                                 font=theme.FONT_BOLD)
+        self.turn_lbl.pack(side="bottom", padx=14, pady=(8, 0))
         self.back_btn = tk.Button(p, text="← Back to World",
                                   command=self._exit_county_view, bg="#232a36",
                                   fg=theme.INK, activebackground=theme.ACCENT,
                                   relief="flat", font=theme.FONT)
         # back_btn is packed only while zoomed in.
 
-    _MODES = ["political", "fertility", "elevation"]
+    _MODES = ["political", "fertility", "elevation", "biome", "climate"]
 
     def _toggle_mode(self):
         self.mode = self._MODES[(self._MODES.index(self.mode) + 1) % len(self._MODES)]
         self.view_btn.config(text=f"View: {self.mode.capitalize()}")
         self._base_key = None
         self.render()
+
+    def _update_turn_label(self):
+        self.turn_lbl.config(text=f"Turn {self.world.turn} — {self.world.season}")
+
+    def _on_end_turn(self):
+        self.on_end_turn()
+        self._report_trade_events()
+        self.refresh()
+
+    def _report_trade_events(self):
+        """Surface this turn's autonomous trade activity to the player only
+        when it actually involves their own faction — shows the first such
+        event on the existing bottom banner (battle outcomes use the same
+        one), rather than spamming a message per event."""
+        player_idx = self.world.player_faction_idx
+        if player_idx is None:
+            return
+        for ev in self.world.trade_events:
+            seller = self.world.factions[ev["seller_idx"]]
+            buyer = self.world.factions[ev["buyer_idx"]]
+            is_seller = ev["seller_idx"] == player_idx
+            is_buyer = ev["buyer_idx"] == player_idx
+            if not (is_seller or is_buyer):
+                continue
+
+            etype = ev["type"]
+            if etype == "dispatched" and is_seller:
+                msg = (f"Your caravan departs for {buyer.name} with "
+                       f"{ev['quantity']} {ev['resource']}.")
+            elif etype == "delivered" and is_seller:
+                msg = (f"Your caravan delivers {ev['quantity']} {ev['resource']} to "
+                       f"{buyer.name}. Payment is en route home.")
+            elif etype == "delivered" and is_buyer:
+                msg = (f"{seller.name}'s caravan delivers {ev['quantity']} "
+                       f"{ev['resource']} to your ports for {ev['price']} Gold.")
+            elif etype == "paid" and is_seller:
+                msg = f"Your caravan returns from {buyer.name} with {ev['price']} Gold."
+            elif etype == "lost":
+                msg = (f"A trade caravan ({ev['quantity']} {ev['resource']}) between "
+                       f"{seller.name} and {buyer.name} was lost!")
+            else:
+                continue
+            self.show_bottom_message(msg)
+            return   # first relevant event only, to avoid message spam
 
     def _player_faction(self):
         idx = self.world.player_faction_idx
@@ -335,26 +459,48 @@ class MapView(tk.Frame):
         player = self._player_faction()
         return player is not None and nation is player
 
+    def _zoom_is_foreign(self):
+        """True while browsing a foreign nation's counties (diplomacy-only —
+        no village drill-down, no ordinary management)."""
+        player = self._player_faction()
+        return (player is not None and self.zoom_faction is not None
+                and self.zoom_faction is not player)
+
+    def _do_diplomacy(self, action_fn, nation, county=None):
+        """Run a diplomacy action, show its flavor message on the bottom
+        banner, and refresh whatever panel is currently displaying it."""
+        player = self._player_faction()
+        msg = (action_fn(self.world, player, nation, county) if county is not None
+               else action_fn(self.world, player, nation))
+        self.show_bottom_message(msg)
+        if self.selected is nation:
+            self._show_faction(nation)
+        if county is not None and self.selected_county is county:
+            self._show_county(county)
+        self.render()
+
     def _show_faction(self, nation):
         player = self._player_faction()
         own = self._is_player(nation)
         self.title_lbl.config(text="Your Realm" if own else "Foreign Realm")
         s = nation.stats
         n_counties = len(nation.meta.get("counties", []))
-        zoom_hint = "\nClick again to zoom in." if (own or player is None) else ""
+        if own or player is None:
+            zoom_hint = "\nClick again to zoom in."
+        elif self.world.world_map.get_relationship(player.id, nation.id)["stance"] == Stance.ENEMY:
+            zoom_hint = "\nClick again to attack."
+        else:
+            zoom_hint = "\nClick again to inspect its counties."
         self.info.config(
             fg=theme.INK,
             text=f"{nation.name}\nSpecies: {nation.meta['species']} "
                  f"— {nation.meta['trait']}\n"
                  f"Military {s['military']} · Morale {s['morale']} · "
-                 f"Economy {s['economy']}\n"
-                 f"Crop output {s['crops']} · Avg fertility "
-                 f"{nation.meta['fertility']}%\n"
-                 f"Resources +{s.get('res_gen', 0)} / "
-                 f"-{s.get('res_drain', 0)} "
-                 f"(net {s.get('res_gen', 0) - s.get('res_drain', 0)})\n"
+                 f"Gold {s.get('gold', 0):,}\n"
+                 f"Avg fertility {nation.meta['fertility']}%\n"
                  f"{self._settle_counts(nation)}\n"
-                 f"{n_counties} counties.{zoom_hint}")
+                 f"{n_counties} counties.{zoom_hint}\n\n"
+                 f"RESOURCES\n{_format_resources(s.get('resources', {}))}")
 
         self.rel_header.config(text="RELATIONSHIPS")
         for w in self.rel_frame.winfo_children():
@@ -397,15 +543,54 @@ class MapView(tk.Frame):
         else:
             rel = self.world.world_map.get_relationship(player.id, nation.id)
             if rel["stance"] == Stance.ENEMY:
-                tk.Button(self.actions, text=f"Attack {nation.name}",
-                          command=lambda n=nation: self._begin_attack_setup(n),
-                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                          relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+                player_idx = self.world.factions.index(player)
+                target_idx = self.world.factions.index(nation)
+                if bordering_counties(self.world, player_idx, target_idx):
+                    tk.Button(self.actions, text=f"Attack {nation.name}",
+                              command=lambda n=nation: self._begin_attack_setup(n),
+                              bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                              relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+                elif naval_reachable_counties(self.world, player_idx, target_idx):
+                    tk.Button(self.actions, text=f"Naval Attack on {nation.name}",
+                              command=lambda n=nation: self._begin_attack_setup(n, naval=True),
+                              bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                              relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+                else:
+                    tk.Label(self.actions, text=f"No route to {nation.name} — you'd "
+                             "need a shared border or a coastal port.",
+                             bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                             justify="left", wraplength=260).pack(anchor="w")
             else:
+                standing = rel.get("standing", 0)
                 tk.Label(self.actions, text=f"You are {rel['stance']} with "
-                         f"{nation.name}.", bg=theme.PANEL, fg=theme.MUTED,
-                         font=theme.FONT, justify="left",
-                         wraplength=260).pack(anchor="w")
+                         f"{nation.name}. Standing: {standing}",
+                         bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                         justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+
+                can_act = diplomacy.can_act_this_turn(self.world, player, nation)
+                tk.Button(self.actions, text="Improve Relations",
+                          command=lambda n=nation: self._do_diplomacy(
+                              diplomacy.improve_relations, n),
+                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                          relief="flat", font=theme.FONT,
+                          state="normal" if can_act else "disabled").pack(fill="x", pady=2)
+                if not can_act:
+                    tk.Label(self.actions, text="Already acted with them this turn.",
+                             bg=theme.PANEL, fg=theme.MUTED,
+                             font=("Segoe UI", 8)).pack(anchor="w")
+
+                if standing <= diplomacy.WAR_THRESHOLD:
+                    tk.Button(self.actions, text=f"Declare War on {nation.name}",
+                              command=lambda n=nation: self._do_diplomacy(
+                                  diplomacy.declare_war, n),
+                              bg="#3a1f1f", fg=theme.BAD, activebackground=theme.ACCENT,
+                              relief="flat", font=theme.FONT).pack(fill="x", pady=(8, 2))
+                if standing >= diplomacy.ALLY_THRESHOLD and rel["stance"] != Stance.ALLY:
+                    tk.Button(self.actions, text=f"Form Alliance with {nation.name}",
+                              command=lambda n=nation: self._do_diplomacy(
+                                  diplomacy.form_alliance, n),
+                              bg="#1f3a24", fg=theme.GOOD, activebackground=theme.ACCENT,
+                              relief="flat", font=theme.FONT).pack(fill="x", pady=(8, 2))
 
     def _settle_counts(self, nation):
         """'2 cities · 3 castles · 5 towns' summary for a faction."""
@@ -421,20 +606,58 @@ class MapView(tk.Frame):
         country = self.zoom_faction
         wd = self.world
         n_villages = len(getattr(county, "villages", []))
+        total_cells = sum(county.biome_counts.values()) or 1
+        biome_line = ", ".join(
+            f"{biome.capitalize()} ({round(100 * count / total_cells)}%)"
+            for biome, count in sorted(county.biome_counts.items(),
+                                       key=lambda kv: -kv[1])) or "Unclassified"
         lines = [f"{county.name}", f"County of {country.name}",
                  f"Area {s['area']} · Fertility {s['fertility']}%",
-                 f"Provides {s['crops']} crops to {country.name}.",
-                 f"Resources +{s.get('res_gen', 0)} / -{s.get('res_drain', 0)} "
-                 f"(net {s.get('res_gen', 0) - s.get('res_drain', 0)}, "
-                 f"incl. {s.get('farm_output', 0)} from farms)"]
+                 f"Biome: {biome_line}",
+                 f"Climate: {county.dominant_climate.capitalize()}",
+                 f"This turn's yield: {_format_resources(county.resources)}"]
         sts = [wd.settlements[i] for i in getattr(county, "meta_settlements", [])]
         if sts:
             lines.append("Settlements: " + ", ".join(
                 f"{st.name} ({st.kind})" for st in sts))
         else:
             lines.append("No settlements.")
-        lines.append(f"{n_villages} villages — click again to zoom in.")
+
+        is_foreign = self._zoom_is_foreign()
+        if is_foreign:
+            lines.append("Foreign territory — consider hostile action below.")
+        else:
+            lines.append(f"{n_villages} villages — click again to zoom in.")
         self.info.config(fg=theme.INK, text="\n".join(lines))
+
+        for w in self.actions.winfo_children():
+            w.destroy()
+        if is_foreign:
+            player = self._player_faction()
+            can_act = diplomacy.can_act_this_turn(self.world, player, country)
+            for label, fn in (("Fabricate Claim on County", diplomacy.fabricate_claim),
+                              ("Terrorize Locals", diplomacy.terrorize_locals)):
+                tk.Button(self.actions, text=label,
+                          command=lambda f=fn: self._do_diplomacy(f, country, county),
+                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                          relief="flat", font=theme.FONT,
+                          state="normal" if can_act else "disabled").pack(fill="x", pady=2)
+            if not can_act:
+                tk.Label(self.actions, text="Already acted against them this turn.",
+                         bg=theme.PANEL, fg=theme.MUTED,
+                         font=("Segoe UI", 8)).pack(anchor="w")
+        elif self._player_faction() is not None:
+            project = next((p for p in wd.castle_projects if p.county_id == county.id), None)
+            if project is not None:
+                note = " (half speed — road not yet finished)" if project.half_speed else ""
+                tk.Label(self.actions, text=f"Castle under construction: "
+                         f"{round(project.progress_turns)}/{project.total_turns} turns{note}",
+                         bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                         justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+            tk.Button(self.actions, text="Build Castle...",
+                      command=lambda cnty=county: self._begin_castle_placement(cnty),
+                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                      relief="flat", font=theme.FONT).pack(fill="x", pady=2)
 
     def _show_settlement(self, st):
         wd = self.world
@@ -444,8 +667,7 @@ class MapView(tk.Frame):
             fg=theme.INK,
             text=f"{st.name}\n{st.kind.capitalize()} in {county}, "
                  f"{wd.factions[st.faction_idx].name}\n"
-                 f"Generates {st.gen} resources · Drains {st.drain}\n"
-                 f"Net {'+' if st.net >= 0 else ''}{st.net} resources.")
+                 f"Upkeep: {_format_resources(st.upkeep)} per turn")
 
     def _show_village(self, v):
         wd = self.world
@@ -454,8 +676,9 @@ class MapView(tk.Frame):
             fg=theme.INK,
             text=f"{v.name}\nVillage in {county.name}, "
                  f"{wd.factions[v.faction_idx].name}\n"
-                 f"Farms here produce {v.farm_output} resources, "
-                 f"scaled by local land fertility.")
+                 f"Farms here contribute {v.farm_output} Grain per turn "
+                 f"(before climate/season modifiers), scaled by local land "
+                 f"fertility.")
 
     # --- zoom-level enter/exit ----------------------------------------------
     # Three levels: World -> Country (shows counties) -> County (shows
@@ -524,17 +747,29 @@ class MapView(tk.Frame):
         self._start_zoom(self._padded_rect(self.zoom_faction.meta["bbox"]))
 
     # --- attack targeting ----------------------------------------------------
-    def _begin_attack_setup(self, enemy):
-        """Zoom to the shared border with `enemy` and let the player pick
-        which of the enemy's frontline counties to attack."""
+    def _begin_attack_setup(self, enemy, naval=False):
+        """Zoom to the shared border (or coastline, for a naval invasion)
+        with `enemy` and let the player pick which frontline/coastal county
+        to attack. If `naval` isn't explicitly requested, land is tried
+        first and naval is the automatic fallback when there's no land
+        connection (e.g. the double-click-to-attack shortcut doesn't know
+        which kind applies — it just wants "attack them, however")."""
         player = self._player_faction()
         player_idx = self.world.factions.index(player)
         enemy_idx = self.world.factions.index(enemy)
-        frontier = bordering_counties(self.world, player_idx, enemy_idx)
+
+        if naval:
+            frontier = naval_reachable_counties(self.world, player_idx, enemy_idx)
+        else:
+            frontier = bordering_counties(self.world, player_idx, enemy_idx)
+            if not frontier:
+                frontier = naval_reachable_counties(self.world, player_idx, enemy_idx)
+                naval = bool(frontier)
+
         if not frontier:
             self.info.config(fg=theme.MUTED,
-                             text=f"{enemy.name}\nNo shared border to attack "
-                                  "across right now.")
+                             text=f"{enemy.name}\nNo shared border or coastal "
+                                  "port to attack across right now.")
             return
 
         self.attack_mode = enemy
@@ -548,9 +783,15 @@ class MapView(tk.Frame):
         bbox = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
 
         self.title_lbl.config(text="Choose a Target")
-        self.info.config(fg=theme.MUTED,
-                         text=f"Attacking {enemy.name}.\nClick a highlighted "
-                              "county along the border to attack it.")
+        if naval:
+            self.info.config(fg=theme.MUTED,
+                             text=f"Launching a naval invasion of {enemy.name}.\n"
+                                  "Click a highlighted county along the coast "
+                                  "to attack it.")
+        else:
+            self.info.config(fg=theme.MUTED,
+                             text=f"Attacking {enemy.name}.\nClick a highlighted "
+                                  "county along the border to attack it.")
         self._enter_ui("ATTACK", "← Cancel", self._cancel_attack_setup)
         self._start_zoom(self._padded_rect(bbox, min_pad_frac=0.3, min_size=10))
         self.render()
@@ -579,6 +820,25 @@ class MapView(tk.Frame):
         # battle, flash_county() can highlight the (possibly newly-won)
         # county right where the player is already looking.
         self.on_attack(player, enemy, county)
+
+    # --- castle placement ----------------------------------------------------
+    def _begin_castle_placement(self, county):
+        self.building_mode = county
+        self.info.config(fg=theme.MUTED,
+                         text=f"{county.name}\nClick a spot in this county to "
+                              "begin building a castle there.")
+        for w in self.actions.winfo_children():
+            w.destroy()
+        tk.Button(self.actions, text="Cancel", command=self._cancel_castle_placement,
+                  bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                  relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+        self.render()
+
+    def _cancel_castle_placement(self):
+        self.building_mode = None
+        if self.selected_county is not None:
+            self._show_county(self.selected_county)
+        self.render()
 
     # --- post-battle conquest flash ------------------------------------------
     def flash_county(self, county, outcome="success"):
@@ -663,18 +923,36 @@ class MapView(tk.Frame):
                 self._launch_attack(wd.counties[cid])
             return
 
+        if self.building_mode is not None:
+            # --- CASTLE PLACEMENT: pick a spot within the armed county -----
+            county = self.building_mode
+            if wd.county_grid[gy][gx] == county.id:
+                player = self._player_faction()
+                msg = construction.start_castle(wd, player, (gx, gy))
+                self.building_mode = None
+                self._base_key = None
+                self.show_bottom_message(msg)
+                if self.selected_county is county:
+                    self._show_county(county)
+                self.render()
+            return
+
         if self.zoom_faction is None:
             # --- LEVEL 0: world view -------------------------------------
             o = wd.owner[gy][gx]
             if o == OCEAN:
                 return
             faction = wd.factions[o]
-            if faction is self.selected:          # 2nd click -> zoom in
+            if faction is self.selected:          # 2nd click -> zoom in / act
                 player = self._player_faction()
                 if player is None or faction is player:
                     self._enter_county_view(faction)
-                # foreign nations (with a player set) are diplomatic-only —
-                # no drilling into their counties/settlements.
+                else:
+                    rel = self.world.world_map.get_relationship(player.id, faction.id)
+                    if rel["stance"] == Stance.ENEMY:
+                        self._begin_attack_setup(faction)   # at war -> attack
+                    else:
+                        self._enter_county_view(faction)    # not at war -> browse
             else:                                 # 1st click -> select country
                 self.selected = faction
                 self._base_key = None
@@ -700,8 +978,10 @@ class MapView(tk.Frame):
                 self._exit_county_view()          # clicked away -> zoom out
                 return
             county = wd.counties[cid]
-            if county is self.selected_county:    # 2nd click -> zoom in
-                self._enter_village_view(county)
+            # Foreign browsing stops at the county level (diplomacy actions
+            # only) — no drilling into a foreign nation's villages.
+            if not self._zoom_is_foreign() and county is self.selected_county:
+                self._enter_village_view(county)  # 2nd click -> village view
             else:                                 # 1st click -> select county
                 self.selected_county = county
                 self._base_key = None
@@ -759,6 +1039,10 @@ class MapView(tk.Frame):
             data = self._px_fert
         elif self.mode == "elevation":
             data = self._px_elev
+        elif self.mode == "biome":
+            data = self._px_biome
+        elif self.mode == "climate":
+            data = self._px_climate
         elif self.selected is not None:
             sel = wd.factions.index(self.selected)
             base, hi = self._px_pol, self._px_pol_hi
@@ -903,7 +1187,9 @@ class MapView(tk.Frame):
                               width=width)
 
         self._draw_trade_routes(c, screen)
+        self._draw_trade_caravans(c, screen)
         self._draw_roads(c, screen)
+        self._draw_construction(c, screen)
         self._draw_settlements(c, screen)
         self._draw_villages(c, screen)
         self._draw_labels(c, screen)
@@ -967,6 +1253,50 @@ class MapView(tk.Frame):
                 c.create_line(*pts, fill=_TRADE_LAND_COLOR, width=width,
                               capstyle="round", joinstyle="round", dash=(7, 4),
                               smooth=True)
+
+    def _draw_trade_caravans(self, c, screen):
+        """Very basic moving markers for active trade caravans (land) and
+        ships (sea) — a small square/triangle at the caravan's current
+        interpolated position along its route. No animation between turns;
+        position only changes when render() runs again after End Turn."""
+        for caravan in self.world.trade_caravans:
+            x, y = screen(*[v + 0.5 for v in caravan.pos])
+            if caravan.kind == "sea":
+                style = _SHIP_STYLE
+                r = style["r"]
+                c.create_polygon(x, y - r, x + r, y + r, x - r, y + r,
+                                 fill=style["fill"], outline=style["outline"], width=1)
+            else:
+                style = _CARAVAN_STYLE
+                r = style["r"]
+                c.create_rectangle(x - r, y - r, x + r, y + r,
+                                   fill=style["fill"], outline=style["outline"], width=1)
+
+    def _draw_construction(self, c, screen):
+        """A growing dashed road (only the portion actually built so far —
+        it physically extends turn by turn) and a hollow, dashed
+        construction-site marker for each castle being built."""
+        wd = self.world
+        width = max(1.0, self._place[2] * 0.18)
+        for road in wd.road_projects:
+            cells = road.built_cells
+            if len(cells) < 2:
+                continue
+            pts = []
+            for gx, gy in cells:
+                pts.extend(screen(gx + 0.5, gy + 0.5))
+            c.create_line(*pts, fill=_ROAD_COLOR, width=width, capstyle="round",
+                          dash=(4, 3), smooth=True)
+
+        for castle in wd.castle_projects:
+            x, y = screen(castle.pos[0] + 0.5, castle.pos[1] + 0.5)
+            r = 4
+            c.create_rectangle(x - r, y - r, x + r, y + r, outline="#f2e9c9",
+                               width=2, dash=(2, 2))
+            c.create_text(x + 1, y + r + 8, text=f"{castle.turns_left}t",
+                         fill="#000000", font=("Segoe UI", 7))
+            c.create_text(x, y + r + 7, text=f"{castle.turns_left}t",
+                         fill="#f2e9c9", font=("Segoe UI", 7))
 
     def _draw_roads(self, c, screen):
         """Simple straight dirt-road segments linking villages (and the

@@ -2,13 +2,32 @@
 faction to another when a battle is won, keeping every ownership/aggregate
 data structure on the World consistent.
 """
+import math
 import random
 
 from app.core.events import bus
 from app.world.world_map import Stance
-from app.world.worldgen import OCEAN
+from app.world.worldgen import OCEAN, _bfs_distance
 
 _NEIGH4 = ((1, 0), (-1, 0), (0, 1), (0, -1))
+_NAVAL_COAST_REACH = 3   # same reach as the trade-route coastal test in worldgen.py
+
+
+def _recompute_settle_proximity(world, county):
+    """A conquered county's nearest settlement may now belong to a
+    different owner, so its remoteness (and thus next turn's non-food
+    resource yields — see app/world/resources.py) needs updating. Uses
+    straight-line distance to the nearest settlement rather than a full
+    grid BFS — cheap enough for a single county on a rare, player-
+    triggered conquest, unlike the full-map BFS done once at generation."""
+    if not world.settlements:
+        county.settle_proximity = 0.5
+        return
+    cx = sum(x for x, y in county.cells) / len(county.cells)
+    cy = sum(y for x, y in county.cells) / len(county.cells)
+    best = min(math.hypot(cx - sx, cy - sy) for sx, sy in
+               (st.pos for st in world.settlements))
+    county.settle_proximity = math.exp(-best / 10.0)
 
 
 def bordering_counties(world, attacker_idx, defender_idx):
@@ -30,6 +49,37 @@ def bordering_counties(world, attacker_idx, defender_idx):
                 continue
             break
     return out
+
+
+def naval_reachable_counties(world, attacker_idx, defender_idx):
+    """Defender's coastal counties, reachable by sea IF the attacker owns at
+    least one coastal settlement (a port) — the fallback used when
+    bordering_counties is empty (no land connection at all), so an
+    overseas/island enemy can still be invaded.
+
+    Simplification: this only checks that both sides have *some* coastline,
+    not that they're on the same connected ocean body — fine for this
+    generator (one continents-in-one-ocean landmass; edges always sink
+    underwater), but would need a real flood-fill check on a world with
+    multiple disconnected seas."""
+    ocean_cells = [(x, y) for y in range(world.h) for x in range(world.w)
+                   if world.owner[y][x] == OCEAN]
+    if not ocean_cells:
+        return []
+    coast_d = _bfs_distance(world, ocean_cells)
+
+    def is_coastal(pos):
+        x, y = pos
+        return coast_d[y][x] <= _NAVAL_COAST_REACH
+
+    has_port = any(is_coastal(st.pos) for st in world.settlements
+                   if st.faction_idx == attacker_idx)
+    if not has_port:
+        return []
+
+    return [county for county in world.counties
+            if county.faction_idx == defender_idx
+            and any(is_coastal((x, y)) for x, y in county.cells)]
 
 
 def _refresh_borders(world, county, rng):
@@ -122,18 +172,18 @@ def transfer_county(world, county, new_faction_idx, rng=None):
             old_settlements.remove(sid)
         new_settlements.append(sid)
 
-    gen = county.stats.get("res_gen", 0)
-    drain = county.stats.get("res_drain", 0)
-    crops = county.stats.get("crops", 0)
-    old_faction.stats["res_gen"] = old_faction.stats.get("res_gen", 0) - gen
-    old_faction.stats["res_drain"] = old_faction.stats.get("res_drain", 0) - drain
-    old_faction.stats["crops"] = old_faction.stats.get("crops", 0) - crops
-    new_faction.stats["res_gen"] = new_faction.stats.get("res_gen", 0) + gen
-    new_faction.stats["res_drain"] = new_faction.stats.get("res_drain", 0) + drain
-    new_faction.stats["crops"] = new_faction.stats.get("crops", 0) + crops
+    # Move this county's most recent turn's yield out of the old faction's
+    # stockpile and into the new one's (military isn't recomputed here —
+    # like the resource move itself, that happens on the next End Turn).
+    old_res = old_faction.stats.setdefault("resources", {})
+    new_res = new_faction.stats.setdefault("resources", {})
+    for resource, amount in county.resources.items():
+        old_res[resource] = max(0, old_res.get(resource, 0) - amount)
+        new_res[resource] = new_res.get(resource, 0) + amount
 
     _recompute_faction_totals(world, old_faction, old_faction_idx)
     _recompute_faction_totals(world, new_faction, new_faction_idx)
+    _recompute_settle_proximity(world, county)
     _refresh_borders(world, county, rng)
 
     bus.emit("county:transferred", {"county": county, "old_faction": old_faction,
