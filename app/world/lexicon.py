@@ -58,6 +58,8 @@ _SETTLE_SUFFIX = {
     "castle": ["keep", "watch", "guard", "bastion", "fort", "wall", "aerie"],
     "town": ["stead", "ford", "mill", "brook", "field", "market", "crossing",
              "hollow", "wick", "dale"],
+    "village": ["ton", "by", "worth", "leigh", "combe", "end", "holt",
+                "thorpe", "wick", "bury"],
 }
 
 

@@ -68,6 +68,21 @@ class Settlement:
         return self.gen - self.drain
 
 
+class Village:
+    """A small farming settlement within a county — the finest-grained unit on
+    the map (World -> Country -> County -> Village). Purely a producer: its
+    farms generate resources scaled by the fertility of the land around it.
+    No drain is modeled (villages are subsistence-level, unlike settlements)."""
+
+    def __init__(self, vid, county_id, faction_idx, name, pos, farm_output):
+        self.id = vid
+        self.county_id = county_id
+        self.faction_idx = faction_idx
+        self.name = name
+        self.pos = pos                 # (x, y) grid cell
+        self.farm_output = farm_output
+
+
 class County:
     """A sub-region of a faction's territory. The unit of control that will be
     fought over once territory can change hands. Stats derive from the fertility
@@ -469,6 +484,130 @@ def _generate_settlements(world, rng):
             c.meta_settlements.append(st.id)
 
 
+# Village generation. Count scales with county size: from ~3 villages for a
+# small county in a small country up to ~50 for a large county in a huge one.
+_VILLAGE_CELLS_PER = 22   # ~cells per village before min/max clamping
+_VILLAGE_MIN = 3
+_VILLAGE_MAX = 50
+_VILLAGE_FERT_W = 1.0
+_VILLAGE_WATER_W = 0.55
+_VILLAGE_WATER_REACH = 5.0
+_VILLAGE_FARM_RANGE = (10, 26)   # base farm output before the fertility scalar
+_VILLAGE_FERT_PATCH = 2          # radius (cells) averaged for "land occupied"
+
+
+def _mst_edges(points):
+    """Simple O(n^2) Prim's minimum spanning tree over 2D grid points. Returns
+    a list of (i, j) index pairs — enough edges to connect every point with no
+    cycles, i.e. the sparsest possible road network."""
+    n = len(points)
+    if n < 2:
+        return []
+    in_tree = [False] * n
+    in_tree[0] = True
+    dist = [(points[0][0] - p[0]) ** 2 + (points[0][1] - p[1]) ** 2 for p in points]
+    parent = [0] * n
+    edges = []
+    for _ in range(n - 1):
+        best, best_d = -1, 1e18
+        for i in range(n):
+            if not in_tree[i] and dist[i] < best_d:
+                best_d, best = dist[i], i
+        if best == -1:
+            break
+        in_tree[best] = True
+        edges.append((parent[best], best))
+        bx, by = points[best]
+        for i in range(n):
+            if not in_tree[i]:
+                d = (bx - points[i][0]) ** 2 + (by - points[i][1]) ** 2
+                if d < dist[i]:
+                    dist[i] = d
+                    parent[i] = best
+    return edges
+
+
+def _generate_villages(world, rng):
+    """Sprinkle small farming villages across every county — 3 for a small
+    county in a small country, up to 50 for a large county in a huge one —
+    each producing farm output tied to the fertility of the land it sits on.
+    Villages (plus the county's existing settlements, as road hubs) are linked
+    by simple straight dirt roads via a minimum spanning tree, so every
+    village has a way out without an excess of redundant roads."""
+    w, h = world.w, world.h
+    water_d = _bfs_distance(world, list(world.river_cells | world.lake_cells))
+
+    for county in world.counties:
+        # A fresh namer per county: villages are only ever viewed one county
+        # at a time, so names need only be unique within a county (a handful
+        # to ~50), not across the whole world's thousands of villages.
+        namer = make_settlement_namer(rng)
+        land_cells = [(x, y) for x, y in county.cells
+                      if (x, y) not in world.river_cells
+                      and (x, y) not in world.lake_cells]
+        if not land_cells:
+            county.villages = []
+            world.roads_by_county[county.id] = []
+            continue
+
+        area = len(county.cells)
+        n = max(_VILLAGE_MIN, min(_VILLAGE_MAX, round(area / _VILLAGE_CELLS_PER)))
+        n = min(n, len(land_cells))
+
+        scored = []
+        for x, y in land_cells:
+            s = (_VILLAGE_FERT_W * world.fertility[y][x]
+                 + _VILLAGE_WATER_W * math.exp(-water_d[y][x] / _VILLAGE_WATER_REACH)
+                 + 0.15 * rng.random())          # tie-break jitter
+            scored.append((s, x, y))
+        scored.sort(reverse=True)
+
+        spacing = max(1.5, math.sqrt(area / max(1, n)) * 0.55)
+        sp2 = spacing * spacing
+        placed = []
+        for s, x, y in scored:
+            if len(placed) >= n:
+                break
+            if any((x - px) ** 2 + (y - py) ** 2 < sp2 for px, py in placed):
+                continue
+            placed.append((x, y))
+
+        vids = []
+        for x, y in placed:
+            # "land occupied": average fertility over a small patch around the
+            # village, not just the single cell, so farm output reflects the
+            # surrounding fields rather than one pixel of terrain.
+            samples = []
+            r = _VILLAGE_FERT_PATCH
+            for dx in range(-r, r + 1):
+                for dy in range(-r, r + 1):
+                    nx, ny = x + dx, y + dy
+                    if (0 <= nx < w and 0 <= ny < h
+                            and world.county_grid[ny][nx] == county.id):
+                        samples.append(world.fertility[ny][nx])
+            local_fert = sum(samples) / len(samples) if samples else world.fertility[y][x]
+            farm = round(rng.uniform(*_VILLAGE_FARM_RANGE) * (0.5 + 1.2 * local_fert))
+            v = Village(len(world.villages), county.id, county.faction_idx,
+                       namer("village"), (x, y), farm)
+            world.villages.append(v)
+            vids.append(v.id)
+
+        county.villages = vids
+        farm_total = sum(world.villages[i].farm_output for i in vids)
+        county.stats["farm_output"] = farm_total
+        county.stats["res_gen"] = county.stats.get("res_gen", 0) + farm_total
+        f = world.factions[county.faction_idx]
+        f.stats["res_gen"] = f.stats.get("res_gen", 0) + farm_total
+
+        # dirt roads: an MST over the villages, plus the county's first
+        # settlement (if any) as an extra node so the network ties into town.
+        points = [world.villages[i].pos for i in vids]
+        if county.meta_settlements:
+            points.append(world.settlements[county.meta_settlements[0]].pos)
+        edges = _mst_edges(points)
+        world.roads_by_county[county.id] = [(points[a], points[b]) for a, b in edges]
+
+
 def _water_distance(world):
     """Steps from each cell to the nearest water cell (multi-source BFS over
     the ocean). Land cells get their distance-to-coast; water cells get 0."""
@@ -530,6 +669,8 @@ class World:
         self.counties = []             # list[County]; index == county id
         self.county_grid = [[-1] * w for _ in range(h)]  # county id, -1 = none
         self.settlements = []          # list[Settlement]; index == id
+        self.villages = []             # list[Village]; index == id
+        self.roads_by_county = {}      # county_id -> [((x,y),(x,y)), ...] segments
         self.sea_level = 0.5
         self.factions = []             # list[Nation], index == owner value
         self.world_map = WorldMap()    # holds factions + relationships
@@ -666,5 +807,9 @@ def generate_world(width=440, height=264, seed=None, n_factions=14):
 
     # 8. found cities, castles and towns; aggregate resource gen/drain
     _generate_settlements(world, rng)
+
+    # 9. sprinkle villages within each county, linked by simple dirt roads;
+    #    each village's farm output tracks the fertility of its land
+    _generate_villages(world, rng)
 
     return world

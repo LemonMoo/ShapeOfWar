@@ -28,6 +28,13 @@ primitive shapes (circles, squares, triangles, diamonds).
   drains **general resources** (deliberately unspecified for now — crops fold
   into them) that aggregate up to its county and country. The world view marks
   cities; the county view shows every settlement, clickable for its numbers.
+  Click a county **again** to zoom in one level further to its **village view**
+  — 3 villages for a small county in a small country, up to ~50 for a large
+  county in a huge one. Villages are linked by simple straight dirt roads (a
+  minimum spanning tree, so every village is reachable with no redundant
+  roads); each village's farms are not drawn, but their output is directly
+  tied to the fertility of the land immediately around it, and rolls up into
+  its county's and country's resource totals.
 - **Micro scale:** a 2D battlefield where shape-soldiers seek and fight in real
   time until one side is wiped out.
 
@@ -62,10 +69,12 @@ app/
   core/  events.py      pub/sub hub — new systems hook in without edits
   world/ nation.py      a faction (free-form stats/meta dicts, incl. species)
          world_map.py   factions + relationship graph, Stance constants
-         lexicon.py     invented species + faction/county name generators
+         lexicon.py     invented species + faction/county/settlement/village
+                        name generators
          worldgen.py    procedural world: elevation, water, fertility, rivers,
-                        river-aware territories/counties, and settlements
-                        (County, Settlement, SETTLEMENT_TYPES)
+                        river-aware territories/counties, settlements, and
+                        villages + roads (County, Settlement, Village,
+                        SETTLEMENT_TYPES)
   battle/shapes.py      shape registry (register_shape) — the "art"
          unit_types.py  unit archetypes (pure data)
          unit.py        one soldier; simple seek-and-attack AI in update()
@@ -100,6 +109,13 @@ Everything below is additive — no existing files need changing.
   kind there (plus a marker style in `map_view.py`) and it generates instantly.
   When the real resource system is specified, replace the generic `gen`/`drain`
   numbers without touching placement.
+- **Tune villages / roads:** the `_VILLAGE_*` constants in `worldgen.py`
+  control count-per-county (`_VILLAGE_CELLS_PER`, clamped `_VILLAGE_MIN`/`_MAX`),
+  placement (fertility/water weights), spacing, and farm output range
+  (`_VILLAGE_FARM_RANGE`). Roads are a minimum spanning tree over each
+  county's villages plus its first settlement (`_mst_edges`), stored in
+  `world.roads_by_county[county_id]` as straight `((x,y),(x,y))` segments —
+  swap in a pathfinder there if roads should ever bend around terrain.
 - **Tune fertility / crops:** the `_FERT_*` weights and `_CROP_PER_FERTILITY` at
   the top of `worldgen.py` control how elevation, water and moisture combine into
   fertility and how that converts to crop output. Per-cell values live in

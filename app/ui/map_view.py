@@ -1,12 +1,16 @@
 """Macro world-map screen.
 
 Renders the procedurally generated world as a raster (a Pillow image cropped to
-a viewport and scaled with nearest-neighbor, so borders stay crisp). Supports:
-  - click a country to select it (country panel);
-  - click the *same* country again to smoothly zoom into it and reveal its
-    counties, each selectable with its own fertility-derived stats;
-  - click outside the zoomed country (or Back) to zoom back out.
-Counties are the future unit of control for territory reassignment.
+a viewport and scaled with nearest-neighbor, so borders stay crisp). Three
+zoom levels, click-to-drill-down:
+  - World: click a country to select it, click it again to zoom into...
+  - Country: shows its counties + settlements. Click a county to select it,
+    click it again to zoom into...
+  - County ("village view"): shows its villages, linked by simple dirt roads,
+    plus its settlements. Click a village for its farm-output stats.
+Click outside the zoomed region (or the Back button) to zoom back out one
+level at a time. Counties are the future unit of control for territory
+reassignment.
 """
 import math
 import tkinter as tk
@@ -83,6 +87,11 @@ _SETTLE_STYLE = {
     "castle": {"fill": "#c9ccd6", "outline": "#3a3f4c", "r": 4},
     "town":   {"fill": "#d9b98a", "outline": "#4a3a24", "r": 3},
 }
+_VILLAGE_STYLE = {"fill": "#c9a06a", "outline": "#4a3418", "r": 2}
+_ROAD_COLOR = "#8a6f4a"
+# Above this many villages in a county, skip name labels (village view) so it
+# doesn't turn into unreadable text soup.
+_VILLAGE_LABEL_LIMIT = 24
 
 
 def _lerp_hex(c0, c1, t):
@@ -99,7 +108,9 @@ class MapView(tk.Frame):
         self.selected = None            # selected faction (world view)
         self.zoom_faction = None        # faction we've zoomed into (county view)
         self.selected_county = None
+        self.zoom_county = None         # county we've zoomed into (village view)
         self.selected_settlement = None
+        self.selected_village = None
         self.mode = "political"
         self._img = None
         self._place = (0, 0, 1)         # vx0, vy0, scale
@@ -122,7 +133,9 @@ class MapView(tk.Frame):
         self.selected = None
         self.zoom_faction = None
         self.selected_county = None
+        self.zoom_county = None
         self.selected_settlement = None
+        self.selected_village = None
         self.view = [0.0, 0.0, world.w, world.h]
         self.view_target = list(self.view)
         self._base_img = self._base_key = None
@@ -308,17 +321,20 @@ class MapView(tk.Frame):
         s = county.stats
         country = self.zoom_faction
         wd = self.world
+        n_villages = len(getattr(county, "villages", []))
         lines = [f"{county.name}", f"County of {country.name}",
                  f"Area {s['area']} · Fertility {s['fertility']}%",
                  f"Provides {s['crops']} crops to {country.name}.",
                  f"Resources +{s.get('res_gen', 0)} / -{s.get('res_drain', 0)} "
-                 f"(net {s.get('res_gen', 0) - s.get('res_drain', 0)})"]
+                 f"(net {s.get('res_gen', 0) - s.get('res_drain', 0)}, "
+                 f"incl. {s.get('farm_output', 0)} from farms)"]
         sts = [wd.settlements[i] for i in getattr(county, "meta_settlements", [])]
         if sts:
             lines.append("Settlements: " + ", ".join(
                 f"{st.name} ({st.kind})" for st in sts))
         else:
             lines.append("No settlements.")
+        lines.append(f"{n_villages} villages — click again to zoom in.")
         self.info.config(fg=theme.INK, text="\n".join(lines))
 
     def _show_settlement(self, st):
@@ -332,14 +348,35 @@ class MapView(tk.Frame):
                  f"Generates {st.gen} resources · Drains {st.drain}\n"
                  f"Net {'+' if st.net >= 0 else ''}{st.net} resources.")
 
-    # --- county view enter/exit -------------------------------------------
-    def _enter_ui(self):
-        """Switch the panel to county mode (hide relationships/attack)."""
-        self.rel_header.config(text="COUNTY")
+    def _show_village(self, v):
+        wd = self.world
+        county = wd.counties[v.county_id]
+        self.info.config(
+            fg=theme.INK,
+            text=f"{v.name}\nVillage in {county.name}, "
+                 f"{wd.factions[v.faction_idx].name}\n"
+                 f"Farms here produce {v.farm_output} resources, "
+                 f"scaled by local land fertility.")
+
+    # --- zoom-level enter/exit ----------------------------------------------
+    # Three levels: World -> Country (shows counties) -> County (shows
+    # villages). Each level's "enter" sets state + zooms in; "exit" clears
+    # that level's state and zooms back out to the level above.
+    @staticmethod
+    def _padded_rect(bbox, min_pad_frac=0.12, min_size=0):
+        x0, y0, x1, y1 = bbox
+        pad = min_pad_frac * max(x1 - x0, y1 - y0, min_size)
+        return [x0 - pad, y0 - pad, x1 + pad, y1 + pad]
+
+    def _enter_ui(self, section_label, back_label, back_command):
+        """Switch the panel into a zoomed mode: clear relationships/attack,
+        show a Back button configured for the current level."""
+        self.rel_header.config(text=section_label)
         for w in self.rel_frame.winfo_children():
             w.destroy()
         for w in self.actions.winfo_children():
             w.destroy()
+        self.back_btn.config(text=back_label, command=back_command)
         self.back_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 2))
 
     def _exit_ui(self):
@@ -347,24 +384,45 @@ class MapView(tk.Frame):
 
     def _enter_county_view(self, faction):
         self.zoom_faction = faction
+        self.zoom_county = None
         self.selected_county = None
+        self.selected_village = None
         self._base_key = None
         self.title_lbl.config(text="Counties")
         self.info.config(fg=theme.MUTED,
                          text=f"{faction.name}\nClick a county to inspect it.")
-        self._enter_ui()
-        x0, y0, x1, y1 = faction.meta["bbox"]
-        pad = 0.12 * max(x1 - x0, y1 - y0)
-        self._start_zoom([x0 - pad, y0 - pad, x1 + pad, y1 + pad])
+        self._enter_ui("COUNTY", "← Back to World", self._exit_county_view)
+        self._start_zoom(self._padded_rect(faction.meta["bbox"]))
 
     def _exit_county_view(self):
         self.zoom_faction = None
+        self.zoom_county = None
         self.selected_county = None
+        self.selected_village = None
         self._base_key = None
         self._exit_ui()
         if self.selected:
             self._show_faction(self.selected)
         self._start_zoom([0.0, 0.0, self.world.w, self.world.h])
+
+    def _enter_village_view(self, county):
+        self.zoom_county = county
+        self.selected_village = None
+        self._base_key = None
+        self.title_lbl.config(text="Villages")
+        self.info.config(fg=theme.MUTED,
+                         text=f"{county.name}\nClick a village to inspect it.")
+        self._enter_ui("VILLAGE", "← Back to County", self._exit_village_view)
+        self._start_zoom(self._padded_rect(county.bbox, min_pad_frac=0.2, min_size=6))
+
+    def _exit_village_view(self):
+        self.zoom_county = None
+        self.selected_village = None
+        self._base_key = None
+        self._enter_ui("COUNTY", "← Back to World", self._exit_county_view)
+        if self.selected_county:
+            self._show_county(self.selected_county)
+        self._start_zoom(self._padded_rect(self.zoom_faction.meta["bbox"]))
 
     # --- zoom animation ----------------------------------------------------
     def _start_zoom(self, target):
@@ -401,6 +459,7 @@ class MapView(tk.Frame):
             return
 
         if self.zoom_faction is None:
+            # --- LEVEL 0: world view -------------------------------------
             o = wd.owner[gy][gx]
             if o == OCEAN:
                 return
@@ -412,10 +471,11 @@ class MapView(tk.Frame):
                 self._base_key = None
                 self._show_faction(faction)
                 self.render()
-        else:
+
+        elif self.zoom_county is None:
+            # --- LEVEL 1: county view (zoomed into a country) -------------
             zf = wd.factions.index(self.zoom_faction)
             # settlement markers take priority over county selection
-            vx0, vy0, scale = self._place
             for sid in self.zoom_faction.meta.get("settlements", []):
                 st = wd.settlements[sid]
                 sx = (st.pos[0] + 0.5 - vx0) * scale
@@ -429,11 +489,40 @@ class MapView(tk.Frame):
             cid = wd.county_grid[gy][gx]
             if cid < 0 or wd.counties[cid].faction_idx != zf:
                 self._exit_county_view()          # clicked away -> zoom out
-            else:
-                self.selected_county = wd.counties[cid]
+                return
+            county = wd.counties[cid]
+            if county is self.selected_county:    # 2nd click -> zoom in
+                self._enter_village_view(county)
+            else:                                 # 1st click -> select county
+                self.selected_county = county
                 self._base_key = None
-                self._show_county(self.selected_county)
+                self._show_county(county)
                 self.render()
+
+        else:
+            # --- LEVEL 2: village view (zoomed into a county) -------------
+            for vid in self.zoom_county.villages:
+                v = wd.villages[vid]
+                sx = (v.pos[0] + 0.5 - vx0) * scale
+                sy = (v.pos[1] + 0.5 - vy0) * scale
+                if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= 8 ** 2:
+                    self.selected_village = v
+                    self._show_village(v)
+                    self.render()
+                    return
+            for sid in self.zoom_county.meta_settlements:
+                st = wd.settlements[sid]
+                sx = (st.pos[0] + 0.5 - vx0) * scale
+                sy = (st.pos[1] + 0.5 - vy0) * scale
+                if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= 10 ** 2:
+                    self.selected_settlement = st
+                    self._show_settlement(st)
+                    self.render()
+                    return
+            cid = wd.county_grid[gy][gx]
+            if cid != self.zoom_county.id:
+                self._exit_village_view()         # clicked away -> zoom out
+            # else: clicked empty land within the same county — no-op
 
     # --- rendering ---------------------------------------------------------
     def _ensure_base(self):
@@ -549,7 +638,9 @@ class MapView(tk.Frame):
                               fill=theme.STANCE_COLOR.get(rel["stance"], theme.MUTED),
                               width=width)
 
+        self._draw_roads(c, screen)
         self._draw_settlements(c, screen)
+        self._draw_villages(c, screen)
         self._draw_labels(c, screen)
 
     def _draw_settlements(self, c, screen):
@@ -589,8 +680,47 @@ class MapView(tk.Frame):
                 c.create_text(x, y + r + 7, text=st.name, fill="#e8e8e8",
                               font=("Segoe UI", 7))
 
+    def _draw_roads(self, c, screen):
+        """Simple straight dirt-road segments linking villages (and the
+        county's main settlement, as a hub) — only shown in village view."""
+        if self.zoom_county is None:
+            return
+        segs = self.world.roads_by_county.get(self.zoom_county.id, [])
+        width = max(1.0, self._place[2] * 0.18)
+        for (ax, ay), (bx, by) in segs:
+            x0, y0 = screen(ax + 0.5, ay + 0.5)
+            x1, y1 = screen(bx + 0.5, by + 0.5)
+            c.create_line(x0, y0, x1, y1, fill=_ROAD_COLOR, width=width,
+                          capstyle="round", dash=(4, 3))
+
+    def _draw_villages(self, c, screen):
+        """Small dots for villages — only shown in village view. Names are
+        skipped past a village-count threshold to avoid label soup."""
+        if self.zoom_county is None:
+            return
+        wd = self.world
+        style = _VILLAGE_STYLE
+        r = style["r"]
+        vids = self.zoom_county.villages
+        show_names = len(vids) <= _VILLAGE_LABEL_LIMIT
+        for vid in vids:
+            v = wd.villages[vid]
+            x, y = screen(v.pos[0] + 0.5, v.pos[1] + 0.5)
+            if v is self.selected_village:          # selection ring
+                c.create_oval(x - r - 3, y - r - 3, x + r + 3, y + r + 3,
+                              outline="#ffffff", width=2)
+            c.create_oval(x - r, y - r, x + r, y + r, fill=style["fill"],
+                          outline=style["outline"], width=1)
+            if show_names:
+                c.create_text(x + 1, y + r + 7, text=v.name, fill="#000000",
+                              font=("Segoe UI", 6))
+                c.create_text(x, y + r + 6, text=v.name, fill="#e8e8e8",
+                              font=("Segoe UI", 6))
+
     def _draw_labels(self, c, screen):
         wd = self.world
+        if self.zoom_county is not None:
+            return   # village view: county/faction name labels aren't useful here
         if self.zoom_faction is not None:
             items = [(wd.counties[cid].name, wd.counties[cid].center)
                      for cid in self.zoom_faction.meta.get("counties", [])]
