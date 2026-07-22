@@ -8,7 +8,8 @@ import math
 import random
 
 from app.world.worldgen import (OCEAN, Settlement, SETTLEMENT_UPKEEP,
-                                SETTLEMENT_TAX_INCOME, _path_dijkstra, _elev_cost)
+                                SETTLEMENT_TAX_INCOME, _path_dijkstra, _elev_cost,
+                                _SEA_COAST_REACH)
 from app.world.lexicon import make_settlement_namer
 
 CASTLE_COST = {"Stone": 400, "Wood": 200, "Iron": 100, "Gold": 300}
@@ -16,6 +17,9 @@ CASTLE_BUILD_TURNS = 15          # at full speed
 ROAD_SPEED_PENALTY = 0.5         # castle progress rate while its road is incomplete
 ROAD_CELLS_PER_TURN = 6          # how much of the route gets physically drawn each turn
 _BBOX_PAD = 20
+
+SHIPYARD_COST = {"Wood": 600, "Gold": 200}
+SHIPYARD_BUILD_TURNS = 30        # deliberately steep -- "large amount of wood, very long cost"
 
 
 class RoadProject:
@@ -57,6 +61,88 @@ class CastleProject:
     @property
     def half_speed(self):
         return self.road is not None and not self.road.complete
+
+
+class ShipyardProject:
+    """A shipyard under construction at an existing coastal city -- no road
+    to build (it's sited in place), just a long flat time+resource sink."""
+
+    def __init__(self, faction_idx, settlement_id):
+        self.faction_idx = faction_idx
+        self.settlement_id = settlement_id
+        self.total_turns = SHIPYARD_BUILD_TURNS
+        self.progress_turns = 0.0
+
+    @property
+    def turns_left(self):
+        return max(0, math.ceil(self.total_turns - self.progress_turns))
+
+
+def _is_coastal(world, pos):
+    """BFS out from `pos` up to _SEA_COAST_REACH steps looking for open
+    water -- the same reach trade._coastal_factions applies (there, via a
+    single map-wide BFS from every ocean cell; here, just for one point, so
+    a small local search is cheaper than that)."""
+    x0, y0 = pos
+    if world.owner[y0][x0] == OCEAN:
+        return False
+    seen = {pos}
+    frontier = [pos]
+    for _ in range(_SEA_COAST_REACH):
+        nxt = []
+        for x, y in frontier:
+            for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if not (0 <= nx < world.w and 0 <= ny < world.h) or (nx, ny) in seen:
+                    continue
+                if world.owner[ny][nx] == OCEAN:
+                    return True
+                seen.add((nx, ny))
+                nxt.append((nx, ny))
+        frontier = nxt
+    return False
+
+
+def can_build_shipyard(world, settlement):
+    if settlement.kind != "city":
+        return False
+    if getattr(settlement, "has_shipyard", False):
+        return False
+    if any(p.settlement_id == settlement.id for p in world.shipyard_projects):
+        return False
+    return _is_coastal(world, settlement.pos)
+
+
+def start_shipyard(world, nation, settlement):
+    """Validate and kick off building a shipyard at an existing coastal
+    city. Returns a message describing what happened (success or why not)."""
+    if not can_build_shipyard(world, settlement):
+        return "A shipyard can't be built there."
+    if not can_afford(nation, SHIPYARD_COST):
+        return "You don't have enough resources to start construction."
+
+    res = nation.stats.setdefault("resources", {})
+    for resource, amount in SHIPYARD_COST.items():
+        if resource == "Gold":
+            nation.stats["gold"] = nation.stats.get("gold", 0) - amount
+        else:
+            res[resource] = res.get(resource, 0) - amount
+
+    project = ShipyardProject(settlement.faction_idx, settlement.id)
+    world.shipyard_projects.append(project)
+    return f"Shipyard construction begins — estimated {project.total_turns} turns."
+
+
+def advance_shipyard_projects(world):
+    finished = []
+    for project in world.shipyard_projects:
+        project.progress_turns += 1.0
+        if project.progress_turns >= project.total_turns:
+            finished.append(project)
+    for project in finished:
+        st = next((s for s in world.settlements if s.id == project.settlement_id), None)
+        if st is not None:
+            st.has_shipyard = True
+        world.shipyard_projects.remove(project)
 
 
 def _find_road_path(world, faction_idx, dest_pos):
@@ -152,7 +238,11 @@ def _finish_castle(world, castle):
 
 def _finish_road(world, road):
     """Fold a completed road into the permanent per-county road network so
-    it renders like any other established dirt road from then on."""
+    it renders like any other established road from then on. Always a
+    settlement-to-settlement connection (the nearest existing settlement to
+    a brand-new castle), so it's Stone — see app/world/worldgen.py's
+    _place_villages_for_county for the same tier rule applied at
+    world-gen time."""
     x, y = road.path[-1]
     if not (0 <= x < world.w and 0 <= y < world.h):
         return
@@ -160,7 +250,7 @@ def _finish_road(world, road):
     if county_id < 0:
         return
     segs = world.roads_by_county.setdefault(county_id, [])
-    segs.extend(zip(road.path, road.path[1:]))
+    segs.extend((a, b, "stone") for a, b in zip(road.path, road.path[1:]))
 
 
 def advance_projects(world):

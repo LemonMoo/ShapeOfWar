@@ -20,6 +20,20 @@ from app.battle.unit_types import UNIT_TYPES
 _GAME_SCREENS = ("map", "battle")
 
 
+class _WildlandDefender:
+    """Stand-in 'nation' for a wildland-garrison battle (see
+    stage_wildland_battle) — just enough attributes for Army composition
+    and battle messaging (App._army_for/stage_battle) to treat it like a
+    normal defender. Never added to world.factions; county.faction_idx
+    stays UNCLAIMED throughout, which territory.transfer_county already
+    knows how to move land out of."""
+
+    def __init__(self, military):
+        self.name = "Wildland Garrison"
+        self.color = "#6b4a3a"
+        self.stats = {"military": military}
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -77,7 +91,8 @@ class App(tk.Tk):
             self.map_view = MapView(self.content, self.world,
                                     on_attack=self.stage_battle,
                                     on_regenerate=self.regenerate_world,
-                                    on_end_turn=self.end_turn)
+                                    on_end_turn=self.end_turn,
+                                    on_wildland_claim=self.stage_wildland_battle)
             self.battle_view = BattleView(self.content, on_new_skirmish=self.random_skirmish,
                                          on_continue=self._return_from_battle)
             for view in (self.map_view, self.battle_view):
@@ -228,19 +243,22 @@ class App(tk.Tk):
         }
         return army, composition
 
-    def stage_battle(self, attacker, defender, county=None):
+    def stage_battle(self, attacker, defender, county=None, claim_project=None,
+                     defender_strength_mult=1.0):
         w = max(self.battle_view.canvas.winfo_width(), 900)
         h = max(self.battle_view.canvas.winfo_height(), 600)
         battle = Battle(w, h)
         a_army, a_comp = self._army_for(attacker, 0)
         d_army, d_comp = self._army_for(defender, 1)
         battle.deploy(a_army, a_comp, 0)
-        battle.deploy(d_army, d_comp, 1)
+        battle.deploy(d_army, d_comp, 1, strength_mult=defender_strength_mult)
 
         # A specific county is normally already chosen by the map's
         # attack-target picker; fall back to a random frontline county (if
         # any) for callers that don't pick one themselves (random skirmishes,
-        # sandbox worlds with no player nation).
+        # sandbox worlds with no player nation). Never hit for a wildland
+        # claim battle — stage_wildland_battle always supplies `county`, and
+        # a _WildlandDefender isn't in world.factions for .index() to find.
         if county is None:
             import random
             from app.world.territory import bordering_counties
@@ -249,12 +267,28 @@ class App(tk.Tk):
             frontier = bordering_counties(self.world, attacker_idx, defender_idx)
             county = random.choice(frontier) if frontier else None
         self._battle_context = {"attacker": attacker, "defender": defender,
-                                "county": county}
+                                "county": county, "claim_project": claim_project}
 
         msg = (f"{attacker.name} marches on {county.name}, held by {defender.name}."
                if county else f"{attacker.name} marches on {defender.name}.")
         self.battle_view.set_battle(battle, msg)
         self.show_screen("battle")
+
+    def stage_wildland_battle(self, project):
+        """Fight for a county whose claim construction has finished — the
+        interactive battlefield replaces the old instant win/loss formula
+        (still used for AI claims, see app/world/expansion.py). The
+        garrison's Army is sized from the county's wildland_strength via
+        the exact same composition formula _army_for already uses for a
+        real nation's military stat, but each of its soldiers fights at
+        WILDLAND_COMBAT_STRENGTH_MULT — the same discount the AI's instant
+        formula applies to wildland_strength itself."""
+        from app.world import expansion
+        player = self.world.factions[project.faction_idx]
+        county = self.world.counties[project.county_id]
+        defender = _WildlandDefender(county.wildland_strength)
+        self.stage_battle(player, defender, county, claim_project=project,
+                          defender_strength_mult=expansion.WILDLAND_COMBAT_STRENGTH_MULT)
 
     def random_skirmish(self):
         import random
@@ -282,18 +316,29 @@ class App(tk.Tk):
         conquest = ""
         if ctx and ctx["county"]:
             county, attacker, defender = ctx["county"], ctx["attacker"], ctx["defender"]
+            claim_project = ctx.get("claim_project")
             if winner and winner.side == 0:
-                from app.world.territory import transfer_county
                 attacker_idx = self.world.factions.index(attacker)
-                transfer_county(self.world, county, attacker_idx)
+                if claim_project is not None:
+                    from app.world import expansion
+                    expansion.resolve_claim_win(self.world, county, attacker_idx)
+                else:
+                    from app.world.territory import transfer_county
+                    transfer_county(self.world, county, attacker_idx)
                 conquest = f" {attacker.name} seizes {county.name}!"
                 self.map_view.refresh()
                 self._battle_outcome = {"result": "success", "county": county,
                                         "attacker": attacker, "defender": defender}
             else:
+                if claim_project is not None:
+                    from app.world import expansion
+                    expansion.resolve_claim_loss(self.world, county)
+                    self.map_view.refresh()
                 self._battle_outcome = {"result": "failure", "county": county,
                                         "attacker": attacker, "defender": defender,
                                         "stalemate": winner is None}
+            if claim_project is not None and claim_project in self.world.claim_projects:
+                self.world.claim_projects.remove(claim_project)
         self.status.config(
             text=(f"{winner.name} won the last battle{conquest}" if winner
                   else "Last battle: stalemate"))

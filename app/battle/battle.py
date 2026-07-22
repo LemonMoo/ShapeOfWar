@@ -59,9 +59,11 @@ class Battle:
     def spawn_projectile(self, sx, sy, tx, ty, color):
         self.projectiles.append(Projectile(sx, sy, tx, ty, color))
 
-    def deploy(self, army, composition, side):
+    def deploy(self, army, composition, side, strength_mult=1.0):
         """Place an army in a grid along one side from a composition dict
-        ``{unit_type: count}``."""
+        ``{unit_type: count}``. ``strength_mult`` scales every spawned
+        unit's combat power (see Unit) — used for a wildland garrison's
+        weaker soldiers, 1.0 (no change) for a normal nation's army."""
         army.side = side
         x0 = self.width * 0.12 if side == 0 else self.width * 0.88
         entries = []
@@ -75,7 +77,7 @@ class Battle:
             jitter = lambda: (random.random() - 0.5) * 8
             x = x0 + (col * 16 if side == 0 else -col * 16) + jitter()
             y = self.height / 2 + (row - rows / 2) * 16 + jitter()
-            army.units.append(Unit(type_key, army, x, y))
+            army.units.append(Unit(type_key, army, x, y, strength_mult))
         self.armies.append(army)
         return army
 

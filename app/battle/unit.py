@@ -10,14 +10,21 @@ from app.battle.unit_types import UNIT_TYPES
 
 
 class Unit:
-    def __init__(self, type_key, faction, x, y):
+    def __init__(self, type_key, faction, x, y, strength_mult=1.0):
         t = UNIT_TYPES.get(type_key, UNIT_TYPES["infantry"])
         self.type_key = type_key
         self.type = t
         self.faction = faction   # the owning Army
         self.x = x
         self.y = y
-        self.hp = t["max_hp"]
+        # strength_mult scales this unit's combat power relative to the
+        # shared UNIT_TYPES baseline (both HP and damage dealt) — e.g. a
+        # wildland garrison's soldiers, per app/ui/app.py's
+        # stage_wildland_battle, without mutating the shared type data
+        # every other army also reads from.
+        self.max_hp = t["max_hp"] * strength_mult
+        self.damage = t["damage"] * strength_mult
+        self.hp = self.max_hp
         self._cd = 0.0           # attack cooldown timer
         self.target = None
         self.vx = 0.0            # bounce velocity (from collisions), decays
@@ -46,7 +53,7 @@ class Unit:
             self.x += dx / dist * move
             self.y += dy / dist * move
         elif self._cd <= 0:
-            self.target.hp -= self.type["damage"]
+            self.target.hp -= self.damage
             self._cd = self.type["cooldown"]
             if self.type.get("ranged"):
                 battle.spawn_projectile(self.x, self.y,

@@ -32,6 +32,10 @@ def init_fog(world):
     world.fog_version = 0
     world.fog_fully_revealed = False
     world.discovered_factions = set()
+    world.fog_bbox = None    # (x0, y0, x1, y1) of everything ever revealed —
+                              # see recompute(); lets the world-view camera
+                              # zoom out to "as far as discovered" instead of
+                              # the whole (mostly-unrevealed) map.
     if world.player_faction_idx is not None:
         recompute(world)
 
@@ -65,12 +69,21 @@ def recompute(world):
     fog = world.fog
     owner = world.owner
     newly_revealed = []
+    bounds = [None, None, None, None]   # minx, miny, maxx, maxy this call
 
     def reveal(x, y):
         i = y * w + x
         if not fog[i]:
             fog[i] = 1
             newly_revealed.append((x, y))
+            if bounds[0] is None:
+                bounds[0] = bounds[2] = x
+                bounds[1] = bounds[3] = y
+            else:
+                if x < bounds[0]: bounds[0] = x
+                if x > bounds[2]: bounds[2] = x
+                if y < bounds[1]: bounds[1] = y
+                if y > bounds[3]: bounds[3] = y
 
     if _owned_frac(world) >= FULL_VISION_THRESHOLD:
         for y in range(h):
@@ -126,6 +139,11 @@ def recompute(world):
 
     if newly_revealed:
         world.fog_version += 1
+        bx0, by0, bx1, by1 = bounds[0], bounds[1], bounds[2] + 1, bounds[3] + 1
+        existing = getattr(world, "fog_bbox", None)
+        world.fog_bbox = ((bx0, by0, bx1, by1) if existing is None else
+                          (min(existing[0], bx0), min(existing[1], by0),
+                           max(existing[2], bx1), max(existing[3], by1)))
         player_idx = world.player_faction_idx
         player = world.factions[player_idx]
         from app.world.diplomacy import establish_contact

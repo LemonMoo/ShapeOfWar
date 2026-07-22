@@ -36,6 +36,7 @@ RESOURCES = {
 BIOMES = ["mountain", "forest", "plains", "coastal", "desert", "swamp"]
 CLIMATES = ["temperate", "arid", "cold", "humid"]
 SEASONS = ["Spring", "Summer", "Autumn", "Winter"]
+TURNS_PER_SEASON = 8
 
 # Food/water resources are grown and eaten locally, so they're exempt from
 # the remoteness penalty applied to everything else below.
@@ -243,7 +244,7 @@ def advance_turn(world):
     subtract settlement upkeep, clamp to storage capacity (so nothing piles
     up forever), and recompute military from the new stockpiles."""
     world.turn += 1
-    world.season = SEASONS[(world.turn - 1) % len(SEASONS)]
+    world.season = SEASONS[((world.turn - 1) // TURNS_PER_SEASON) % len(SEASONS)]
 
     production = defaultdict(lambda: defaultdict(int))
     for county in world.counties:
@@ -283,6 +284,7 @@ def advance_turn(world):
     # Player-built castles + their connecting roads (app/world/construction.py).
     from app.world import construction
     construction.advance_projects(world)
+    construction.advance_shipyard_projects(world)
 
     # Progressive expansion: claims-in-progress on UNCLAIMED land
     # (app/world/expansion.py).

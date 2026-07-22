@@ -78,6 +78,9 @@ class Settlement:
         self.county_id = county_id
         self.upkeep = upkeep           # {resource: amount} consumed per turn
         self.tax_income = tax_income   # gold generated per turn
+        # Coastal cities only — see app/world/construction.py's
+        # ShipyardProject: launches free, faster ships once built.
+        self.has_shipyard = False
 
 
 class Village:
@@ -117,10 +120,6 @@ class County:
         self.settle_proximity = 0.5
         self.village_grain_base = 0
         self.resources = {}
-        # Local road network tier ("dirt" or "stone"), decided once from this
-        # county's wealth (land value + resources harvested) when its roads
-        # are built — see _compute_county_wealth/_place_villages_for_county.
-        self.road_tier = "dirt"
         # Progressive expansion (see app/world/expansion.py): garrison rating
         # for UNCLAIMED land (irrelevant once claimed), whether this county's
         # settlements/villages have been generated yet (False for every
@@ -714,32 +713,6 @@ def _mst_edges(points):
     return edges
 
 
-# Road tier: a county's local road network renders as Stone (sturdier,
-# faster, weather-resistant) once its wealth clears this threshold, Dirt
-# otherwise — see _compute_county_wealth.
-ROAD_STONE_WEALTH_THRESHOLD = 0.55
-_WEALTH_FERT_WEIGHT = 0.5
-_WEALTH_RES_WEIGHT = 0.5
-_WEALTH_RES_DENSITY_CAP = 8.0   # resource-value-per-cell that reads as "fully wealthy"
-
-
-def _compute_county_wealth(world, county):
-    """0..1 wealth score from land value (fertility) and resources actually
-    harvested — this county's yield, excluding subsistence food (Grain/
-    Fresh Water/Meat/Fish, which is abundant everywhere and drowns out any
-    real signal) and weighted by resource tier so luxury/industrial goods
-    count for more than an equal quantity of a common one. Decides whether
-    a county's local roads are built in Stone or Dirt."""
-    from app.world.resources import compute_county_yield, RESOURCES, _LOCAL_FOOD
-    fert_frac = county.stats.get("fertility", 50) / 100.0
-    yield_ = compute_county_yield(county, world.season)
-    area = max(1, len(county.cells))
-    value = sum(amount * RESOURCES.get(r, {}).get("tier", 1)
-                for r, amount in yield_.items() if r not in _LOCAL_FOOD)
-    res_frac = min(1.0, (value / area) / _WEALTH_RES_DENSITY_CAP)
-    return _WEALTH_FERT_WEIGHT * fert_frac + _WEALTH_RES_WEIGHT * res_frac
-
-
 def _init_village_fields(world):
     """Shared water-distance field + occupancy hash for village placement,
     cached on `world` — same "compute once, reuse per-claim later" pattern
@@ -825,16 +798,18 @@ def _place_villages_for_county(world, rng, county):
     # Local roads: an MST over the villages plus *every* settlement in the
     # county (city/castle/town alike — previously only the first settlement
     # was added, so a second town or castle was left with no road at all),
-    # so the whole network ties every settlement into town. Rendered in
-    # Stone (sturdier, faster, weather-resistant) once the county's wealth
-    # clears ROAD_STONE_WEALTH_THRESHOLD, Dirt otherwise (see
-    # _compute_county_wealth and app/ui/map_view.py's _draw_roads).
+    # so the whole network ties every settlement into town. Each edge's
+    # tier is decided by what it connects, not by county wealth: a road
+    # touching a village is a humble Dirt farm track; a road linking two
+    # settlements (city/castle/town) is a proper Stone trunk road — see
+    # app/ui/map_view.py's _draw_roads for the rendering side.
     points = [world.villages[i].pos for i in vids]
     points += [world.settlements[sid].pos for sid in county.meta_settlements]
+    is_settlement = [False] * len(vids) + [True] * len(county.meta_settlements)
     edges = _mst_edges(points)
-    world.roads_by_county[county.id] = [(points[a], points[b]) for a, b in edges]
-    county.road_tier = ("stone" if _compute_county_wealth(world, county)
-                                    >= ROAD_STONE_WEALTH_THRESHOLD else "dirt")
+    world.roads_by_county[county.id] = [
+        (points[a], points[b], "stone" if (is_settlement[a] and is_settlement[b]) else "dirt")
+        for a, b in edges]
 
 
 def _generate_villages(world, rng):
@@ -1046,7 +1021,7 @@ class World:
         self.county_grid = [[-1] * w for _ in range(h)]  # county id, -1 = none
         self.settlements = []          # list[Settlement]; index == id
         self.villages = []             # list[Village]; index == id
-        self.roads_by_county = {}      # county_id -> [((x,y),(x,y)), ...] segments
+        self.roads_by_county = {}      # county_id -> [((x,y),(x,y),"dirt"/"stone"), ...] segments
         # Trade routes exist only once built/opened (app/world/trade.py) —
         # no faction starts pre-connected to any other. trade_routes is the
         # flat list rendering reads (kind/cells, plus a_faction/b_faction);
@@ -1059,8 +1034,10 @@ class World:
         self.trade_events = []         # this turn's dispatch/delivery/payment/loss events
         self.castle_projects = []      # list[CastleProject] — see app/world/construction.py
         self.road_projects = []        # list[RoadProject] — see app/world/construction.py
+        self.shipyard_projects = []    # list[ShipyardProject] — see app/world/construction.py
         self.claim_projects = []       # list[ClaimProject] — see app/world/expansion.py
         self.commanders = []           # list[Commander] — see app/world/commander.py
+        self.ships = []                 # list[Ship] — see app/world/commander.py
         self.total_land_cells = 0      # cached once at gen time (vision%/target-size% denom)
         self.base_cost = None          # per-cell noise traversal cost (see _cost_field);
                                         # persisted so trade.py can pathfind post-generation

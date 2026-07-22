@@ -24,8 +24,34 @@ class LoadGameMenuView(tk.Frame):
         tk.Label(panel, text="Load Game", bg=theme.PANEL, fg=theme.INK,
                  font=("Segoe UI", 18, "bold")).pack(padx=24, pady=(20, 12))
 
-        self.list_frame = tk.Frame(panel, bg=theme.PANEL)
-        self.list_frame.pack(padx=24, fill="both", expand=True)
+        # The save list scrolls internally (Canvas + inner frame) instead of
+        # just packing rows straight into `panel` — with enough saves, an
+        # unscrolled list's natural height used to exceed the panel's fixed
+        # 420px and silently push the Cancel/Delete/Load row below it clean
+        # off-screen (unviewable, not just visually cut off). Scrolling keeps
+        # the action row pinned at a fixed height at the bottom no matter how
+        # many saves accumulate.
+        list_container = tk.Frame(panel, bg=theme.PANEL)
+        list_container.pack(padx=24, fill="both", expand=True)
+        self._list_canvas = tk.Canvas(list_container, bg=theme.PANEL,
+                                      highlightthickness=0)
+        scrollbar = tk.Scrollbar(list_container, orient="vertical",
+                                 command=self._list_canvas.yview)
+        self._list_canvas.configure(yscrollcommand=scrollbar.set)
+        self._list_canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        self.list_frame = tk.Frame(self._list_canvas, bg=theme.PANEL)
+        self._list_window = self._list_canvas.create_window(
+            (0, 0), window=self.list_frame, anchor="nw")
+        self.list_frame.bind(
+            "<Configure>",
+            lambda e: self._list_canvas.configure(scrollregion=self._list_canvas.bbox("all")))
+        self._list_canvas.bind(
+            "<Configure>",
+            lambda e: self._list_canvas.itemconfig(self._list_window, width=e.width))
+        self._bind_mousewheel(self._list_canvas)
+        self._bind_mousewheel(self.list_frame)
 
         actions = tk.Frame(panel, bg=theme.PANEL)
         actions.pack(padx=24, pady=(12, 20), fill="x")
@@ -42,6 +68,14 @@ class LoadGameMenuView(tk.Frame):
                                   relief="flat", font=theme.FONT_BOLD,
                                   activebackground=theme.ACCENT, state="disabled")
         self.load_btn.pack(side="right")
+
+    def _bind_mousewheel(self, widget):
+        """Tkinter doesn't bubble events from child widgets up to the
+        canvas, so scrolling only works while the pointer is over bare
+        canvas background unless every row/label gets this too — bound
+        individually on each row as it's created in refresh()."""
+        widget.bind("<MouseWheel>",
+                    lambda e: self._list_canvas.yview_scroll(int(-e.delta / 120), "units"))
 
     def refresh(self, saves):
         for w in self.list_frame.winfo_children():
@@ -71,6 +105,7 @@ class LoadGameMenuView(tk.Frame):
             name = meta.get("name", "Unnamed World")
             for widget in (row, lbl):
                 widget.bind("<Button-1>", lambda e, sid=save_id, n=name: self._select(sid, n))
+                self._bind_mousewheel(widget)
             self._rows[save_id] = (row, lbl)
 
     def _select(self, save_id, name):

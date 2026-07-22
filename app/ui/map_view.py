@@ -149,8 +149,8 @@ _SETTLE_STYLE = {
 }
 _VILLAGE_STYLE = {"fill": "#c9a06a", "outline": "#4a3418", "r": 2}
 # Local roads (village/settlement network within a county — see
-# County.road_tier in app/world/worldgen.py): Dirt is the common case, brown;
-# Stone is reserved for wealthier counties, gray.
+# _place_villages_for_county in app/world/worldgen.py): Dirt for a road
+# touching a village, brown; Stone for a road linking two settlements, gray.
 _DIRT_ROAD_COLOR = "#8a6f4a"
 _STONE_ROAD_COLOR = "#9a9ba3"
 _TRADE_LAND_COLOR = "#7c5f26"   # long-haul trade road — dark bronze, recedes into the map
@@ -173,6 +173,7 @@ _SHIP_STYLE = {"fill": "#c8f5ff", "outline": "#154a5c", "r": 6, "glow": "#5fd0ff
 # unlike any settlement/caravan color so the player's own unit never gets
 # confused with anything else on the map.
 _COMMANDER_STYLE = {"fill": "#e685ff", "outline": "#4a1a5c", "r": 7}
+_SHIP_STYLE = {"fill": "#c9a86a", "outline": "#5c3f1a", "r": 6}
 # Above this many villages in a county, skip name labels (village view) so it
 # doesn't turn into unreadable text soup.
 _VILLAGE_LABEL_LIMIT = 24
@@ -197,11 +198,13 @@ def _format_resources(res):
 
 
 class MapView(tk.Frame):
-    def __init__(self, master, world, on_attack, on_regenerate, on_end_turn):
+    def __init__(self, master, world, on_attack, on_regenerate, on_end_turn,
+                on_wildland_claim=None):
         super().__init__(master, bg=theme.BG)
         self.on_attack = on_attack
         self.on_regenerate = on_regenerate
         self.on_end_turn = on_end_turn
+        self.on_wildland_claim = on_wildland_claim
         self.selected = None            # selected faction (world view)
         self.zoom_faction = None        # faction we've zoomed into (county view)
         self.selected_county = None
@@ -261,6 +264,9 @@ class MapView(tk.Frame):
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         self.canvas.bind("<MouseWheel>", self._on_wheel)
+        # QoL: right-click sends the currently-selected Commander straight
+        # to that spot — no need to click Move first (which still works too).
+        self.canvas.bind("<Button-3>", self._on_right_click)
 
         self.bottom_msg = tk.Label(self, text="", bg="#0d1017", fg=theme.INK,
                                    font=("Segoe UI", 13, "bold"), padx=18, pady=10)
@@ -288,7 +294,7 @@ class MapView(tk.Frame):
             self.after_cancel(self._flash_id)
             self._flash_id = None
         self._hide_bottom_message()
-        self.view = [0.0, 0.0, world.w, world.h]
+        self.view = self._world_view_rect()
         self.view_target = list(self.view)
         self._base_img = self._base_key = None
         self._fog_overlay_img = None
@@ -945,11 +951,21 @@ class MapView(tk.Frame):
             return
         project = next((p for p in wd.claim_projects if p.county_id == county.id), None)
         if project is not None:
-            elapsed = project.total_turns - project.turns_left
-            tk.Label(self.actions, text=f"Expansion under way: "
-                     f"{elapsed}/{project.total_turns} turns",
-                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+            if project.complete:
+                tk.Label(self.actions, text="The expansion crew has arrived "
+                         "— fight the wildland garrison to claim this land.",
+                         bg=theme.PANEL, fg=theme.INK, font=theme.FONT,
+                         justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+                tk.Button(self.actions, text="Fight for the Territory",
+                          command=lambda p=project: self._do_wildland_battle(p),
+                          bg="#3a1f1f", fg=theme.BAD, activebackground=theme.ACCENT,
+                          relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+            else:
+                elapsed = project.total_turns - project.turns_left
+                tk.Label(self.actions, text=f"Expansion under way: "
+                         f"{elapsed}/{project.total_turns} turns",
+                         bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                         justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
             return
         cost = expansion.claim_cost(county)
         afford = construction.can_afford(player, cost)
@@ -972,15 +988,56 @@ class MapView(tk.Frame):
             self._show_county(county)
         self.render()
 
+    def _do_wildland_battle(self, project):
+        """Hand off to App.stage_wildland_battle — the interactive
+        battlefield, not an instant formula, decides whether the claim
+        succeeds (see app/world/expansion.py's advance_claims, which leaves
+        a completed player claim sitting untouched for exactly this)."""
+        if self.on_wildland_claim is not None:
+            self.on_wildland_claim(project)
+
     def _show_settlement(self, st):
         wd = self.world
         county = (wd.counties[st.county_id].name
                   if 0 <= st.county_id < len(wd.counties) else "?")
-        self.info.config(
-            fg=theme.INK,
-            text=f"{st.name}\n{st.kind.capitalize()} in {county}, "
-                 f"{wd.factions[st.faction_idx].name}\n"
-                 f"Upkeep: {_format_resources(st.upkeep)} per turn")
+        lines = [st.name, f"{st.kind.capitalize()} in {county}, "
+                 f"{wd.factions[st.faction_idx].name}",
+                 f"Upkeep: {_format_resources(st.upkeep)} per turn"]
+        if getattr(st, "has_shipyard", False):
+            lines.append("Has a Shipyard — commanders here launch free, fast ships.")
+        self.info.config(fg=theme.INK, text="\n".join(lines))
+
+        for w in self.actions.winfo_children():
+            w.destroy()
+        player = self._player_faction()
+        if player is None or st.faction_idx != wd.factions.index(player):
+            return
+        project = next((p for p in wd.shipyard_projects if p.settlement_id == st.id), None)
+        if project is not None:
+            elapsed = project.total_turns - project.turns_left
+            tk.Label(self.actions, text=f"Shipyard under construction: "
+                     f"{elapsed}/{project.total_turns} turns",
+                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+        elif construction.can_build_shipyard(wd, st):
+            afford = construction.can_afford(player, construction.SHIPYARD_COST)
+            tk.Label(self.actions,
+                     text=f"Cost: {_format_resources(construction.SHIPYARD_COST)}\n"
+                          f"Build time: {construction.SHIPYARD_BUILD_TURNS} turns",
+                     bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+            tk.Button(self.actions, text="Build Shipyard",
+                      command=lambda s=st: self._do_build_shipyard(s),
+                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                      relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+
+    def _do_build_shipyard(self, st):
+        player = self._player_faction()
+        msg = construction.start_shipyard(self.world, player, st)
+        self.show_bottom_message(msg)
+        if self.selected_settlement is st:
+            self._show_settlement(st)
+        self.render()
 
     def _show_village(self, v):
         wd = self.world
@@ -995,11 +1052,23 @@ class MapView(tk.Frame):
 
     def _show_commander(self, cmd):
         """Panel for a selected Commander: position, current order, and
-        Move/Build Ship actions. A pure scout for now — no combat, so
-        there's nothing here about strength or risk."""
+        Move/Board/Dismantle/Build Ship actions (which of these apply
+        depends on whether the commander is aboard a ship, standing on a
+        beached one, or on foot with none nearby). A pure scout for now —
+        no combat, so there's nothing here about strength or risk."""
         wd = self.world
-        lines = ["Commander", f"Position: ({cmd.pos[0]}, {cmd.pos[1]})",
-                 f"Ship: {'Yes' if cmd.has_ship else 'No'}"]
+        aboard = commander.ship_by_id(wd, cmd.aboard_ship_id) if cmd.aboard_ship_id is not None else None
+        beached = None if aboard is not None else commander.find_ship_at(
+            wd, cmd.faction_idx, cmd.pos)
+
+        lines = ["Commander", f"Position: ({cmd.pos[0]}, {cmd.pos[1]})"]
+        if aboard is not None:
+            ship_desc = "fast ship" if aboard.speed_mult > 1.0 else "ship"
+            lines.append(f"Aboard a {ship_desc}")
+        elif beached is not None:
+            lines.append("Standing beside a beached ship")
+        else:
+            lines.append("On foot")
         if cmd.ship_turns_left is not None:
             lines.append(f"Building ship: {cmd.ship_turns_left} turns left")
         elif cmd.path is not None:
@@ -1016,8 +1085,20 @@ class MapView(tk.Frame):
                       command=lambda: self._begin_commander_move(cmd),
                       bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                       relief="flat", font=theme.FONT).pack(fill="x", pady=2)
-            if commander.can_build_ship(wd, cmd):
-                tk.Button(self.actions, text="Build Ship",
+            if beached is not None:
+                tk.Button(self.actions, text="Board Ship",
+                          command=lambda: self._do_board_ship(cmd),
+                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                          relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+                tk.Button(self.actions, text="Dismantle Ship",
+                          command=lambda: self._do_dismantle_ship(cmd),
+                          bg="#232a36", fg=theme.BAD, activebackground=theme.ACCENT,
+                          relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+            if aboard is None and commander.can_build_ship(wd, cmd):
+                shipyard = commander.shipyard_at(wd, cmd.faction_idx, cmd.pos)
+                label = ("Launch Ship (free)" if shipyard is not None
+                         else "Build Ship")
+                tk.Button(self.actions, text=label,
                           command=lambda: self._do_build_ship(cmd),
                           bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                           relief="flat", font=theme.FONT).pack(fill="x", pady=2)
@@ -1044,6 +1125,18 @@ class MapView(tk.Frame):
         self._show_commander(cmd)
         self.render()
 
+    def _do_board_ship(self, cmd):
+        msg = commander.board_ship(self.world, cmd)
+        self.show_bottom_message(msg)
+        self._show_commander(cmd)
+        self.render()
+
+    def _do_dismantle_ship(self, cmd):
+        msg = commander.dismantle_ship(self.world, cmd)
+        self.show_bottom_message(msg)
+        self._show_commander(cmd)
+        self.render()
+
     # --- zoom-level enter/exit ----------------------------------------------
     # Three levels: World -> Country (shows counties) -> County (shows
     # villages). Each level's "enter" sets state + zooms in; "exit" clears
@@ -1053,6 +1146,21 @@ class MapView(tk.Frame):
         x0, y0, x1, y1 = bbox
         pad = min_pad_frac * max(x1 - x0, y1 - y0, min_size)
         return [x0 - pad, y0 - pad, x1 + pad, y1 + pad]
+
+    def _world_view_rect(self):
+        """Where "back to world view" should zoom out to: a padded box
+        around everything fog of war has actually revealed so far, not the
+        full map. Early on, most of the map is still black — snapping the
+        camera all the way out to it every time you back out of a county is
+        jarring whiplash; zooming only as far as you've actually explored
+        keeps the transition proportional, and it naturally widens on its
+        own as more gets revealed. Falls back to the full map for sandbox
+        worlds (no player/no fog) or once fog_bbox already covers it."""
+        wd = self.world
+        bbox = getattr(wd, "fog_bbox", None)
+        if self._fog_is_active() and bbox is not None:
+            return self._padded_rect(bbox, min_pad_frac=0.15, min_size=30)
+        return [0.0, 0.0, wd.w, wd.h]
 
     def _enter_ui(self, section_label, back_label, back_command):
         """Switch the panel into a zoomed mode: clear relationships/attack,
@@ -1089,7 +1197,7 @@ class MapView(tk.Frame):
         self._exit_ui()
         if self.selected:
             self._show_faction(self.selected)
-        self._start_zoom([0.0, 0.0, self.world.w, self.world.h])
+        self._start_zoom(self._world_view_rect())
 
     def _enter_village_view(self, county):
         self.zoom_county = county
@@ -1168,7 +1276,7 @@ class MapView(tk.Frame):
         self._base_key = None
         if self.selected:
             self._show_faction(self.selected)
-        self._start_zoom([0.0, 0.0, self.world.w, self.world.h])
+        self._start_zoom(self._world_view_rect())
 
     def _launch_attack(self, county):
         enemy = self._attack_enemy
@@ -1228,7 +1336,7 @@ class MapView(tk.Frame):
             self._flash_county = None
             self._flash_id = None
             if failed:
-                self._start_zoom([0.0, 0.0, self.world.w, self.world.h])
+                self._start_zoom(self._world_view_rect())
             self.render()
             return
         self.render()
@@ -1483,6 +1591,25 @@ class MapView(tk.Frame):
                 self._exit_village_view()         # clicked away -> zoom out
             # else: clicked empty land within the same county — no-op
 
+    def _on_right_click(self, event):
+        """QoL: right-click sends the currently-selected Commander toward
+        that spot directly, at any zoom level — a faster alternative to the
+        Move button + left-click flow, not a replacement for it."""
+        if self._animating or self.selected_commander is None:
+            return
+        vx0, vy0, scale = self._place
+        gx = int(vx0 + event.x / scale)
+        gy = int(vy0 + event.y / scale)
+        wd = self.world
+        if not (0 <= gx < wd.w and 0 <= gy < wd.h):
+            return
+        cmd = self.selected_commander
+        self.commander_move_mode = None   # in case Move was separately armed
+        msg = commander.set_move_order(wd, cmd, (gx, gy))
+        self.show_bottom_message(msg)
+        self._show_commander(cmd)
+        self.render()
+
     # --- rendering ---------------------------------------------------------
     def _ensure_base(self):
         """Rebuild the full-grid PIL image only when what it depicts changes."""
@@ -1617,8 +1744,27 @@ class MapView(tk.Frame):
         self._draw_villages(c, screen)
         self._draw_labels(c, screen)
         self._draw_attack_targets(c, screen)
+        self._draw_ships(c, screen)
         self._draw_commanders(c, screen)
         self._draw_flash(c, screen)
+
+    def _draw_ships(self, c, screen):
+        """Beached Ships (app/world/commander.py) — a hull-shaped marker
+        distinct from the Commander's diamond, drawn only for ships no
+        commander is currently aboard (one being sailed is already
+        represented by its Commander marker, so it doesn't need its own)."""
+        wd = self.world
+        aboard_ids = {cmd.aboard_ship_id for cmd in wd.commanders
+                     if cmd.aboard_ship_id is not None}
+        style = _SHIP_STYLE
+        r = style["r"]
+        for ship in wd.ships:
+            if ship.id in aboard_ids:
+                continue
+            x, y = screen(ship.pos[0] + 0.5, ship.pos[1] + 0.5)
+            c.create_polygon(x - r, y + r * 0.4, x + r, y + r * 0.4,
+                             x + r * 0.6, y - r * 0.5, x - r * 0.6, y - r * 0.5,
+                             fill=style["fill"], outline=style["outline"], width=1.5)
 
     def _draw_commanders(self, c, screen):
         """Commander(s) (app/world/commander.py) — a distinct diamond
@@ -1794,22 +1940,44 @@ class MapView(tk.Frame):
                          fill="#f2e9c9", font=("Segoe UI", 7))
 
     def _draw_roads(self, c, screen):
-        """Straight road segments linking every village and settlement in
-        the county (an MST — see _place_villages_for_county) — only shown in
-        village view. Rendered gray/solid for a wealthy county's Stone
-        roads, brown/dashed for a poorer county's Dirt roads."""
-        if self.zoom_county is None:
-            return
-        segs = self.world.roads_by_county.get(self.zoom_county.id, [])
+        """Straight road segments linking every village and settlement
+        across a faction's counties (an MST per county — see
+        _place_villages_for_county). Per-segment tier, not per-county: Dirt
+        (brown/dashed) for any road touching a village, Stone (gray/solid)
+        for a road connecting two settlements. Dirt only shows once zoomed
+        into a specific nation's counties (too minor to matter at world
+        scale); Stone — the trunk network — is visible even from the world
+        map, same idea as trade routes already being shown at every zoom
+        level."""
+        wd = self.world
         width = max(1.0, self._place[2] * 0.18)
-        is_stone = getattr(self.zoom_county, "road_tier", "dirt") == "stone"
-        color = _STONE_ROAD_COLOR if is_stone else _DIRT_ROAD_COLOR
-        dash = None if is_stone else (4, 3)
-        for (ax, ay), (bx, by) in segs:
-            x0, y0 = screen(ax + 0.5, ay + 0.5)
-            x1, y1 = screen(bx + 0.5, by + 0.5)
-            c.create_line(x0, y0, x1, y1, fill=color, width=width,
-                          capstyle="round", dash=dash)
+
+        if self.zoom_faction is None:
+            for county in wd.counties:
+                if county.faction_idx < 0:
+                    continue
+                for (ax, ay), (bx, by), tier in wd.roads_by_county.get(county.id, []):
+                    if tier != "stone":
+                        continue
+                    if not (self._cell_revealed(ax, ay) or self._cell_revealed(bx, by)):
+                        continue
+                    x0, y0 = screen(ax + 0.5, ay + 0.5)
+                    x1, y1 = screen(bx + 0.5, by + 0.5)
+                    c.create_line(x0, y0, x1, y1, fill=_STONE_ROAD_COLOR,
+                                  width=width, capstyle="round")
+            return
+
+        for cid in self.zoom_faction.meta.get("counties", []):
+            for (ax, ay), (bx, by), tier in wd.roads_by_county.get(cid, []):
+                if not (self._cell_revealed(ax, ay) or self._cell_revealed(bx, by)):
+                    continue
+                is_stone = tier == "stone"
+                color = _STONE_ROAD_COLOR if is_stone else _DIRT_ROAD_COLOR
+                dash = None if is_stone else (4, 3)
+                x0, y0 = screen(ax + 0.5, ay + 0.5)
+                x1, y1 = screen(bx + 0.5, by + 0.5)
+                c.create_line(x0, y0, x1, y1, fill=color, width=width,
+                              capstyle="round", dash=dash)
 
     def _draw_villages(self, c, screen):
         """Small dots for villages — only shown in village view. Names are
