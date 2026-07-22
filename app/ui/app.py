@@ -90,7 +90,6 @@ class App(tk.Tk):
         if self.map_view is None:
             self.map_view = MapView(self.content, self.world,
                                     on_attack=self.stage_battle,
-                                    on_regenerate=self.regenerate_world,
                                     on_end_turn=self.end_turn,
                                     on_wildland_claim=self.stage_wildland_battle)
             self.battle_view = BattleView(self.content, on_continue=self._return_from_battle)
@@ -135,21 +134,6 @@ class App(tk.Tk):
         self._ensure_game_views()
         self._update_status()
         self.show_screen("map")
-
-    def regenerate_world(self):
-        # Keep playing as the same nation, if this world has a player one.
-        species = name = None
-        if self.world is not None and self.world.player_faction_idx is not None:
-            player = self.world.factions[self.world.player_faction_idx]
-            species, name = player.meta["species"], player.name
-        self.world = generate_world(player_species=species, player_name=name)
-        self.map_view.set_world(self.world)
-        if self._save_id is None:
-            self._save_id = new_save_id()
-            self._save_created_at = None
-        self._save_created_at = save_game(self.world, self._save_id, self._save_created_at)
-        self.show_screen("map")
-        self._update_status()
 
     def end_turn(self):
         from app.world.resources import advance_turn

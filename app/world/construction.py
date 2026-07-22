@@ -41,12 +41,17 @@ SHIPYARD_BUILD_TURNS = 30        # deliberately steep -- "large amount of wood, 
 class RoadProject:
     """A road under construction: `built_index` is how much of the final
     `path` is actually visible/traversable so far — grows by
-    ROAD_CELLS_PER_TURN every turn until it reaches the end."""
+    ROAD_CELLS_PER_TURN every turn until it reaches the end. `tier` is
+    fixed at creation (not re-derived from what the endpoints happen to be)
+    since the caller already knows: "stone" for a settlement-to-settlement
+    connector (Castle/City/Town roads), "dirt" for anything touching a
+    village (see expansion.ensure_interregion_roads)."""
 
-    def __init__(self, faction_idx, path):
+    def __init__(self, faction_idx, path, tier="stone"):
         self.faction_idx = faction_idx
         self.path = path
         self.built_index = 0
+        self.tier = tier
 
     @property
     def complete(self):
@@ -166,20 +171,17 @@ def advance_shipyard_projects(world):
         world.shipyard_projects.remove(project)
 
 
-def _find_road_path(world, faction_idx, dest_pos):
-    """Terrain-aware path from the nearest existing settlement of this
-    faction to `dest_pos` — the exact same Dijkstra + elevation-cost
-    machinery worldgen already uses for trade routes/roads, so this can't
-    cross a mountain or river any more than anything else in the game does."""
-    candidates = [st.pos for st in world.settlements if st.faction_idx == faction_idx]
-    if not candidates:
-        return [dest_pos]
-    dx, dy = dest_pos
-    origin = min(candidates, key=lambda p: (p[0] - dx) ** 2 + (p[1] - dy) ** 2)
+def _path_between(world, origin, dest_pos):
+    """Terrain-aware path between two specific points — the same Dijkstra +
+    elevation-cost machinery worldgen already uses for trade routes/roads,
+    so this can't cross a mountain or river any more than anything else in
+    the game does. Shared by _find_road_path (nearest existing settlement
+    to a new one) and expansion.ensure_interregion_roads (village to
+    village across a region border)."""
     if origin == dest_pos:
-        return [dest_pos]
-
+        return [origin]
     ox, oy = origin
+    dx, dy = dest_pos
     x0, x1 = sorted((ox, dx))
     y0, y1 = sorted((oy, dy))
     bx0 = max(0, x0 - _BBOX_PAD)
@@ -191,6 +193,17 @@ def _find_road_path(world, faction_idx, dest_pos):
     path = _path_dijkstra(land_cellset, lambda c: _elev_cost(world, world.base_cost, c),
                           origin, dest_pos)
     return path or [origin, dest_pos]   # fallback straight segment if pathfinding fails
+
+
+def _find_road_path(world, faction_idx, dest_pos):
+    """Terrain-aware path from the nearest existing settlement of this
+    faction to `dest_pos`."""
+    candidates = [st.pos for st in world.settlements if st.faction_idx == faction_idx]
+    if not candidates:
+        return [dest_pos]
+    dx, dy = dest_pos
+    origin = min(candidates, key=lambda p: (p[0] - dx) ** 2 + (p[1] - dy) ** 2)
+    return _path_between(world, origin, dest_pos)
 
 
 def can_afford(nation, cost):
@@ -222,6 +235,8 @@ def start_settlement(world, nation, pos, kind):
         return "There's already a settlement there."
     if any(p.pos == pos for p in world.settlement_projects):
         return "Construction is already underway there."
+    if any(v.pos == pos for v in world.villages):
+        return "There's already a village there."
     cost = SETTLEMENT_BUILD_COST[kind]
     if not can_afford(nation, cost):
         return "You don't have enough resources to start construction."
@@ -267,11 +282,8 @@ def _finish_settlement(world, project):
 
 def _finish_road(world, road):
     """Fold a completed road into the permanent per-region road network so
-    it renders like any other established road from then on. Always a
-    settlement-to-settlement connection (the nearest existing settlement to
-    a brand-new City/Town/Castle), so it's Stone — see app/world/worldgen.py's
-    _place_villages_for_region for the same tier rule applied at
-    world-gen time."""
+    it renders like any other established road from then on, at whichever
+    tier the project was created with (see RoadProject)."""
     x, y = road.path[-1]
     if not (0 <= x < world.w and 0 <= y < world.h):
         return
@@ -279,7 +291,7 @@ def _finish_road(world, road):
     if region_id < 0:
         return
     segs = world.roads_by_region.setdefault(region_id, [])
-    segs.extend((a, b, "stone") for a, b in zip(road.path, road.path[1:]))
+    segs.extend((a, b, road.tier) for a, b in zip(road.path, road.path[1:]))
 
 
 def advance_projects(world):
@@ -309,9 +321,14 @@ def advance_projects(world):
 # --- AI settlement construction ----------------------------------------------
 def _region_settlement_pos(world, region):
     """A free cell in `region` to build on: not a river, not already a
-    settlement or under construction. None if nothing's available."""
+    settlement, village, or under construction — a region can easily have
+    villages but no settlement yet (the normal outcome of a wildland
+    claim), so this is exactly the kind of region run_settlement_ai targets
+    and villages must be excluded here too, not just other settlements.
+    None if nothing's available."""
     occupied = {st.pos for st in world.settlements}
     occupied.update(p.pos for p in world.settlement_projects)
+    occupied.update(world.villages[vid].pos for vid in region.villages)
     candidates = [c for c in region.cells
                  if c not in world.river_cells and c not in occupied]
     return random.choice(candidates) if candidates else None

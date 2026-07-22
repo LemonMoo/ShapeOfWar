@@ -21,12 +21,14 @@ new machinery.
 """
 import math
 
-from app.world.worldgen import OCEAN, _path_dijkstra, _elev_cost, _sea_cost
+from app.world.worldgen import (OCEAN, _path_dijkstra, _elev_cost, _sea_cost,
+                                _nearest_ocean_cell, _SEA_COAST_REACH,
+                                _NEIGH8, _DIAG)
 from app.world.construction import can_afford
 
 COMMANDER_CELLS_PER_TURN = 5
 COMMANDER_VISION_RADIUS = 8
-SHIP_COST = {"Wood": 150, "Iron": 40, "Gold": 100}
+SHIP_COST = {"Wood": 150, "Gold": 100}
 SHIP_BUILD_TURNS = 8
 SHIP_DISMANTLE_REFUND_FRACTION = 0.5   # of SHIP_COST["Wood"], salvaged on dismantle
 SHIPYARD_SPEED_MULT = 1.5              # a shipyard-launched ship's per-turn speed bonus
@@ -64,13 +66,31 @@ def spawn_commander(world, faction_idx, pos):
 
 
 def find_ship_at(world, faction_idx, pos):
-    """The same-faction Ship sitting exactly at `pos`, if any — the one
-    lookup board_ship/dismantle_ship/the UI panel all share. Only
+    """The same-faction Ship sitting exactly at `pos`, if any. Only
     meaningful for a beached ship (a Ship currently being sailed keeps
     whatever `.pos` it had when boarded/launched, since nothing needs to
     query it mid-voyage — see advance_commanders)."""
     return next((s for s in world.ships
                 if s.faction_idx == faction_idx and s.pos == pos), None)
+
+
+def find_ship_near(world, faction_idx, pos):
+    """Same-faction beached Ship at `pos` or an orthogonally adjacent cell —
+    the check board_ship/dismantle_ship/the UI panel actually want. A ship
+    is always left on the ocean cell it was last sailing on (see
+    advance_commanders), and a commander on foot can never step onto an
+    ocean cell (set_move_order restricts land-only movement), so an exact
+    `find_ship_at(pos)` match would never fire for a disembarked commander
+    walking back to its ship — only "next to it" is ever reachable."""
+    ship = find_ship_at(world, faction_idx, pos)
+    if ship is not None:
+        return ship
+    x, y = pos
+    for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+        ship = find_ship_at(world, faction_idx, (nx, ny))
+        if ship is not None:
+            return ship
+    return None
 
 
 def shipyard_at(world, faction_idx, pos):
@@ -79,6 +99,50 @@ def shipyard_at(world, faction_idx, pos):
                 and getattr(st, "has_shipyard", False)):
             return st
     return None
+
+
+def _path_dijkstra_nearest(cellset, cost_fn, start, dest):
+    """Like worldgen._path_dijkstra, but never fails: if `dest` isn't in
+    `cellset` or isn't reachable from `start`, this returns the path to
+    whichever visited cell ends up closest (straight-line) to `dest`
+    instead. Used for commander movement so an order sent into fog — where
+    the player can't yet know what's actually out there — always just
+    walks/sails as far toward it as the terrain allows and stops at
+    whatever's blocking it, rather than an explicit 'no route' response
+    that would itself leak what's blocking it (water, a separate
+    landmass, ...)."""
+    import heapq
+    if start not in cellset:
+        return None
+    dist = {start: 0.0}
+    parent = {}
+    pq = [(0.0, start)]
+    best, best_d2 = start, (start[0] - dest[0]) ** 2 + (start[1] - dest[1]) ** 2
+    while pq:
+        d, cur = heapq.heappop(pq)
+        if d > dist.get(cur, 1e18):
+            continue
+        d2 = (cur[0] - dest[0]) ** 2 + (cur[1] - dest[1]) ** 2
+        if d2 < best_d2:
+            best_d2, best = d2, cur
+        if cur == dest:
+            break
+        cx, cy = cur
+        for dx, dy in _NEIGH8:
+            nb = (cx + dx, cy + dy)
+            if nb not in cellset:
+                continue
+            step = cost_fn(nb) * (_DIAG if dx and dy else 1.0)
+            nd = d + step
+            if nd < dist.get(nb, 1e18):
+                dist[nb] = nd
+                parent[nb] = cur
+                heapq.heappush(pq, (nd, nb))
+    path = [best]
+    while path[-1] != start:
+        path.append(parent[path[-1]])
+    path.reverse()
+    return path
 
 
 def _bbox_cellset(world, a, b, include_ocean):
@@ -98,11 +162,121 @@ def _bbox_cellset(world, a, b, include_ocean):
             if world.owner[y][x] != OCEAN}
 
 
-def _move_cost(world, cell):
-    x, y = cell
+_NEIGH8 = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
+_SHIP_LANDING_SEARCH_R = 200   # generous -- covers even a very deep inland dest
+_SEA_COAST_REACH_PAD = _SEA_COAST_REACH + 2   # a shipyard can sit a few cells inland
+
+
+def _ocean_cellset(world, a, b):
+    x0, x1 = sorted((a[0], b[0]))
+    y0, y1 = sorted((a[1], b[1]))
+    bx0 = max(0, x0 - _BBOX_PAD)
+    by0 = max(0, y0 - _BBOX_PAD)
+    bx1 = min(world.w, x1 + _BBOX_PAD + 1)
+    by1 = min(world.h, y1 + _BBOX_PAD + 1)
+    return {(x, y) for y in range(by0, by1) for x in range(bx0, bx1)
+            if world.owner[y][x] == OCEAN}
+
+
+def _shore_neighbor(world, ocean_cell, toward):
+    """A land cell adjacent to `ocean_cell`, preferring whichever is
+    closest to `toward` -- the actual disembark/embark point next to a
+    given sea cell."""
+    x, y = ocean_cell
+    best, best_d2 = None, None
+    for dx, dy in _NEIGH8:
+        nx, ny = x + dx, y + dy
+        if not (0 <= nx < world.w and 0 <= ny < world.h):
+            continue
+        if world.owner[ny][nx] == OCEAN:
+            continue
+        d2 = (nx - toward[0]) ** 2 + (ny - toward[1]) ** 2
+        if best_d2 is None or d2 < best_d2:
+            best_d2, best = d2, (nx, ny)
+    return best
+
+
+def _to_sea_leg(world, pos, max_r):
+    """(land_path, sea_cell) connecting `pos` to open water: if `pos` is
+    already ocean, there's no land leg at all (land_path is just [pos]);
+    otherwise a short land-only hop from `pos` to the shore beside the
+    nearest reachable ocean cell. Returns (None, None) if no ocean cell is
+    found within `max_r`."""
+    x, y = pos
     if world.owner[y][x] == OCEAN:
-        return _sea_cost(world, world.base_cost, cell)
-    return _elev_cost(world, world.base_cost, cell)
+        return [pos], pos
+    sea_cell = _nearest_ocean_cell(world, pos, max_r=max_r)
+    if sea_cell is None:
+        return None, None
+    shore = _shore_neighbor(world, sea_cell, pos)
+    if shore is None:
+        return None, None
+    if shore == pos:
+        return [pos], sea_cell
+    land_cellset = _bbox_cellset(world, pos, shore, False)
+    if pos not in land_cellset or shore not in land_cellset:
+        return None, None
+    land_path = _path_dijkstra(land_cellset, lambda c: _elev_cost(world, world.base_cost, c),
+                               pos, shore)
+    if land_path is None:
+        return None, None
+    return land_path, sea_cell
+
+
+def _join_paths(a, b):
+    """Concatenate two adjacent path segments, dropping a's last cell if
+    it's literally b's first (the two legs share an endpoint) rather than
+    duplicating it."""
+    return (a[:-1] if a[-1] == b[0] else a) + b
+
+
+def _ship_path(world, start, dest):
+    """Route for a ship-borne commander. If `dest` is itself open water,
+    this is a pure ocean-only search -- land is never even in the cellset,
+    so the ship can't graze a coastline or peninsula along the way and
+    trigger a spurious mid-voyage 'landing'. Otherwise it's a two-phase
+    sea-then-land route: a short land hop (if needed) from `start` out to
+    open water, sail to the ocean cell nearest `dest`, then walk the rest
+    on foot -- so the coastline is crossed at most once, never
+    ocean->land->ocean, which would otherwise leave the commander's path
+    walking through cells it has no ship to cross (see
+    advance_commanders).
+
+    Whenever the ideal route can't be completed -- `dest` is across fogged
+    water the ship can't actually reach, or there's no coastline anywhere
+    near it -- this sails as far in that direction as the sea allows and
+    stops there (_path_dijkstra_nearest), the same 'follow the line, stop
+    at the edge' behavior set_move_order uses on foot, instead of an
+    explicit failure that would leak what's actually out there through the
+    fog."""
+    start_land, sea_start = _to_sea_leg(world, start, _SEA_COAST_REACH_PAD)
+    if sea_start is None:
+        return None
+
+    dx, dy = dest
+    sea_cost = lambda c: _sea_cost(world, world.base_cost, c)
+
+    if world.owner[dy][dx] == OCEAN:
+        sea_cellset = _ocean_cellset(world, sea_start, dest)
+        sea_path = (_path_dijkstra(sea_cellset, sea_cost, sea_start, dest)
+                   if dest in sea_cellset else None)
+        if sea_path is None:
+            sea_path = _path_dijkstra_nearest(sea_cellset, sea_cost, sea_start, dest)
+        return _join_paths(start_land, sea_path)
+
+    dest_land, sea_end = _to_sea_leg(world, dest, _SHIP_LANDING_SEARCH_R)
+    sea_target = sea_end if sea_end is not None else dest
+    sea_cellset = _ocean_cellset(world, sea_start, sea_target)
+    sea_path = (_path_dijkstra(sea_cellset, sea_cost, sea_start, sea_target)
+               if sea_target in sea_cellset else None)
+    reached_landing = sea_path is not None
+    if sea_path is None:
+        sea_path = _path_dijkstra_nearest(sea_cellset, sea_cost, sea_start, sea_target)
+
+    path = _join_paths(start_land, sea_path)
+    if reached_landing and sea_end is not None:
+        path = _join_paths(path, list(reversed(dest_land)))
+    return path
 
 
 def set_move_order(world, commander, dest):
@@ -110,11 +284,19 @@ def set_move_order(world, commander, dest):
     queue it — advance_commanders() walks it a few cells per turn. Calling
     this again while already moving simply replans from the current
     position, overwriting the old order (natural mid-route redirection).
-    Aboard a ship, the cellset includes ocean, so a single Dijkstra search
-    naturally sails as far as is cheapest before crossing onto land — no
-    separate 'prefer water' rule needed, it falls straight out of cost
-    minimization over the combined cellset. On foot, only land is
-    reachable at all. Returns a message describing what happened."""
+    Aboard a ship, routing goes through _ship_path so the coastline is
+    crossed at most once (see its docstring) instead of a single mixed
+    Dijkstra that could dip on and off land wherever that happened to be
+    cheapest. On foot, only land is reachable at all.
+
+    `dest` is very often clicked somewhere still hidden by fog of war, so
+    this deliberately never reports "can't reach that" -- doing so would
+    itself tell the player something about ground they haven't actually
+    seen (that it's water, or a separate landmass, etc). Instead, whenever
+    the direct route isn't available, _path_dijkstra_nearest walks/sails as
+    far toward `dest` as the terrain allows and simply stops at whatever's
+    blocking it -- the same "follow the line, stop at the edge" behavior
+    either way. Returns a message describing what happened."""
     x, y = dest
     if not (0 <= x < world.w and 0 <= y < world.h):
         return "That's outside the map."
@@ -123,13 +305,22 @@ def set_move_order(world, commander, dest):
     if commander.ship_turns_left is not None:
         return "The commander is busy building a ship."
 
-    aboard = commander.aboard_ship_id is not None
-    cellset = _bbox_cellset(world, commander.pos, dest, aboard)
-    if dest not in cellset:
-        return "No route the commander can currently travel reaches there."
-    path = _path_dijkstra(cellset, lambda c: _move_cost(world, c), commander.pos, dest)
+    if commander.aboard_ship_id is not None:
+        path = _ship_path(world, commander.pos, dest)
+    else:
+        cellset = _bbox_cellset(world, commander.pos, dest, False)
+        path = (_path_dijkstra(cellset, lambda c: _elev_cost(world, world.base_cost, c),
+                               commander.pos, dest)
+                if dest in cellset else None)
+        if path is None:
+            path = _path_dijkstra_nearest(cellset, lambda c: _elev_cost(world, world.base_cost, c),
+                                          commander.pos, dest)
     if path is None:
-        return "No viable route exists to that location."
+        # Only possible if the commander's own current tile has no
+        # traversable neighbor at all in this mode -- describes what's
+        # already visible right where the commander is standing, not
+        # anything behind fog.
+        return "The commander has nowhere to go from here."
 
     commander.path = path
     commander.path_index = 0
@@ -193,20 +384,21 @@ def board_ship(world, commander):
         return "Already aboard a ship."
     if commander.ship_turns_left is not None:
         return "The commander is busy building a ship."
-    ship = find_ship_at(world, commander.faction_idx, commander.pos)
+    ship = find_ship_near(world, commander.faction_idx, commander.pos)
     if ship is None:
         return "There's no ship here to board."
+    commander.pos = ship.pos
     commander.aboard_ship_id = ship.id
     return "The commander boards the ship."
 
 
 def dismantle_ship(world, commander):
     """Salvage a beached ship for SHIP_DISMANTLE_REFUND_FRACTION of its
-    Wood cost back to the faction's stockpile. Must be standing at it, and
-    not currently aboard it (disembark first)."""
+    Wood cost back to the faction's stockpile. Must be standing at or next
+    to it, and not currently aboard it (disembark first)."""
     if commander.aboard_ship_id is not None:
         return "Disembark before dismantling this ship."
-    ship = find_ship_at(world, commander.faction_idx, commander.pos)
+    ship = find_ship_near(world, commander.faction_idx, commander.pos)
     if ship is None:
         return "There's no ship here to dismantle."
     world.ships.remove(ship)
@@ -238,6 +430,8 @@ def advance_commanders(world):
                 # Scan the whole segment crossed this turn (not just the
                 # endpoints) for a water->land transition -- a single
                 # turn's jump can skip straight over the exact boundary.
+                # set_move_order/_ship_path guarantees at most one such
+                # crossing per path, so this only ever fires once.
                 last_water_pos = None
                 for i in range(old_index, new_index + 1):
                     px, py = cmd.path[i]
@@ -246,6 +440,17 @@ def advance_commanders(world):
                     elif last_water_pos is not None:
                         ship.pos = last_water_pos
                         cmd.aboard_ship_id = None
+                        break
+            else:
+                # On foot: never step onto an ocean cell. Freshly planned
+                # paths can't contain one (see set_move_order), but this
+                # guards a path that already existed before that guarantee
+                # -- e.g. an old save -- from stranding the commander
+                # mid-ocean instead of just stopping short.
+                for i in range(old_index, new_index + 1):
+                    px, py = cmd.path[i]
+                    if world.owner[py][px] == OCEAN:
+                        new_index = max(old_index, i - 1)
                         break
 
             cmd.path_index = new_index

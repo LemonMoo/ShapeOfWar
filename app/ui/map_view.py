@@ -145,6 +145,16 @@ def _biome_rgb(biome):
 _POL_FOREST_TINT = 0.4
 _POL_MOUNTAIN_TINT = 0.35
 
+# Symbols layered on top of the color tint above (political mode only) —
+# color alone doesn't read clearly enough at a glance, especially at this
+# map's size. See _draw_terrain_symbols/_draw_terrain_legend.
+_FOREST_SYMBOL_FILL = "#173d20"
+_FOREST_SYMBOL_OUTLINE = "#0a1f10"
+_MOUNTAIN_SYMBOL_FILL = "#eef0f2"
+_MOUNTAIN_SYMBOL_OUTLINE = "#585860"
+_TERRAIN_SYMBOL_SCREEN_SPACING = 26   # target px between sampled points on screen
+_TERRAIN_SYMBOL_MIN_WORLD_SPACING = 3   # never sample closer than this many world cells
+
 
 def _climate_rgb(climate):
     return _CLIMATE_COLORS.get(climate, _NO_DATA_RGB)
@@ -184,7 +194,7 @@ _TRADE_ROUTE_CONSTRUCTION_COLOR = "#f2e9c9"
 # Moving caravan/ship markers — big, glowing (a dim halo behind a bright
 # core), so an active caravan is unmistakable even zoomed far out.
 _CARAVAN_STYLE = {"fill": "#fff3c4", "outline": "#5a4318", "r": 6, "glow": "#ffcf5c"}
-_SHIP_STYLE = {"fill": "#c8f5ff", "outline": "#154a5c", "r": 6, "glow": "#5fd0ff"}
+_SEA_CARAVAN_STYLE = {"fill": "#c8f5ff", "outline": "#154a5c", "r": 6, "glow": "#5fd0ff"}
 # Commander (app/world/commander.py) — a bright orchid diamond, deliberately
 # unlike any settlement/caravan color so the player's own unit never gets
 # confused with anything else on the map.
@@ -213,12 +223,26 @@ def _format_resources(res):
     return " · ".join(f"{r} {_fmt_amount(res[r])}" for r in order if res[r])
 
 
+def _resource_shortfall(nation, cost):
+    """{resource: amount still missing} for whichever of `cost`'s resources
+    the nation can't currently cover in full — empty once it can afford
+    all of it. Gold is tracked separately from the resources dict (see
+    construction.can_afford), so it's special-cased the same way here."""
+    res = nation.stats.get("resources", {})
+    gold = nation.stats.get("gold", 0)
+    missing = {}
+    for resource, amount in cost.items():
+        have = gold if resource == "Gold" else res.get(resource, 0)
+        if have < amount:
+            missing[resource] = amount - have
+    return missing
+
+
 class MapView(tk.Frame):
-    def __init__(self, master, world, on_attack, on_regenerate, on_end_turn,
+    def __init__(self, master, world, on_attack, on_end_turn,
                 on_wildland_claim=None):
         super().__init__(master, bg=theme.BG)
         self.on_attack = on_attack
-        self.on_regenerate = on_regenerate
         self.on_end_turn = on_end_turn
         self.on_wildland_claim = on_wildland_claim
         self.selected = None            # selected faction (world view)
@@ -316,6 +340,7 @@ class MapView(tk.Frame):
         self._fog_overlay_img = None
         self._fog_key = object()   # never matches any real fog_version -> forces a rebuild
         self._precompute_colors()
+        self._last_territory_version = getattr(self.world, "territory_version", 0)
         self._exit_ui()
         self._hide_prosperity_bar()
         self.info.config(fg=theme.MUTED, text="Click a faction to inspect it.")
@@ -330,10 +355,20 @@ class MapView(tk.Frame):
     def refresh(self):
         """Recompute cached tile colors and panel text after the World's
         ownership data was mutated in place (e.g. a territory transfer),
-        without resetting the camera/selection the way set_world() does."""
+        without resetting the camera/selection the way set_world() does.
+
+        _precompute_colors() rebuilds every cell's color from scratch —
+        O(w*h), the single most expensive thing this view does on a large
+        map — so it's only actually re-run when region ownership changed
+        (world.territory_version, bumped by territory.transfer_region) since
+        the last time. Most End Turn calls don't transfer any territory, so
+        this used to be pure wasted work every single turn."""
         from app.world import vision
         vision.recompute(self.world)
-        self._precompute_colors()
+        territory_version = getattr(self.world, "territory_version", 0)
+        if territory_version != getattr(self, "_last_territory_version", None):
+            self._precompute_colors()
+            self._last_territory_version = territory_version
         self._base_img = self._base_key = None
         if self.selected is not None:
             self._show_faction(self.selected)
@@ -566,15 +601,11 @@ class MapView(tk.Frame):
         self.actions = tk.Frame(p, bg=theme.PANEL)
         self.actions.pack(fill="x", padx=14, pady=16)
 
-        tk.Button(p, text="Generate New World", command=self.on_regenerate,
-                  bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                  relief="flat", font=theme.FONT).pack(side="bottom", fill="x",
-                                                       padx=14, pady=(4, 14))
         self.view_btn = tk.Button(p, text="View: Political", command=self._toggle_mode,
                                   bg="#232a36", fg=theme.INK,
                                   activebackground=theme.ACCENT, relief="flat",
                                   font=theme.FONT)
-        self.view_btn.pack(side="bottom", fill="x", padx=14)
+        self.view_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 14))
         tk.Button(p, text="End Turn", command=self._on_end_turn,
                   bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                   relief="flat", font=theme.FONT).pack(side="bottom", fill="x",
@@ -731,6 +762,7 @@ class MapView(tk.Frame):
                  f"Military {s['military']} · Morale {s['morale']} · "
                  f"Gold {s.get('gold', 0):,}\n"
                  f"Avg fertility {nation.meta['fertility']}%\n"
+                 f"Population {self._total_population(nation):,}\n"
                  f"{self._settle_counts(nation)}\n"
                  f"{n_regions} regions.{zoom_hint}\n\n"
                  f"RESOURCES\n{_format_resources(s.get('resources', {}))}")
@@ -883,6 +915,16 @@ class MapView(tk.Frame):
             counts[wd.settlements[sid].kind] += 1
         return (f"{counts['city']} cities · {counts['castle']} castles · "
                 f"{counts['town']} towns")
+
+    def _total_population(self, nation):
+        """Every city/castle/town's population plus every village's,
+        summed across all of the faction's regions — not just one."""
+        wd = self.world
+        fac_idx = wd.factions.index(nation)
+        total = sum(getattr(wd.settlements[sid], "population", 0)
+                   for sid in nation.meta.get("settlements", []))
+        total += sum(v.population for v in wd.villages if v.faction_idx == fac_idx)
+        return total
 
     def _show_region(self, region):
         self._hide_prosperity_bar()
@@ -1080,6 +1122,9 @@ class MapView(tk.Frame):
 
     def _show_settlement(self, st):
         wd = self.world
+        self.selected_village = None   # a settlement and a village are never both selected
+        if self.zoom_region is not None:
+            self.title_lbl.config(text=st.kind.capitalize())
         region = (wd.regions[st.region_id].name
                   if 0 <= st.region_id < len(wd.regions) else "?")
         lines = [st.name, f"{st.kind.capitalize()} in {region}, "
@@ -1133,6 +1178,8 @@ class MapView(tk.Frame):
 
     def _show_village(self, v):
         wd = self.world
+        self.selected_settlement = None   # a village and a settlement are never both selected
+        self.title_lbl.config(text="Village")
         region = wd.regions[v.region_id]
         lines = [v.name, f"Village in {region.name}, "
                  f"{wd.factions[v.faction_idx].name}",
@@ -1160,7 +1207,7 @@ class MapView(tk.Frame):
         self._hide_prosperity_bar()
         wd = self.world
         aboard = commander.ship_by_id(wd, cmd.aboard_ship_id) if cmd.aboard_ship_id is not None else None
-        beached = None if aboard is not None else commander.find_ship_at(
+        beached = None if aboard is not None else commander.find_ship_near(
             wd, cmd.faction_idx, cmd.pos)
 
         lines = ["Commander", f"Position: ({cmd.pos[0]}, {cmd.pos[1]})"]
@@ -1187,6 +1234,27 @@ class MapView(tk.Frame):
                       command=lambda: self._begin_commander_move(cmd),
                       bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                       relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+            if aboard is None and commander.can_build_ship(wd, cmd):
+                shipyard = commander.shipyard_at(wd, cmd.faction_idx, cmd.pos)
+                if shipyard is not None:
+                    label = "Launch Ship (free)"
+                else:
+                    label = "Build Ship"
+                    nation = wd.factions[cmd.faction_idx]
+                    afford = construction.can_afford(nation, commander.SHIP_COST)
+                    cost_text = (f"Cost: {_format_resources(commander.SHIP_COST)}\n"
+                                f"Build time: {commander.SHIP_BUILD_TURNS} turns")
+                    if not afford:
+                        missing = _resource_shortfall(nation, commander.SHIP_COST)
+                        cost_text += f"\nShort: {_format_resources(missing)}"
+                    tk.Label(self.actions, text=cost_text,
+                             bg=theme.PANEL, fg=theme.INK if afford else theme.BAD,
+                             font=theme.FONT, justify="left",
+                             wraplength=260).pack(anchor="w", pady=(0, 4))
+                tk.Button(self.actions, text=label,
+                          command=lambda: self._do_build_ship(cmd),
+                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                          relief="flat", font=theme.FONT).pack(fill="x", pady=2)
             if beached is not None:
                 tk.Button(self.actions, text="Board Ship",
                           command=lambda: self._do_board_ship(cmd),
@@ -1195,14 +1263,6 @@ class MapView(tk.Frame):
                 tk.Button(self.actions, text="Dismantle Ship",
                           command=lambda: self._do_dismantle_ship(cmd),
                           bg="#232a36", fg=theme.BAD, activebackground=theme.ACCENT,
-                          relief="flat", font=theme.FONT).pack(fill="x", pady=2)
-            if aboard is None and commander.can_build_ship(wd, cmd):
-                shipyard = commander.shipyard_at(wd, cmd.faction_idx, cmd.pos)
-                label = ("Launch Ship (free)" if shipyard is not None
-                         else "Build Ship")
-                tk.Button(self.actions, text=label,
-                          command=lambda: self._do_build_ship(cmd),
-                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                           relief="flat", font=theme.FONT).pack(fill="x", pady=2)
 
     def _begin_commander_move(self, cmd):
@@ -1302,14 +1362,18 @@ class MapView(tk.Frame):
         self._start_zoom(self._world_view_rect())
 
     def _enter_village_view(self, region):
+        """Zooms to the whole faction's territory (not just `region`'s bbox)
+        since village view shows every village the faction owns, across all
+        its regions — `region` is kept only so "Back to Region" returns to
+        the region you actually clicked through."""
         self.zoom_region = region
         self.selected_village = None
         self._base_key = None
         self.title_lbl.config(text="Villages")
         self.info.config(fg=theme.MUTED,
-                         text=f"{region.name}\nClick a village to inspect it.")
+                         text=f"{self.zoom_faction.name}\nClick a village to inspect it.")
         self._enter_ui("VILLAGE", "← Back to Region", self._exit_village_view)
-        self._start_zoom(self._padded_rect(region.bbox, min_pad_frac=0.2, min_size=6))
+        self._start_zoom(self._padded_rect(self.zoom_faction.meta["bbox"]))
 
     def _exit_village_view(self):
         self.zoom_region = None
@@ -1672,9 +1736,11 @@ class MapView(tk.Frame):
                 self.render()
 
         else:
-            # --- LEVEL 2: village view (zoomed into a region) -------------
-            for vid in self.zoom_region.villages:
-                v = wd.villages[vid]
+            # --- LEVEL 2: village view (zoomed to the whole faction) ------
+            zf = wd.factions.index(self.zoom_faction)
+            for v in wd.villages:
+                if v.faction_idx != zf:
+                    continue
                 sx = (v.pos[0] + 0.5 - vx0) * scale
                 sy = (v.pos[1] + 0.5 - vy0) * scale
                 if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= 8 ** 2:
@@ -1682,7 +1748,7 @@ class MapView(tk.Frame):
                     self._show_village(v)
                     self.render()
                     return
-            for sid in self.zoom_region.meta_settlements:
+            for sid in self.zoom_faction.meta.get("settlements", []):
                 st = wd.settlements[sid]
                 sx = (st.pos[0] + 0.5 - vx0) * scale
                 sy = (st.pos[1] + 0.5 - vy0) * scale
@@ -1692,9 +1758,10 @@ class MapView(tk.Frame):
                     self.render()
                     return
             cid = wd.region_grid[gy][gx]
-            if cid != self.zoom_region.id:
+            if cid < 0 or wd.regions[cid].faction_idx != zf:
                 self._exit_village_view()         # clicked away -> zoom out
-            # else: clicked empty land within the same region — no-op
+            # else: clicked empty land still within the faction's own
+            # territory (any region) — no-op, stay in village view
 
     def _on_right_click(self, event):
         """QoL: right-click sends the currently-selected Commander toward
@@ -1844,6 +1911,7 @@ class MapView(tk.Frame):
         self._draw_trade_route_construction(c, screen)
         self._draw_trade_caravans(c, screen)
         self._draw_roads(c, screen)
+        self._draw_terrain_symbols(c, screen, bx0, by0, bx1, by1)
         self._draw_construction(c, screen)
         self._draw_settlements(c, screen)
         self._draw_villages(c, screen)
@@ -1852,6 +1920,97 @@ class MapView(tk.Frame):
         self._draw_ships(c, screen)
         self._draw_commanders(c, screen)
         self._draw_flash(c, screen)
+        self._draw_terrain_legend(c)
+
+    def _draw_forest_glyph(self, c, x, y, r):
+        """A small cluster of 2-3 tiny conifer triangles — reads as "a patch
+        of forest" at a glance, layered on top of the color tint
+        _precompute_colors already blends into political mode."""
+        for ox, oy, rr in ((-r * 0.55, r * 0.28, r * 0.85),
+                          (r * 0.5, r * 0.35, r * 0.8),
+                          (0.0, -r * 0.25, r * 0.65)):
+            px, py = x + ox, y + oy
+            c.create_polygon(px, py - rr, px + rr * 0.62, py + rr * 0.55,
+                             px - rr * 0.62, py + rr * 0.55,
+                             fill=_FOREST_SYMBOL_FILL, outline=_FOREST_SYMBOL_OUTLINE)
+
+    def _draw_mountain_glyph(self, c, x, y, r):
+        """A small double-peak mountain silhouette."""
+        c.create_polygon(x - r * 0.95, y + r * 0.5, x - r * 0.15, y - r * 0.65,
+                         x + r * 0.55, y + r * 0.5,
+                         fill=_MOUNTAIN_SYMBOL_FILL, outline=_MOUNTAIN_SYMBOL_OUTLINE)
+        c.create_polygon(x - r * 0.05, y + r * 0.5, x + r * 0.4, y - r * 0.2,
+                         x + r * 0.95, y + r * 0.5,
+                         fill=_MOUNTAIN_SYMBOL_FILL, outline=_MOUNTAIN_SYMBOL_OUTLINE)
+
+    @staticmethod
+    def _terrain_jitter(gx, gy, salt):
+        """Deterministic pseudo-random value in -0.5..0.5 for cell (gx,gy)
+        — same every render (no flicker/dancing symbols during pan/zoom),
+        unlike calling random() fresh each frame. `salt` gives x/y jitter
+        for the same cell independent values instead of moving diagonally."""
+        h = (gx * 374761393 + gy * 668265263 + salt * 2246822519) & 0xffffffff
+        h = (h ^ (h >> 13)) * 1274126177 & 0xffffffff
+        h = (h ^ (h >> 16)) & 0xffffffff
+        return (h / 0xffffffff) - 0.5
+
+    def _draw_terrain_symbols(self, c, screen, bx0, by0, bx1, by1):
+        """Sparse tree/mountain glyphs over forest/mountain biome cells
+        within the visible viewport — color tint alone doesn't read clearly
+        enough at a glance, especially at this map's size. Political mode
+        only (Biome mode already shows this via flat color; the other modes
+        aren't about biome at all). Sample spacing is derived from the
+        current zoom, not a fixed world-cell count, so on-screen symbol
+        density — and render cost — stays roughly constant regardless of
+        how much world is visible (world view vs. zoomed into one region)."""
+        if self.mode != "political":
+            return
+        wd = self.world
+        scale = self._place[2]
+        spacing = max(_TERRAIN_SYMBOL_MIN_WORLD_SPACING,
+                     round(_TERRAIN_SYMBOL_SCREEN_SPACING / max(scale, 0.01)))
+        r = max(2.5, scale * spacing * 0.22)
+        gy0 = by0 - by0 % spacing
+        gx0 = bx0 - bx0 % spacing
+        for gy in range(gy0, by1, spacing):
+            for gx in range(gx0, bx1, spacing):
+                if wd.owner[gy][gx] == OCEAN or (gx, gy) in wd.river_cells or (gx, gy) in wd.lake_cells:
+                    continue
+                if not self._cell_revealed(gx, gy):
+                    continue
+                biome = wd.biome_grid[gy][gx]
+                if biome not in ("forest", "mountain"):
+                    continue
+                jx = self._terrain_jitter(gx, gy, 1) * spacing * 0.7
+                jy = self._terrain_jitter(gx, gy, 2) * spacing * 0.7
+                sx, sy = screen(gx + 0.5 + jx, gy + 0.5 + jy)
+                if biome == "forest":
+                    self._draw_forest_glyph(c, sx, sy, r)
+                else:
+                    self._draw_mountain_glyph(c, sx, sy, r)
+
+    def _draw_terrain_legend(self, c):
+        """A small always-visible key explaining the forest/mountain glyphs
+        — fixed to the canvas corner (not tied to world coordinates, so it
+        never pans/zooms with the map), like a real map legend. Political
+        mode only, matching the symbols it explains."""
+        if self.mode != "political":
+            return
+        x0, y0 = 12, 12
+        row_h = 20
+        w, h = 116, row_h * 2 + 16
+        c.create_rectangle(x0, y0, x0 + w, y0 + h, fill=theme.PANEL,
+                           outline=theme.LINE, width=1)
+        c.create_text(x0 + w / 2, y0 + 10, text="LEGEND", fill=theme.MUTED,
+                     font=("Segoe UI", 7, "bold"))
+        ry = y0 + 16 + row_h * 0.5
+        self._draw_forest_glyph(c, x0 + 16, ry, 7)
+        c.create_text(x0 + 32, ry, text="Forest", fill=theme.INK,
+                     font=("Segoe UI", 8), anchor="w")
+        ry += row_h
+        self._draw_mountain_glyph(c, x0 + 16, ry, 7)
+        c.create_text(x0 + 32, ry, text="Mountain", fill=theme.INK,
+                     font=("Segoe UI", 8), anchor="w")
 
     def _draw_ships(self, c, screen):
         """Beached Ships (app/world/commander.py) — a hull-shaped marker
@@ -1985,7 +2144,7 @@ class MapView(tk.Frame):
 
         for caravan in self.world.trade_caravans:
             x, y = screen(*[v + 0.5 for v in caravan.pos])
-            style = _SHIP_STYLE if caravan.kind == "sea" else _CARAVAN_STYLE
+            style = _SEA_CARAVAN_STYLE if caravan.kind == "sea" else _CARAVAN_STYLE
             r = style["r"]
             # glow: a couple of soft, oversized rings behind the solid
             # marker (canvas shapes are opaque, so the "glow" is faked with
@@ -2125,17 +2284,19 @@ class MapView(tk.Frame):
                                         dash=dash, bridge=is_stone)
 
     def _draw_villages(self, c, screen):
-        """Small dots for villages — only shown in village view. Names are
-        skipped past a village-count threshold to avoid label soup."""
+        """Small dots for villages — only shown in village view, which now
+        covers every village the zoomed faction owns (not just the region
+        last clicked through — see _enter_village_view). Names are skipped
+        past a village-count threshold to avoid label soup."""
         if self.zoom_region is None:
             return
         wd = self.world
         style = _VILLAGE_STYLE
         r = style["r"]
-        vids = self.zoom_region.villages
-        show_names = len(vids) <= _VILLAGE_LABEL_LIMIT
-        for vid in vids:
-            v = wd.villages[vid]
+        zf = wd.factions.index(self.zoom_faction)
+        villages = [v for v in wd.villages if v.faction_idx == zf]
+        show_names = len(villages) <= _VILLAGE_LABEL_LIMIT
+        for v in villages:
             x, y = screen(v.pos[0] + 0.5, v.pos[1] + 0.5)
             if v is self.selected_village:          # selection ring
                 c.create_oval(x - r - 3, y - r - 3, x + r + 3, y + r + 3,

@@ -32,6 +32,28 @@ def bordering_regions(world, attacker_idx, defender_idx):
     """Regions owned by `defender_idx` that share at least one cell edge
     with land owned by `attacker_idx` — the frontline, and the only
     territory that can realistically change hands from a single battle."""
+    w, h, owner = world.w, world.h, world.owner
+    if defender_idx < 0:
+        # UNCLAIMED wildland (expansion.claimable_frontier's use of this) is
+        # typically the vast majority of a large map, while a faction's own
+        # territory (attacker_idx) is comparatively small, especially early
+        # game — iterate the smaller, attacker side instead of scanning
+        # every unclaimed region on the whole map one at a time. This is
+        # the path a single region click re-ran from scratch (no caching),
+        # so it was the single biggest source of region-click lag on a
+        # large map. Left as the original algorithm for faction-vs-faction
+        # calls (comparable sizes either way, not reported as slow).
+        found_ids = set()
+        for region in world.regions:
+            if region.faction_idx != attacker_idx:
+                continue
+            for x, y in region.cells:
+                for dx, dy in _NEIGH4:
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < w and 0 <= ny < h and owner[ny][nx] == defender_idx:
+                        found_ids.add(world.region_grid[ny][nx])
+        return [world.regions[rid] for rid in found_ids]
+
     out = []
     for region in world.regions:
         if region.faction_idx != defender_idx:
@@ -39,8 +61,7 @@ def bordering_regions(world, attacker_idx, defender_idx):
         for x, y in region.cells:
             for dx, dy in _NEIGH4:
                 nx, ny = x + dx, y + dy
-                if (0 <= nx < world.w and 0 <= ny < world.h
-                        and world.owner[ny][nx] == attacker_idx):
+                if 0 <= nx < w and 0 <= ny < h and owner[ny][nx] == attacker_idx:
                     out.append(region)
                     break
             else:
@@ -59,12 +80,22 @@ def naval_reachable_regions(world, attacker_idx, defender_idx):
     not that they're on the same connected ocean body — fine for this
     generator (one continents-in-one-ocean landmass; edges always sink
     underwater), but would need a real flood-fill check on a world with
-    multiple disconnected seas."""
-    ocean_cells = [(x, y) for y in range(world.h) for x in range(world.w)
-                   if world.owner[y][x] == OCEAN]
-    if not ocean_cells:
-        return []
-    coast_d = _bfs_distance(world, ocean_cells)
+    multiple disconnected seas.
+
+    Reuses the coast-distance field settlement placement already computed
+    once at world-gen (worldgen._init_settlement_proximity_fields's
+    world._settle_coast_d) instead of a fresh map-wide BFS every call — this
+    used to redo that full-grid BFS on *every single click* of an unclaimed
+    region (claimable_frontier calls this), which on a large map was the
+    single biggest source of region-click lag by far."""
+    coast_d = getattr(world, "_settle_coast_d", None)
+    if coast_d is None:
+        ocean_cells = [(x, y) for y in range(world.h) for x in range(world.w)
+                      if world.owner[y][x] == OCEAN]
+        if not ocean_cells:
+            return []
+        coast_d = _bfs_distance(world, ocean_cells)
+        world._settle_coast_d = coast_d
 
     def is_coastal(pos):
         x, y = pos
@@ -144,6 +175,7 @@ def transfer_region(world, region, new_faction_idx):
     for x, y in region.cells:
         world.owner[y][x] = new_faction_idx
     region.faction_idx = new_faction_idx
+    world.territory_version = getattr(world, "territory_version", 0) + 1
 
     settlement_ids = list(getattr(region, "meta_settlements", []))
     for sid in settlement_ids:

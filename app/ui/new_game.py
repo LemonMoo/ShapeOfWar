@@ -58,6 +58,13 @@ class NewGameView(tk.Frame):
                   font=theme.FONT_BOLD, activebackground=theme.ACCENT
                   ).pack(side="left", padx=6)
 
+        # Shown only while the (synchronous, blocking) world generator runs
+        # for a much bigger map than before — created last so it's on top
+        # of everything else in this frame once placed.
+        self._generating_lbl = tk.Label(self, text="Generating world...",
+                                        bg=theme.BG, fg=theme.ACCENT,
+                                        font=theme.FONT_TITLE)
+
         self.reset()
 
     def reset(self):
@@ -86,4 +93,7 @@ class NewGameView(tk.Frame):
 
     def _play(self):
         name = self._name_var.get().strip() or self._namer(self.species)
+        self._generating_lbl.place(relx=0.5, rely=0.5, anchor="center")
+        self.update_idletasks()   # force the label to actually paint before the blocking call
         self.on_play(self.species, name)
+        self._generating_lbl.place_forget()

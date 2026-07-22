@@ -123,15 +123,24 @@ def eligible_to_trade(world, a_idx, b_idx):
 
 
 def _coastal_factions(world):
-    """Faction indices owning at least one coastal settlement — computed
-    once per turn, not once per pair (unlike territory.naval_reachable_regions,
-    which does a fresh BFS per attack — far too slow to run for every
-    faction-pair every turn)."""
-    ocean_cells = [(x, y) for y in range(world.h) for x in range(world.w)
-                   if world.owner[y][x] == OCEAN]
-    if not ocean_cells:
-        return set()
-    coast_d = _bfs_distance(world, ocean_cells)
+    """Faction indices owning at least one coastal settlement — reuses the
+    coast-distance field settlement placement already computed once at
+    world-gen (worldgen._init_settlement_proximity_fields's
+    world._settle_coast_d) instead of redoing that same map-wide BFS from
+    every ocean cell every single turn: ocean geography never changes once
+    the world exists, so there's nothing to recompute. On a large map this
+    used to be the single biggest per-turn cost by far (a full-grid BFS,
+    every turn, forever) for a value that's turn-invariant."""
+    coast_d = getattr(world, "_settle_coast_d", None)
+    if coast_d is None:
+        # Old save predating the cached field (or a non-standard World) —
+        # compute once and cache, same as world-gen itself does.
+        ocean_cells = [(x, y) for y in range(world.h) for x in range(world.w)
+                      if world.owner[y][x] == OCEAN]
+        if not ocean_cells:
+            return set()
+        coast_d = _bfs_distance(world, ocean_cells)
+        world._settle_coast_d = coast_d
     coastal = set()
     for st in world.settlements:
         x, y = st.pos

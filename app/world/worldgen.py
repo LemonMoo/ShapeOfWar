@@ -580,6 +580,36 @@ def _occupy(occupied, x, y):
     occupied.setdefault(_bucket_key(x, y), []).append((x, y))
 
 
+def _too_close_any(world, x, y, min_dist):
+    """_too_close against *both* the settlement (_settle_occupied) and
+    village (_village_occupied) auto-placement occupancy hashes. These are
+    two separate dicts (settlements are generated before villages, so each
+    needed its own), but a settlement and a village should never be able to
+    land on/next to each other regardless of which system placed which
+    first or which call placed it — see _mark_occupied_both."""
+    settle_occ = getattr(world, "_settle_occupied", None)
+    if settle_occ is not None and _too_close(settle_occ, x, y, min_dist):
+        return True
+    village_occ = getattr(world, "_village_occupied", None)
+    if village_occ is not None and _too_close(village_occ, x, y, min_dist):
+        return True
+    return False
+
+
+def _mark_occupied_both(world, x, y):
+    """Register (x, y) as occupied in whichever of the settlement/village
+    occupancy hashes currently exist — so a settlement placed here is
+    correctly avoided by every future village placement and vice versa.
+    (_village_occupied doesn't exist yet the first time this runs at
+    world-gen, since settlements are generated before villages.)"""
+    settle_occ = getattr(world, "_settle_occupied", None)
+    if settle_occ is not None:
+        _occupy(settle_occ, x, y)
+    village_occ = getattr(world, "_village_occupied", None)
+    if village_occ is not None:
+        _occupy(village_occ, x, y)
+
+
 def _init_settlement_proximity_fields(world, rng):
     """Build the shared proximity fields + occupancy hash settlement
     placement scores against, and cache them on `world` — computed once
@@ -633,16 +663,15 @@ def _place_settlements_for_faction(world, rng, fac_idx, cells, namer, fixed_coun
     begins with the same small seed regardless of how large its home region
     turned out to be); newly claimed wildland (see
     app/world/expansion.py's settle_newly_claimed_region) passes
-    {"city": 0, "town": 0} — no free City/Town, but Castle still scales with
-    area as before, since claiming land was never how you got one of those
-    for free in the first place."""
+    {"city": 0, "town": 0, "castle": 0} — no free City/Town/Castle, since
+    claiming land was never how you got one of those for free in the first
+    place."""
     from app.world.resources import seed_prosperity
     sea = world.sea_level
     span = (1.0 - sea) or 1.0
     coast_d = world._settle_coast_d
     water_d = world._settle_water_d
     border_d = world._settle_border_d
-    occupied = world._settle_occupied
     prox = lambda d, reach: math.exp(-d / reach)   # 1 at the feature, ->0 away
     species = world.factions[fac_idx].meta["species"]
 
@@ -669,7 +698,7 @@ def _place_settlements_for_faction(world, rng, fac_idx, cells, namer, fixed_coun
         for s, x, y in scored:
             if placed >= count:
                 break
-            if _too_close(occupied, x, y, t["spacing"]):
+            if _too_close_any(world, x, y, t["spacing"]):
                 continue
             upkeep = {res: round(rng.uniform(*rng_range))
                       for res, rng_range in SETTLEMENT_UPKEEP[kind].items()}
@@ -681,7 +710,7 @@ def _place_settlements_for_faction(world, rng, fac_idx, cells, namer, fixed_coun
                             (x, y), fac_idx, region_id, upkeep, tax_income,
                             population, adults, children, prosperity)
             world.settlements.append(st)
-            _occupy(occupied, x, y)
+            _mark_occupied_both(world, x, y)
             world.factions[fac_idx].meta["settlements"].append(st.id)
             if 0 <= region_id < len(world.regions):
                 world.regions[region_id].meta_settlements.append(st.id)
@@ -812,7 +841,6 @@ def _place_villages_for_region(world, rng, region, fixed_n=None):
     from app.world.resources import seed_prosperity
     w, h = world.w, world.h
     water_d = world._village_water_d
-    occupied = world._village_occupied
     # A fresh namer per region: villages are only ever viewed one region at a
     # time, so names need only be unique within a region (a handful to ~50),
     # not across the whole world's thousands of villages.
@@ -846,10 +874,10 @@ def _place_villages_for_region(world, rng, region, fixed_n=None):
     for s, x, y in scored:
         if len(placed) >= n:
             break
-        if _too_close(occupied, x, y, spacing):
+        if _too_close_any(world, x, y, spacing):
             continue
         placed.append((x, y))
-        _occupy(occupied, x, y)
+        _mark_occupied_both(world, x, y)
 
     vids = []
     for x, y in placed:
@@ -1122,6 +1150,11 @@ class World:
         self.climate_grid = [[None] * w for _ in range(h)]  # climate name or None
         self.turn = 1
         self.season = "Spring"
+        # Bumped whenever region ownership actually changes (see
+        # territory.transfer_region) so map_view can skip rebuilding the
+        # whole political-mode color raster (an O(w*h) rebuild) on turns
+        # where nothing changed hands — most turns.
+        self.territory_version = 0
         self.rivers = []               # list of {"cells": [(x,y)...], "flow": f}
         self.river_cells = set()       # all (x, y) cells a river runs through
         self.lake_cells = set()        # (x, y) land cells that are lake surface
@@ -1157,29 +1190,121 @@ class World:
         self.player_faction_idx = None  # index into self.factions, or None
 
 
-def generate_world(width=440, height=264, seed=None, n_factions=14,
-                    player_species=None, player_name=None):
+def _pick_continent_centers(rng, width, height):
+    """2-3 continent centers, spaced far enough apart that real open ocean
+    forms between them instead of one landmass touching every edge.
+
+    Each gets a different band of *distance from the equator* (0 = map's
+    vertical middle/warmest, 1 = pole/coldest — matches classify_climate's
+    latitude_temp = 1 - dist exactly), picked independently for a random
+    north/south side each time. That's deliberate, not just "spread them
+    across different rows": latitude_temp is symmetric around the equator,
+    so two continents merely in different halves of the map (say y=0.25 and
+    y=0.75) sit at the *same* distance from it and would get identical
+    climates. Banding by distance instead guarantees each continent lands
+    at a meaningfully different temperature.
+
+    Each continent's footprint is an ellipse, not a circle: wide east-west
+    (sized off the map's full width, so it stays big enough that the height
+    noise can't easily bridge it to its neighbor) but compact north-south
+    (shrinking a bit as more continents need to fit), so it comfortably
+    clears the equator/pole without needing an impractically tall map."""
+    n = rng.randint(2, 3)
+    radius_x = width * 0.16
+    radius_y = height * 0.30 / n
+    margin_x = min(radius_x * 1.15, width * 0.35)
+    margin_y = radius_y * 1.1
+    min_norm_dist = 2.6   # separation required, in radius_x/radius_y-normalized units
+
+    centers = []
+    for band in range(n):
+        d_lo = band / n
+        d_hi = (band + 1) / n
+        # Alternate north/south by band (not randomly) so adjacent bands
+        # land on opposite sides of the equator, maximizing their actual
+        # separation instead of risking two bands both landing north and
+        # crowding each other (min_norm_dist below still catches genuine
+        # collisions either way, but this cuts down how often it has to).
+        side = 1.0 if band % 2 == 0 else -1.0
+        for _ in range(500):
+            dist = rng.uniform(d_lo, d_hi)          # 0=equator, 1=pole
+            y = (0.5 + side * dist / 2.0) * height
+            y = max(margin_y, min(height - margin_y, y))
+            x = rng.uniform(margin_x, width - margin_x)
+            if all(((x - ox) / radius_x) ** 2 + ((y - oy) / radius_y) ** 2 >= min_norm_dist ** 2
+                  for ox, oy in centers):
+                centers.append((x, y))
+                break
+        else:
+            y = (0.5 + ((d_lo + d_hi) / 2.0) / 2.0) * height
+            centers.append((rng.uniform(margin_x, width - margin_x),
+                           max(margin_y, min(height - margin_y, y))))
+    return centers, radius_x, radius_y
+
+
+def _has_multiple_landmasses(land, width, height, land_cells):
+    """True if the land mask splits into at least two *substantial*
+    (>=3% of total land) connected components — real separate continents,
+    not one dominant blob plus a few stray noise-speck islands. On the rare
+    seed where the intended 2-3 continents end up noise-bridged into one,
+    generate_world retries with a fresh layout instead of accepting it."""
+    total = len(land_cells)
+    if total == 0:
+        return False
+    threshold = max(30, total * 0.03)
+    seen = set()
+    substantial = 0
+    for start in land_cells:
+        if start in seen:
+            continue
+        stack = [start]
+        seen.add(start)
+        size = 0
+        while stack:
+            x, y = stack.pop()
+            size += 1
+            for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if (0 <= nx < width and 0 <= ny < height
+                        and (nx, ny) not in seen and land[ny][nx]):
+                    seen.add((nx, ny))
+                    stack.append((nx, ny))
+        if size >= threshold:
+            substantial += 1
+            if substantial >= 2:
+                return True
+    return False
+
+
+def generate_world(width=1100, height=660, seed=None, n_factions=14,
+                    player_species=None, player_name=None, _attempt=0):
     """Generate a world. If `player_species`/`player_name` are given, faction
     0 is forced to that species and given that exact name (instead of a
     random roll) and `world.player_faction_idx` is set to 0, so a "New Game"
-    flow can drop the player into a nation of their own choosing."""
+    flow can drop the player into a nation of their own choosing.
+
+    `_attempt` is internal — caps the retries below so a run of unlucky
+    seeds can never recurse forever."""
     rng = random.Random(seed)
     nseed = rng.randint(0, 2 ** 31 - 1)
     world = World(width, height)
     world.seed = nseed if seed is None else seed
 
-    # 1. height field: several octaves of value noise + radial falloff so the
-    #    map is oceans around continents rather than land to the edges.
+    # 1. height field: several octaves of value noise + falloff from the
+    #    *nearest* of 2-3 continent centers (see _pick_continent_centers),
+    #    so the map is multiple separate landmasses ringed by ocean rather
+    #    than one blob glued to the middle of the map.
     octaves = [(0.028, 1.0), (0.060, 0.5), (0.130, 0.25), (0.260, 0.12)]
-    cx, cy = width / 2.0, height / 2.0
+    centers, radius_x, radius_y = _pick_continent_centers(rng, width, height)
+    inv_rx2 = 1.0 / (radius_x * radius_x)
+    inv_ry2 = 1.0 / (radius_y * radius_y)
     raw = [[0.0] * width for _ in range(height)]
     lo, hi = 1e9, -1e9
     for y in range(height):
         for x in range(width):
             v = sum(amp * _vnoise(x * f, y * f, nseed) for f, amp in octaves)
-            dx = (x - cx) / (width / 2.0)
-            dy = (y - cy) / (height / 2.0)
-            v -= 0.85 * (dx * dx + dy * dy)      # push edges underwater
+            best_d2 = min((x - ccx) ** 2 * inv_rx2 + (y - ccy) ** 2 * inv_ry2
+                         for ccx, ccy in centers)
+            v -= 0.85 * best_d2                  # push far-from-any-continent cells underwater
             raw[y][x] = v
             lo = min(lo, v)
             hi = max(hi, v)
@@ -1194,9 +1319,16 @@ def generate_world(width=440, height=264, seed=None, n_factions=14,
     land = [[world.height[y][x] > world.sea_level for x in range(width)]
             for y in range(height)]
     land_cells = [(x, y) for y in range(height) for x in range(width) if land[y][x]]
-    if not land_cells:                # extremely unlucky seed; retry once
+    if not land_cells and _attempt < 6:      # extremely unlucky seed; retry
         return generate_world(width, height, rng.random(), n_factions,
-                              player_species, player_name)
+                              player_species, player_name, _attempt=_attempt + 1)
+    if (land_cells and _attempt < 6
+            and not _has_multiple_landmasses(land, width, height, land_cells)):
+        # the 2-3 intended continents got noise-bridged into one blob (rare
+        # — see _pick_continent_centers/_has_multiple_landmasses) -- retry
+        # with a fresh layout rather than accepting a single-landmass world.
+        return generate_world(width, height, rng.random(), n_factions,
+                              player_species, player_name, _attempt=_attempt + 1)
     world.total_land_cells = len(land_cells)
 
     # 2. hydrology: fill basins, form lakes, and route flow-accumulated rivers

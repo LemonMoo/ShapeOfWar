@@ -12,9 +12,9 @@ import random
 from app.world import territory
 from app.world import resources
 from app.world.worldgen import (UNCLAIMED, _place_settlements_for_faction,
-                                _place_villages_for_region)
+                                _place_villages_for_region, _adjacent_region_ids)
 from app.world.lexicon import make_settlement_namer
-from app.world.construction import can_afford
+from app.world.construction import can_afford, RoadProject, _path_between
 
 CLAIM_BASE_COST = {"Gold": 80}
 CLAIM_COST_PER_CELL = {"Gold": 0.6}
@@ -123,7 +123,19 @@ def start_claim(world, faction_idx, region):
             f"{project.total_turns} turns.")
 
 
-_NO_FREE_CITY_TOWN = {"city": 0, "town": 0}   # see _place_settlements_for_faction
+_NO_FREE_SETTLEMENT = {"city": 0, "town": 0, "castle": 0}   # see _place_settlements_for_faction
+
+WILDLAND_VILLAGE_MIN = 1
+WILDLAND_VILLAGE_MAX = 3
+WILDLAND_VILLAGE_CELLS_PER = 100   # area per village, before min/max clamping
+
+
+def _wildland_village_count(region):
+    """1-3 villages for a newly claimed region, scaled by area — wildland
+    is meant to stay sparse, not use the much larger (3-50) area-scaled
+    range the starting foothold / general village formula allows."""
+    return max(WILDLAND_VILLAGE_MIN, min(WILDLAND_VILLAGE_MAX,
+              round(len(region.cells) / WILDLAND_VILLAGE_CELLS_PER)))
 
 
 def settle_newly_claimed_region(world, region):
@@ -133,19 +145,94 @@ def settle_newly_claimed_region(world, region):
     being pre-baked at world-gen for land nobody may ever reach), and
     recompute its resource yield so next turn's advance_turn is accurate.
 
-    Wildland only ever gives up a Castle (still area-scaled) and villages —
-    no free City or Town. Getting one of those now takes an actual
+    Wildland only ever gives up villages (1-3, scaled by area) — no free
+    City, Town, or Castle. Getting one of those now takes an actual
     construction project (app/world/construction.py's start_settlement/
-    run_settlement_ai), the same as everyone's very first City/Town always
-    has, matching how a Castle already had to be built by hand."""
+    run_settlement_ai), the same as everyone's very first City/Town/Castle
+    always has."""
     if not region.settlements_generated:
         namer = make_settlement_namer(random)
         _place_settlements_for_faction(world, random, region.faction_idx,
                                        list(region.cells), namer,
-                                       fixed_counts=_NO_FREE_CITY_TOWN)
-        _place_villages_for_region(world, random, region)
+                                       fixed_counts=_NO_FREE_SETTLEMENT)
+        _place_villages_for_region(world, random, region,
+                                   fixed_n=_wildland_village_count(region))
         region.settlements_generated = True
     region.resources = resources.compute_region_yield(region, world.season)
+
+
+def _region_has_interregion_road(world, region):
+    for (ax, ay), (bx, by), _tier in world.roads_by_region.get(region.id, []):
+        if world.region_grid[ay][ax] != world.region_grid[by][bx]:
+            return True
+    return False
+
+
+def _region_has_pending_interregion_road(world, region):
+    for proj in world.road_projects:
+        if not proj.path:
+            continue
+        ax, ay = proj.path[0]
+        bx, by = proj.path[-1]
+        ra, rb = world.region_grid[ay][ax], world.region_grid[by][bx]
+        if ra != rb and region.id in (ra, rb):
+            return True
+    return False
+
+
+def _nearest_interregion_village_link(world, region):
+    """(my_village_pos, neighbor_village_pos) for the closest pair between
+    this region's own villages and an adjacent, same-faction, already-
+    settled region's villages — or None if there's no candidate (no
+    villages here yet, or no settled neighbor with villages of its own)."""
+    if not region.villages:
+        return None
+    neighbor_villages = []
+    for rid in _adjacent_region_ids(world, region):
+        other = world.regions[rid]
+        if other.faction_idx != region.faction_idx or not other.settlements_generated:
+            continue
+        neighbor_villages.extend(world.villages[vid].pos for vid in other.villages)
+    if not neighbor_villages:
+        return None
+    my_villages = [world.villages[vid].pos for vid in region.villages]
+    best, best_d2 = None, None
+    for mp in my_villages:
+        for np in neighbor_villages:
+            d2 = (mp[0] - np[0]) ** 2 + (mp[1] - np[1]) ** 2
+            if best_d2 is None or d2 < best_d2:
+                best_d2, best = d2, (mp, np)
+    return best
+
+
+def ensure_interregion_roads(world):
+    """Every settled region with at least one village should have a dirt
+    road connecting it to a neighboring already-settled region of the same
+    faction — otherwise a freshly claimed wildland region's villages sit
+    isolated from the rest of the faction's road network, cut off at the
+    region border. Runs every turn, so it catches both a region claimed
+    this turn *and* any pre-existing gap (a starting foothold spanning
+    multiple regions, or a region claimed before this rule existed) —
+    retroactive by construction, not a one-time migration. One connector
+    project started per region per call, using the same RoadProject/
+    ROAD_CELLS_PER_TURN machinery every other road in the game already
+    uses, tiered "dirt" since it always touches a village."""
+    for region in world.regions:
+        if region.faction_idx < 0 or not region.settlements_generated:
+            continue
+        if not region.villages:
+            continue
+        if _region_has_interregion_road(world, region):
+            continue
+        if _region_has_pending_interregion_road(world, region):
+            continue
+        link = _nearest_interregion_village_link(world, region)
+        if link is None:
+            continue
+        my_pos, neighbor_pos = link
+        path = _path_between(world, neighbor_pos, my_pos)
+        if len(path) > 1:
+            world.road_projects.append(RoadProject(region.faction_idx, path, tier="dirt"))
 
 
 def resolve_claim_win(world, region, faction_idx):

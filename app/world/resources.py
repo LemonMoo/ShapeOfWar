@@ -521,6 +521,7 @@ def advance_turn(world):
     # (app/world/expansion.py).
     from app.world import expansion
     expansion.advance_claims(world)
+    expansion.ensure_interregion_roads(world)
 
     # Commanders: walk any active move order, count down ship construction
     # (app/world/commander.py) — before vision.recompute so this turn's

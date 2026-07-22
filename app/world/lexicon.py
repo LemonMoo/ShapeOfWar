@@ -66,38 +66,56 @@ _FACTION_NAMES = {
 }
 
 # --- region names: "<Adj> <Feature>" ----------------------------------------
-_REGION_NAMES = {
-    "Humans": (
-        _FACTION_NAMES["Humans"][0],
-        ["Vale", "Downs", "Moor", "Weald", "Fen", "Hollow", "Ridge", "Marsh",
-         "Heath", "Glen", "Wold", "Reach", "Barrow", "Fell", "Combe",
-         "Meadows", "Hills", "Bluffs", "Cross", "Hedge"],
-    ),
-    "Elves": (
-        _FACTION_NAMES["Elves"][0],
-        ["Glade", "Grove", "Hollow", "Vale", "Wood", "Bower", "Thicket",
-         "Glen", "Meadow", "Brook", "Fernwood", "Moonwood", "Willows",
-         "Canopy", "Dell"],
-    ),
-    "Dwarves": (
-        _FACTION_NAMES["Dwarves"][0],
-        ["Deep", "Shaft", "Vein", "Crag", "Ridge", "Cavern", "Tunnels",
-         "Quarry", "Peak", "Hollow", "Mine", "Chasm", "Foothold", "Bluff",
-         "Underhall"],
-    ),
-    "Orcs": (
-        _FACTION_NAMES["Orcs"][0],
-        ["Wastes", "Scar", "Ashfield", "Ruin", "Flats", "Blight", "Warcamp",
-         "Pit", "Gash", "Crag", "Bonefield", "Mire", "Blackland", "Ridge",
-         "Hollow"],
-    ),
-    "Goblins": (
-        _FACTION_NAMES["Goblins"][0],
-        ["Burrow", "Midden", "Warren", "Tunnels", "Sinkhole", "Bog",
-         "Scrapfield", "Ditch", "Hollow", "Thicket", "Muckland", "Pit",
-         "Undercroft", "Crevice", "Gulch"],
-    ),
-}
+# Regions are generated map-wide before any faction/species claims them (see
+# app/world/worldgen.py), so — unlike factions/settlements/villages below —
+# there's no owning species yet to flavor the name with. One large, broad
+# pool instead, drawing on many different fantasy traditions (high fantasy,
+# Norse/saga, Gothic/dark fantasy, Arthurian/British Isles, desert and
+# far-eastern flavor, Greco-Roman myth) rather than a single narrow well —
+# with this many combinations, two regions landing on the same name is rare
+# even across a very large, many-continent map.
+_REGION_ADJ = [
+    "Ashen", "Iron", "Golden", "Crimson", "Verdant", "Frost", "Storm",
+    "Obsidian", "Radiant", "Hollow", "Thorned", "Gilded", "Pale", "Scarlet",
+    "Ember", "Duskward", "Sundered", "Wintered", "Cobalt", "Umber", "Silver",
+    "Moonlit", "Starlit", "Whispering", "Twilight", "Sylvan", "Emerald",
+    "Evergreen", "Mistveil", "Ancient", "Granite", "Deep", "Bronze",
+    "Blackrock", "Runed", "Weeping", "Forsaken", "Forgotten", "Sunken",
+    "Drowned", "Withered", "Gloaming", "Nightshade", "Wyrmwood", "Fensworn",
+    "Dunefire", "Jadewind", "Lotusfall", "Cloudreach", "Amber", "Ivory",
+    "Jet", "Copper", "Rime", "Sable", "Titanfallen", "Fated", "Labyrinthine",
+    "Elder", "Nameless", "Undying", "Silent", "Hidden", "Lonely", "Widowed",
+    "Cursed", "Blessed", "Sacred", "Forbidden", "Endless", "Restless",
+    "Winterbound", "Sunscorched", "Windswept", "Stormwrought", "Cinderlit",
+    "Mossgrown", "Ironbound", "Wraithbound", "Bloodfang", "Bramblewood",
+    "Ravenwood", "Ghostlit", "Emberlit", "Shadowbound", "Grimwald",
+    "Frostbitten", "Sunwrought", "Starforged", "Bonewrought", "Thornveiled",
+    "Duskbound", "Wyldborne", "Ironvale", "Moonshadow", "Fireforged",
+]
+_REGION_FEATURE = [
+    "Vale", "Downs", "Moor", "Weald", "Fen", "Hollow", "Ridge", "Marsh",
+    "Heath", "Glen", "Wold", "Reach", "Barrow", "Fell", "Combe", "Meadows",
+    "Hills", "Bluffs", "Cross", "Hedge", "Glade", "Grove", "Wood", "Bower",
+    "Thicket", "Brook", "Fernwood", "Willows", "Canopy", "Dell", "Shaft",
+    "Vein", "Crag", "Cavern", "Tunnels", "Quarry", "Peak", "Mine", "Chasm",
+    "Foothold", "Underhall", "Wastes", "Scar", "Ashfield", "Ruin", "Flats",
+    "Blight", "Pit", "Gash", "Bonefield", "Mire", "Blackland", "Burrow",
+    "Midden", "Warren", "Sinkhole", "Bog", "Scrapfield", "Ditch",
+    "Muckland", "Undercroft", "Crevice", "Gulch", "Span", "March",
+    "Steppe", "Delta", "Isle", "Cape", "Cove", "Bay", "Strand", "Shoal",
+    "Cairn", "Tor", "Spire", "Aerie", "Roost", "Eyrie", "Mere", "Weir",
+    "Furlong", "Hallow", "Sanctum", "Wyrmspine", "Frostreach", "Sunstead",
+    "Starfall", "Wyldwood", "Emberfall", "Ashenmoor", "Ravenspire",
+    "Wolfden", "Serpentmarsh", "Dragontooth", "Oraclemere", "Labyrinth",
+    "Dunereach", "Mirage", "Jadewood", "Lotusmere", "Bambooglen",
+    "Silkmere", "Cloudspire",
+]
+_REGION_QUALIFIERS = [
+    "the Elder", "the Lesser", "the Forsaken", "the Forgotten",
+    "the Sundered", "the Old", "the Hidden", "the Silent", "the Last",
+    "the Nameless", "the Drowned", "the Undying", "the Restless",
+    "the Unclaimed", "the Far",
+]
 
 # --- settlement names: "<Root><suffix>", suffix picked by settlement kind ---
 _SETTLE_NAMES = {
@@ -150,18 +168,31 @@ _SETTLE_NAMES = {
 
 
 def make_region_namer(rng):
-    """Return a function (species) -> unique '<Adj> <Feature>' region name,
-    drawn from that species' word bank (falls back to Human if unknown)."""
+    """Return a function () -> unique '<Adj> <Feature>' region name. No
+    species argument — regions are named map-wide before any faction has
+    claimed them (see app/world/worldgen.py), so there's nothing to flavor
+    the pick with yet; _REGION_ADJ/_REGION_FEATURE are one broad,
+    tradition-spanning pool instead. If that combinatorial space (in the
+    thousands) is ever actually exhausted, later names get a themed
+    qualifier tacked on rather than a bare number."""
     used = set()
 
-    def namer(species="Humans"):
-        adj, feature = _REGION_NAMES.get(species, _REGION_NAMES["Humans"])
-        for _ in range(200):
-            name = f"{rng.choice(adj)} {rng.choice(feature)}"
+    def namer():
+        for _ in range(300):
+            name = f"{rng.choice(_REGION_ADJ)} {rng.choice(_REGION_FEATURE)}"
             if name not in used:
                 used.add(name)
                 return name
-        name = f"{rng.choice(adj)} {rng.choice(feature)} {len(used)}"
+        for _ in range(300):
+            name = (f"{rng.choice(_REGION_ADJ)} {rng.choice(_REGION_FEATURE)}, "
+                    f"{rng.choice(_REGION_QUALIFIERS)}")
+            if name not in used:
+                used.add(name)
+                return name
+        # Practically unreachable outside a map with tens of thousands of
+        # regions -- still no digits, just two qualifiers stacked together.
+        name = (f"{rng.choice(_REGION_ADJ)} {rng.choice(_REGION_FEATURE)}, "
+                f"{rng.choice(_REGION_QUALIFIERS)} and {rng.choice(_REGION_QUALIFIERS)}")
         used.add(name)
         return name
 
