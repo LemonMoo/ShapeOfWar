@@ -11,6 +11,7 @@ from app.world.resources import RESOURCES
 STANDING_MIN, STANDING_MAX = -100, 100
 ALLY_THRESHOLD = 50     # standing at/above this unlocks Form Alliance
 WAR_THRESHOLD = -50     # standing at/below this unlocks Declare War
+TRADE_STANDING_THRESHOLD = 10   # standing at/above this unlocks proposing a trade route
 
 IMPROVE_RELATIONS_DELTA = 12
 FABRICATE_CLAIM_DELTA = -15
@@ -43,6 +44,36 @@ def species_affinity(species_a, species_b):
     if species_a == species_b:
         return 2
     return SPECIES_AFFINITY.get(frozenset([species_a, species_b]), 0)
+
+
+# First contact (see establish_contact): reputation starts as a deterministic
+# function of species affinity alone (extensible later), not a dice roll.
+FIRST_CONTACT_SPECIES_WEIGHT = 15   # matches _SPECIES_WEIGHT's alliance-scoring weight
+
+
+def first_contact_standing(species_a, species_b):
+    return _clamp_standing(species_affinity(species_a, species_b) * FIRST_CONTACT_SPECIES_WEIGHT)
+
+
+def establish_contact(world, a_id, b_id):
+    """Create the relationship between two nations the first time they make
+    contact (fog-of-war discovery for the player, a shared border for
+    anyone) — idempotent, a no-op if one already exists, so it never
+    overwrites standing built up by subsequent diplomacy. Stance is derived
+    from the computed standing via the existing ALLY_THRESHOLD/WAR_THRESHOLD
+    rather than hardcoded — species affinity tops out at 2 * 15 = 30, under
+    both thresholds (50), so stance is always Neutral at first contact
+    today; deriving it keeps this correct if affinity values or the weight
+    ever change."""
+    wm = world.world_map
+    if a_id == b_id or frozenset((a_id, b_id)) in wm.relationships:
+        return
+    a, b = wm.nations[a_id], wm.nations[b_id]
+    standing = first_contact_standing(a.meta.get("species"), b.meta.get("species"))
+    stance = (Stance.ALLY if standing >= ALLY_THRESHOLD else
+              Stance.ENEMY if standing <= WAR_THRESHOLD else Stance.NEUTRAL)
+    tension = max(0, -standing)
+    wm.set_relationship(a_id, b_id, stance=stance, tension=tension, standing=standing)
 
 
 def _resource_complementarity(world, a, b):

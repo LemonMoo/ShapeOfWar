@@ -4,6 +4,7 @@ same terrain-aware pathfinding as trade routes/village roads) before
 construction can run at full speed — modeling "the workers need a way to
 get there."
 """
+import math
 import random
 
 from app.world.worldgen import (OCEAN, Settlement, SETTLEMENT_UPKEEP,
@@ -47,7 +48,11 @@ class CastleProject:
 
     @property
     def turns_left(self):
-        return max(0, round(self.total_turns - self.progress_turns))
+        # ceil, not round: progress advances by half-turns while the road is
+        # unfinished, and round()'s banker's-rounding on those .5 values made
+        # the displayed countdown skip a number some turns and hold for two
+        # others (e.g. 4 -> 4 -> 6), instead of ticking down steadily.
+        return max(0, math.ceil(self.total_turns - self.progress_turns))
 
     @property
     def half_speed(self):

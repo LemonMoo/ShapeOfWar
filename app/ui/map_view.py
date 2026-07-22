@@ -25,6 +25,9 @@ from app.world.territory import bordering_counties, naval_reachable_counties
 from app.world.resources import RESOURCES
 from app.world import diplomacy
 from app.world import construction
+from app.world import trade
+from app.world import expansion
+from app.world import commander
 
 _FLASH_COLOR = (255, 236, 120)   # bright gold — county gained
 _FLASH_FAIL_COLOR = (232, 74, 62)  # bright red — county attack failed
@@ -33,9 +36,17 @@ _FLASH_FREQ = 1.8                # blink cycles per second
 
 _LABEL_FONT = ("Segoe UI", 8, "bold")
 
+# Free camera (drag-pan / wheel-zoom).
+_DRAG_THRESHOLD_PX = 4   # movement past this on a press+move counts as a drag, not a click
+_ZOOM_STEP = 0.9         # view-span multiplier per wheel notch
+_MIN_ZOOM_CELLS = 6      # closest allowed zoom (world-cells across the short viewport edge)
+
 _OCEAN_DEEP = (18, 30, 58)
 _OCEAN_SHALLOW = (44, 74, 120)
 _LAKE_RGB = (48, 92, 140)      # inland lake water (shown in every map mode)
+
+# Fog of war (see app/world/vision.py) — unexplored land/sea, world view only.
+_FOG_HIDDEN_RGB = (7, 9, 14)
 
 # Per-county lightness offsets so neighboring counties of a faction read apart.
 _COUNTY_SHADES = [-0.12, 0.10, 0.22, -0.04, 0.15, 0.02, 0.28, -0.09, 0.06, 0.19]
@@ -107,6 +118,14 @@ _CLIMATE_COLORS = {
 }
 _NO_DATA_RGB = (40, 44, 52)   # ocean / unclassified cells in biome & climate modes
 
+# UNCLAIMED land (see app/world/worldgen.py) in the political view — a muted
+# neutral tone, no faction owns it so it can't use a faction color. Tinted
+# toward a dull rust the more strongly its wildland garrison is defended, as
+# a quick "how dangerous to claim" read at a glance.
+_UNCLAIMED_RGB = (64, 60, 46)
+_UNCLAIMED_DANGER_RGB = (92, 46, 40)
+_WILDLAND_DANGER_REF = 150.0   # wildland_strength that reads as "fully dangerous"
+
 
 def _biome_rgb(biome):
     return _BIOME_COLORS.get(biome, _NO_DATA_RGB)
@@ -116,9 +135,11 @@ def _climate_rgb(climate):
     return _CLIMATE_COLORS.get(climate, _NO_DATA_RGB)
 
 
-RIVER_COLOR = "#5fa8dc"
-_RIVER_RGB = _hex_to_rgb(RIVER_COLOR)
-_RIVER_SHADOW = "#101c26"     # dark casing drawn under every river
+# River cells are baked directly into the terrain raster (_precompute_colors,
+# same treatment as lake_cells), not drawn as a separate vector line on top —
+# a muted fresh-water blue, distinct from but close in tone to lake/ocean, so
+# a river reads as part of the terrain instead of a decal floating over it.
+_RIVER_RGB = (64, 112, 152)
 
 # Settlement marker styling (drawn as canvas shapes — no art assets).
 _SETTLE_STYLE = {
@@ -127,13 +148,31 @@ _SETTLE_STYLE = {
     "town":   {"fill": "#d9b98a", "outline": "#4a3a24", "r": 3},
 }
 _VILLAGE_STYLE = {"fill": "#c9a06a", "outline": "#4a3418", "r": 2}
-_ROAD_COLOR = "#8a6f4a"
-_TRADE_LAND_COLOR = "#d1a544"   # long-haul trade road — distinct gold from local dirt roads
-_TRADE_SEA_COLOR = "#bfe3f0"    # pale shipping-lane blue, dotted like a nautical chart
-# Moving caravan/ship markers — bright enough to stand out against the
-# (duller) static route line they travel along.
-_CARAVAN_STYLE = {"fill": "#fff3c4", "outline": "#5a4318", "r": 3}
-_SHIP_STYLE = {"fill": "#8fe3ff", "outline": "#154a5c", "r": 3}
+# Local roads (village/settlement network within a county — see
+# County.road_tier in app/world/worldgen.py): Dirt is the common case, brown;
+# Stone is reserved for wealthier counties, gray.
+_DIRT_ROAD_COLOR = "#8a6f4a"
+_STONE_ROAD_COLOR = "#9a9ba3"
+_TRADE_LAND_COLOR = "#7c5f26"   # long-haul trade road — dark bronze, recedes into the map
+_TRADE_SEA_COLOR = "#557c8c"    # dark shipping-lane blue, dotted like a nautical chart
+# A route currently carrying a caravan is redrawn on top in a bright,
+# saturated version of its color — thicker than the dim static line — so an
+# active trade route reads at a glance, not just its tiny marker.
+_ACTIVE_ROUTE_LAND_COLOR = "#ffcf5c"
+_ACTIVE_ROUTE_SEA_COLOR = "#a4ecff"
+# A land route still under construction (see app/world/trade.py's
+# TradeRouteProject) — pale gold, matching the castle-under-construction
+# marker's color, distinct from both the dim static line (not built yet)
+# and the bright active-caravan highlight (nothing can use it yet).
+_TRADE_ROUTE_CONSTRUCTION_COLOR = "#f2e9c9"
+# Moving caravan/ship markers — big, glowing (a dim halo behind a bright
+# core), so an active caravan is unmistakable even zoomed far out.
+_CARAVAN_STYLE = {"fill": "#fff3c4", "outline": "#5a4318", "r": 6, "glow": "#ffcf5c"}
+_SHIP_STYLE = {"fill": "#c8f5ff", "outline": "#154a5c", "r": 6, "glow": "#5fd0ff"}
+# Commander (app/world/commander.py) — a bright orchid diamond, deliberately
+# unlike any settlement/caravan color so the player's own unit never gets
+# confused with anything else on the map.
+_COMMANDER_STYLE = {"fill": "#e685ff", "outline": "#4a1a5c", "r": 7}
 # Above this many villages in a county, skip name labels (village view) so it
 # doesn't turn into unreadable text soup.
 _VILLAGE_LABEL_LIMIT = 24
@@ -157,12 +196,6 @@ def _format_resources(res):
     return " · ".join(f"{r} {_fmt_amount(res[r])}" for r in order if res[r])
 
 
-def _lerp_hex(c0, c1, t):
-    t = max(0.0, min(1.0, t))
-    r, g, b = _rgb(*(c0[j] + (c1[j] - c0[j]) * t for j in range(3)))
-    return f"#{r:02x}{g:02x}{b:02x}"
-
-
 class MapView(tk.Frame):
     def __init__(self, master, world, on_attack, on_regenerate, on_end_turn):
         super().__init__(master, bg=theme.BG)
@@ -175,12 +208,22 @@ class MapView(tk.Frame):
         self.zoom_county = None         # county we've zoomed into (village view)
         self.selected_settlement = None
         self.selected_village = None
+        self.selected_commander = None
+        self.commander_move_mode = None   # armed Commander awaiting a destination click
         self.mode = "political"
         self._img = None
         self._place = (0, 0, 1)         # vx0, vy0, scale
         self._base_img = None           # cached full-grid PIL image
+        self._fog_overlay_img = None    # cached fog mask ("L" image) — see _ensure_fog_overlay
+        self._fog_key = None
         self._base_key = None           # signature of what _base_img depicts
         self._anim_id = None
+
+        # Free camera (drag-pan / wheel-zoom): independent of the click-
+        # driven drill-down zoom (_start_zoom/_animate below), but writes
+        # the same self.view/self.view_target so both can coexist.
+        self._press_xy = None
+        self._dragged = False
         self._animating = False
 
         # Attack-target picking: when not None, we've zoomed to the shared
@@ -202,10 +245,22 @@ class MapView(tk.Frame):
         self._flash_id = None
         self._bottom_msg_after_id = None
 
+        # Resources gained/lost on the turn just ended, keyed by resource
+        # name (including "Gold"); shown alongside current totals in the
+        # resource bar until the next End Turn overwrites them.
+        self._resource_deltas = {}
+
+        self._build_resource_bar()
+
         self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
         self.canvas.pack(side="left", fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda e: self.render())
-        self.canvas.bind("<Button-1>", self._on_click)
+        # Free camera: press/drag/release (drag pans, a plain click still
+        # drills down/selects exactly as before) plus wheel-zoom.
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<MouseWheel>", self._on_wheel)
 
         self.bottom_msg = tk.Label(self, text="", bg="#0d1017", fg=theme.INK,
                                    font=("Segoe UI", 13, "bold"), padx=18, pady=10)
@@ -222,6 +277,8 @@ class MapView(tk.Frame):
         self.zoom_county = None
         self.selected_settlement = None
         self.selected_village = None
+        self.selected_commander = None
+        self.commander_move_mode = None
         self.attack_mode = None
         self._attack_enemy = None
         self._attack_frontier = []
@@ -234,12 +291,16 @@ class MapView(tk.Frame):
         self.view = [0.0, 0.0, world.w, world.h]
         self.view_target = list(self.view)
         self._base_img = self._base_key = None
+        self._fog_overlay_img = None
+        self._fog_key = object()   # never matches any real fog_version -> forces a rebuild
         self._precompute_colors()
         self._exit_ui()
         self.info.config(fg=theme.MUTED, text="Click a faction to inspect it.")
         for frame in (self.rel_frame, self.actions):
             for w in frame.winfo_children():
                 w.destroy()
+        self._resource_deltas = {}
+        self._update_resource_bar()
         self._update_turn_label()
         self.render()
 
@@ -247,12 +308,15 @@ class MapView(tk.Frame):
         """Recompute cached tile colors and panel text after the World's
         ownership data was mutated in place (e.g. a territory transfer),
         without resetting the camera/selection the way set_world() does."""
+        from app.world import vision
+        vision.recompute(self.world)
         self._precompute_colors()
         self._base_img = self._base_key = None
         if self.selected is not None:
             self._show_faction(self.selected)
         if self.selected_county is not None:
             self._show_county(self.selected_county)
+        self._update_resource_bar()
         self._update_turn_label()
         self.render()
 
@@ -304,30 +368,62 @@ class MapView(tk.Frame):
                     self._px_county[i] = self._px_county_hi[i] = lk
                     self._owner_flat[i] = o
                     self._county_flat[i] = cg[y][x]
+                elif (x, y) in wd.river_cells:
+                    # River surface: baked into the raster exactly like a
+                    # lake (flat tone, every mode, owner/county preserved
+                    # beneath) rather than drawn as a separate vector line on
+                    # top of everything — this is what makes it read as part
+                    # of the terrain instead of a decal, and it means fog of
+                    # war (which only ever composites over this raster)
+                    # covers rivers automatically, same as anything else.
+                    rv = _rgb(*_RIVER_RGB)
+                    self._px_pol[i] = self._px_pol_hi[i] = rv
+                    self._px_fert[i] = self._px_elev[i] = rv
+                    self._px_biome[i] = self._px_climate[i] = rv
+                    self._px_county[i] = self._px_county_hi[i] = rv
+                    self._owner_flat[i] = o
+                    self._county_flat[i] = cg[y][x]
                 else:
                     relief = (h - sea) / (1 - sea) if sea < 1 else 0
-                    base = _rgb(*_lighten(fcolors[o], 0.10 * relief))
+                    if o >= 0:
+                        base = _rgb(*_lighten(fcolors[o], 0.10 * relief))
+                    else:
+                        # UNCLAIMED — no faction color to draw from; a muted
+                        # neutral tone, darker/rustier where the wildland
+                        # garrison guarding it is stronger.
+                        cid_here = cg[y][x]
+                        strength = (wd.counties[cid_here].wildland_strength
+                                   if 0 <= cid_here < len(wd.counties) else 40)
+                        danger = max(0.0, min(1.0, strength / _WILDLAND_DANGER_REF))
+                        base = _rgb(*(_UNCLAIMED_RGB[j] + (_UNCLAIMED_DANGER_RGB[j]
+                                     - _UNCLAIMED_RGB[j]) * danger for j in range(3)))
+                        base = _rgb(*_lighten(base, 0.08 * relief))
 
-                    # coastline: any 4-neighbor is ocean or a lake, so every
-                    # landmass gets a dark outline against water, in any mode.
-                    coastal = False
+                    # water-adjacent: any 4-neighbor is ocean, a lake, or a
+                    # river — every such shoreline/riverbank cell gets the
+                    # same darkened "carved edge" treatment, in any mode, so
+                    # a river reads as cutting a real channel through the
+                    # landscape rather than floating over flat, unshaded
+                    # ground on either side.
+                    water_adjacent = False
                     for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
                         if 0 <= nx < wd.w and 0 <= ny < wd.h:
                             no = wd.owner[ny][nx]
-                            if no == OCEAN or (nx, ny) in wd.lake_cells:
-                                coastal = True
+                            if (no == OCEAN or (nx, ny) in wd.lake_cells
+                                    or (nx, ny) in wd.river_cells):
+                                water_adjacent = True
                                 break
 
                     fert_rgb = _fert_rgb(wd.fertility[y][x])
                     elev_rgb = _elev_rgb(relief)
-                    if coastal:
+                    if water_adjacent:
                         base = _rgb(*_shade(base, -0.8))
                         fert_rgb = _rgb(*_shade(fert_rgb, -0.8))
                         elev_rgb = _rgb(*_shade(elev_rgb, -0.8))
 
                     biome_rgb = _rgb(*_biome_rgb(wd.biome_grid[y][x]))
                     climate_rgb = _rgb(*_climate_rgb(wd.climate_grid[y][x]))
-                    if coastal:
+                    if water_adjacent:
                         biome_rgb = _rgb(*_shade(biome_rgb, -0.5))
                         climate_rgb = _rgb(*_shade(climate_rgb, -0.5))
 
@@ -341,10 +437,10 @@ class MapView(tk.Frame):
 
                     cid = cg[y][x]
                     self._county_flat[i] = cid
-                    shade = cshade[cid] if cid >= 0 else base
+                    shade = cshade[cid] if (cid >= 0 and cshade[cid] is not None) else base
                     # county border: any 4-neighbor in a different county, or
-                    # the coastline itself
-                    border = coastal
+                    # a water-adjacent (coastline/riverbank) edge
+                    border = water_adjacent
                     for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
                         if not (0 <= nx < wd.w and 0 <= ny < wd.h) or cg[ny][nx] != cid:
                             border = True
@@ -352,6 +448,56 @@ class MapView(tk.Frame):
                     self._px_county[i] = _rgb(*(_shade(shade, -0.5) if border else shade))
                     self._px_county_hi[i] = _rgb(*_lighten(shade, 0.45))
                 i += 1
+
+    # --- resource bar --------------------------------------------------------
+    def _build_resource_bar(self):
+        rb = tk.Frame(self, bg=theme.PANEL, width=190)
+        rb.pack(side="left", fill="y")
+        rb.pack_propagate(False)
+        self._resource_bar = rb
+
+        tk.Label(rb, text="RESOURCES", bg=theme.PANEL, fg=theme.MUTED,
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=12, pady=(14, 6))
+        self._resource_rows = tk.Frame(rb, bg=theme.PANEL)
+        self._resource_rows.pack(fill="both", expand=True, padx=12)
+
+    def _current_resource_snapshot(self):
+        """This turn's totals for the player faction: stockpiled resources
+        plus Gold, as one flat dict."""
+        player = self._player_faction()
+        if player is None:
+            return {}
+        snap = dict(player.stats.get("resources", {}))
+        snap["Gold"] = player.stats.get("gold", 0)
+        return snap
+
+    def _update_resource_bar(self):
+        for w in self._resource_rows.winfo_children():
+            w.destroy()
+        current = self._current_resource_snapshot()
+        if self._player_faction() is None:
+            tk.Label(self._resource_rows, text="No realm selected.",
+                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                     wraplength=160, justify="left").pack(anchor="w", pady=4)
+            return
+
+        order = ["Gold"] + sorted(
+            (r for r in current if r != "Gold"),
+            key=lambda r: (RESOURCES.get(r, {}).get("tier", 9), r))
+        for resource in order:
+            amount = current.get(resource, 0)
+            delta = self._resource_deltas.get(resource, 0)
+            row = tk.Frame(self._resource_rows, bg=theme.PANEL)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=resource, bg=theme.PANEL, fg=theme.INK,
+                     font=("Segoe UI", 9), anchor="w").pack(side="left")
+            if delta:
+                color = theme.GOOD if delta > 0 else theme.BAD
+                sign = "+" if delta > 0 else "-"
+                tk.Label(row, text=f"{sign}{_fmt_amount(abs(delta))}", bg=theme.PANEL,
+                         fg=color, font=("Segoe UI", 9, "bold")).pack(side="right")
+            tk.Label(row, text=_fmt_amount(amount), bg=theme.PANEL, fg=theme.MUTED,
+                     font=("Segoe UI", 9)).pack(side="right", padx=(0, 6))
 
     # --- panel -------------------------------------------------------------
     def _build_panel(self):
@@ -411,7 +557,11 @@ class MapView(tk.Frame):
         self.turn_lbl.config(text=f"Turn {self.world.turn} — {self.world.season}")
 
     def _on_end_turn(self):
+        before = self._current_resource_snapshot()
         self.on_end_turn()
+        after = self._current_resource_snapshot()
+        self._resource_deltas = {r: after.get(r, 0) - before.get(r, 0)
+                                  for r in set(before) | set(after)}
         self._report_trade_events()
         self.refresh()
 
@@ -459,6 +609,45 @@ class MapView(tk.Frame):
         player = self._player_faction()
         return player is not None and nation is player
 
+    def _fog_is_active(self):
+        """Whether fog currently gates what's shown. Applies at *every* zoom
+        level, not just the world view: with free camera pan/zoom, "zoomed
+        into your own county" no longer confines the camera to your own
+        territory — you can drag/scroll anywhere on the map while
+        zoom_faction stays set, so gating fog off at that level used to let
+        you pan out and see the whole map uncovered. Fog only ever hides
+        cells you haven't actually revealed regardless (your own territory
+        is always revealed by definition), so applying it unconditionally
+        costs nothing when looking at your own realm and correctly still
+        hides everything else. Computed fresh (not cached) so it's correct
+        even when called before render() has run for the current state,
+        e.g. mid-click."""
+        wd = self.world
+        return wd.player_faction_idx is not None and hasattr(wd, "fog")
+
+    def _cell_revealed(self, x, y):
+        """True if fog isn't currently gating the view, or this specific
+        cell has been revealed — used for point features (settlements)
+        where precise per-cell gating is more accurate than a per-nation
+        check (see _is_known, used instead for identity info like labels)."""
+        if not self._fog_is_active():
+            return True
+        wd = self.world
+        return bool(wd.fog[y * wd.w + x])
+
+    def _is_known(self, nation):
+        """True if `nation` is the player or the player has made contact
+        with it (fog of war has revealed at least one of its cells) — see
+        app/world/vision.py. True unconditionally in sandbox worlds with no
+        player faction, so fog gating is a no-op there."""
+        wd = self.world
+        if wd.player_faction_idx is None:
+            return True
+        if self._is_player(nation):
+            return True
+        idx = wd.factions.index(nation)
+        return idx in getattr(wd, "discovered_factions", ())
+
     def _zoom_is_foreign(self):
         """True while browsing a foreign nation's counties (diplomacy-only —
         no village drill-down, no ordinary management)."""
@@ -505,7 +694,8 @@ class MapView(tk.Frame):
         self.rel_header.config(text="RELATIONSHIPS")
         for w in self.rel_frame.winfo_children():
             w.destroy()
-        rels = self.world.world_map.relationships_of(nation.id)
+        rels = [r for r in self.world.world_map.relationships_of(nation.id)
+                if self._is_known(r["other"])]
         if not rels:
             tk.Label(self.rel_frame, text="Isolated — no bordering factions.",
                      bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT).pack(anchor="w")
@@ -592,6 +782,55 @@ class MapView(tk.Frame):
                               bg="#1f3a24", fg=theme.GOOD, activebackground=theme.ACCENT,
                               relief="flat", font=theme.FONT).pack(fill="x", pady=(8, 2))
 
+                self._show_trade_route_status(player, nation)
+
+    def _show_trade_route_status(self, player, nation):
+        """Land trade route status/action against `nation` (only reached
+        while relations aren't hostile — see _show_faction's caller): a
+        completed route, in-progress construction, a Propose button once
+        eligible, or why proposing isn't available yet. Sea lanes need no
+        UI — they open automatically once eligible (see
+        trade._capital_sea_path) and just show up on the map."""
+        wd = self.world
+        player_idx = wd.factions.index(player)
+        target_idx = wd.factions.index(nation)
+        key = frozenset((player_idx, target_idx))
+
+        if key in wd.trade_routes_by_pair:
+            tk.Label(self.actions, text="Trade route established.",
+                     bg=theme.PANEL, fg=theme.GOOD, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+            return
+
+        project = next((p for p in wd.trade_route_projects
+                        if frozenset((p.a_idx, p.b_idx)) == key), None)
+        if project is not None:
+            tk.Label(self.actions, text=f"Trade route under construction: "
+                     f"{project.built_cells}/{project.total_cells} cells",
+                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+            return
+
+        if not trade.eligible_to_trade(wd, player_idx, target_idx):
+            tk.Label(self.actions, text=f"Standing needs to reach "
+                     f"{diplomacy.TRADE_STANDING_THRESHOLD} before you can "
+                     "propose a trade route.",
+                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+            return
+
+        tk.Button(self.actions, text=f"Propose Trade Route with {nation.name}",
+                  command=lambda: self._do_propose_trade_route(player_idx, target_idx),
+                  bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                  relief="flat", font=theme.FONT).pack(fill="x", pady=(8, 2))
+
+    def _do_propose_trade_route(self, a_idx, b_idx):
+        msg = trade.start_trade_route(self.world, a_idx, b_idx)
+        self.show_bottom_message(msg)
+        if self.selected is self.world.factions[b_idx]:
+            self._show_faction(self.selected)
+        self.render()
+
     def _settle_counts(self, nation):
         """'2 cities · 3 castles · 5 towns' summary for a faction."""
         wd = self.world
@@ -602,6 +841,9 @@ class MapView(tk.Frame):
                 f"{counts['town']} towns")
 
     def _show_county(self, county):
+        if county.faction_idx < 0:
+            self._show_wildland_county(county)
+            return
         s = county.stats
         country = self.zoom_faction
         wd = self.world
@@ -650,14 +892,85 @@ class MapView(tk.Frame):
             project = next((p for p in wd.castle_projects if p.county_id == county.id), None)
             if project is not None:
                 note = " (half speed — road not yet finished)" if project.half_speed else ""
+                elapsed = project.total_turns - project.turns_left
                 tk.Label(self.actions, text=f"Castle under construction: "
-                         f"{round(project.progress_turns)}/{project.total_turns} turns{note}",
+                         f"{elapsed}/{project.total_turns} turns{note}",
                          bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
                          justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+            player = self._player_faction()
+            afford = construction.can_afford(player, construction.CASTLE_COST)
+            tk.Label(self.actions, text=f"Cost: {_format_resources(construction.CASTLE_COST)}\n"
+                     f"Build time: {construction.CASTLE_BUILD_TURNS} turns",
+                     bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
             tk.Button(self.actions, text="Build Castle...",
                       command=lambda cnty=county: self._begin_castle_placement(cnty),
                       bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                       relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+
+    def _show_wildland_county(self, county):
+        """UNCLAIMED land: wildland garrison strength, claim cost/time/odds,
+        and a Claim Territory button (or why claiming isn't available yet)."""
+        wd = self.world
+        player = self._player_faction()
+        total_cells = sum(county.biome_counts.values()) or 1
+        biome_line = ", ".join(
+            f"{biome.capitalize()} ({round(100 * count / total_cells)}%)"
+            for biome, count in sorted(county.biome_counts.items(),
+                                       key=lambda kv: -kv[1])) or "Unclassified"
+        lines = [f"{county.name}", "Unclaimed wildland",
+                 f"Area {county.stats['area']} · Fertility {county.stats['fertility']}%",
+                 f"Biome: {biome_line}",
+                 f"Wildland garrison strength: {county.wildland_strength}"]
+        if player is not None:
+            odds = expansion.claim_odds(player, county)
+            lines.append(f"Estimated success odds: {round(100 * odds)}%")
+        self.info.config(fg=theme.INK, text="\n".join(lines))
+
+        for w in self.actions.winfo_children():
+            w.destroy()
+        if player is None:
+            return
+        faction_idx = wd.factions.index(player)
+        if county not in expansion.claimable_frontier(wd, faction_idx):
+            tk.Label(self.actions, text="Not adjacent to your territory yet.",
+                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w")
+            return
+        if wd.turn < county.claim_cooldown_until_turn:
+            tk.Label(self.actions, text="The locals are still wary after "
+                     "repelling your last attempt — try again later.",
+                     bg=theme.PANEL, fg=theme.BAD, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w")
+            return
+        project = next((p for p in wd.claim_projects if p.county_id == county.id), None)
+        if project is not None:
+            elapsed = project.total_turns - project.turns_left
+            tk.Label(self.actions, text=f"Expansion under way: "
+                     f"{elapsed}/{project.total_turns} turns",
+                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+            return
+        cost = expansion.claim_cost(county)
+        afford = construction.can_afford(player, cost)
+        tk.Label(self.actions, text=f"Cost: {_format_resources(cost)}\n"
+                 f"Build time: {expansion.claim_turns(county)} turns",
+                 bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
+                 justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+        tk.Button(self.actions, text="Claim Territory",
+                  command=lambda cnty=county: self._do_claim(cnty),
+                  bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                  relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+
+    def _do_claim(self, county):
+        player = self._player_faction()
+        faction_idx = self.world.factions.index(player)
+        msg = expansion.start_claim(self.world, faction_idx, county)
+        self.show_bottom_message(msg)
+        self._base_key = None
+        if self.selected_county is county:
+            self._show_county(county)
+        self.render()
 
     def _show_settlement(self, st):
         wd = self.world
@@ -679,6 +992,57 @@ class MapView(tk.Frame):
                  f"Farms here contribute {v.farm_output} Grain per turn "
                  f"(before climate/season modifiers), scaled by local land "
                  f"fertility.")
+
+    def _show_commander(self, cmd):
+        """Panel for a selected Commander: position, current order, and
+        Move/Build Ship actions. A pure scout for now — no combat, so
+        there's nothing here about strength or risk."""
+        wd = self.world
+        lines = ["Commander", f"Position: ({cmd.pos[0]}, {cmd.pos[1]})",
+                 f"Ship: {'Yes' if cmd.has_ship else 'No'}"]
+        if cmd.ship_turns_left is not None:
+            lines.append(f"Building ship: {cmd.ship_turns_left} turns left")
+        elif cmd.path is not None:
+            remaining = len(cmd.path) - 1 - cmd.path_index
+            lines.append(f"Moving — {remaining} cells left")
+        else:
+            lines.append("Idle")
+        self.info.config(fg=theme.INK, text="\n".join(lines))
+
+        for w in self.actions.winfo_children():
+            w.destroy()
+        if cmd.ship_turns_left is None:
+            tk.Button(self.actions, text="Move",
+                      command=lambda: self._begin_commander_move(cmd),
+                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                      relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+            if commander.can_build_ship(wd, cmd):
+                tk.Button(self.actions, text="Build Ship",
+                          command=lambda: self._do_build_ship(cmd),
+                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                          relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+
+    def _begin_commander_move(self, cmd):
+        self.commander_move_mode = cmd
+        self.info.config(fg=theme.MUTED,
+                         text="Click a spot on the map to send the "
+                              "commander there.")
+        for w in self.actions.winfo_children():
+            w.destroy()
+        tk.Button(self.actions, text="Cancel",
+                  command=lambda: self._cancel_commander_move(cmd),
+                  bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                  relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+
+    def _cancel_commander_move(self, cmd):
+        self.commander_move_mode = None
+        self._show_commander(cmd)
+
+    def _do_build_ship(self, cmd):
+        msg = commander.start_ship(self.world, cmd)
+        self.show_bottom_message(msg)
+        self._show_commander(cmd)
+        self.render()
 
     # --- zoom-level enter/exit ----------------------------------------------
     # Three levels: World -> Country (shows counties) -> County (shows
@@ -826,7 +1190,9 @@ class MapView(tk.Frame):
         self.building_mode = county
         self.info.config(fg=theme.MUTED,
                          text=f"{county.name}\nClick a spot in this county to "
-                              "begin building a castle there.")
+                              "begin building a castle there.\n\n"
+                              f"Cost: {_format_resources(construction.CASTLE_COST)}\n"
+                              f"Build time: {construction.CASTLE_BUILD_TURNS} turns")
         for w in self.actions.winfo_children():
             w.destroy()
         tk.Button(self.actions, text="Cancel", command=self._cancel_castle_placement,
@@ -881,6 +1247,65 @@ class MapView(tk.Frame):
             self.after_cancel(self._bottom_msg_after_id)
             self._bottom_msg_after_id = None
         self.bottom_msg.place_forget()
+
+    # --- free camera: drag-pan / wheel-zoom ---------------------------------
+    def _cancel_animation(self):
+        """Manual camera control always wins over an in-flight click-drill
+        ease — called before any drag/wheel mutates the view directly."""
+        if self._anim_id is not None:
+            self.after_cancel(self._anim_id)
+            self._anim_id = None
+        self._animating = False
+
+    def _on_press(self, event):
+        self._cancel_animation()
+        self._press_xy = (event.x, event.y)
+        self._dragged = False
+
+    def _on_drag(self, event):
+        if self._press_xy is None:
+            return
+        px, py = self._press_xy
+        dx, dy = event.x - px, event.y - py
+        if not self._dragged and dx * dx + dy * dy < _DRAG_THRESHOLD_PX ** 2:
+            return
+        self._dragged = True
+        _, _, scale = self._place
+        wx, wy = dx / scale, dy / scale
+        self.view[0] -= wx
+        self.view[2] -= wx
+        self.view[1] -= wy
+        self.view[3] -= wy
+        self.view_target = list(self.view)
+        self._press_xy = (event.x, event.y)
+        self.render()
+
+    def _on_release(self, event):
+        was_drag = self._dragged
+        self._press_xy = None
+        self._dragged = False
+        if not was_drag:
+            self._on_click(event)
+
+    def _on_wheel(self, event):
+        self._cancel_animation()
+        vx0, vy0, scale = self._place
+        wx, wy = vx0 + event.x / scale, vy0 + event.y / scale
+        factor = _ZOOM_STEP if event.delta > 0 else 1.0 / _ZOOM_STEP
+
+        x0, y0, x1, y1 = self.view
+        w = (x1 - x0) * factor
+        h = (y1 - y0) * factor
+        max_span = max(self.world.w, self.world.h) * 1.2
+        w = max(_MIN_ZOOM_CELLS, min(max_span, w))
+        h = max(_MIN_ZOOM_CELLS, min(max_span, h))
+        fx = (wx - x0) / (x1 - x0) if x1 != x0 else 0.5
+        fy = (wy - y0) / (y1 - y0) if y1 != y0 else 0.5
+        nx0, ny0 = wx - fx * w, wy - fy * h
+
+        self.view = [nx0, ny0, nx0 + w, ny0 + h]
+        self.view_target = list(self.view)
+        self.render()
 
     # --- zoom animation ----------------------------------------------------
     def _start_zoom(self, target):
@@ -937,11 +1362,42 @@ class MapView(tk.Frame):
                 self.render()
             return
 
+        if self.commander_move_mode is not None:
+            # --- COMMANDER MOVE: next click of any kind is the destination -
+            cmd = self.commander_move_mode
+            self.commander_move_mode = None
+            msg = commander.set_move_order(wd, cmd, (gx, gy))
+            self.show_bottom_message(msg)
+            if self.selected_commander is cmd:
+                self._show_commander(cmd)
+            self.render()
+            return
+
+        # --- COMMANDER SELECTION: click-radius test against every one of
+        # the player's own commanders, checked before normal county/faction
+        # selection so a commander is selectable identically at any zoom
+        # level rather than duplicating this in all three click branches.
+        player = self._player_faction()
+        if player is not None:
+            player_idx = wd.factions.index(player)
+            for cmd in wd.commanders:
+                if cmd.faction_idx != player_idx:
+                    continue
+                csx = (cmd.pos[0] + 0.5 - vx0) * scale
+                csy = (cmd.pos[1] + 0.5 - vy0) * scale
+                if (csx - event.x) ** 2 + (csy - event.y) ** 2 <= 10 ** 2:
+                    self.selected_commander = cmd
+                    self._show_commander(cmd)
+                    self.render()
+                    return
+
         if self.zoom_faction is None:
             # --- LEVEL 0: world view -------------------------------------
             o = wd.owner[gy][gx]
-            if o == OCEAN:
+            if o < 0:            # OCEAN or UNCLAIMED — no faction to select here
                 return
+            if not self._cell_revealed(gx, gy):
+                return           # fogged — nothing has been "found" here yet
             faction = wd.factions[o]
             if faction is self.selected:          # 2nd click -> zoom in / act
                 player = self._player_faction()
@@ -974,10 +1430,24 @@ class MapView(tk.Frame):
                     return
             self.selected_settlement = None
             cid = wd.county_grid[gy][gx]
-            if cid < 0 or wd.counties[cid].faction_idx != zf:
+            if cid < 0:
                 self._exit_county_view()          # clicked away -> zoom out
                 return
             county = wd.counties[cid]
+            if county.faction_idx != zf:
+                # UNCLAIMED land adjacent to your own realm -> select it
+                # (shows wildland info + a Claim button); anything else
+                # (foreign-owned land, or unclaimed land while browsing a
+                # foreign realm) just zooms back out as before.
+                is_own = self.zoom_faction is self._player_faction()
+                if is_own and county.faction_idx < 0:
+                    self.selected_county = county
+                    self._base_key = None
+                    self._show_county(county)
+                    self.render()
+                else:
+                    self._exit_county_view()
+                return
             # Foreign browsing stops at the county level (diplomacy actions
             # only) — no drilling into a foreign nation's villages.
             if not self._zoom_is_foreign() and county is self.selected_county:
@@ -1056,6 +1526,24 @@ class MapView(tk.Frame):
         self._base_img = img
         self._base_key = key
 
+    def _ensure_fog_overlay(self):
+        """Rebuild the cached fog mask ("L" image, 255=hidden/0=revealed)
+        only when world.fog_version changed since last time — mirrors
+        _ensure_base's cache-key pattern. None when there's no player
+        faction (fog isn't tracked at all in that case) or nothing's
+        hidden yet."""
+        wd = self.world
+        key = getattr(wd, "fog_version", None)
+        if key == self._fog_key:
+            return
+        if wd.player_faction_idx is None or not hasattr(wd, "fog"):
+            self._fog_overlay_img = None
+        else:
+            from app.world.vision import fog_mask_bytes
+            self._fog_overlay_img = Image.frombytes(
+                "L", (wd.w, wd.h), fog_mask_bytes(wd))
+        self._fog_key = key
+
     @staticmethod
     def _fit_aspect(rect, aspect):
         x0, y0, x1, y1 = rect
@@ -1076,6 +1564,8 @@ class MapView(tk.Frame):
             return
 
         self._ensure_base()
+        self._ensure_fog_overlay()
+        fog_active = self._fog_is_active() and self._fog_overlay_img is not None
         vx0, vy0, vx1, vy1 = self._fit_aspect(self.view, cw / ch)
         scale = cw / (vx1 - vx0)
         self._place = (vx0, vy0, scale)
@@ -1085,6 +1575,11 @@ class MapView(tk.Frame):
         bx1, by1 = min(wd.w, int(math.ceil(vx1))), min(wd.h, int(math.ceil(vy1)))
         if bx1 > bx0 and by1 > by0:
             crop = self._base_img.crop((bx0, by0, bx1, by1))
+            if fog_active:
+                fog_crop = self._fog_overlay_img.crop((bx0, by0, bx1, by1))
+                if fog_crop.getbbox() is not None:   # skip if fully revealed here
+                    dark = Image.new("RGB", crop.size, _FOG_HIDDEN_RGB)
+                    crop = Image.composite(dark, crop, fog_crop)
             tw = max(1, round((bx1 - bx0) * scale))
             th = max(1, round((by1 - by0) * scale))
             self._img = ImageTk.PhotoImage(crop.resize((tw, th), Image.NEAREST))
@@ -1094,91 +1589,18 @@ class MapView(tk.Frame):
         def screen(gx, gy):
             return ((gx - vx0) * scale, (gy - vy0) * scale)
 
-        # Rivers: width grows with flow; the tail fades into whatever water it
-        # actually empties into (ocean or lake — they're different colors) for
-        # a seamless mouth. The fade re-draws shrinking *suffixes* of the same
-        # point list, each with smooth=True like the base line, so the curve
-        # traced by the fade matches the base line's curve exactly (no seam) —
-        # unlike straight overdraw segments, which visibly kink against a
-        # smoothed base line wherever the river bends near its mouth.
-        #
-        # Full detail (shadow casing + gradient mouth) is ~6 canvas items per
-        # river; with 100+ rivers that's ~700-900 items and ~30-40ms per
-        # redraw — fine for a one-off click, but during the 60fps zoom
-        # animation render() runs every 16ms, so that cost alone tanks the
-        # framerate. While animating, skip the shadow and fade passes and
-        # draw just the plain colored line (1 item/river) — full detail comes
-        # back the instant the animation settles.
-        #
-        # (Caching these as persistent canvas items and repositioning them
-        # via coords()/itemconfigure() instead of recreating was tried and
-        # measured *slower*, not faster: Tk's canvas has to repaint almost
-        # the same screen area either way once the whole view rescales every
-        # frame — coords() only pays off for small local moves — and it adds
-        # a second Tcl call per item (coords + itemconfigure) versus one
-        # (create_line). So: plain create_line, gated by the LOD flag.)
-        river_width = lambda flow: max(1.0, scale * (0.35 + 0.18 * min(3.0, math.log10(flow + 1))))
-        full_detail = not self._animating
-
-        if full_detail:
-            # Pass 1: a dark casing under every river first, so they read as a
-            # carved channel (not a flat line on top of the terrain) and,
-            # where two different rivers run close or cross, their mouth-fade
-            # colors meet over a shared dark bed instead of clipping straight
-            # into each other.
-            for r in wd.rivers:
-                cells = r["cells"]
-                if len(cells) < 2:
-                    continue
-                w = river_width(r["flow"])
-                pts = []
-                for gx, gy in cells:
-                    pts.extend(screen(gx + 0.5, gy + 0.5))
-                c.create_line(*pts, fill=_RIVER_SHADOW, width=w + max(1.5, scale * 0.28),
-                              joinstyle="round", capstyle="round", smooth=True)
-
-        for r in wd.rivers:
-            cells = r["cells"]
-            n = len(cells)
-            if n < 2:
-                continue
-
-            width = river_width(r["flow"])
-            pts = []
-            for gx, gy in cells:
-                pts.extend(screen(gx + 0.5, gy + 0.5))
-            c.create_line(*pts, fill=RIVER_COLOR, width=width, joinstyle="round",
-                          capstyle="round", smooth=True)
-
-            if not full_detail:
-                continue
-
-            mx, my = cells[-1]
-            if wd.owner[my][mx] == OCEAN:
-                dest_rgb = _OCEAN_SHALLOW
-            elif (mx, my) in wd.lake_cells:
-                dest_rgb = _LAKE_RGB
-            else:
-                dest_rgb = _RIVER_RGB    # never reached water; don't fade
-
-            fade_n = min(n - 1, 4)
-            for k in range(fade_n, 0, -1):
-                tail = cells[max(0, n - k - 1):]
-                if len(tail) < 2:
-                    continue
-                blend = 1.0 - (k - 1) / fade_n
-                tpts = []
-                for gx, gy in tail:
-                    tpts.extend(screen(gx + 0.5, gy + 0.5))
-                c.create_line(*tpts, fill=_lerp_hex(_RIVER_RGB, dest_rgb, blend),
-                              width=width, capstyle="round", joinstyle="round",
-                              smooth=True)
+        # Rivers are baked into the terrain raster itself (_precompute_colors,
+        # same as lake_cells) rather than drawn here as a separate vector
+        # overlay — see that method for why. No per-frame river drawing
+        # needed at all.
 
         # Relationship links (world view, selected faction only).
         if self.zoom_faction is None and self.selected:
             ax, ay = screen(self.selected.center[0] * wd.w,
                             self.selected.center[1] * wd.h)
             for rel in wd.world_map.relationships_of(self.selected.id):
+                if not self._is_known(rel["other"]):
+                    continue
                 bx, by = screen(rel["other"].center[0] * wd.w,
                                 rel["other"].center[1] * wd.h)
                 width = 1 if rel["stance"] == Stance.NEUTRAL else 2
@@ -1187,6 +1609,7 @@ class MapView(tk.Frame):
                               width=width)
 
         self._draw_trade_routes(c, screen)
+        self._draw_trade_route_construction(c, screen)
         self._draw_trade_caravans(c, screen)
         self._draw_roads(c, screen)
         self._draw_construction(c, screen)
@@ -1194,7 +1617,34 @@ class MapView(tk.Frame):
         self._draw_villages(c, screen)
         self._draw_labels(c, screen)
         self._draw_attack_targets(c, screen)
+        self._draw_commanders(c, screen)
         self._draw_flash(c, screen)
+
+    def _draw_commanders(self, c, screen):
+        """Commander(s) (app/world/commander.py) — a distinct diamond
+        marker, shown at every zoom level since it's a single mobile unit
+        rather than something tied to one county, plus a thin dashed
+        preview of its queued path (if any) so a move order is visible at a
+        glance."""
+        wd = self.world
+        style = _COMMANDER_STYLE
+        r = style["r"]
+        for cmd in wd.commanders:
+            if cmd.path is not None:
+                remaining_path = cmd.path[cmd.path_index:]
+                if len(remaining_path) >= 2:
+                    pts = []
+                    for gx, gy in remaining_path:
+                        pts.extend(screen(gx + 0.5, gy + 0.5))
+                    c.create_line(*pts, fill=style["fill"], width=1.5,
+                                  dash=(3, 3), capstyle="round", smooth=True)
+
+            x, y = screen(cmd.pos[0] + 0.5, cmd.pos[1] + 0.5)
+            if cmd is self.selected_commander:
+                c.create_oval(x - r - 3, y - r - 3, x + r + 3, y + r + 3,
+                              outline="#ffffff", width=2)
+            c.create_polygon(x, y - r, x + r, y, x, y + r, x - r, y,
+                             fill=style["fill"], outline=style["outline"], width=1.5)
 
     def _draw_settlements(self, c, screen):
         """Markers: city = circle, castle = triangle, town = square. The world
@@ -1202,10 +1652,12 @@ class MapView(tk.Frame):
         settlement of the zoomed faction, with names."""
         wd = self.world
         if self.zoom_faction is not None:
-            sids = self.zoom_faction.meta.get("settlements", [])
+            sids = [sid for sid in self.zoom_faction.meta.get("settlements", [])
+                    if self._cell_revealed(*wd.settlements[sid].pos)]
             show_names = True
         else:
-            sids = [s.id for s in wd.settlements if s.kind == "city"]
+            sids = [s.id for s in wd.settlements if s.kind == "city"
+                    and self._cell_revealed(*s.pos)]
             show_names = False
 
         for sid in sids:
@@ -1255,22 +1707,65 @@ class MapView(tk.Frame):
                               smooth=True)
 
     def _draw_trade_caravans(self, c, screen):
-        """Very basic moving markers for active trade caravans (land) and
-        ships (sea) — a small square/triangle at the caravan's current
-        interpolated position along its route. No animation between turns;
-        position only changes when render() runs again after End Turn."""
+        """Moving markers for active trade caravans (land) and ships (sea) —
+        a glowing marker at the caravan's current interpolated position,
+        with the *entire route it's currently on* redrawn in a bright color
+        on top of the dim static line, so an active trade route is obvious
+        at a glance and not just its small marker. No animation between
+        turns; position only changes when render() runs again after End Turn."""
+        width = max(1.0, self._place[2] * 0.22)
+
+        # Highlight every route a caravan is currently traveling, before
+        # drawing any markers on top of them.
+        for caravan in self.world.trade_caravans:
+            pts = []
+            for gx, gy in caravan.path:
+                pts.extend(screen(gx + 0.5, gy + 0.5))
+            if len(pts) < 4:
+                continue
+            if caravan.kind == "sea":
+                c.create_line(*pts, fill=_ACTIVE_ROUTE_SEA_COLOR,
+                              width=max(1.0, width * 0.85), capstyle="round",
+                              joinstyle="round", dash=(2, 3), smooth=True)
+            else:
+                c.create_line(*pts, fill=_ACTIVE_ROUTE_LAND_COLOR,
+                              width=width * 1.3, capstyle="round",
+                              joinstyle="round", dash=(9, 3), smooth=True)
+
         for caravan in self.world.trade_caravans:
             x, y = screen(*[v + 0.5 for v in caravan.pos])
+            style = _SHIP_STYLE if caravan.kind == "sea" else _CARAVAN_STYLE
+            r = style["r"]
+            # glow: a couple of soft, oversized rings behind the solid
+            # marker (canvas shapes are opaque, so the "glow" is faked with
+            # progressively larger/dimmer-colored circles, not real alpha).
+            c.create_oval(x - r * 2.4, y - r * 2.4, x + r * 2.4, y + r * 2.4,
+                          fill="", outline=style["glow"], width=2)
+            c.create_oval(x - r * 1.6, y - r * 1.6, x + r * 1.6, y + r * 1.6,
+                          fill=style["glow"], outline="")
             if caravan.kind == "sea":
-                style = _SHIP_STYLE
-                r = style["r"]
                 c.create_polygon(x, y - r, x + r, y + r, x - r, y + r,
-                                 fill=style["fill"], outline=style["outline"], width=1)
+                                 fill=style["fill"], outline=style["outline"], width=2)
             else:
-                style = _CARAVAN_STYLE
-                r = style["r"]
                 c.create_rectangle(x - r, y - r, x + r, y + r,
-                                   fill=style["fill"], outline=style["outline"], width=1)
+                                   fill=style["fill"], outline=style["outline"], width=2)
+
+    def _draw_trade_route_construction(self, c, screen):
+        """Two growing dashed segments — one from each capital — for every
+        land trade route currently under construction, meeting in the
+        middle as both sides finish (see app/world/trade.py's
+        TradeRouteProject.built_segments)."""
+        wd = self.world
+        width = max(1.0, self._place[2] * 0.18)
+        for proj in wd.trade_route_projects:
+            for seg in proj.built_segments:
+                if len(seg) < 2:
+                    continue
+                pts = []
+                for gx, gy in seg:
+                    pts.extend(screen(gx + 0.5, gy + 0.5))
+                c.create_line(*pts, fill=_TRADE_ROUTE_CONSTRUCTION_COLOR, width=width,
+                              capstyle="round", joinstyle="round", dash=(3, 5), smooth=True)
 
     def _draw_construction(self, c, screen):
         """A growing dashed road (only the portion actually built so far —
@@ -1285,7 +1780,7 @@ class MapView(tk.Frame):
             pts = []
             for gx, gy in cells:
                 pts.extend(screen(gx + 0.5, gy + 0.5))
-            c.create_line(*pts, fill=_ROAD_COLOR, width=width, capstyle="round",
+            c.create_line(*pts, fill=_DIRT_ROAD_COLOR, width=width, capstyle="round",
                           dash=(4, 3), smooth=True)
 
         for castle in wd.castle_projects:
@@ -1299,17 +1794,22 @@ class MapView(tk.Frame):
                          fill="#f2e9c9", font=("Segoe UI", 7))
 
     def _draw_roads(self, c, screen):
-        """Simple straight dirt-road segments linking villages (and the
-        county's main settlement, as a hub) — only shown in village view."""
+        """Straight road segments linking every village and settlement in
+        the county (an MST — see _place_villages_for_county) — only shown in
+        village view. Rendered gray/solid for a wealthy county's Stone
+        roads, brown/dashed for a poorer county's Dirt roads."""
         if self.zoom_county is None:
             return
         segs = self.world.roads_by_county.get(self.zoom_county.id, [])
         width = max(1.0, self._place[2] * 0.18)
+        is_stone = getattr(self.zoom_county, "road_tier", "dirt") == "stone"
+        color = _STONE_ROAD_COLOR if is_stone else _DIRT_ROAD_COLOR
+        dash = None if is_stone else (4, 3)
         for (ax, ay), (bx, by) in segs:
             x0, y0 = screen(ax + 0.5, ay + 0.5)
             x1, y1 = screen(bx + 0.5, by + 0.5)
-            c.create_line(x0, y0, x1, y1, fill=_ROAD_COLOR, width=width,
-                          capstyle="round", dash=(4, 3))
+            c.create_line(x0, y0, x1, y1, fill=color, width=width,
+                          capstyle="round", dash=dash)
 
     def _draw_villages(self, c, screen):
         """Small dots for villages — only shown in village view. Names are
@@ -1340,10 +1840,14 @@ class MapView(tk.Frame):
         if self.zoom_county is not None:
             return   # village view: county/faction name labels aren't useful here
         if self.zoom_faction is not None:
-            items = [(wd.counties[cid].name, wd.counties[cid].center)
-                     for cid in self.zoom_faction.meta.get("counties", [])]
+            items = []
+            for cid in self.zoom_faction.meta.get("counties", []):
+                county = wd.counties[cid]
+                cx, cy = int(county.center[0] * wd.w), int(county.center[1] * wd.h)
+                if self._cell_revealed(cx, cy):
+                    items.append((county.name, county.center))
         else:
-            items = [(f.name, f.center) for f in wd.factions]
+            items = [(f.name, f.center) for f in wd.factions if self._is_known(f)]
         for name, center in items:
             lx, ly = screen(center[0] * wd.w, center[1] * wd.h)
             c.create_text(lx + 1, ly + 1, text=name, fill="#000000", font=_LABEL_FONT)

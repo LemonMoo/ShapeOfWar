@@ -222,6 +222,8 @@ def seed_initial_stockpiles(world):
         nation.stats["resources"] = {}
         nation.stats["gold"] = 0
     for county in world.counties:
+        if county.faction_idx < 0:      # UNCLAIMED — no faction to seed
+            continue
         nation = world.factions[county.faction_idx]
         county.resources = compute_county_yield(county, world.season)
         res = nation.stats["resources"]
@@ -272,10 +274,28 @@ def advance_turn(world):
     # messages (see map_view.py) without resources.py needing to know
     # anything about panels/banners.
     from app.world import trade
+    trade.advance_trade_route_projects(world)   # land routes under construction
     events = trade.advance_caravans(world)
     events += trade.run_trade_ai(world)
+    events += trade.run_trade_route_ai(world)   # AI proposes new routes
     world.trade_events = events
 
     # Player-built castles + their connecting roads (app/world/construction.py).
     from app.world import construction
     construction.advance_projects(world)
+
+    # Progressive expansion: claims-in-progress on UNCLAIMED land
+    # (app/world/expansion.py).
+    from app.world import expansion
+    expansion.advance_claims(world)
+
+    # Commanders: walk any active move order, count down ship construction
+    # (app/world/commander.py) — before vision.recompute so this turn's
+    # movement is reflected in this turn's fog reveal, not one turn late.
+    from app.world import commander
+    commander.advance_commanders(world)
+
+    # Fog of war: reveal whatever's now in range as territory changes hands
+    # (app/world/vision.py).
+    from app.world import vision
+    vision.recompute(world)

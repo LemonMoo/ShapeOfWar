@@ -17,7 +17,7 @@ import random
 from collections import deque, defaultdict
 
 from app.world.nation import Nation
-from app.world.world_map import WorldMap, Stance
+from app.world.world_map import WorldMap
 from app.world.lexicon import (SPECIES, make_faction_namer, make_county_namer,
                                make_settlement_namer)
 
@@ -117,6 +117,18 @@ class County:
         self.settle_proximity = 0.5
         self.village_grain_base = 0
         self.resources = {}
+        # Local road network tier ("dirt" or "stone"), decided once from this
+        # county's wealth (land value + resources harvested) when its roads
+        # are built — see _compute_county_wealth/_place_villages_for_county.
+        self.road_tier = "dirt"
+        # Progressive expansion (see app/world/expansion.py): garrison rating
+        # for UNCLAIMED land (irrelevant once claimed), whether this county's
+        # settlements/villages have been generated yet (False for every
+        # UNCLAIMED county until claimed), and a claim-retry cooldown after a
+        # failed attempt.
+        self.wildland_strength = 0
+        self.settlements_generated = False
+        self.claim_cooldown_until_turn = 0
 
     def finalize(self, world):
         n = max(1, len(self.cells))
@@ -142,60 +154,48 @@ class County:
                                   if climate_counts else "temperate")
 
 
-def _generate_counties(world, rng, base_cost):
-    """Bisect every faction into counties (min 2, scaled by size). Seeds are
-    spaced within the faction, then grown with the same river-aware weighted
-    flooding as countries, so county borders also follow rivers."""
-    cells_by_fac = defaultdict(list)
-    for y in range(world.h):
-        for x in range(world.w):
-            o = world.owner[y][x]
-            if o != OCEAN:
-                cells_by_fac[o].append((x, y))
+def _generate_all_counties(world, rng, base_cost, land_cells):
+    """Bisect the *entire* landmass into counties before any faction owns
+    anything — county geometry becomes the fixed unit of territory that
+    ownership (starting footholds, later claims/conquests) maps onto,
+    instead of being carved out of land a faction already owns. Seeds are
+    spaced across all land, then grown with the same river-aware weighted
+    flooding used for country borders, so county borders follow rivers too.
+    Every county starts UNCLAIMED; callers assign faction_idx afterward."""
+    n_counties = max(1, len(land_cells) // 200)
+    min_d = max(3.0, (len(land_cells) / n_counties) ** 0.5 * 0.7)
+    shuffled = land_cells[:]
+    rng.shuffle(shuffled)
+    seeds = []
+    for p in shuffled:
+        if len(seeds) >= n_counties:
+            break
+        if all((p[0] - s[0]) ** 2 + (p[1] - s[1]) ** 2 >= min_d * min_d
+               for s in seeds):
+            seeds.append(p)
+    if not seeds:
+        seeds = [land_cells[0]]
+
+    landset = set(land_cells)
+    assign = _grow_weighted(world, landset, seeds, base_cost, _COUNTY_RIVER_PEN)
+    for p in land_cells:                # disconnected bits -> nearest seed
+        if p not in assign:
+            assign[p] = min(range(len(seeds)),
+                            key=lambda i: (p[0] - seeds[i][0]) ** 2
+                            + (p[1] - seeds[i][1]) ** 2)
 
     namer = make_county_namer(rng)
-    for fac_idx, cells in cells_by_fac.items():
-        n_counties = max(2, min(10, len(cells) // 200))
-        min_d = max(3.0, (len(cells) / n_counties) ** 0.5 * 0.7)
-        shuffled = cells[:]
-        rng.shuffle(shuffled)
-        seeds = []
-        for p in shuffled:
-            if len(seeds) >= n_counties:
-                break
-            if all((p[0] - s[0]) ** 2 + (p[1] - s[1]) ** 2 >= min_d * min_d
-                   for s in seeds):
-                seeds.append(p)
-        if not seeds:
-            seeds = [cells[0]]
+    objs = [County(i, UNCLAIMED, namer()) for i in range(len(seeds))]
+    for (x, y), i in assign.items():
+        world.county_grid[y][x] = i
+        objs[i].cells.append((x, y))
+    for cobj in objs:
+        cobj.finalize(world)
+        world.counties.append(cobj)
 
-        facset = set(cells)
-        assign = _grow_weighted(world, facset, seeds, base_cost, _COUNTY_RIVER_PEN)
-        for p in cells:                    # disconnected bits -> nearest seed
-            if p not in assign:
-                assign[p] = min(range(len(seeds)),
-                                key=lambda i: (p[0] - seeds[i][0]) ** 2
-                                + (p[1] - seeds[i][1]) ** 2)
-
-        species = world.factions[fac_idx].meta["species"]
-        base = len(world.counties)
-        objs = [County(base + i, fac_idx, namer(species)) for i in range(len(seeds))]
-        for (x, y), i in assign.items():
-            world.county_grid[y][x] = base + i
-            objs[i].cells.append((x, y))
-        ids = []
-        for cobj in objs:
-            cobj.finalize(world)
-            world.counties.append(cobj)
-            ids.append(cobj.id)
-        world.factions[fac_idx].meta["counties"] = ids
-        # faction bounding box (for zooming), from all its cells
-        xs = [p[0] for p in cells]
-        ys = [p[1] for p in cells]
-        world.factions[fac_idx].meta["bbox"] = (min(xs), min(ys),
-                                                 max(xs) + 1, max(ys) + 1)
 
 OCEAN = -1
+UNCLAIMED = -2   # land not yet claimed by any faction — see _assign_starting_footholds
 
 # Fertility weighting — how much each factor contributes (should sum to 1).
 _FERT_MOISTURE = 0.40     # rainfall (noise layer)
@@ -306,20 +306,90 @@ def _grow_weighted(world, cellset, seeds, base_cost, river_pen):
     return owner
 
 
-def _assign_territories(world, land, capitals, base_cost):
-    """Grow each capital's territory with river-aware weighted flooding, so
-    country borders wander with the noise and snap onto rivers where present."""
-    w, h = world.w, world.h
-    landset = {(x, y) for y in range(h) for x in range(w) if land[y][x]}
-    owner = _grow_weighted(world, landset, capitals, base_cost, _COUNTRY_RIVER_PEN)
-    for (x, y), i in owner.items():
-        world.owner[y][x] = i
-    # any land unreached (islands) -> nearest capital by straight-line distance
-    for x, y in landset:
-        if world.owner[y][x] == OCEAN:
-            world.owner[y][x] = min(
-                range(len(capitals)),
-                key=lambda k: (x - capitals[k][0]) ** 2 + (y - capitals[k][1]) ** 2)
+# Progressive expansion: how strongly an unclaimed county's neutral garrison
+# scales with distance from the nearest capital (weak near everyone's start,
+# so early expansion is fast; strong deep in the interior, so it takes a
+# built-up military to reach) and with the land's own fertility (better land
+# is defended harder) — plus a little jitter so it's not perfectly uniform.
+WILDLAND_BASE = 20
+WILDLAND_DIST_SCALE = 0.6
+WILDLAND_FERT_BONUS = 15
+WILDLAND_JITTER = 0.15
+MIN_FOOTHOLD_CELLS = 120   # every faction starts owning at least this many cells
+
+
+def _seed_wildland_strength(world, rng, capitals):
+    """Rate every county's neutral-garrison strength before any faction
+    claims anything — see the WILDLAND_* constants above."""
+    for county in world.counties:
+        cx, cy = county.center[0] * world.w, county.center[1] * world.h
+        dist = min(math.hypot(cx - px, cy - py) for px, py in capitals)
+        fert = county.stats.get("fertility", 50) / 100.0
+        base = (WILDLAND_BASE + WILDLAND_DIST_SCALE * dist
+                + WILDLAND_FERT_BONUS * fert)
+        jitter = 1.0 + rng.uniform(-WILDLAND_JITTER, WILDLAND_JITTER)
+        county.wildland_strength = max(5, round(base * jitter))
+
+
+def _adjacent_county_ids(world, county):
+    """County ids sharing a cell edge with `county` (4-neighbor)."""
+    ids = set()
+    w, h, cg = world.w, world.h, world.county_grid
+    for x, y in county.cells:
+        for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            if 0 <= nx < w and 0 <= ny < h:
+                cid = cg[ny][nx]
+                if cid >= 0 and cid != county.id:
+                    ids.add(cid)
+    return ids
+
+
+def _nearest_unclaimed_county(world, pos):
+    """Fallback for the rare case (tiny test maps, unlucky capital spacing)
+    where a capital's home county is already claimed by another faction:
+    the closest still-UNCLAIMED county by straight-line center distance."""
+    x, y = pos
+    best, best_d = None, 1e18
+    for county in world.counties:
+        if county.faction_idx >= 0:
+            continue
+        cx, cy = county.center[0] * world.w, county.center[1] * world.h
+        d = (cx - x) ** 2 + (cy - y) ** 2
+        if d < best_d:
+            best_d, best = d, county.id
+    return best
+
+
+def _assign_starting_footholds(world, capitals, min_cells=MIN_FOOTHOLD_CELLS):
+    """Hand each faction only its capital's home county (plus enough
+    bordering unclaimed counties to reach `min_cells`, largest first) —
+    everything else on the map stays UNCLAIMED for players/AI to expand
+    into over time, instead of the old "claim the whole map instantly"
+    flood-fill."""
+    for idx, (cx, cy) in enumerate(capitals):
+        home_id = world.county_grid[cy][cx]
+        if home_id < 0 or world.counties[home_id].faction_idx >= 0:
+            home_id = _nearest_unclaimed_county(world, (cx, cy))
+        if home_id is None:
+            continue   # ran out of unclaimed land — extremely unlikely
+        claimed = {home_id}
+        total = len(world.counties[home_id].cells)
+        while total < min_cells:
+            frontier = set()
+            for cid in claimed:
+                frontier |= _adjacent_county_ids(world, world.counties[cid])
+            frontier = {cid for cid in frontier - claimed
+                       if world.counties[cid].faction_idx < 0}
+            if not frontier:
+                break
+            best = max(frontier, key=lambda cid: len(world.counties[cid].cells))
+            claimed.add(best)
+            total += len(world.counties[best].cells)
+        for cid in claimed:
+            county = world.counties[cid]
+            county.faction_idx = idx
+            for x, y in county.cells:
+                world.owner[y][x] = idx
 
 
 _LAKE_DEPTH = 0.012       # filled-minus-original elevation that counts as lake
@@ -462,19 +532,13 @@ def _occupy(occupied, x, y):
     occupied.setdefault(_bucket_key(x, y), []).append((x, y))
 
 
-def _generate_settlements(world, rng):
-    """Found cities, castles and towns for every faction. Counts scale with
-    territory size; placement follows the map: cities seek fertile, riverside
-    or coastal land, castles guard frontiers and high ground, towns fill the
-    countryside. Each settlement rolls its per-turn upkeep (population/
-    garrison draw on the faction's resource stockpile); production itself is
-    county-level, computed later from biome/climate/season."""
+def _init_settlement_proximity_fields(world, rng):
+    """Build the shared proximity fields + occupancy hash settlement
+    placement scores against, and cache them on `world` — computed once
+    (O(w*h)) rather than per-claim, so a settlement placed in a county
+    claimed turn 400 scores against the same live geography as one placed at
+    world-gen, without redoing a whole-map BFS every time."""
     w, h = world.w, world.h
-    sea = world.sea_level
-    span = (1.0 - sea) or 1.0
-    namer = make_settlement_namer(rng)
-
-    # shared proximity fields
     ocean_cells = [(x, y) for y in range(h) for x in range(w)
                    if world.owner[y][x] == OCEAN]
     coast_d = _bfs_distance(world, ocean_cells)
@@ -483,79 +547,87 @@ def _generate_settlements(world, rng):
     for y in range(h):
         for x in range(w):
             o = world.owner[y][x]
-            if o == OCEAN:
+            if o < 0:
                 continue
             for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
                 if 0 <= nx < w and 0 <= ny < h:
                     o2 = world.owner[ny][nx]
-                    if o2 != OCEAN and o2 != o:
+                    if o2 >= 0 and o2 != o:
                         border_sources.append((x, y))
                         break
     border_d = _bfs_distance(world, border_sources)
 
-    cells_by_fac = defaultdict(list)
-    for y in range(h):
-        for x in range(w):
-            o = world.owner[y][x]
-            if o != OCEAN and (x, y) not in world.lake_cells:
-                cells_by_fac[o].append((x, y))
+    # NOTE: deliberately not caching a namer here — make_settlement_namer
+    # returns a closure, and closures can't be pickled (app/core/save.py
+    # pickles the whole World). Each caller of _place_settlements_for_faction
+    # builds its own short-lived namer instead (see _generate_settlements and
+    # expansion.settle_newly_claimed_county) — same "fresh per call, no
+    # global uniqueness guarantee" tradeoff _place_villages_for_county
+    # already makes, and for the same reason.
+    world._settle_coast_d = coast_d
+    world._settle_water_d = water_d
+    world._settle_border_d = border_d
+    world._settle_occupied = {}
 
+
+def _place_settlements_for_faction(world, rng, fac_idx, cells, namer):
+    """Score and place cities/castles/towns for one faction's cells, using
+    the shared proximity fields/occupancy hash `_init_settlement_proximity_
+    fields` cached on `world`. Reusable both for the full initial pass (one
+    call per faction's starting foothold) and, mid-game, for a single newly
+    claimed county's cells (see app/world/expansion.py)."""
+    sea = world.sea_level
+    span = (1.0 - sea) or 1.0
+    coast_d = world._settle_coast_d
+    water_d = world._settle_water_d
+    border_d = world._settle_border_d
+    occupied = world._settle_occupied
     prox = lambda d, reach: math.exp(-d / reach)   # 1 at the feature, ->0 away
+    species = world.factions[fac_idx].meta["species"]
 
-    # Shared across every faction (not reset per-faction) so a frontier
-    # castle from one side can't land on top of a rival's, right at the
-    # border both of them are drawn to.
-    occupied = {}
+    for kind, t in SETTLEMENT_TYPES.items():
+        count = max(t["min"], min(t["max"], len(cells) // t["per_cells"]))
+        scored = []
+        for x, y in cells:
+            if (x, y) in world.river_cells:
+                continue                       # don't build in the river
+            elev = max(0.0, min(1.0, (world.height[y][x] - sea) / span))
+            s = (t["fert_w"] * world.fertility[y][x]
+                 + t["river_w"] * prox(water_d[y][x], 4.0)
+                 + t["coast_w"] * prox(coast_d[y][x], 4.0)
+                 + t["border_w"] * prox(border_d[y][x], 5.0)
+                 + t["elev_w"] * elev
+                 + 0.1 * rng.random())         # tie-break jitter
+            scored.append((s, x, y))
+        scored.sort(reverse=True)
 
-    for fac_idx, cells in cells_by_fac.items():
-        species = world.factions[fac_idx].meta["species"]
-        for kind, t in SETTLEMENT_TYPES.items():
-            count = max(t["min"], min(t["max"], len(cells) // t["per_cells"]))
-            # score every candidate cell for this settlement type
-            scored = []
-            for x, y in cells:
-                if (x, y) in world.river_cells:
-                    continue                       # don't build in the river
-                elev = max(0.0, min(1.0, (world.height[y][x] - sea) / span))
-                s = (t["fert_w"] * world.fertility[y][x]
-                     + t["river_w"] * prox(water_d[y][x], 4.0)
-                     + t["coast_w"] * prox(coast_d[y][x], 4.0)
-                     + t["border_w"] * prox(border_d[y][x], 5.0)
-                     + t["elev_w"] * elev
-                     + 0.1 * rng.random())         # tie-break jitter
-                scored.append((s, x, y))
-            scored.sort(reverse=True)
+        placed = 0
+        for s, x, y in scored:
+            if placed >= count:
+                break
+            if _too_close(occupied, x, y, t["spacing"]):
+                continue
+            upkeep = {res: round(rng.uniform(*rng_range))
+                      for res, rng_range in SETTLEMENT_UPKEEP[kind].items()}
+            tax_income = round(rng.uniform(*SETTLEMENT_TAX_INCOME[kind]))
+            county_id = world.county_grid[y][x]
+            st = Settlement(len(world.settlements), kind, namer(kind, species),
+                            (x, y), fac_idx, county_id, upkeep, tax_income)
+            world.settlements.append(st)
+            _occupy(occupied, x, y)
+            world.factions[fac_idx].meta["settlements"].append(st.id)
+            if 0 <= county_id < len(world.counties):
+                world.counties[county_id].meta_settlements.append(st.id)
+            placed += 1
 
-            placed = 0
-            for s, x, y in scored:
-                if placed >= count:
-                    break
-                if _too_close(occupied, x, y, t["spacing"]):
-                    continue
-                upkeep = {res: round(rng.uniform(*rng_range))
-                          for res, rng_range in SETTLEMENT_UPKEEP[kind].items()}
-                tax_income = round(rng.uniform(*SETTLEMENT_TAX_INCOME[kind]))
-                st = Settlement(len(world.settlements), kind, namer(kind, species),
-                                (x, y), fac_idx, world.county_grid[y][x], upkeep,
-                                tax_income)
-                world.settlements.append(st)
-                _occupy(occupied, x, y)
-                placed += 1
 
-    # aggregate settlement lists onto counties and factions
-    for c in world.counties:
-        c.meta_settlements = []
-    for f in world.factions:
-        f.meta["settlements"] = []
-    for st in world.settlements:
-        f = world.factions[st.faction_idx]
-        f.meta["settlements"].append(st.id)
-        if 0 <= st.county_id < len(world.counties):
-            world.counties[st.county_id].meta_settlements.append(st.id)
-
-    # settle_proximity: how close each county is to *any* settlement (0..1,
-    # 1 = right on top of one) — feeds the "remote areas are harder to
-    # acquire resources from" rule in app/world/resources.py.
+def _recompute_settle_proximity_all(world):
+    """settle_proximity: how close each county is to *any* settlement (0..1,
+    1 = right on top of one) — feeds the "remote areas are harder to acquire
+    resources from" rule in app/world/resources.py. Full-map BFS; cheap
+    enough at world-gen time (called once), not used again afterward — a
+    single newly claimed county instead uses the cheaper straight-line
+    version, territory._recompute_settle_proximity."""
     settle_d = (_bfs_distance(world, [st.pos for st in world.settlements])
                 if world.settlements else None)
     for county in world.counties:
@@ -564,6 +636,39 @@ def _generate_settlements(world, rng):
             continue
         avg_d = sum(settle_d[y][x] for x, y in county.cells) / len(county.cells)
         county.settle_proximity = math.exp(-avg_d / 10.0)
+
+
+def _generate_settlements(world, rng):
+    """Found cities, castles and towns for every faction that currently owns
+    land (their starting foothold — UNCLAIMED counties get settlements later,
+    when claimed). Counts scale with territory size; placement follows the
+    map: cities seek fertile, riverside or coastal land, castles guard
+    frontiers and high ground, towns fill the countryside. Each settlement
+    rolls its per-turn upkeep (population/garrison draw on the faction's
+    resource stockpile); production itself is county-level, computed later
+    from biome/climate/season."""
+    w, h = world.w, world.h
+    for c in world.counties:
+        c.meta_settlements = []
+    for f in world.factions:
+        f.meta["settlements"] = []
+
+    _init_settlement_proximity_fields(world, rng)
+    namer = make_settlement_namer(rng)
+
+    cells_by_fac = defaultdict(list)
+    for y in range(h):
+        for x in range(w):
+            o = world.owner[y][x]
+            if o >= 0 and (x, y) not in world.lake_cells:
+                cells_by_fac[o].append((x, y))
+
+    for fac_idx, cells in cells_by_fac.items():
+        _place_settlements_for_faction(world, rng, fac_idx, cells, namer)
+        for cid in world.factions[fac_idx].meta.get("counties", []):
+            world.counties[cid].settlements_generated = True
+
+    _recompute_settle_proximity_all(world)
 
 
 # Village generation. Count scales with county size: from ~3 villages for a
@@ -609,109 +714,150 @@ def _mst_edges(points):
     return edges
 
 
-def _generate_villages(world, rng):
-    """Sprinkle small farming villages across every county — 3 for a small
-    county in a small country, up to 50 for a large county in a huge one —
-    each producing farm output tied to the fertility of the land it sits on.
-    Villages (plus the county's existing settlements, as road hubs) are linked
-    by simple straight dirt roads via a minimum spanning tree, so every
-    village has a way out without an excess of redundant roads."""
-    w, h = world.w, world.h
-    water_d = _bfs_distance(world, list(world.river_cells | world.lake_cells))
+# Road tier: a county's local road network renders as Stone (sturdier,
+# faster, weather-resistant) once its wealth clears this threshold, Dirt
+# otherwise — see _compute_county_wealth.
+ROAD_STONE_WEALTH_THRESHOLD = 0.55
+_WEALTH_FERT_WEIGHT = 0.5
+_WEALTH_RES_WEIGHT = 0.5
+_WEALTH_RES_DENSITY_CAP = 8.0   # resource-value-per-cell that reads as "fully wealthy"
 
-    # Shared across every county (not reset per-county) and seeded with every
-    # existing settlement position, so villages repel both neighboring
-    # counties' villages *and* settlements instead of only their own county's
-    # other villages.
-    occupied = {}
+
+def _compute_county_wealth(world, county):
+    """0..1 wealth score from land value (fertility) and resources actually
+    harvested — this county's yield, excluding subsistence food (Grain/
+    Fresh Water/Meat/Fish, which is abundant everywhere and drowns out any
+    real signal) and weighted by resource tier so luxury/industrial goods
+    count for more than an equal quantity of a common one. Decides whether
+    a county's local roads are built in Stone or Dirt."""
+    from app.world.resources import compute_county_yield, RESOURCES, _LOCAL_FOOD
+    fert_frac = county.stats.get("fertility", 50) / 100.0
+    yield_ = compute_county_yield(county, world.season)
+    area = max(1, len(county.cells))
+    value = sum(amount * RESOURCES.get(r, {}).get("tier", 1)
+                for r, amount in yield_.items() if r not in _LOCAL_FOOD)
+    res_frac = min(1.0, (value / area) / _WEALTH_RES_DENSITY_CAP)
+    return _WEALTH_FERT_WEIGHT * fert_frac + _WEALTH_RES_WEIGHT * res_frac
+
+
+def _init_village_fields(world):
+    """Shared water-distance field + occupancy hash for village placement,
+    cached on `world` — same "compute once, reuse per-claim later" pattern
+    as `_init_settlement_proximity_fields`."""
+    world._village_water_d = _bfs_distance(
+        world, list(world.river_cells | world.lake_cells))
+    world._village_occupied = {}
     for st in world.settlements:
-        _occupy(occupied, *st.pos)
+        _occupy(world._village_occupied, *st.pos)
 
-    for county in world.counties:
-        # A fresh namer per county: villages are only ever viewed one county
-        # at a time, so names need only be unique within a county (a handful
-        # to ~50), not across the whole world's thousands of villages.
-        namer = make_settlement_namer(rng)
-        species = world.factions[county.faction_idx].meta["species"]
-        land_cells = [(x, y) for x, y in county.cells
-                      if (x, y) not in world.river_cells
-                      and (x, y) not in world.lake_cells]
-        if not land_cells:
-            county.villages = []
-            world.roads_by_county[county.id] = []
+
+def _place_villages_for_county(world, rng, county):
+    """Sprinkle farming villages within one county — 3 for a small county,
+    up to 50 for a large one — each producing farm output tied to the
+    fertility of the land it sits on, linked by an MST of simple dirt roads.
+    Reusable both for the full initial pass (one call per starting county)
+    and, mid-game, for a single newly claimed county (see
+    app/world/expansion.py)."""
+    w, h = world.w, world.h
+    water_d = world._village_water_d
+    occupied = world._village_occupied
+    # A fresh namer per county: villages are only ever viewed one county at a
+    # time, so names need only be unique within a county (a handful to ~50),
+    # not across the whole world's thousands of villages.
+    namer = make_settlement_namer(rng)
+    species = world.factions[county.faction_idx].meta["species"]
+    land_cells = [(x, y) for x, y in county.cells
+                  if (x, y) not in world.river_cells
+                  and (x, y) not in world.lake_cells]
+    if not land_cells:
+        county.villages = []
+        world.roads_by_county[county.id] = []
+        return
+
+    area = len(county.cells)
+    n = max(_VILLAGE_MIN, min(_VILLAGE_MAX, round(area / _VILLAGE_CELLS_PER)))
+    n = min(n, len(land_cells))
+
+    scored = []
+    for x, y in land_cells:
+        s = (_VILLAGE_FERT_W * world.fertility[y][x]
+             + _VILLAGE_WATER_W * math.exp(-water_d[y][x] / _VILLAGE_WATER_REACH)
+             + 0.15 * rng.random())          # tie-break jitter
+        scored.append((s, x, y))
+    scored.sort(reverse=True)
+
+    spacing = max(1.5, math.sqrt(area / max(1, n)) * 0.55)
+    placed = []
+    for s, x, y in scored:
+        if len(placed) >= n:
+            break
+        if _too_close(occupied, x, y, spacing):
             continue
+        placed.append((x, y))
+        _occupy(occupied, x, y)
 
-        area = len(county.cells)
-        n = max(_VILLAGE_MIN, min(_VILLAGE_MAX, round(area / _VILLAGE_CELLS_PER)))
-        n = min(n, len(land_cells))
+    vids = []
+    for x, y in placed:
+        # "land occupied": average fertility over a small patch around the
+        # village, not just the single cell, so farm output reflects the
+        # surrounding fields rather than one pixel of terrain.
+        samples = []
+        r = _VILLAGE_FERT_PATCH
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                nx, ny = x + dx, y + dy
+                if (0 <= nx < w and 0 <= ny < h
+                        and world.county_grid[ny][nx] == county.id):
+                    samples.append(world.fertility[ny][nx])
+        local_fert = sum(samples) / len(samples) if samples else world.fertility[y][x]
+        farm = round(rng.uniform(*_VILLAGE_FARM_RANGE) * (0.5 + 1.2 * local_fert))
+        v = Village(len(world.villages), county.id, county.faction_idx,
+                   namer("village", species), (x, y), farm)
+        world.villages.append(v)
+        vids.append(v.id)
 
-        scored = []
-        for x, y in land_cells:
-            s = (_VILLAGE_FERT_W * world.fertility[y][x]
-                 + _VILLAGE_WATER_W * math.exp(-water_d[y][x] / _VILLAGE_WATER_REACH)
-                 + 0.15 * rng.random())          # tie-break jitter
-            scored.append((s, x, y))
-        scored.sort(reverse=True)
+    county.villages = vids
+    # Villages are farms: their output feeds straight into this county's
+    # Grain yield each turn (app/world/resources.py), climate/season
+    # modulated same as everything else.
+    county.village_grain_base = sum(world.villages[i].farm_output for i in vids)
 
-        spacing = max(1.5, math.sqrt(area / max(1, n)) * 0.55)
-        placed = []
-        for s, x, y in scored:
-            if len(placed) >= n:
-                break
-            if _too_close(occupied, x, y, spacing):
-                continue
-            placed.append((x, y))
-            _occupy(occupied, x, y)
-
-        vids = []
-        for x, y in placed:
-            # "land occupied": average fertility over a small patch around the
-            # village, not just the single cell, so farm output reflects the
-            # surrounding fields rather than one pixel of terrain.
-            samples = []
-            r = _VILLAGE_FERT_PATCH
-            for dx in range(-r, r + 1):
-                for dy in range(-r, r + 1):
-                    nx, ny = x + dx, y + dy
-                    if (0 <= nx < w and 0 <= ny < h
-                            and world.county_grid[ny][nx] == county.id):
-                        samples.append(world.fertility[ny][nx])
-            local_fert = sum(samples) / len(samples) if samples else world.fertility[y][x]
-            farm = round(rng.uniform(*_VILLAGE_FARM_RANGE) * (0.5 + 1.2 * local_fert))
-            v = Village(len(world.villages), county.id, county.faction_idx,
-                       namer("village", species), (x, y), farm)
-            world.villages.append(v)
-            vids.append(v.id)
-
-        county.villages = vids
-        # Villages are farms: their output feeds straight into this county's
-        # Grain yield each turn (app/world/resources.py), climate/season
-        # modulated same as everything else.
-        county.village_grain_base = sum(world.villages[i].farm_output for i in vids)
-
-        # dirt roads: an MST over the villages, plus the county's first
-        # settlement (if any) as an extra node so the network ties into town.
-        points = [world.villages[i].pos for i in vids]
-        if county.meta_settlements:
-            points.append(world.settlements[county.meta_settlements[0]].pos)
-        edges = _mst_edges(points)
-        world.roads_by_county[county.id] = [(points[a], points[b]) for a, b in edges]
+    # Local roads: an MST over the villages plus *every* settlement in the
+    # county (city/castle/town alike — previously only the first settlement
+    # was added, so a second town or castle was left with no road at all),
+    # so the whole network ties every settlement into town. Rendered in
+    # Stone (sturdier, faster, weather-resistant) once the county's wealth
+    # clears ROAD_STONE_WEALTH_THRESHOLD, Dirt otherwise (see
+    # _compute_county_wealth and app/ui/map_view.py's _draw_roads).
+    points = [world.villages[i].pos for i in vids]
+    points += [world.settlements[sid].pos for sid in county.meta_settlements]
+    edges = _mst_edges(points)
+    world.roads_by_county[county.id] = [(points[a], points[b]) for a, b in edges]
+    county.road_tier = ("stone" if _compute_county_wealth(world, county)
+                                    >= ROAD_STONE_WEALTH_THRESHOLD else "dirt")
 
 
-# Global trade routes: long-haul roads and sea lanes linking cities across the
-# whole world, as opposed to the straight-line village roads above (which only
-# ever need to look right within one small county). A route's *topology* (who
-# connects to whom) comes from a cheap Euclidean MST plus a few nearest-
-# neighbor edges for redundancy; its *geometry* (the actual line on the map)
-# comes from a real weighted Dijkstra so it can never cut straight through a
-# mountain range or across dry land — it has to wind around high ground the
-# way a real road would, or (for sea lanes) stay on open water the whole way.
+def _generate_villages(world, rng):
+    """Sprinkle small farming villages into every currently-owned county's
+    starting foothold (UNCLAIMED counties get villages later, when claimed —
+    see app/world/expansion.py)."""
+    _init_village_fields(world)
+    for county in world.counties:
+        if county.faction_idx < 0:
+            continue
+        _place_villages_for_county(world, rng, county)
+
+
+# Long-haul trade route pathfinding: used by app/world/trade.py both for the
+# built-from-both-ends land construction (see TradeRouteProject) and the
+# automatic sea-lane fallback. Real weighted Dijkstra, not a straight line,
+# so a route can never cut straight through a mountain range or across dry
+# land — it has to wind around high ground the way a real road would, or
+# (for sea lanes) stay on open water the whole way.
 _ROAD_ELEV_START = 0.62   # elevation (0..1) above which roads start avoiding ground
 _ROAD_ELEV_PEN = 60.0     # steepness of that avoidance — pushes roads around peaks
 _ROAD_RIVER_PEN = 6.0     # crossing a river costs extra (a ford/bridge), not blocked
 _SEA_COAST_REACH = 3      # cells from open water a settlement still counts as a port
-_TRADE_BBOX_PAD = 26      # cells of slack around a route's bounding box for routing
-_TRADE_EXTRA_NEIGHBORS = 2   # extra nearest-neighbor edges added on top of the MST
 _DIAG = 2 ** 0.5
 
 
@@ -754,10 +900,11 @@ def _path_dijkstra(cellset, cost_fn, start, goal):
 
 
 def _elev_cost(world, base_cost, cell):
-    """Standalone version of the land-routing cost `_generate_trade_routes`
-    uses internally (as a closure) — exposed at module level too so other
-    systems (e.g. app/world/trade.py, pathfinding post-generation) can route
-    around mountains/rivers the same way without duplicating the formula."""
+    """Land-routing cost: base terrain noise plus a steep penalty for high
+    elevation and a toll for crossing a river/lake — shared by every land
+    pathfinder in the game (castle-connecting roads in construction.py,
+    trade-route construction in trade.py) so they all route around
+    mountains/rivers identically, one formula."""
     x, y = cell
     cost = base_cost[y][x]
     over = world.height[y][x] - _ROAD_ELEV_START
@@ -790,97 +937,6 @@ def _nearest_ocean_cell(world, pos, max_r=8):
                 if 0 <= x < w and 0 <= y < h and world.owner[y][x] == OCEAN:
                     return (x, y)
     return None
-
-
-def _generate_trade_routes(world, rng, base_cost):
-    """Weave a sparse network of trade routes between major cities: land
-    roads that bend around mountains and pay a toll to ford rivers, and sea
-    lanes between coastal cities that stick to open water. Unlike the
-    per-county village roads (straight lines, only ever seen up close), these
-    span the whole map, so their shape has to survive being seen from far
-    away — meaning real terrain-following pathfinding, not a straight line."""
-    w, h = world.w, world.h
-    cities = [s for s in world.settlements if s.kind == "city"]
-    world.trade_routes = []
-    if len(cities) < 2:
-        return
-
-    ocean_cells = [(x, y) for y in range(h) for x in range(w)
-                   if world.owner[y][x] == OCEAN]
-    coast_d = _bfs_distance(world, ocean_cells) if ocean_cells else None
-
-    def is_coastal(pos):
-        x, y = pos
-        return coast_d is not None and coast_d[y][x] <= _SEA_COAST_REACH
-
-    # Topology: an MST over all cities (by straight-line distance) so every
-    # city has at least one route, plus a couple of extra nearest-neighbor
-    # edges so the network has some redundancy like a real trade web instead
-    # of a single fragile tree.
-    pts = [c.pos for c in cities]
-    edges = set(_mst_edges(pts))
-    for i, p in enumerate(pts):
-        order = sorted(range(len(pts)), key=lambda j:
-                        (pts[j][0] - p[0]) ** 2 + (pts[j][1] - p[1]) ** 2)
-        added = 0
-        for j in order:
-            if added >= _TRADE_EXTRA_NEIGHBORS:
-                break
-            if j == i:
-                continue
-            edges.add((min(i, j), max(i, j)))
-            added += 1
-
-    def elev_cost(cell):
-        x, y = cell
-        cost = base_cost[y][x]
-        over = world.height[y][x] - _ROAD_ELEV_START
-        if over > 0:
-            cost += _ROAD_ELEV_PEN * over * over
-        if cell in world.river_cells or cell in world.lake_cells:
-            cost += _ROAD_RIVER_PEN
-        return cost
-
-    def sea_cost(cell):
-        x, y = cell
-        return 1.0 + 0.4 * base_cost[y][x] / 8.0   # mild wander, mostly direct
-
-    routes = []
-    for i, j in edges:
-        a, b = cities[i], cities[j]
-        ax, ay = a.pos
-        bx, by = b.pos
-        x0, x1 = sorted((ax, bx))
-        y0, y1 = sorted((ay, by))
-        bx0 = max(0, x0 - _TRADE_BBOX_PAD)
-        by0 = max(0, y0 - _TRADE_BBOX_PAD)
-        bx1 = min(w, x1 + _TRADE_BBOX_PAD + 1)
-        by1 = min(h, y1 + _TRADE_BBOX_PAD + 1)
-
-        land_cellset = {(x, y) for y in range(by0, by1) for x in range(bx0, bx1)
-                         if world.owner[y][x] != OCEAN}
-        path = None
-        if a.pos in land_cellset and b.pos in land_cellset:
-            path = _path_dijkstra(land_cellset, elev_cost, a.pos, b.pos)
-
-        kind = "land"
-        if path is None and is_coastal(a.pos) and is_coastal(b.pos):
-            dock_a = _nearest_ocean_cell(world, a.pos)
-            dock_b = _nearest_ocean_cell(world, b.pos)
-            if dock_a and dock_b:
-                sea_cellset = {(x, y) for y in range(by0, by1)
-                               for x in range(bx0, bx1)
-                               if world.owner[y][x] == OCEAN}
-                sea_path = _path_dijkstra(sea_cellset, sea_cost, dock_a, dock_b)
-                if sea_path is not None:
-                    path = [a.pos] + sea_path + [b.pos]
-                    kind = "sea"
-
-        if path is None:
-            continue
-        routes.append({"kind": kind, "cells": path, "a": a.id, "b": b.id})
-
-    world.trade_routes = routes
 
 
 def _water_distance(world):
@@ -991,11 +1047,21 @@ class World:
         self.settlements = []          # list[Settlement]; index == id
         self.villages = []             # list[Village]; index == id
         self.roads_by_county = {}      # county_id -> [((x,y),(x,y)), ...] segments
+        # Trade routes exist only once built/opened (app/world/trade.py) —
+        # no faction starts pre-connected to any other. trade_routes is the
+        # flat list rendering reads (kind/cells, plus a_faction/b_faction);
+        # trade_routes_by_pair mirrors it keyed by frozenset({a_idx,b_idx})
+        # for O(1) "is this pair connected yet" lookups.
         self.trade_routes = []         # list of {"kind": "land"/"sea", "cells": [...]}
+        self.trade_routes_by_pair = {}  # frozenset({a_idx,b_idx}) -> route dict
+        self.trade_route_projects = []  # list[TradeRouteProject] — see app/world/trade.py
         self.trade_caravans = []       # list[TradeCaravan] — see app/world/trade.py
         self.trade_events = []         # this turn's dispatch/delivery/payment/loss events
         self.castle_projects = []      # list[CastleProject] — see app/world/construction.py
         self.road_projects = []        # list[RoadProject] — see app/world/construction.py
+        self.claim_projects = []       # list[ClaimProject] — see app/world/expansion.py
+        self.commanders = []           # list[Commander] — see app/world/commander.py
+        self.total_land_cells = 0      # cached once at gen time (vision%/target-size% denom)
         self.base_cost = None          # per-cell noise traversal cost (see _cost_field);
                                         # persisted so trade.py can pathfind post-generation
                                         # without recomputing the noise field from scratch
@@ -1044,7 +1110,9 @@ def generate_world(width=440, height=264, seed=None, n_factions=14,
             for y in range(height)]
     land_cells = [(x, y) for y in range(height) for x in range(width) if land[y][x]]
     if not land_cells:                # extremely unlucky seed; retry once
-        return generate_world(width, height, rng.random(), n_factions)
+        return generate_world(width, height, rng.random(), n_factions,
+                              player_species, player_name)
+    world.total_land_cells = len(land_cells)
 
     # 2. hydrology: fill basins, form lakes, and route flow-accumulated rivers
     #    to the sea. Done before fertility so water can irrigate nearby land.
@@ -1062,27 +1130,43 @@ def generate_world(width=440, height=264, seed=None, n_factions=14,
     if not capitals:
         capitals.append(rng.choice(land_cells))
 
-    # 4. assign territories by river-aware weighted growth from each capital:
-    #    noise in the cost keeps borders wandering, while a surcharge to cross
-    #    rivers/lakes makes frontiers settle onto waterways.
+    # 4. mark every land cell UNCLAIMED (distinct from OCEAN) before anyone
+    #    owns anything — geography (fertility/biome/county shape) no longer
+    #    depends on ownership, only on land-vs-water, so it can all be
+    #    computed before territory is handed out at all.
     base_cost = _cost_field(world, nseed)
     world.base_cost = base_cost    # persisted for on-demand pathfinding (trade.py)
-    _assign_territories(world, land, capitals, base_cost)
+    for x, y in land_cells:
+        world.owner[y][x] = UNCLAIMED
 
     # 5. ecology: fertility from moisture + elevation + distance to water/rivers.
     _compute_moisture(world, nseed)
     _compute_fertility(world, nseed)
     _classify_biomes_and_climate(world)
 
-    # 6. build factions (species, color, stats, centroid) + adjacency
+    # 6. bisect the *entire* landmass into counties — the fixed unit of
+    #    territory, decoupled from ownership (see UNCLAIMED-land progressive
+    #    expansion in app/world/expansion.py) — before any faction exists.
+    _generate_all_counties(world, rng, base_cost, land_cells)
+
+    # 7. rate every county's neutral-garrison strength (defends UNCLAIMED land
+    #    against being claimed until a faction's military can overcome it).
+    _seed_wildland_strength(world, rng, capitals)
+
+    # 8. hand each faction only a small starting foothold around its capital
+    #    — everything else on the map stays UNCLAIMED for players/AI to
+    #    expand into over time, instead of claiming the whole map at once.
+    _assign_starting_footholds(world, capitals)
+
+    # 9. build factions (species, color, stats, centroid) from their foothold
     species_names = list(SPECIES.keys())
     namer = make_faction_namer(rng)
-    # per faction: cell count, sum x, sum y, sum fertility
+    # per faction: cell count, sum x, sum y, sum fertility (foothold only)
     sums = [[0, 0, 0, 0.0] for _ in capitals]
     for y in range(height):
         for x in range(width):
             o = world.owner[y][x]
-            if o != OCEAN:
+            if o >= 0:
                 sums[o][0] += 1
                 sums[o][1] += x
                 sums[o][2] += y
@@ -1104,64 +1188,76 @@ def generate_world(width=440, height=264, seed=None, n_factions=14,
         morale = max(15, min(99, int(rng.uniform(50, 75))))
         center = (sums[idx][1] / cells / width, sums[idx][2] / cells / height)
         name = player_name if (is_player and player_name) else namer(species)
+        county_ids = [c.id for c in world.counties if c.faction_idx == idx]
+        xs = [x for c in county_ids for x, y in world.counties[c].cells]
+        ys = [y for c in county_ids for x, y in world.counties[c].cells]
+        bbox = (min(xs), min(ys), max(xs) + 1, max(ys) + 1) if xs else (0, 0, 1, 1)
         nation = Nation(
             name, color, territory=[], center=center,
             stats={"military": military, "morale": morale},
             meta={"species": species, "trait": traits["trait"],
                   "cells": cells, "capital": capitals[idx],
-                  "fertility": round(100 * fert_sum / cells)})  # avg %, 0..100
+                  "fertility": round(100 * fert_sum / cells),  # avg %, 0..100
+                  "counties": county_ids, "bbox": bbox})
         world.factions.append(nation)
         world.world_map.add_nation(nation)
 
     if player_species is not None:
         world.player_faction_idx = 0
 
-    # adjacency: neighboring owners share a border
+    # adjacency: neighboring owners share a border (rarely true yet, since
+    # footholds are small and scattered — most new relationships get rolled
+    # lazily later, as claims/conquests bring factions into contact, via
+    # territory._refresh_borders)
     borders = set()
     for y in range(height):
         for x in range(width):
             o = world.owner[y][x]
-            if o == OCEAN:
+            if o < 0:
                 continue
             for nx, ny in ((x + 1, y), (x, y + 1)):
                 if 0 <= nx < width and 0 <= ny < height:
                     o2 = world.owner[ny][nx]
-                    if o2 != OCEAN and o2 != o:
+                    if o2 >= 0 and o2 != o:
                         borders.add((min(o, o2), max(o, o2)))
 
+    from app.world.diplomacy import establish_contact
     for a, b in borders:
         na, nb = world.factions[a], world.factions[b]
-        same = na.meta["species"] == nb.meta["species"]
-        r = rng.random()
-        if same:
-            stance = Stance.ALLY if r < 0.7 else Stance.NEUTRAL
-        else:
-            stance = (Stance.ENEMY if r < 0.55 else
-                      Stance.NEUTRAL if r < 0.85 else Stance.ALLY)
-        tension = {Stance.ENEMY: rng.randint(40, 85),
-                   Stance.NEUTRAL: rng.randint(10, 40),
-                   Stance.ALLY: 0}[stance]
-        world.world_map.set_relationship(na.id, nb.id, stance, tension)
+        establish_contact(world, na.id, nb.id)
 
-    # 7. bisect each faction into counties (the future unit of control),
-    #    reusing the same river-aware growth so county borders follow rivers too
-    _generate_counties(world, rng, base_cost)
-
-    # 8. found cities, castles and towns; aggregate resource gen/drain
+    # 10. found cities, castles and towns in each faction's starting
+    #     foothold (UNCLAIMED land gets settlements later, when claimed)
     _generate_settlements(world, rng)
 
-    # 9. sprinkle villages within each county, linked by simple dirt roads;
-    #    each village's farm output tracks the fertility of its land
+    # 11. sprinkle villages within each starting county, linked by simple
+    #     dirt roads; each village's farm output tracks local fertility
     _generate_villages(world, rng)
 
-    # 10. global trade routes: land roads between cities (pathfound around
-    #     mountains and rivers) and sea lanes between coastal cities
-    #     (pathfound over open water only)
-    _generate_trade_routes(world, rng, base_cost)
+    # 12. trade routes start nonexistent — no nation is pre-connected to any
+    #     other; land routes must be discovered (diplomacy) and physically
+    #     built (app/world/trade.py) before caravans can use them, sea lanes
+    #     open automatically once eligible. See World.__init__ for the
+    #     trade_routes/trade_routes_by_pair/trade_route_projects fields.
 
-    # 11. seed every faction's starting resource stockpile (and, from it,
+    # 13. seed every faction's starting resource stockpile (and, from it,
     #     their real military strength) — see app/world/resources.py
     from app.world.resources import seed_initial_stockpiles
     seed_initial_stockpiles(world)
+
+    # 14. spawn the player's Commander at their capital — a mobile scout
+    #     unit, independent of territory growth (see app/world/commander.py;
+    #     this is what lets an island start ever explore beyond its own
+    #     shore). Before fog init so the very first reveal already accounts
+    #     for it.
+    if world.player_faction_idx is not None:
+        from app.world.commander import spawn_commander
+        player = world.factions[world.player_faction_idx]
+        spawn_commander(world, world.player_faction_idx, player.meta["capital"])
+
+    # 15. fog of war: reveal the player's starting foothold (and whatever's
+    #     already in range of it) — see app/world/vision.py
+    from app.world.vision import init_fog
+    init_fog(world)
 
     return world

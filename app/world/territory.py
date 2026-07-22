@@ -3,10 +3,8 @@ faction to another when a battle is won, keeping every ownership/aggregate
 data structure on the World consistent.
 """
 import math
-import random
 
 from app.core.events import bus
-from app.world.world_map import Stance
 from app.world.worldgen import OCEAN, _bfs_distance
 
 _NEIGH4 = ((1, 0), (-1, 0), (0, 1), (0, -1))
@@ -82,11 +80,15 @@ def naval_reachable_counties(world, attacker_idx, defender_idx):
             and any(is_coastal((x, y)) for x, y in county.cells)]
 
 
-def _refresh_borders(world, county, rng):
-    """After a county changes hands, roll a fresh relationship for any
-    faction pair that's newly touching along its border. Existing
-    relationships (between factions that still share other territory, or
-    that were already at war/allied) are left untouched."""
+def _refresh_borders(world, county):
+    """After a county changes hands, establish first contact for any faction
+    pair that's newly touching along its border — a shared border is the
+    AI-vs-AI equivalent of the player's fog-of-war discovery (see
+    app/world/vision.py). Existing relationships (factions that already
+    share other territory, or that were already at war/allied) are left
+    untouched — see diplomacy.establish_contact, which is itself a no-op
+    once a relationship exists."""
+    from app.world import diplomacy
     pairs = set()
     for x, y in county.cells:
         o = world.owner[y][x]
@@ -95,25 +97,12 @@ def _refresh_borders(world, county, rng):
             if not (0 <= nx < world.w and 0 <= ny < world.h):
                 continue
             o2 = world.owner[ny][nx]
-            if o2 != OCEAN and o2 != o:
+            if o2 >= 0 and o2 != o:
                 pairs.add((min(o, o2), max(o, o2)))
 
     for a, b in pairs:
         na, nb = world.factions[a], world.factions[b]
-        key = frozenset((na.id, nb.id))
-        if key in world.world_map.relationships:
-            continue
-        same = na.meta.get("species") == nb.meta.get("species")
-        r = rng.random()
-        if same:
-            stance = Stance.ALLY if r < 0.7 else Stance.NEUTRAL
-        else:
-            stance = (Stance.ENEMY if r < 0.55 else
-                      Stance.NEUTRAL if r < 0.85 else Stance.ALLY)
-        tension = {Stance.ENEMY: rng.randint(40, 85),
-                   Stance.NEUTRAL: rng.randint(10, 40),
-                   Stance.ALLY: 0}[stance]
-        world.world_map.set_relationship(na.id, nb.id, stance, tension)
+        diplomacy.establish_contact(world, na.id, nb.id)
 
 
 def _recompute_faction_totals(world, faction, faction_idx):
@@ -135,17 +124,21 @@ def _recompute_faction_totals(world, faction, faction_idx):
         faction.meta["bbox"] = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
 
 
-def transfer_county(world, county, new_faction_idx, rng=None):
+def transfer_county(world, county, new_faction_idx):
     """Move `county` (and every settlement/village in it) to
     `new_faction_idx`. Updates grid ownership, per-county/settlement/village
     owner fields, both factions' meta lists and resource/crop aggregates,
-    bounding boxes, and rolls fresh relationships for any newly-adjacent
-    faction pair. Emits 'county:transferred' when done."""
-    rng = rng or random
+    bounding boxes, and establishes first contact for any newly-adjacent
+    faction pair. Emits 'county:transferred' when done.
+
+    `old_faction_idx` may be UNCLAIMED (a fresh claim of neutral land, see
+    app/world/expansion.py) rather than a real faction — every old-faction-
+    keyed step below is skipped in that case, since there's nothing to move
+    out of."""
     old_faction_idx = county.faction_idx
     if old_faction_idx == new_faction_idx:
         return
-    old_faction = world.factions[old_faction_idx]
+    old_faction = world.factions[old_faction_idx] if old_faction_idx >= 0 else None
     new_faction = world.factions[new_faction_idx]
 
     for x, y in county.cells:
@@ -159,13 +152,14 @@ def transfer_county(world, county, new_faction_idx, rng=None):
     for vid in village_ids:
         world.villages[vid].faction_idx = new_faction_idx
 
-    old_counties = old_faction.meta.setdefault("counties", [])
+    if old_faction is not None:
+        old_counties = old_faction.meta.setdefault("counties", [])
+        if county.id in old_counties:
+            old_counties.remove(county.id)
     new_counties = new_faction.meta.setdefault("counties", [])
-    if county.id in old_counties:
-        old_counties.remove(county.id)
     new_counties.append(county.id)
 
-    old_settlements = old_faction.meta.setdefault("settlements", [])
+    old_settlements = old_faction.meta.setdefault("settlements", []) if old_faction is not None else []
     new_settlements = new_faction.meta.setdefault("settlements", [])
     for sid in settlement_ids:
         if sid in old_settlements:
@@ -175,16 +169,18 @@ def transfer_county(world, county, new_faction_idx, rng=None):
     # Move this county's most recent turn's yield out of the old faction's
     # stockpile and into the new one's (military isn't recomputed here —
     # like the resource move itself, that happens on the next End Turn).
-    old_res = old_faction.stats.setdefault("resources", {})
     new_res = new_faction.stats.setdefault("resources", {})
+    old_res = old_faction.stats.setdefault("resources", {}) if old_faction is not None else None
     for resource, amount in county.resources.items():
-        old_res[resource] = max(0, old_res.get(resource, 0) - amount)
+        if old_res is not None:
+            old_res[resource] = max(0, old_res.get(resource, 0) - amount)
         new_res[resource] = new_res.get(resource, 0) + amount
 
-    _recompute_faction_totals(world, old_faction, old_faction_idx)
+    if old_faction is not None:
+        _recompute_faction_totals(world, old_faction, old_faction_idx)
     _recompute_faction_totals(world, new_faction, new_faction_idx)
     _recompute_settle_proximity(world, county)
-    _refresh_borders(world, county, rng)
+    _refresh_borders(world, county)
 
     bus.emit("county:transferred", {"county": county, "old_faction": old_faction,
                                      "new_faction": new_faction})
