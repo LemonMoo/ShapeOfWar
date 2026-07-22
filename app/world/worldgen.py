@@ -1171,6 +1171,7 @@ class World:
         self.trade_routes = []         # list of {"kind": "land"/"sea", "cells": [...]}
         self.trade_routes_by_pair = {}  # frozenset({a_idx,b_idx}) -> route dict
         self.trade_route_projects = []  # list[TradeRouteProject] — see app/world/trade.py
+        self.trade_route_decline_until = {}  # frozenset({a_idx,b_idx}) -> turn a decline expires
         self.trade_caravans = []       # list[TradeCaravan] — see app/world/trade.py
         self.trade_events = []         # this turn's dispatch/delivery/payment/loss events
         self.settlement_projects = []  # list[SettlementProject] — see app/world/construction.py

@@ -39,6 +39,11 @@ ALLIANCE_ACCEPT_THRESHOLD = 50   # matches ALLY_THRESHOLD: a neutral-species,
 _SPECIES_WEIGHT = 15
 _COMPLEMENTARITY_WEIGHT = 15
 
+TRADE_ROUTE_ACCEPT_THRESHOLD = 0   # a much lower bar than an alliance — trade
+                                   # is a far less binding ask
+_TRADE_SPECIES_WEIGHT = 10
+_TRADE_COMPLEMENTARITY_WEIGHT = 25
+
 
 def species_affinity(species_a, species_b):
     if species_a == species_b:
@@ -172,3 +177,28 @@ def form_alliance(world, player, target):
     wm.set_relationship(player.id, target.id, stance=Stance.ALLY, tension=0,
                         standing=standing, acted_turn=rel.get("acted_turn"))
     return f"{target.name} accepts! {player.name} and {target.name} are now allied."
+
+
+def evaluate_trade_route(world, proposer, target):
+    """Whether `target` agrees to a trade route `proposer` wants to open —
+    the same "does this actually make sense for them" weighing as
+    form_alliance (standing, species affinity, real economic
+    complementarity), just a much lower bar since a trade route is far
+    less binding than an alliance. Called by trade.start_trade_route for
+    both a land route (before construction begins) and a sea route
+    (before it opens) — trade routes are proposed and either accepted or
+    declined the same way regardless of kind. Returns (accepted, reason):
+    reason is None when accepted, else a short phrase for the decline
+    message."""
+    rel = world.world_map.get_relationship(proposer.id, target.id)
+    standing = rel.get("standing", 0)
+    species_score = species_affinity(proposer.meta.get("species"), target.meta.get("species"))
+    complementarity = _resource_complementarity(world, proposer, target)
+    score = (standing + species_score * _TRADE_SPECIES_WEIGHT
+            + complementarity * _TRADE_COMPLEMENTARITY_WEIGHT)
+    if score >= TRADE_ROUTE_ACCEPT_THRESHOLD:
+        return True, None
+    if species_score <= -2:
+        return False, (f"the {target.meta.get('species')} have never trusted "
+                       f"{proposer.meta.get('species')} traders")
+    return False, "they see too little economic benefit in it right now"

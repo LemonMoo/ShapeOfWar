@@ -861,12 +861,13 @@ class MapView(tk.Frame):
                 self._show_trade_route_status(player, nation)
 
     def _show_trade_route_status(self, player, nation):
-        """Land trade route status/action against `nation` (only reached
-        while relations aren't hostile — see _show_faction's caller): a
+        """Trade route status/action against `nation` (only reached while
+        relations aren't hostile — see _show_faction's caller): a
         completed route, in-progress construction, a Propose button once
-        eligible, or why proposing isn't available yet. Sea lanes need no
-        UI — they open automatically once eligible (see
-        trade._capital_sea_path) and just show up on the map."""
+        eligible, or why proposing isn't available yet. One button covers
+        both kinds — start_trade_route picks land or sea (whichever
+        exists) and the other side has to actually agree before anything
+        opens; neither kind is ever established without going through it."""
         wd = self.world
         player_idx = wd.factions.index(player)
         target_idx = wd.factions.index(nation)
@@ -892,6 +893,14 @@ class MapView(tk.Frame):
                      f"{diplomacy.TRADE_STANDING_THRESHOLD} before you can "
                      "propose a trade route.",
                      bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+            return
+
+        decline_until = getattr(wd, "trade_route_decline_until", {}).get(key, -1)
+        if wd.turn < decline_until:
+            tk.Label(self.actions, text=f"{nation.name} recently declined a trade "
+                     "proposal — try again later.",
+                     bg=theme.PANEL, fg=theme.BAD, font=theme.FONT,
                      justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
             return
 

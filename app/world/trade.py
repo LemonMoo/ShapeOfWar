@@ -6,14 +6,20 @@ Trade is gated on diplomacy, not just geography: two factions must have
 made contact (app/world/diplomacy.establish_contact — fired by the player's
 fog-of-war discovery, or a shared border for anyone — see
 app/world/vision.py and app/world/territory.py) and be on decent terms
-(standing >= TRADE_STANDING_THRESHOLD) before any deal can happen at all —
-see eligible_to_trade(). A *land* route additionally has to be physically
-built before caravans can use it: TradeRouteProject grows a precomputed
-capital-to-capital path from both ends at once, meeting in the middle (see
-start_trade_route/advance_trade_route_projects) — the player proposes one
-via the UI, AI factions do the same via run_trade_route_ai. Sea lanes stay
-automatic once eligible (nothing to physically build across open water) —
-see _capital_sea_path.
+(standing >= TRADE_STANDING_THRESHOLD) before a route can even be proposed
+at all — see eligible_to_trade(). Neither a land nor a sea route ever opens
+on its own, though: one side has to propose it (the player via the UI, an
+AI faction via run_trade_route_ai) and the other has to actually agree
+(diplomacy.evaluate_trade_route — standing, species affinity, and real
+economic complementarity, the same "does this make sense for them" check
+form_alliance uses, just a lower bar) before anything is established — see
+start_trade_route, the single entry point both proposers go through. Once
+agreed, a *land* route still has to be physically built before caravans can
+use it: TradeRouteProject grows a precomputed capital-to-capital path from
+both ends at once, meeting in the middle (see advance_trade_route_projects).
+A *sea* route opens the moment it's agreed to — nothing to physically build
+across open water — see _capital_sea_path (path lookup only; it no longer
+opens a route as a side effect).
 
 A deal is carried out by a TradeCaravan (land) or ship (sea, same class) that
 travels the established route from the seller's capital to the buyer's,
@@ -185,13 +191,12 @@ def _land_capital_path(world, a_idx, b_idx):
 def _capital_sea_path(world, a_idx, b_idx):
     """("sea", cells) route between two factions' capitals over open water,
     or None if no sea connection exists. Cached — capitals never move, so
-    the path is constant for the whole game. Land routes no longer auto-
-    compute here at all: they require actually being built (see
-    TradeRouteProject) — sea is the only kind that stays automatic, since
-    there's nothing physical to construct across open water. The first time
-    a pair's sea path is found, it's also registered into world.trade_routes
-    /trade_routes_by_pair so it renders (see app/ui/map_view.py's
-    _draw_trade_routes, which just reads that list generically)."""
+    the path is constant for the whole game. Purely a feasibility/path
+    lookup: unlike before, finding a sea path no longer opens a usable
+    route by itself — a sea route now has to be proposed and agreed to
+    exactly like a land one (see start_trade_route), it just skips the
+    multi-turn construction phase since there's nothing physical to build
+    across open water."""
     cache = _get_path_cache(world)
     key = frozenset((a_idx, b_idx))
     if key in cache:
@@ -220,10 +225,6 @@ def _capital_sea_path(world, a_idx, b_idx):
 
     result = ("sea", path) if path else None
     cache[key] = result
-    if result is not None:
-        route = {"kind": "sea", "cells": path, "a_faction": a_idx, "b_faction": b_idx}
-        world.trade_routes.append(route)
-        world.trade_routes_by_pair[key] = route
     return result
 
 
@@ -338,17 +339,16 @@ def advance_caravans(world):
     return events
 
 
-def _route_for_pair(world, a_idx, b_idx, coastal):
-    """A usable (kind, path) route for this faction pair, or None: an
-    already-completed land route (see TradeRouteProject) takes priority;
-    otherwise an automatic sea lane if both sides are coastal. Land is never
-    auto-computed here — it has to have actually been built."""
-    land = world.trade_routes_by_pair.get(frozenset((a_idx, b_idx)))
-    if land is not None and land["kind"] == "land":
-        return ("land", land["cells"])
-    if a_idx in coastal and b_idx in coastal:
-        return _capital_sea_path(world, a_idx, b_idx)
-    return None
+def _route_for_pair(world, a_idx, b_idx):
+    """A usable (kind, path) route for this faction pair, or None. Neither
+    kind is ever auto-created here anymore — both a land route (finished
+    construction) and a sea route require an explicit proposal and the
+    other side's agreement first (see start_trade_route); this only looks
+    up what's already been established."""
+    route = world.trade_routes_by_pair.get(frozenset((a_idx, b_idx)))
+    if route is None:
+        return None
+    return (route["kind"], route["cells"])
 
 
 def run_trade_ai(world):
@@ -356,7 +356,6 @@ def run_trade_ai(world):
     for why: this is the first autonomous-agent logic in the game. Returns a
     list of "dispatched" event dicts (see advance_caravans) for UI messaging."""
     events = []
-    coastal = _coastal_factions(world)
     n = len(world.factions)
 
     for f_idx in range(n):
@@ -385,7 +384,7 @@ def run_trade_ai(world):
                 qty = int(min(surplus, buyer.stats.get("gold", 0) // price))
                 if qty < MIN_TRADE_QUANTITY:
                     continue
-                route = _route_for_pair(world, f_idx, p_idx, coastal)
+                route = _route_for_pair(world, f_idx, p_idx)
                 if route is None:
                     continue
                 kind, path = route
@@ -441,11 +440,21 @@ class TradeRouteProject:
         return self.path[:a_end], self.path[b_start:]
 
 
+TRADE_ROUTE_DECLINE_COOLDOWN_TURNS = 10   # matches expansion.CLAIM_FAIL_COOLDOWN_TURNS in spirit
+
+
 def start_trade_route(world, a_idx, b_idx):
-    """Validate and kick off building a land trade route between a_idx and
-    b_idx's capitals. Returns a message describing what happened (success
-    or why not) — used identically by the player's UI action and
-    run_trade_route_ai, one code path for both."""
+    """Propose a trade route (land or sea, whichever exists — land takes
+    priority when both do, since it's the more substantial connection)
+    between a_idx and b_idx's capitals. Neither kind opens automatically
+    anymore: the other side has to actually agree (see
+    diplomacy.evaluate_trade_route), the same "propose, then either
+    accepted or declined" flow form_alliance already uses — a land route
+    still takes real turns to build once agreed to, a sea route opens
+    immediately since there's nothing physical to construct across open
+    water. Returns a message describing what happened (success, decline,
+    or why proposing isn't possible at all) — used identically by the
+    player's UI action and run_trade_route_ai, one code path for both."""
     if a_idx == b_idx:
         return "A nation can't trade with itself."
     if not eligible_to_trade(world, a_idx, b_idx):
@@ -455,14 +464,35 @@ def start_trade_route(world, a_idx, b_idx):
         return "A trade route already connects these two."
     if any(frozenset((p.a_idx, p.b_idx)) == key for p in world.trade_route_projects):
         return "A trade route is already under construction between these two."
+    decline_until = getattr(world, "trade_route_decline_until", {}).get(key, -1)
+    if world.turn < decline_until:
+        return "They're not ready to reconsider a trade proposal yet."
 
-    path = _land_capital_path(world, a_idx, b_idx)
-    if path is None:
-        return "No viable land route exists between these two capitals."
+    a, b = world.factions[a_idx], world.factions[b_idx]
+    land_path = _land_capital_path(world, a_idx, b_idx)
+    coastal = _coastal_factions(world)
+    sea_result = (_capital_sea_path(world, a_idx, b_idx)
+                 if a_idx in coastal and b_idx in coastal else None)
+    if land_path is None and sea_result is None:
+        return "No viable route exists between these two capitals."
 
-    world.trade_route_projects.append(TradeRouteProject(a_idx, b_idx, path))
-    a_name, b_name = world.factions[a_idx].name, world.factions[b_idx].name
-    return f"Construction begins on a trade route between {a_name} and {b_name}."
+    from app.world import diplomacy
+    accepted, reason = diplomacy.evaluate_trade_route(world, a, b)
+    if not accepted:
+        if not hasattr(world, "trade_route_decline_until"):
+            world.trade_route_decline_until = {}
+        world.trade_route_decline_until[key] = world.turn + TRADE_ROUTE_DECLINE_COOLDOWN_TURNS
+        return f"{b.name} declines the trade proposal — {reason}."
+
+    if land_path is not None:
+        world.trade_route_projects.append(TradeRouteProject(a_idx, b_idx, land_path))
+        return f"{b.name} agrees — construction begins on a trade route between {a.name} and {b.name}."
+
+    kind, sea_path = sea_result
+    route = {"kind": kind, "cells": sea_path, "a_faction": a_idx, "b_faction": b_idx}
+    world.trade_routes.append(route)
+    world.trade_routes_by_pair[key] = route
+    return f"{b.name} agrees — a sea trade route opens between {a.name} and {b.name}."
 
 
 def advance_trade_route_projects(world):
@@ -514,6 +544,7 @@ def run_trade_route_ai(world):
         if active.get(f_idx, 0) >= MAX_ACTIVE_ROUTE_PROJECTS_PER_FACTION:
             continue
         seller = world.factions[f_idx]
+        decline_until = getattr(world, "trade_route_decline_until", {})
         candidates = []
         for p_idx in range(n):
             if p_idx == f_idx:
@@ -521,6 +552,8 @@ def run_trade_route_ai(world):
             key = frozenset((f_idx, p_idx))
             if key in world.trade_routes_by_pair or key in building_pairs:
                 continue
+            if world.turn < decline_until.get(key, -1):
+                continue   # declined recently -- don't re-pester them every turn
             if eligible_to_trade(world, f_idx, p_idx):
                 candidates.append(p_idx)
         if not candidates:
@@ -528,10 +561,13 @@ def run_trade_route_ai(world):
 
         best = max(candidates, key=lambda p:
                    diplomacy._resource_complementarity(world, seller, world.factions[p]))
-        msg = start_trade_route(world, f_idx, best)
-        if msg.startswith("Construction begins"):
+        key = frozenset((f_idx, best))
+        start_trade_route(world, f_idx, best)
+        established = key in world.trade_routes_by_pair
+        building = key in {frozenset((p.a_idx, p.b_idx)) for p in world.trade_route_projects}
+        if established or building:
             events.append({"type": "route_started", "a_idx": f_idx, "b_idx": best})
             active[f_idx] = active.get(f_idx, 0) + 1
-            building_pairs.add(frozenset((f_idx, best)))
+            building_pairs.add(key)
 
     return events
