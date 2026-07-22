@@ -5,6 +5,7 @@ and isolated in ``update`` so it's easy to swap for smarter AI, formations, or
 morale-driven routing later.
 """
 import math
+import random
 
 from app.battle.unit_types import UNIT_TYPES
 
@@ -53,8 +54,12 @@ class Unit:
             self.x += dx / dist * move
             self.y += dy / dist * move
         elif self._cd <= 0:
-            self.target.hp -= self.damage
             self._cd = self.type["cooldown"]
+            # accuracy (see UNIT_TYPES) defaults to 1.0 -- melee always
+            # connects when in range; a miss still fires (the arrow flies,
+            # the cooldown ticks) but deals no damage.
+            if random.random() < self.type.get("accuracy", 1.0):
+                self.target.hp -= self.damage
             if self.type.get("ranged"):
                 battle.spawn_projectile(self.x, self.y,
                                         self.target.x, self.target.y,

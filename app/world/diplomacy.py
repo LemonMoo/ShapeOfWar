@@ -120,16 +120,16 @@ def improve_relations(world, player, target):
             f"(Standing: {standing})")
 
 
-def fabricate_claim(world, player, target, county):
+def fabricate_claim(world, player, target, region):
     standing = _adjust_standing(world, player, target, FABRICATE_CLAIM_DELTA)
-    return (f"{player.name} fabricates a claim on {county.name}, souring "
+    return (f"{player.name} fabricates a claim on {region.name}, souring "
             f"relations with {target.name}. (Standing: {standing})")
 
 
-def terrorize_locals(world, player, target, county):
+def terrorize_locals(world, player, target, region):
     standing = _adjust_standing(world, player, target, TERRORIZE_LOCALS_DELTA)
     player.stats["morale"] = max(15, player.stats.get("morale", 50) - TERRORIZE_MORALE_COST)
-    return (f"{player.name} terrorizes the people of {county.name}. "
+    return (f"{player.name} terrorizes the people of {region.name}. "
             f"{target.name} is outraged. (Standing: {standing}, your morale "
             f"-{TERRORIZE_MORALE_COST})")
 

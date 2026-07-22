@@ -34,11 +34,11 @@ from app.world.world_map import Stance
 from app.world.worldgen import (OCEAN, _path_dijkstra, _nearest_ocean_cell,
                                 _elev_cost, _sea_cost, _bfs_distance,
                                 _SEA_COAST_REACH)
-from app.world.resources import RESOURCES, _LOCAL_FOOD, _storage_cap, _clamp_to_storage
+from app.world.resources import (RESOURCES, BASE_VALUE_BY_TIER, _LOCAL_FOOD,
+                                 _storage_cap, _clamp_to_storage)
 from app.world.diplomacy import TRADE_STANDING_THRESHOLD
 
 # --- market ------------------------------------------------------------------
-BASE_VALUE_BY_TIER = {1: 2, 2: 4, 3: 3, 4: 12}   # gold/unit before scarcity
 MIN_TRADE_QUANTITY = 20
 SAFETY_RESERVE_TURNS = 8          # food: never sell below N turns of upkeep
 NON_FOOD_RESERVE_FRACTION = 0.1   # non-food: never sell below 10% of storage cap
@@ -124,7 +124,7 @@ def eligible_to_trade(world, a_idx, b_idx):
 
 def _coastal_factions(world):
     """Faction indices owning at least one coastal settlement — computed
-    once per turn, not once per pair (unlike territory.naval_reachable_counties,
+    once per turn, not once per pair (unlike territory.naval_reachable_regions,
     which does a fresh BFS per attack — far too slow to run for every
     faction-pair every turn)."""
     ocean_cells = [(x, y) for y in range(world.h) for x in range(world.w)
@@ -397,7 +397,7 @@ class TradeRouteProject:
     """A land trade route under construction: grows from *both* ends of a
     precomputed capital-to-capital path simultaneously, meeting in the
     middle — built_from_a/built_from_b are cell counts built from each end.
-    No fractional-turn accumulation (unlike CastleProject/ClaimProject in
+    No fractional-turn accumulation (unlike SettlementProject/ClaimProject in
     construction.py/expansion.py), so there's no round()-vs-math.ceil()
     jumpy-countdown risk here by construction: progress is an exact cell
     count, shown directly rather than an estimated turn countdown."""

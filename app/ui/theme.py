@@ -9,6 +9,7 @@ MUTED = "#8a94a6"     # secondary text
 ACCENT = "#4da3ff"
 LINE = "#2a3140"
 GOOD = "#59c17a"
+WARN = "#d9a441"
 BAD = "#e2604a"
 
 FONT = ("Segoe UI", 10)

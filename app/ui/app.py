@@ -24,8 +24,8 @@ class _WildlandDefender:
     """Stand-in 'nation' for a wildland-garrison battle (see
     stage_wildland_battle) — just enough attributes for Army composition
     and battle messaging (App._army_for/stage_battle) to treat it like a
-    normal defender. Never added to world.factions; county.faction_idx
-    stays UNCLAIMED throughout, which territory.transfer_county already
+    normal defender. Never added to world.factions; region.faction_idx
+    stays UNCLAIMED throughout, which territory.transfer_region already
     knows how to move land out of."""
 
     def __init__(self, military):
@@ -93,8 +93,7 @@ class App(tk.Tk):
                                     on_regenerate=self.regenerate_world,
                                     on_end_turn=self.end_turn,
                                     on_wildland_claim=self.stage_wildland_battle)
-            self.battle_view = BattleView(self.content, on_new_skirmish=self.random_skirmish,
-                                         on_continue=self._return_from_battle)
+            self.battle_view = BattleView(self.content, on_continue=self._return_from_battle)
             for view in (self.map_view, self.battle_view):
                 view.place(relx=0, rely=0, relwidth=1, relheight=1)
         else:
@@ -167,7 +166,7 @@ class App(tk.Tk):
         # and new-game setup screens, which have no in-game nav to offer.
         self.nav_frame = tk.Frame(bar, bg=theme.PANEL)
         self.nav_buttons = {}
-        for name, label in (("map", "World Map"), ("battle", "Battlefield")):
+        for name, label in (("map", "World Map"),):
             b = tk.Button(self.nav_frame, text=label, relief="flat", font=theme.FONT,
                           command=lambda n=name: self.show_screen(n))
             b.pack(side="left", padx=3, pady=8)
@@ -243,7 +242,7 @@ class App(tk.Tk):
         }
         return army, composition
 
-    def stage_battle(self, attacker, defender, county=None, claim_project=None,
+    def stage_battle(self, attacker, defender, region=None, claim_project=None,
                      defender_strength_mult=1.0):
         w = max(self.battle_view.canvas.winfo_width(), 900)
         h = max(self.battle_view.canvas.winfo_height(), 600)
@@ -253,59 +252,42 @@ class App(tk.Tk):
         battle.deploy(a_army, a_comp, 0)
         battle.deploy(d_army, d_comp, 1, strength_mult=defender_strength_mult)
 
-        # A specific county is normally already chosen by the map's
-        # attack-target picker; fall back to a random frontline county (if
+        # A specific region is normally already chosen by the map's
+        # attack-target picker; fall back to a random frontline region (if
         # any) for callers that don't pick one themselves (random skirmishes,
         # sandbox worlds with no player nation). Never hit for a wildland
-        # claim battle — stage_wildland_battle always supplies `county`, and
+        # claim battle — stage_wildland_battle always supplies `region`, and
         # a _WildlandDefender isn't in world.factions for .index() to find.
-        if county is None:
+        if region is None:
             import random
-            from app.world.territory import bordering_counties
+            from app.world.territory import bordering_regions
             attacker_idx = self.world.factions.index(attacker)
             defender_idx = self.world.factions.index(defender)
-            frontier = bordering_counties(self.world, attacker_idx, defender_idx)
-            county = random.choice(frontier) if frontier else None
+            frontier = bordering_regions(self.world, attacker_idx, defender_idx)
+            region = random.choice(frontier) if frontier else None
         self._battle_context = {"attacker": attacker, "defender": defender,
-                                "county": county, "claim_project": claim_project}
+                                "region": region, "claim_project": claim_project}
 
-        msg = (f"{attacker.name} marches on {county.name}, held by {defender.name}."
-               if county else f"{attacker.name} marches on {defender.name}.")
+        msg = (f"{attacker.name} marches on {region.name}, held by {defender.name}."
+               if region else f"{attacker.name} marches on {defender.name}.")
         self.battle_view.set_battle(battle, msg)
         self.show_screen("battle")
 
     def stage_wildland_battle(self, project):
-        """Fight for a county whose claim construction has finished — the
+        """Fight for a region whose claim construction has finished — the
         interactive battlefield replaces the old instant win/loss formula
         (still used for AI claims, see app/world/expansion.py). The
-        garrison's Army is sized from the county's wildland_strength via
+        garrison's Army is sized from the region's wildland_strength via
         the exact same composition formula _army_for already uses for a
         real nation's military stat, but each of its soldiers fights at
         WILDLAND_COMBAT_STRENGTH_MULT — the same discount the AI's instant
         formula applies to wildland_strength itself."""
         from app.world import expansion
         player = self.world.factions[project.faction_idx]
-        county = self.world.counties[project.county_id]
-        defender = _WildlandDefender(county.wildland_strength)
-        self.stage_battle(player, defender, county, claim_project=project,
+        region = self.world.regions[project.region_id]
+        defender = _WildlandDefender(region.wildland_strength)
+        self.stage_battle(player, defender, region, claim_project=project,
                           defender_strength_mult=expansion.WILDLAND_COMBAT_STRENGTH_MULT)
-
-    def random_skirmish(self):
-        import random
-        from app.world.world_map import Stance
-        factions = self.world.factions
-        if len(factions) < 2:
-            return
-        # Prefer a real rivalry; fall back to any two factions.
-        enemy_pairs = []
-        for f in factions:
-            for r in self.world.world_map.relationships_of(f.id):
-                if r["stance"] == Stance.ENEMY:
-                    enemy_pairs.append((f, r["other"]))
-        if enemy_pairs:
-            self.stage_battle(*random.choice(enemy_pairs))
-        else:
-            self.stage_battle(*random.sample(factions, 2))
 
     _ACQUISITION_MEANS = "Military Conquest"
 
@@ -314,27 +296,27 @@ class App(tk.Tk):
         ctx, self._battle_context = getattr(self, "_battle_context", None), None
         self._battle_outcome = None
         conquest = ""
-        if ctx and ctx["county"]:
-            county, attacker, defender = ctx["county"], ctx["attacker"], ctx["defender"]
+        if ctx and ctx["region"]:
+            region, attacker, defender = ctx["region"], ctx["attacker"], ctx["defender"]
             claim_project = ctx.get("claim_project")
             if winner and winner.side == 0:
                 attacker_idx = self.world.factions.index(attacker)
                 if claim_project is not None:
                     from app.world import expansion
-                    expansion.resolve_claim_win(self.world, county, attacker_idx)
+                    expansion.resolve_claim_win(self.world, region, attacker_idx)
                 else:
-                    from app.world.territory import transfer_county
-                    transfer_county(self.world, county, attacker_idx)
-                conquest = f" {attacker.name} seizes {county.name}!"
+                    from app.world.territory import transfer_region
+                    transfer_region(self.world, region, attacker_idx)
+                conquest = f" {attacker.name} seizes {region.name}!"
                 self.map_view.refresh()
-                self._battle_outcome = {"result": "success", "county": county,
+                self._battle_outcome = {"result": "success", "region": region,
                                         "attacker": attacker, "defender": defender}
             else:
                 if claim_project is not None:
                     from app.world import expansion
-                    expansion.resolve_claim_loss(self.world, county)
+                    expansion.resolve_claim_loss(self.world, region)
                     self.map_view.refresh()
-                self._battle_outcome = {"result": "failure", "county": county,
+                self._battle_outcome = {"result": "failure", "region": region,
                                         "attacker": attacker, "defender": defender,
                                         "stalemate": winner is None}
             if claim_project is not None and claim_project in self.world.claim_projects:
@@ -345,25 +327,25 @@ class App(tk.Tk):
 
     def _return_from_battle(self):
         """Called once the player dismisses the battle-over screen (click or
-        keypress) — back to the map, blinking the contested county's border
+        keypress) — back to the map, blinking the contested region's border
         gold (won) or red (lost/stalemate)."""
         outcome = getattr(self, "_battle_outcome", None)
         self._battle_outcome = None
         self.show_screen("map")
         if outcome is None:
             return
-        county, attacker, defender = outcome["county"], outcome["attacker"], outcome["defender"]
+        region, attacker, defender = outcome["region"], outcome["attacker"], outcome["defender"]
         if outcome["result"] == "success":
-            self.map_view.flash_county(county, "success")
+            self.map_view.flash_region(region, "success")
             self.map_view.show_bottom_message(
-                f"{attacker.name} successfully acquired {county.name} "
+                f"{attacker.name} successfully acquired {region.name} "
                 f"through {self._ACQUISITION_MEANS}.")
         else:
-            self.map_view.flash_county(county, "failure")
+            self.map_view.flash_region(region, "failure")
             if outcome.get("stalemate"):
-                msg = f"The battle for {county.name} ended in a stalemate."
+                msg = f"The battle for {region.name} ended in a stalemate."
             else:
-                msg = f"{attacker.name} failed to take {county.name} from {defender.name}."
+                msg = f"{attacker.name} failed to take {region.name} from {defender.name}."
             self.map_view.show_bottom_message(msg)
 
 

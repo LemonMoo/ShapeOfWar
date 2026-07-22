@@ -1,5 +1,5 @@
 """Save/load games. Each save is a slot on disk identified by a short id:
-  saves/<id>.pkl   the pickled World (factions, counties, grids, everything)
+  saves/<id>.pkl   the pickled World (factions, regions, grids, everything)
   saves/<id>.json  lightweight metadata (species, realm name, created date)
 
 Keeping metadata in a tiny separate JSON file means listing saves for the

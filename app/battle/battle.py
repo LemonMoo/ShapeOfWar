@@ -11,6 +11,9 @@ _FRICTION = 0.80   # per-frame velocity damping so bounces settle quickly
 _CELL = 16         # spatial-hash cell size (px); ~2x a unit diameter
 _ARROW_SPEED = 320  # px/sec — how fast an arrow travels to its target
 
+PLANNING_ZONE_MARGIN = 24   # px kept clear of the midline on each side, so a
+                            # dragged unit can never land in/past the enemy's half
+
 
 class Projectile:
     """A cosmetic arrow flying from a shooter to where its target was. Purely
@@ -80,6 +83,16 @@ class Battle:
             army.units.append(Unit(type_key, army, x, y, strength_mult))
         self.armies.append(army)
         return army
+
+    def zone_bounds(self, side):
+        """(x_min, x_max) a side's units may occupy during the pre-battle
+        planning phase (app/ui/battle_view.py) — confines dragging to that
+        side's own half, leaving a gap at the midline so a unit can never
+        be dropped in or past the opposing army's territory."""
+        mid = self.width / 2
+        if side == 0:
+            return (0.0, mid - PLANNING_ZONE_MARGIN)
+        return (mid + PLANNING_ZONE_MARGIN, self.width)
 
     def nearest_enemy(self, unit):
         best, best_d = None, float("inf")

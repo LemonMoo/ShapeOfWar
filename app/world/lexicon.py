@@ -5,7 +5,7 @@ SPECIES maps a species name to flavor + gameplay traits:
   mil / eco  : stat modifiers (military / economy)
   trait      : short descriptor shown in the UI
 
-Every namer below is species-aware: factions, counties, settlements and
+Every namer below is species-aware: factions, regions, settlements and
 villages all draw their name components from word banks flavored for their
 owning species (Elvish forests, Dwarven holds, Orcish warbands, Goblin
 warrens, Human realms), so the name itself hints at who lives there.
@@ -65,8 +65,8 @@ _FACTION_NAMES = {
     ),
 }
 
-# --- county names: "<Adj> <Feature>" ----------------------------------------
-_COUNTY_NAMES = {
+# --- region names: "<Adj> <Feature>" ----------------------------------------
+_REGION_NAMES = {
     "Humans": (
         _FACTION_NAMES["Humans"][0],
         ["Vale", "Downs", "Moor", "Weald", "Fen", "Hollow", "Ridge", "Marsh",
@@ -149,13 +149,13 @@ _SETTLE_NAMES = {
 }
 
 
-def make_county_namer(rng):
-    """Return a function (species) -> unique '<Adj> <Feature>' county name,
+def make_region_namer(rng):
+    """Return a function (species) -> unique '<Adj> <Feature>' region name,
     drawn from that species' word bank (falls back to Human if unknown)."""
     used = set()
 
     def namer(species="Humans"):
-        adj, feature = _COUNTY_NAMES.get(species, _COUNTY_NAMES["Humans"])
+        adj, feature = _REGION_NAMES.get(species, _REGION_NAMES["Humans"])
         for _ in range(200):
             name = f"{rng.choice(adj)} {rng.choice(feature)}"
             if name not in used:

@@ -1,7 +1,7 @@
 """Fog of war: what the player has actually seen. Two-state (unexplored /
 revealed — no dimmed "remembered" state), monotonic (once seen, always
 shown), with the reveal radius scaling up as the player's own territory
-grows, so a freshly-founded, single-county realm can't see the whole
+grows, so a freshly-founded, single-region realm can't see the whole
 continent — see recompute()'s vision-radius formula.
 
 Also tracks which *factions* the player has made contact with (any faction
@@ -95,8 +95,8 @@ def recompute(world):
         max_steps = int(math.ceil(_vision_radius(world)))
         dist = {}
         frontier = deque()
-        for cid in world.factions[player_idx].meta.get("counties", []):
-            for (x, y) in world.counties[cid].cells:
+        for cid in world.factions[player_idx].meta.get("regions", []):
+            for (x, y) in world.regions[cid].cells:
                 if (x, y) not in dist:
                     dist[(x, y)] = 0
                     frontier.append((x, y))

@@ -1,5 +1,13 @@
 """Micro battlefield screen: renders a Battle each frame and runs the sim loop
-via Tk's after(). Controls: Start/Pause, Step, New Skirmish.
+via Tk's after(). Controls: Deploy Army (planning) / Start-Pause (live), Step.
+
+Every battle opens in a planning phase before the simulation runs: the
+attacker's units (army 0 — see Battle.deploy/App.stage_battle, always the
+side the player clicked "Attack" with) can be dragged into position one at a
+time, or multi-selected by rubber-band-dragging a box over empty ground and
+then dragged as a group — classic RTS marquee-select. The defender's side
+is fixed; only your own army is ever plannable. "Deploy Army" ends planning
+and starts the fight in the same click.
 """
 import math
 import tkinter as tk
@@ -7,15 +15,15 @@ import tkinter as tk
 from app.ui import theme
 from app.battle.shapes import draw_shape
 
-_FRAME_MS = 16          # ~60 fps
-_DT = 1 / 60            # fixed simulation step (seconds)
-_SPEEDS = [1, 2, 4]     # sim sub-steps per frame (battle speed multiplier)
+_FRAME_MS = 16              # ~60 fps
+_DT = 1 / 60                # fixed simulation step (seconds)
+_SPEEDS = [1, 2, 4, 8]      # sim sub-steps per frame (battle speed multiplier)
+_CLICK_SLOP = 4             # px of movement still counted as a click, not a drag
 
 
 class BattleView(tk.Frame):
-    def __init__(self, master, on_new_skirmish, on_continue=None):
+    def __init__(self, master, on_continue=None):
         super().__init__(master, bg=theme.BG)
-        self.on_new_skirmish = on_new_skirmish
         self.on_continue = on_continue
         self.battle = None
         self.running = False
@@ -24,9 +32,22 @@ class BattleView(tk.Frame):
         self.speed = 1
         self._continue_armed = False
 
+        # Planning phase: drag-to-move / rubber-band multi-select for the
+        # attacker's (army 0) units before the fight starts — see the
+        # module docstring and _on_press/_on_drag/_on_release below.
+        self.planning = False
+        self.selected_units = set()
+        self._drag_mode = None      # None | "move" | "marquee"
+        self._drag_start = None     # (x, y) canvas coords at mouse-down
+        self._drag_last = None      # (x, y) last motion event, for move deltas
+        self._marquee = None        # (x0, y0, x1, y1) while box-selecting
+
         self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
         self.canvas.pack(side="left", fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda e: self.render())
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
 
         self._build_panel()
 
@@ -41,15 +62,21 @@ class BattleView(tk.Frame):
                              fg=theme.MUTED, font=theme.FONT, justify="left",
                              wraplength=270, anchor="w")
         self.info.pack(anchor="w", padx=14)
+        self.plan_hint = tk.Label(p, text="", bg=theme.PANEL, fg=theme.ACCENT,
+                                  font=("Segoe UI", 9, "bold"), justify="left",
+                                  wraplength=270, anchor="w")
+        self.plan_hint.pack(anchor="w", padx=14, pady=(4, 0))
 
         controls = tk.Frame(p, bg=theme.PANEL)
         controls.pack(fill="x", padx=14, pady=12)
-        for text, cmd in (("Start / Pause", self.toggle),
-                          ("Step", self.step_once),
-                          ("New Skirmish", self.on_new_skirmish)):
-            tk.Button(controls, text=text, command=cmd, bg="#232a36",
-                      fg=theme.INK, activebackground=theme.ACCENT,
-                      relief="flat", font=theme.FONT).pack(side="left", padx=2)
+        self.toggle_btn = tk.Button(controls, text="Start / Pause", command=self.toggle,
+                                    bg="#232a36", fg=theme.INK,
+                                    activebackground=theme.ACCENT, relief="flat",
+                                    font=theme.FONT)
+        self.toggle_btn.pack(side="left", padx=2)
+        tk.Button(controls, text="Step", command=self.step_once, bg="#232a36",
+                  fg=theme.INK, activebackground=theme.ACCENT,
+                  relief="flat", font=theme.FONT).pack(side="left", padx=2)
 
         self.speed_btn = tk.Button(controls, text="Speed 1x",
                                    command=self._cycle_speed, bg="#232a36",
@@ -72,7 +99,28 @@ class BattleView(tk.Frame):
         battle.on_attack = self._on_attack
         counts = " vs ".join(f"{a.name} ({len(a.units)})" for a in battle.armies)
         self.info.config(fg=theme.INK, text=counts)
+
+        self.planning = True
+        self.selected_units = set()
+        self._drag_mode = None
+        self._marquee = None
+        self.plan_hint.config(text="Planning phase — drag your units (highlighted "
+                              "outline when selected) into position. Drag over "
+                              "empty ground to box-select several at once. Click "
+                              "\"Deploy Army\" when ready.")
+        self._update_toggle_label()
         self.render()
+
+    def _end_planning(self):
+        self.planning = False
+        self.selected_units = set()
+        self._drag_mode = None
+        self._marquee = None
+        self.plan_hint.config(text="")
+        self._update_toggle_label()
+
+    def _update_toggle_label(self):
+        self.toggle_btn.config(text="Deploy Army" if self.planning else "Start / Pause")
 
     def _on_attack(self, attacker, target):
         import random
@@ -92,7 +140,9 @@ class BattleView(tk.Frame):
     def toggle(self):
         if not self.battle:
             return
-        self.running = not self.running
+        if self.planning:
+            self._end_planning()   # "Deploy Army" -> confirm placement and...
+        self.running = not self.running    # ...start the fight in the same click
         if self.running:
             self._tick()
 
@@ -103,6 +153,8 @@ class BattleView(tk.Frame):
             self._after_id = None
 
     def step_once(self):
+        if self.planning:
+            return
         if self.battle and not self.battle.over:
             self.battle.update(_DT)
             self.render()
@@ -126,6 +178,75 @@ class BattleView(tk.Frame):
             self._arm_continue()
             return
         self._after_id = self.after(_FRAME_MS, self._tick)
+
+    # --- planning phase: drag-to-move + rubber-band multi-select -----------
+    def _plannable_units(self):
+        """Army 0's living units — the only ones a player ever repositions
+        (see the module docstring for why it's always army 0)."""
+        if not self.battle or not self.battle.armies:
+            return []
+        return [u for u in self.battle.armies[0].units if u.alive]
+
+    def _unit_at(self, x, y):
+        """The plannable unit under (x, y), nearest first, or None."""
+        best, best_d2 = None, None
+        for u in self._plannable_units():
+            r = u.type["radius"]
+            d2 = (u.x - x) ** 2 + (u.y - y) ** 2
+            if d2 <= r * r and (best_d2 is None or d2 < best_d2):
+                best, best_d2 = u, d2
+        return best
+
+    def _on_press(self, event):
+        if not self.planning:
+            return
+        x, y = event.x, event.y
+        self._drag_start = (x, y)
+        self._drag_last = (x, y)
+        hit = self._unit_at(x, y)
+        if hit is not None:
+            if hit not in self.selected_units:
+                self.selected_units = {hit}
+            self._drag_mode = "move"
+        else:
+            self._drag_mode = "marquee"
+            self._marquee = (x, y, x, y)
+        self.render()
+
+    def _on_drag(self, event):
+        if not self.planning or self._drag_mode is None:
+            return
+        x, y = event.x, event.y
+        if self._drag_mode == "move":
+            lx, ly = self._drag_last
+            dx, dy = x - lx, y - ly
+            x_min, x_max = self.battle.zone_bounds(0)
+            for u in self.selected_units:
+                r = u.type["radius"]
+                u.x = min(x_max - r, max(x_min + r, u.x + dx))
+                u.y = min(self.battle.height - r, max(r, u.y + dy))
+            self._drag_last = (x, y)
+        else:   # marquee
+            sx, sy = self._drag_start
+            self._marquee = (sx, sy, x, y)
+        self.render()
+
+    def _on_release(self, event):
+        if not self.planning:
+            return
+        if self._drag_mode == "marquee" and self._marquee is not None:
+            x0, y0, x1, y1 = self._marquee
+            if abs(x1 - x0) > _CLICK_SLOP or abs(y1 - y0) > _CLICK_SLOP:
+                lo_x, hi_x = sorted((x0, x1))
+                lo_y, hi_y = sorted((y0, y1))
+                self.selected_units = {u for u in self._plannable_units()
+                                       if lo_x <= u.x <= hi_x and lo_y <= u.y <= hi_y}
+            else:
+                self.selected_units = set()   # plain click on empty ground -> deselect
+        self._drag_mode = None
+        self._drag_start = None
+        self._marquee = None
+        self.render()
 
     # --- "click any button to continue" after a battle ----------------------
     def _arm_continue(self):
@@ -193,12 +314,27 @@ class BattleView(tk.Frame):
 
         if not self.battle:
             return
+
+        if self.planning:
+            x_min, x_max = self.battle.zone_bounds(0)
+            c.create_line(x_max, 0, x_max, h, fill=theme.ACCENT, dash=(4, 3))
+            c.create_text(10, 8, text="PLANNING PHASE — drag your units into position",
+                         fill=theme.ACCENT, font=("Segoe UI", 11, "bold"), anchor="nw")
+
         for army in self.battle.armies:
             for u in army.units:
                 if u.alive:
                     draw_shape(c, u.type["shape"], u.x, u.y,
                                u.type["radius"], army.color)
                     self._draw_equipment(c, u)
+                    if u in self.selected_units:
+                        r = u.type["radius"]
+                        c.create_oval(u.x - r - 3, u.y - r - 3, u.x + r + 3, u.y + r + 3,
+                                     outline="#ffffff", width=2)
+
+        if self._marquee is not None:
+            x0, y0, x1, y1 = self._marquee
+            c.create_rectangle(x0, y0, x1, y1, outline=theme.ACCENT, dash=(3, 2))
 
         # Arrows in flight, drawn on top as '.'.
         for p in self.battle.projectiles:

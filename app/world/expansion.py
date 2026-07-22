@@ -1,5 +1,5 @@
 """Progressive territory expansion: claiming UNCLAIMED land instead of
-starting the game already owning a fully-formed nation. Every county not
+starting the game already owning a fully-formed nation. Every region not
 part of a faction's starting foothold begins UNCLAIMED, defended by a
 neutral "wildland" garrison (see app/world/worldgen.py's
 _seed_wildland_strength) — claiming one requires being adjacent to land you
@@ -12,7 +12,7 @@ import random
 from app.world import territory
 from app.world import resources
 from app.world.worldgen import (UNCLAIMED, _place_settlements_for_faction,
-                                _place_villages_for_county)
+                                _place_villages_for_region)
 from app.world.lexicon import make_settlement_namer
 from app.world.construction import can_afford
 
@@ -21,7 +21,7 @@ CLAIM_COST_PER_CELL = {"Gold": 0.6}
 CLAIM_BASE_TURNS = 4
 CLAIM_TURNS_PER_CELL = 0.03
 CLAIM_FAIL_COOLDOWN_TURNS = 5
-CLAIM_FAIL_STRENGTH_BUMP = 1.15   # a county "digs in" after repelling a claim
+CLAIM_FAIL_STRENGTH_BUMP = 1.15   # a region "digs in" after repelling a claim
 
 # Wildland garrisons fight 10% below their nominal strength rating — applied
 # consistently wherever a garrison is actually fought: here (the AI's
@@ -34,40 +34,40 @@ CLAIM_FAIL_STRENGTH_BUMP = 1.15   # a county "digs in" after repelling a claim
 WILDLAND_COMBAT_STRENGTH_MULT = 0.9
 
 
-def claim_cost(county):
+def claim_cost(region):
     cost = dict(CLAIM_BASE_COST)
     for resource, per_cell in CLAIM_COST_PER_CELL.items():
-        cost[resource] = cost.get(resource, 0) + round(per_cell * len(county.cells))
+        cost[resource] = cost.get(resource, 0) + round(per_cell * len(region.cells))
     return cost
 
 
-def claim_turns(county):
-    return max(1, round(CLAIM_BASE_TURNS + CLAIM_TURNS_PER_CELL * len(county.cells)))
+def claim_turns(region):
+    return max(1, round(CLAIM_BASE_TURNS + CLAIM_TURNS_PER_CELL * len(region.cells)))
 
 
-def claim_odds(nation, county):
+def claim_odds(nation, region):
     """Player-facing success-probability preview for a wildland claim (and
     what the AI's instant-resolve path in advance_claims actually rolls
     against) — the garrison's effective strength is discounted by
     WILDLAND_COMBAT_STRENGTH_MULT, same as its soldiers are in an
     interactive battle."""
     mil = nation.stats.get("military", 0)
-    effective_strength = max(1, county.wildland_strength * WILDLAND_COMBAT_STRENGTH_MULT)
+    effective_strength = max(1, region.wildland_strength * WILDLAND_COMBAT_STRENGTH_MULT)
     return mil / (mil + effective_strength)
 
 
 def claimable_frontier(world, faction_idx):
-    """UNCLAIMED counties adjacent (by land, or by sea if there's no land
+    """UNCLAIMED regions adjacent (by land, or by sea if there's no land
     connection) to a faction's own territory — the only land it can
     legally claim next; this *is* the no-leapfrogging rule, not just a
     check for one."""
-    return (territory.bordering_counties(world, faction_idx, UNCLAIMED)
-            + territory.naval_reachable_counties(world, faction_idx, UNCLAIMED))
+    return (territory.bordering_regions(world, faction_idx, UNCLAIMED)
+            + territory.naval_reachable_regions(world, faction_idx, UNCLAIMED))
 
 
 class ClaimProject:
-    """A county being claimed: cost is paid up front, progress accrues over
-    `total_turns` — mirrors CastleProject/RoadProject in
+    """A region being claimed: cost is paid up front, progress accrues over
+    `total_turns` — mirrors SettlementProject/RoadProject in
     app/world/construction.py, including the ceil-based countdown (not
     round(), which produces an uneven/jumpy display — see construction.py).
     Once `complete`, an AI-owned project resolves instantly (win/loss
@@ -75,10 +75,10 @@ class ClaimProject:
     and waits for the player to fight an interactive battle against the
     garrison — see app/ui/app.py's stage_wildland_battle."""
 
-    def __init__(self, faction_idx, county):
+    def __init__(self, faction_idx, region):
         self.faction_idx = faction_idx
-        self.county_id = county.id
-        self.total_turns = claim_turns(county)
+        self.region_id = region.id
+        self.total_turns = claim_turns(region)
         self.progress_turns = 0.0
 
     @property
@@ -90,23 +90,23 @@ class ClaimProject:
         return self.progress_turns >= self.total_turns
 
 
-def start_claim(world, faction_idx, county):
-    """Validate and kick off claiming `county` for `faction_idx` (player or,
+def start_claim(world, faction_idx, region):
+    """Validate and kick off claiming `region` for `faction_idx` (player or,
     in a future phase, AI). Returns a message describing what happened
     (success or why not) — used identically by the player's UI action and
     the AI expansion routine, one code path for both."""
-    if county.faction_idx >= 0:
+    if region.faction_idx >= 0:
         return "That land is already claimed."
-    if county not in claimable_frontier(world, faction_idx):
+    if region not in claimable_frontier(world, faction_idx):
         return "That land doesn't border your territory."
-    if world.turn < county.claim_cooldown_until_turn:
+    if world.turn < region.claim_cooldown_until_turn:
         return ("The locals are still wary after repelling your last "
                 "attempt — try again later.")
-    if any(p.county_id == county.id for p in world.claim_projects):
+    if any(p.region_id == region.id for p in world.claim_projects):
         return "A claim is already underway there."
 
     nation = world.factions[faction_idx]
-    cost = claim_cost(county)
+    cost = claim_cost(region)
     if not can_afford(nation, cost):
         return "You don't have enough resources to fund this expansion."
 
@@ -117,41 +117,51 @@ def start_claim(world, faction_idx, county):
         else:
             res[resource] = res.get(resource, 0) - amount
 
-    project = ClaimProject(faction_idx, county)
+    project = ClaimProject(faction_idx, region)
     world.claim_projects.append(project)
-    return (f"Expansion begins into {county.name} — estimated "
+    return (f"Expansion begins into {region.name} — estimated "
             f"{project.total_turns} turns.")
 
 
-def settle_newly_claimed_county(world, county):
-    """Place settlements/villages for a freshly claimed county, reusing the
+_NO_FREE_CITY_TOWN = {"city": 0, "town": 0}   # see _place_settlements_for_faction
+
+
+def settle_newly_claimed_region(world, region):
+    """Place settlements/villages for a freshly claimed region, reusing the
     same worldgen machinery used for a faction's starting foothold (so a new
-    city/castle/town lands fresh, scored against live geography, rather than
+    castle/village lands fresh, scored against live geography, rather than
     being pre-baked at world-gen for land nobody may ever reach), and
-    recompute its resource yield so next turn's advance_turn is accurate."""
-    if not county.settlements_generated:
+    recompute its resource yield so next turn's advance_turn is accurate.
+
+    Wildland only ever gives up a Castle (still area-scaled) and villages —
+    no free City or Town. Getting one of those now takes an actual
+    construction project (app/world/construction.py's start_settlement/
+    run_settlement_ai), the same as everyone's very first City/Town always
+    has, matching how a Castle already had to be built by hand."""
+    if not region.settlements_generated:
         namer = make_settlement_namer(random)
-        _place_settlements_for_faction(world, random, county.faction_idx,
-                                       list(county.cells), namer)
-        _place_villages_for_county(world, random, county)
-        county.settlements_generated = True
-    county.resources = resources.compute_county_yield(county, world.season)
+        _place_settlements_for_faction(world, random, region.faction_idx,
+                                       list(region.cells), namer,
+                                       fixed_counts=_NO_FREE_CITY_TOWN)
+        _place_villages_for_region(world, random, region)
+        region.settlements_generated = True
+    region.resources = resources.compute_region_yield(region, world.season)
 
 
-def resolve_claim_win(world, county, faction_idx):
+def resolve_claim_win(world, region, faction_idx):
     """A garrison battle (or, for AI, the instant formula) was won: transfer
-    the county and populate it fresh. Shared by advance_claims' AI path and
+    the region and populate it fresh. Shared by advance_claims' AI path and
     app.py's player-battle-outcome handling."""
-    territory.transfer_county(world, county, faction_idx)
-    settle_newly_claimed_county(world, county)
+    territory.transfer_region(world, region, faction_idx)
+    settle_newly_claimed_region(world, region)
 
 
-def resolve_claim_loss(world, county):
+def resolve_claim_loss(world, region):
     """A garrison battle (or the instant formula) was lost: no refund, the
     garrison digs in (a permanent strength bump) and a cooldown before it
     can be attempted again. Shared the same way as resolve_claim_win."""
-    county.wildland_strength = round(county.wildland_strength * CLAIM_FAIL_STRENGTH_BUMP)
-    county.claim_cooldown_until_turn = world.turn + CLAIM_FAIL_COOLDOWN_TURNS
+    region.wildland_strength = round(region.wildland_strength * CLAIM_FAIL_STRENGTH_BUMP)
+    region.claim_cooldown_until_turn = world.turn + CLAIM_FAIL_COOLDOWN_TURNS
 
 
 def advance_claims(world):
@@ -172,9 +182,9 @@ def advance_claims(world):
 
     for project in finished_ai:
         world.claim_projects.remove(project)
-        county = world.counties[project.county_id]
+        region = world.regions[project.region_id]
         nation = world.factions[project.faction_idx]
-        if random.random() < claim_odds(nation, county):
-            resolve_claim_win(world, county, project.faction_idx)
+        if random.random() < claim_odds(nation, region):
+            resolve_claim_win(world, region, project.faction_idx)
         else:
-            resolve_claim_loss(world, county)
+            resolve_claim_loss(world, region)

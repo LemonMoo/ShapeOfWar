@@ -4,12 +4,12 @@ Renders the procedurally generated world as a raster (a Pillow image cropped to
 a viewport and scaled with nearest-neighbor, so borders stay crisp). Three
 zoom levels, click-to-drill-down:
   - World: click a country to select it, click it again to zoom into...
-  - Country: shows its counties + settlements. Click a county to select it,
+  - Country: shows its regions + settlements. Click a region to select it,
     click it again to zoom into...
-  - County ("village view"): shows its villages, linked by simple dirt roads,
+  - Region ("village view"): shows its villages, linked by simple dirt roads,
     plus its settlements. Click a village for its farm-output stats.
 Click outside the zoomed region (or the Back button) to zoom back out one
-level at a time. Counties are the future unit of control for territory
+level at a time. Regions are the future unit of control for territory
 reassignment.
 """
 import math
@@ -21,7 +21,7 @@ from PIL import Image, ImageTk
 from app.ui import theme
 from app.world.world_map import Stance
 from app.world.worldgen import OCEAN
-from app.world.territory import bordering_counties, naval_reachable_counties
+from app.world.territory import bordering_regions, naval_reachable_regions
 from app.world.resources import RESOURCES
 from app.world import diplomacy
 from app.world import construction
@@ -29,8 +29,8 @@ from app.world import trade
 from app.world import expansion
 from app.world import commander
 
-_FLASH_COLOR = (255, 236, 120)   # bright gold — county gained
-_FLASH_FAIL_COLOR = (232, 74, 62)  # bright red — county attack failed
+_FLASH_COLOR = (255, 236, 120)   # bright gold — region gained
+_FLASH_FAIL_COLOR = (232, 74, 62)  # bright red — region attack failed
 _FLASH_DURATION = 2.2            # seconds
 _FLASH_FREQ = 1.8                # blink cycles per second
 
@@ -48,8 +48,8 @@ _LAKE_RGB = (48, 92, 140)      # inland lake water (shown in every map mode)
 # Fog of war (see app/world/vision.py) — unexplored land/sea, world view only.
 _FOG_HIDDEN_RGB = (7, 9, 14)
 
-# Per-county lightness offsets so neighboring counties of a faction read apart.
-_COUNTY_SHADES = [-0.12, 0.10, 0.22, -0.04, 0.15, 0.02, 0.28, -0.09, 0.06, 0.19]
+# Per-region lightness offsets so neighboring regions of a faction read apart.
+_REGION_SHADES = [-0.12, 0.10, 0.22, -0.04, 0.15, 0.02, 0.28, -0.09, 0.06, 0.19]
 
 
 def _hex_to_rgb(h):
@@ -73,6 +73,11 @@ def _shade(rgb, d):
         return _lighten(rgb, d)
     f = 1 + d
     return (rgb[0] * f, rgb[1] * f, rgb[2] * f)
+
+
+def _blend(a, b, t):
+    """Linear-interpolate from RGB `a` toward `b` by fraction `t` (0=a, 1=b)."""
+    return tuple(a[j] + (b[j] - a[j]) * t for j in range(3))
 
 
 def _ramp(t, stops):
@@ -101,7 +106,7 @@ def _elev_rgb(e):
 
 # Flat per-biome / per-climate colors for the "Biome"/"Climate" view modes —
 # these are the literal "sub-maps" for the resource economy in
-# app/world/resources.py (each biome/climate drives what a county yields).
+# app/world/resources.py (each biome/climate drives what a region yields).
 _BIOME_COLORS = {
     "mountain": (150, 148, 150),
     "forest": (40, 110, 58),
@@ -131,6 +136,16 @@ def _biome_rgb(biome):
     return _BIOME_COLORS.get(biome, _NO_DATA_RGB)
 
 
+# Basic topographical texture on the political map itself, not just the
+# separate Biome view mode: forests and mountains blend a bit of their
+# biome-mode reference color into the political base tint (see
+# _precompute_colors), so terrain reads at a glance without losing the
+# faction-color-is-primary political view. Other biomes (plains/coastal/
+# desert/swamp) are left alone — subtler and less useful to distinguish here.
+_POL_FOREST_TINT = 0.4
+_POL_MOUNTAIN_TINT = 0.35
+
+
 def _climate_rgb(climate):
     return _CLIMATE_COLORS.get(climate, _NO_DATA_RGB)
 
@@ -148,11 +163,12 @@ _SETTLE_STYLE = {
     "town":   {"fill": "#d9b98a", "outline": "#4a3a24", "r": 3},
 }
 _VILLAGE_STYLE = {"fill": "#c9a06a", "outline": "#4a3418", "r": 2}
-# Local roads (village/settlement network within a county — see
-# _place_villages_for_county in app/world/worldgen.py): Dirt for a road
+# Local roads (village/settlement network within a region — see
+# _place_villages_for_region in app/world/worldgen.py): Dirt for a road
 # touching a village, brown; Stone for a road linking two settlements, gray.
 _DIRT_ROAD_COLOR = "#8a6f4a"
 _STONE_ROAD_COLOR = "#9a9ba3"
+_BRIDGE_COLOR = "#6e4326"   # a stone road's river crossing, recolored like timber decking
 _TRADE_LAND_COLOR = "#7c5f26"   # long-haul trade road — dark bronze, recedes into the map
 _TRADE_SEA_COLOR = "#557c8c"    # dark shipping-lane blue, dotted like a nautical chart
 # A route currently carrying a caravan is redrawn on top in a bright,
@@ -174,7 +190,7 @@ _SHIP_STYLE = {"fill": "#c8f5ff", "outline": "#154a5c", "r": 6, "glow": "#5fd0ff
 # confused with anything else on the map.
 _COMMANDER_STYLE = {"fill": "#e685ff", "outline": "#4a1a5c", "r": 7}
 _SHIP_STYLE = {"fill": "#c9a86a", "outline": "#5c3f1a", "r": 6}
-# Above this many villages in a county, skip name labels (village view) so it
+# Above this many villages in a region, skip name labels (village view) so it
 # doesn't turn into unreadable text soup.
 _VILLAGE_LABEL_LIMIT = 24
 
@@ -190,7 +206,7 @@ def _fmt_amount(n):
 
 def _format_resources(res):
     """'Grain 64k · Iron 21k · ...', ordered by tier then name, for a
-    faction/county/settlement's resource dict."""
+    faction/region/settlement's resource dict."""
     if not res:
         return "None yet."
     order = sorted(res.keys(), key=lambda r: (RESOURCES.get(r, {}).get("tier", 9), r))
@@ -206,9 +222,9 @@ class MapView(tk.Frame):
         self.on_end_turn = on_end_turn
         self.on_wildland_claim = on_wildland_claim
         self.selected = None            # selected faction (world view)
-        self.zoom_faction = None        # faction we've zoomed into (county view)
-        self.selected_county = None
-        self.zoom_county = None         # county we've zoomed into (village view)
+        self.zoom_faction = None        # faction we've zoomed into (region view)
+        self.selected_region = None
+        self.zoom_region = None         # region we've zoomed into (village view)
         self.selected_settlement = None
         self.selected_village = None
         self.selected_commander = None
@@ -231,18 +247,18 @@ class MapView(tk.Frame):
 
         # Attack-target picking: when not None, we've zoomed to the shared
         # border with `_attack_enemy` and clicking one of `_attack_frontier`
-        # counties launches the battle for it.
+        # regions launches the battle for it.
         self.attack_mode = None
         self._attack_enemy = None
         self._attack_frontier = []
 
-        # Castle placement: when not None, holds the (own-territory) county
+        # Castle placement: when not None, holds the (own-territory) region
         # the player is about to click a build site within.
         self.building_mode = None
 
-        # Post-battle border flash (see flash_county()): "success" (gold) for
-        # a county gained, "failure" (red) for a failed attack.
-        self._flash_county = None
+        # Post-battle border flash (see flash_region()): "success" (gold) for
+        # a region gained, "failure" (red) for a failed attack.
+        self._flash_region = None
         self._flash_outcome = "success"
         self._flash_start = 0.0
         self._flash_id = None
@@ -279,8 +295,8 @@ class MapView(tk.Frame):
         self.world = world
         self.selected = None
         self.zoom_faction = None
-        self.selected_county = None
-        self.zoom_county = None
+        self.selected_region = None
+        self.zoom_region = None
         self.selected_settlement = None
         self.selected_village = None
         self.selected_commander = None
@@ -289,7 +305,7 @@ class MapView(tk.Frame):
         self._attack_enemy = None
         self._attack_frontier = []
         self.building_mode = None
-        self._flash_county = None
+        self._flash_region = None
         if self._flash_id is not None:
             self.after_cancel(self._flash_id)
             self._flash_id = None
@@ -301,6 +317,7 @@ class MapView(tk.Frame):
         self._fog_key = object()   # never matches any real fog_version -> forces a rebuild
         self._precompute_colors()
         self._exit_ui()
+        self._hide_prosperity_bar()
         self.info.config(fg=theme.MUTED, text="Click a faction to inspect it.")
         for frame in (self.rel_frame, self.actions):
             for w in frame.winfo_children():
@@ -320,8 +337,8 @@ class MapView(tk.Frame):
         self._base_img = self._base_key = None
         if self.selected is not None:
             self._show_faction(self.selected)
-        if self.selected_county is not None:
-            self._show_county(self.selected_county)
+        if self.selected_region is not None:
+            self._show_region(self.selected_region)
         self._update_resource_bar()
         self._update_turn_label()
         self.render()
@@ -336,21 +353,21 @@ class MapView(tk.Frame):
         self._px_elev = [None] * n
         self._px_biome = [None] * n
         self._px_climate = [None] * n
-        self._px_county = [None] * n
-        self._px_county_hi = [None] * n
+        self._px_region = [None] * n
+        self._px_region_hi = [None] * n
         self._owner_flat = [OCEAN] * n
-        self._county_flat = [-1] * n
+        self._region_flat = [-1] * n
         sea = wd.sea_level
         fcolors = [_hex_to_rgb(f.color) for f in wd.factions]
 
-        # a shaded color per county (varied within its faction)
-        cshade = [None] * len(wd.counties)
+        # a shaded color per region (varied within its faction)
+        cshade = [None] * len(wd.regions)
         for f in wd.factions:
             fc = _hex_to_rgb(f.color)
-            for li, cid in enumerate(f.meta.get("counties", [])):
-                cshade[cid] = _shade(fc, _COUNTY_SHADES[li % len(_COUNTY_SHADES)])
+            for li, cid in enumerate(f.meta.get("regions", [])):
+                cshade[cid] = _shade(fc, _REGION_SHADES[li % len(_REGION_SHADES)])
 
-        cg = wd.county_grid
+        cg = wd.region_grid
         i = 0
         for y in range(wd.h):
             for x in range(wd.w):
@@ -363,20 +380,20 @@ class MapView(tk.Frame):
                     self._px_pol[i] = self._px_pol_hi[i] = px
                     self._px_fert[i] = self._px_elev[i] = px
                     self._px_biome[i] = self._px_climate[i] = _rgb(*_NO_DATA_RGB)
-                    self._px_county[i] = self._px_county_hi[i] = px
+                    self._px_region[i] = self._px_region_hi[i] = px
                 elif (x, y) in wd.lake_cells:
-                    # lake surface: water in every mode, but keep owner/county
-                    # so clicks still resolve to the faction/county beneath.
+                    # lake surface: water in every mode, but keep owner/region
+                    # so clicks still resolve to the faction/region beneath.
                     lk = _rgb(*_LAKE_RGB)
                     self._px_pol[i] = self._px_pol_hi[i] = lk
                     self._px_fert[i] = self._px_elev[i] = lk
                     self._px_biome[i] = self._px_climate[i] = lk
-                    self._px_county[i] = self._px_county_hi[i] = lk
+                    self._px_region[i] = self._px_region_hi[i] = lk
                     self._owner_flat[i] = o
-                    self._county_flat[i] = cg[y][x]
+                    self._region_flat[i] = cg[y][x]
                 elif (x, y) in wd.river_cells:
                     # River surface: baked into the raster exactly like a
-                    # lake (flat tone, every mode, owner/county preserved
+                    # lake (flat tone, every mode, owner/region preserved
                     # beneath) rather than drawn as a separate vector line on
                     # top of everything — this is what makes it read as part
                     # of the terrain instead of a decal, and it means fog of
@@ -386,9 +403,9 @@ class MapView(tk.Frame):
                     self._px_pol[i] = self._px_pol_hi[i] = rv
                     self._px_fert[i] = self._px_elev[i] = rv
                     self._px_biome[i] = self._px_climate[i] = rv
-                    self._px_county[i] = self._px_county_hi[i] = rv
+                    self._px_region[i] = self._px_region_hi[i] = rv
                     self._owner_flat[i] = o
-                    self._county_flat[i] = cg[y][x]
+                    self._region_flat[i] = cg[y][x]
                 else:
                     relief = (h - sea) / (1 - sea) if sea < 1 else 0
                     if o >= 0:
@@ -398,12 +415,18 @@ class MapView(tk.Frame):
                         # neutral tone, darker/rustier where the wildland
                         # garrison guarding it is stronger.
                         cid_here = cg[y][x]
-                        strength = (wd.counties[cid_here].wildland_strength
-                                   if 0 <= cid_here < len(wd.counties) else 40)
+                        strength = (wd.regions[cid_here].wildland_strength
+                                   if 0 <= cid_here < len(wd.regions) else 40)
                         danger = max(0.0, min(1.0, strength / _WILDLAND_DANGER_REF))
                         base = _rgb(*(_UNCLAIMED_RGB[j] + (_UNCLAIMED_DANGER_RGB[j]
                                      - _UNCLAIMED_RGB[j]) * danger for j in range(3)))
                         base = _rgb(*_lighten(base, 0.08 * relief))
+
+                    biome_here = wd.biome_grid[y][x]
+                    if biome_here == "forest":
+                        base = _rgb(*_blend(base, _BIOME_COLORS["forest"], _POL_FOREST_TINT))
+                    elif biome_here == "mountain":
+                        base = _rgb(*_blend(base, _BIOME_COLORS["mountain"], _POL_MOUNTAIN_TINT))
 
                     # water-adjacent: any 4-neighbor is ocean, a lake, or a
                     # river — every such shoreline/riverbank cell gets the
@@ -427,7 +450,7 @@ class MapView(tk.Frame):
                         fert_rgb = _rgb(*_shade(fert_rgb, -0.8))
                         elev_rgb = _rgb(*_shade(elev_rgb, -0.8))
 
-                    biome_rgb = _rgb(*_biome_rgb(wd.biome_grid[y][x]))
+                    biome_rgb = _rgb(*_biome_rgb(biome_here))
                     climate_rgb = _rgb(*_climate_rgb(wd.climate_grid[y][x]))
                     if water_adjacent:
                         biome_rgb = _rgb(*_shade(biome_rgb, -0.5))
@@ -442,17 +465,17 @@ class MapView(tk.Frame):
                     self._owner_flat[i] = o
 
                     cid = cg[y][x]
-                    self._county_flat[i] = cid
+                    self._region_flat[i] = cid
                     shade = cshade[cid] if (cid >= 0 and cshade[cid] is not None) else base
-                    # county border: any 4-neighbor in a different county, or
+                    # region border: any 4-neighbor in a different region, or
                     # a water-adjacent (coastline/riverbank) edge
                     border = water_adjacent
                     for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
                         if not (0 <= nx < wd.w and 0 <= ny < wd.h) or cg[ny][nx] != cid:
                             border = True
                             break
-                    self._px_county[i] = _rgb(*(_shade(shade, -0.5) if border else shade))
-                    self._px_county_hi[i] = _rgb(*_lighten(shade, 0.45))
+                    self._px_region[i] = _rgb(*(_shade(shade, -0.5) if border else shade))
+                    self._px_region_hi[i] = _rgb(*_lighten(shade, 0.45))
                 i += 1
 
     # --- resource bar --------------------------------------------------------
@@ -520,6 +543,20 @@ class MapView(tk.Frame):
                              justify="left", wraplength=270, anchor="w")
         self.info.pack(anchor="w", padx=14)
 
+        # Prosperity meter — a settlement/village-only bar (see
+        # _show_prosperity_bar/_hide_prosperity_bar), left unpacked here so
+        # it's hidden by default for every other panel type.
+        self.prosperity_frame = tk.Frame(p, bg=theme.PANEL)
+        tk.Label(self.prosperity_frame, text="Prosperity", bg=theme.PANEL,
+                 fg=theme.MUTED, font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        self._prosperity_canvas = tk.Canvas(self.prosperity_frame, height=14,
+                                            bg=theme.PANEL, highlightthickness=0)
+        self._prosperity_canvas.pack(fill="x", pady=(2, 2))
+        self._prosperity_pct_lbl = tk.Label(self.prosperity_frame, text="",
+                                            bg=theme.PANEL, fg=theme.MUTED,
+                                            font=("Segoe UI", 8))
+        self._prosperity_pct_lbl.pack(anchor="w")
+
         self.rel_header = tk.Label(p, text="RELATIONSHIPS", bg=theme.PANEL,
                                    fg=theme.MUTED, font=("Segoe UI", 8, "bold"))
         self.rel_header.pack(anchor="w", padx=14, pady=(16, 4))
@@ -546,7 +583,7 @@ class MapView(tk.Frame):
                                  font=theme.FONT_BOLD)
         self.turn_lbl.pack(side="bottom", padx=14, pady=(8, 0))
         self.back_btn = tk.Button(p, text="← Back to World",
-                                  command=self._exit_county_view, bg="#232a36",
+                                  command=self._exit_region_view, bg="#232a36",
                                   fg=theme.INK, activebackground=theme.ACCENT,
                                   relief="flat", font=theme.FONT)
         # back_btn is packed only while zoomed in.
@@ -618,7 +655,7 @@ class MapView(tk.Frame):
     def _fog_is_active(self):
         """Whether fog currently gates what's shown. Applies at *every* zoom
         level, not just the world view: with free camera pan/zoom, "zoomed
-        into your own county" no longer confines the camera to your own
+        into your own region" no longer confines the camera to your own
         territory — you can drag/scroll anywhere on the map while
         zoom_faction stays set, so gating fog off at that level used to let
         you pan out and see the whole map uncovered. Fog only ever hides
@@ -655,37 +692,38 @@ class MapView(tk.Frame):
         return idx in getattr(wd, "discovered_factions", ())
 
     def _zoom_is_foreign(self):
-        """True while browsing a foreign nation's counties (diplomacy-only —
+        """True while browsing a foreign nation's regions (diplomacy-only —
         no village drill-down, no ordinary management)."""
         player = self._player_faction()
         return (player is not None and self.zoom_faction is not None
                 and self.zoom_faction is not player)
 
-    def _do_diplomacy(self, action_fn, nation, county=None):
+    def _do_diplomacy(self, action_fn, nation, region=None):
         """Run a diplomacy action, show its flavor message on the bottom
         banner, and refresh whatever panel is currently displaying it."""
         player = self._player_faction()
-        msg = (action_fn(self.world, player, nation, county) if county is not None
+        msg = (action_fn(self.world, player, nation, region) if region is not None
                else action_fn(self.world, player, nation))
         self.show_bottom_message(msg)
         if self.selected is nation:
             self._show_faction(nation)
-        if county is not None and self.selected_county is county:
-            self._show_county(county)
+        if region is not None and self.selected_region is region:
+            self._show_region(region)
         self.render()
 
     def _show_faction(self, nation):
+        self._hide_prosperity_bar()
         player = self._player_faction()
         own = self._is_player(nation)
         self.title_lbl.config(text="Your Realm" if own else "Foreign Realm")
         s = nation.stats
-        n_counties = len(nation.meta.get("counties", []))
+        n_regions = len(nation.meta.get("regions", []))
         if own or player is None:
             zoom_hint = "\nClick again to zoom in."
         elif self.world.world_map.get_relationship(player.id, nation.id)["stance"] == Stance.ENEMY:
             zoom_hint = "\nClick again to attack."
         else:
-            zoom_hint = "\nClick again to inspect its counties."
+            zoom_hint = "\nClick again to inspect its regions."
         self.info.config(
             fg=theme.INK,
             text=f"{nation.name}\nSpecies: {nation.meta['species']} "
@@ -694,7 +732,7 @@ class MapView(tk.Frame):
                  f"Gold {s.get('gold', 0):,}\n"
                  f"Avg fertility {nation.meta['fertility']}%\n"
                  f"{self._settle_counts(nation)}\n"
-                 f"{n_counties} counties.{zoom_hint}\n\n"
+                 f"{n_regions} regions.{zoom_hint}\n\n"
                  f"RESOURCES\n{_format_resources(s.get('resources', {}))}")
 
         self.rel_header.config(text="RELATIONSHIPS")
@@ -741,12 +779,12 @@ class MapView(tk.Frame):
             if rel["stance"] == Stance.ENEMY:
                 player_idx = self.world.factions.index(player)
                 target_idx = self.world.factions.index(nation)
-                if bordering_counties(self.world, player_idx, target_idx):
+                if bordering_regions(self.world, player_idx, target_idx):
                     tk.Button(self.actions, text=f"Attack {nation.name}",
                               command=lambda n=nation: self._begin_attack_setup(n),
                               bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                               relief="flat", font=theme.FONT).pack(fill="x", pady=2)
-                elif naval_reachable_counties(self.world, player_idx, target_idx):
+                elif naval_reachable_regions(self.world, player_idx, target_idx):
                     tk.Button(self.actions, text=f"Naval Attack on {nation.name}",
                               command=lambda n=nation: self._begin_attack_setup(n, naval=True),
                               bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
@@ -846,25 +884,26 @@ class MapView(tk.Frame):
         return (f"{counts['city']} cities · {counts['castle']} castles · "
                 f"{counts['town']} towns")
 
-    def _show_county(self, county):
-        if county.faction_idx < 0:
-            self._show_wildland_county(county)
+    def _show_region(self, region):
+        self._hide_prosperity_bar()
+        if region.faction_idx < 0:
+            self._show_wildland_region(region)
             return
-        s = county.stats
+        s = region.stats
         country = self.zoom_faction
         wd = self.world
-        n_villages = len(getattr(county, "villages", []))
-        total_cells = sum(county.biome_counts.values()) or 1
+        n_villages = len(getattr(region, "villages", []))
+        total_cells = sum(region.biome_counts.values()) or 1
         biome_line = ", ".join(
             f"{biome.capitalize()} ({round(100 * count / total_cells)}%)"
-            for biome, count in sorted(county.biome_counts.items(),
+            for biome, count in sorted(region.biome_counts.items(),
                                        key=lambda kv: -kv[1])) or "Unclassified"
-        lines = [f"{county.name}", f"County of {country.name}",
+        lines = [f"{region.name}", f"Region of {country.name}",
                  f"Area {s['area']} · Fertility {s['fertility']}%",
                  f"Biome: {biome_line}",
-                 f"Climate: {county.dominant_climate.capitalize()}",
-                 f"This turn's yield: {_format_resources(county.resources)}"]
-        sts = [wd.settlements[i] for i in getattr(county, "meta_settlements", [])]
+                 f"Climate: {region.dominant_climate.capitalize()}",
+                 f"This turn's yield: {_format_resources(region.resources)}"]
+        sts = [wd.settlements[i] for i in getattr(region, "meta_settlements", [])]
         if sts:
             lines.append("Settlements: " + ", ".join(
                 f"{st.name} ({st.kind})" for st in sts))
@@ -883,10 +922,10 @@ class MapView(tk.Frame):
         if is_foreign:
             player = self._player_faction()
             can_act = diplomacy.can_act_this_turn(self.world, player, country)
-            for label, fn in (("Fabricate Claim on County", diplomacy.fabricate_claim),
+            for label, fn in (("Fabricate Claim on Region", diplomacy.fabricate_claim),
                               ("Terrorize Locals", diplomacy.terrorize_locals)):
                 tk.Button(self.actions, text=label,
-                          command=lambda f=fn: self._do_diplomacy(f, country, county),
+                          command=lambda f=fn: self._do_diplomacy(f, country, region),
                           bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                           relief="flat", font=theme.FONT,
                           state="normal" if can_act else "disabled").pack(fill="x", pady=2)
@@ -895,41 +934,52 @@ class MapView(tk.Frame):
                          bg=theme.PANEL, fg=theme.MUTED,
                          font=("Segoe UI", 8)).pack(anchor="w")
         elif self._player_faction() is not None:
-            project = next((p for p in wd.castle_projects if p.county_id == county.id), None)
-            if project is not None:
+            # Claiming wildland only ever hands out villages (and, still
+            # area-scaled, a Castle) now — a City or Town has to be built
+            # here by hand, same as a Castle always did. See
+            # app/world/expansion.py's settle_newly_claimed_region.
+            player = self._player_faction()
+            projects_here = [p for p in wd.settlement_projects if p.region_id == region.id]
+            for project in projects_here:
                 note = " (half speed — road not yet finished)" if project.half_speed else ""
                 elapsed = project.total_turns - project.turns_left
-                tk.Label(self.actions, text=f"Castle under construction: "
-                         f"{elapsed}/{project.total_turns} turns{note}",
+                tk.Label(self.actions, text=f"{project.kind.capitalize()} under "
+                         f"construction: {elapsed}/{project.total_turns} turns{note}",
                          bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
                          justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
-            player = self._player_faction()
-            afford = construction.can_afford(player, construction.CASTLE_COST)
-            tk.Label(self.actions, text=f"Cost: {_format_resources(construction.CASTLE_COST)}\n"
-                     f"Build time: {construction.CASTLE_BUILD_TURNS} turns",
-                     bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
-            tk.Button(self.actions, text="Build Castle...",
-                      command=lambda cnty=county: self._begin_castle_placement(cnty),
-                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                      relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+            building_kinds = {p.kind for p in projects_here}
+            for kind in ("city", "town", "castle"):
+                if kind in building_kinds:
+                    continue
+                cost = construction.SETTLEMENT_BUILD_COST[kind]
+                turns = construction.SETTLEMENT_BUILD_TURNS[kind]
+                afford = construction.can_afford(player, cost)
+                tk.Label(self.actions,
+                         text=f"{kind.capitalize()} — Cost: {_format_resources(cost)}\n"
+                              f"Build time: {turns} turns",
+                         bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
+                         justify="left", wraplength=260).pack(anchor="w", pady=(4, 2))
+                tk.Button(self.actions, text=f"Build {kind.capitalize()}...",
+                          command=lambda r=region, k=kind: self._begin_settlement_placement(r, k),
+                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                          relief="flat", font=theme.FONT).pack(fill="x", pady=(0, 8))
 
-    def _show_wildland_county(self, county):
+    def _show_wildland_region(self, region):
         """UNCLAIMED land: wildland garrison strength, claim cost/time/odds,
         and a Claim Territory button (or why claiming isn't available yet)."""
         wd = self.world
         player = self._player_faction()
-        total_cells = sum(county.biome_counts.values()) or 1
+        total_cells = sum(region.biome_counts.values()) or 1
         biome_line = ", ".join(
             f"{biome.capitalize()} ({round(100 * count / total_cells)}%)"
-            for biome, count in sorted(county.biome_counts.items(),
+            for biome, count in sorted(region.biome_counts.items(),
                                        key=lambda kv: -kv[1])) or "Unclassified"
-        lines = [f"{county.name}", "Unclaimed wildland",
-                 f"Area {county.stats['area']} · Fertility {county.stats['fertility']}%",
+        lines = [f"{region.name}", "Unclaimed wildland",
+                 f"Area {region.stats['area']} · Fertility {region.stats['fertility']}%",
                  f"Biome: {biome_line}",
-                 f"Wildland garrison strength: {county.wildland_strength}"]
+                 f"Wildland garrison strength: {region.wildland_strength}"]
         if player is not None:
-            odds = expansion.claim_odds(player, county)
+            odds = expansion.claim_odds(player, region)
             lines.append(f"Estimated success odds: {round(100 * odds)}%")
         self.info.config(fg=theme.INK, text="\n".join(lines))
 
@@ -938,18 +988,18 @@ class MapView(tk.Frame):
         if player is None:
             return
         faction_idx = wd.factions.index(player)
-        if county not in expansion.claimable_frontier(wd, faction_idx):
+        if region not in expansion.claimable_frontier(wd, faction_idx):
             tk.Label(self.actions, text="Not adjacent to your territory yet.",
                      bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
                      justify="left", wraplength=260).pack(anchor="w")
             return
-        if wd.turn < county.claim_cooldown_until_turn:
+        if wd.turn < region.claim_cooldown_until_turn:
             tk.Label(self.actions, text="The locals are still wary after "
                      "repelling your last attempt — try again later.",
                      bg=theme.PANEL, fg=theme.BAD, font=theme.FONT,
                      justify="left", wraplength=260).pack(anchor="w")
             return
-        project = next((p for p in wd.claim_projects if p.county_id == county.id), None)
+        project = next((p for p in wd.claim_projects if p.region_id == region.id), None)
         if project is not None:
             if project.complete:
                 tk.Label(self.actions, text="The expansion crew has arrived "
@@ -967,25 +1017,25 @@ class MapView(tk.Frame):
                          bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
                          justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
             return
-        cost = expansion.claim_cost(county)
+        cost = expansion.claim_cost(region)
         afford = construction.can_afford(player, cost)
         tk.Label(self.actions, text=f"Cost: {_format_resources(cost)}\n"
-                 f"Build time: {expansion.claim_turns(county)} turns",
+                 f"Build time: {expansion.claim_turns(region)} turns",
                  bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
                  justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
         tk.Button(self.actions, text="Claim Territory",
-                  command=lambda cnty=county: self._do_claim(cnty),
+                  command=lambda cnty=region: self._do_claim(cnty),
                   bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                   relief="flat", font=theme.FONT).pack(fill="x", pady=2)
 
-    def _do_claim(self, county):
+    def _do_claim(self, region):
         player = self._player_faction()
         faction_idx = self.world.factions.index(player)
-        msg = expansion.start_claim(self.world, faction_idx, county)
+        msg = expansion.start_claim(self.world, faction_idx, region)
         self.show_bottom_message(msg)
         self._base_key = None
-        if self.selected_county is county:
-            self._show_county(county)
+        if self.selected_region is region:
+            self._show_region(region)
         self.render()
 
     def _do_wildland_battle(self, project):
@@ -996,16 +1046,58 @@ class MapView(tk.Frame):
         if self.on_wildland_claim is not None:
             self.on_wildland_claim(project)
 
+    def _hide_prosperity_bar(self):
+        self.prosperity_frame.pack_forget()
+
+    def _show_prosperity_bar(self, value):
+        """Pack the meter in right under `info` (before rel_header, so it
+        lands there regardless of pack/forget history) and draw its current
+        fill — see resources._update_prosperity for how `value` (0..100)
+        actually moves over time."""
+        self.prosperity_frame.pack(anchor="w", padx=14, pady=(8, 0), fill="x",
+                                   before=self.rel_header)
+        self._draw_prosperity_bar(value)
+
+    def _draw_prosperity_bar(self, value):
+        c = self._prosperity_canvas
+        c.update_idletasks()
+        w = c.winfo_width()
+        if w <= 1:
+            w = 270   # not yet laid out on the very first draw
+        h = 14
+        frac = max(0.0, min(1.0, value / 100.0))
+        if frac < 0.34:
+            color = theme.BAD
+        elif frac < 0.67:
+            color = theme.WARN
+        else:
+            color = theme.GOOD
+        c.delete("all")
+        c.create_rectangle(0, 0, w, h, fill="#11151b", outline="")
+        if frac > 0:
+            c.create_rectangle(0, 0, w * frac, h, fill=color, outline="")
+        self._prosperity_pct_lbl.config(text=f"{value:.0f} / 100")
+
     def _show_settlement(self, st):
         wd = self.world
-        county = (wd.counties[st.county_id].name
-                  if 0 <= st.county_id < len(wd.counties) else "?")
-        lines = [st.name, f"{st.kind.capitalize()} in {county}, "
+        region = (wd.regions[st.region_id].name
+                  if 0 <= st.region_id < len(wd.regions) else "?")
+        lines = [st.name, f"{st.kind.capitalize()} in {region}, "
                  f"{wd.factions[st.faction_idx].name}",
                  f"Upkeep: {_format_resources(st.upkeep)} per turn"]
+        population = getattr(st, "population", None)
+        if population is not None:
+            lines.append(f"Population: {population:,} "
+                         f"({st.adults:,} adults, {st.children:,} children)")
         if getattr(st, "has_shipyard", False):
             lines.append("Has a Shipyard — commanders here launch free, fast ships.")
         self.info.config(fg=theme.INK, text="\n".join(lines))
+
+        prosperity = getattr(st, "prosperity", None)
+        if prosperity is not None:
+            self._show_prosperity_bar(prosperity)
+        else:
+            self._hide_prosperity_bar()
 
         for w in self.actions.winfo_children():
             w.destroy()
@@ -1041,14 +1133,23 @@ class MapView(tk.Frame):
 
     def _show_village(self, v):
         wd = self.world
-        county = wd.counties[v.county_id]
-        self.info.config(
-            fg=theme.INK,
-            text=f"{v.name}\nVillage in {county.name}, "
-                 f"{wd.factions[v.faction_idx].name}\n"
+        region = wd.regions[v.region_id]
+        lines = [v.name, f"Village in {region.name}, "
+                 f"{wd.factions[v.faction_idx].name}",
                  f"Farms here contribute {v.farm_output} Grain per turn "
                  f"(before climate/season modifiers), scaled by local land "
-                 f"fertility.")
+                 f"fertility."]
+        population = getattr(v, "population", None)
+        if population is not None:
+            lines.append(f"Population: {population:,} "
+                         f"({v.adults:,} adults, {v.children:,} children)")
+        self.info.config(fg=theme.INK, text="\n".join(lines))
+
+        prosperity = getattr(v, "prosperity", None)
+        if prosperity is not None:
+            self._show_prosperity_bar(prosperity)
+        else:
+            self._hide_prosperity_bar()
 
     def _show_commander(self, cmd):
         """Panel for a selected Commander: position, current order, and
@@ -1056,6 +1157,7 @@ class MapView(tk.Frame):
         depends on whether the commander is aboard a ship, standing on a
         beached one, or on foot with none nearby). A pure scout for now —
         no combat, so there's nothing here about strength or risk."""
+        self._hide_prosperity_bar()
         wd = self.world
         aboard = commander.ship_by_id(wd, cmd.aboard_ship_id) if cmd.aboard_ship_id is not None else None
         beached = None if aboard is not None else commander.find_ship_at(
@@ -1138,7 +1240,7 @@ class MapView(tk.Frame):
         self.render()
 
     # --- zoom-level enter/exit ----------------------------------------------
-    # Three levels: World -> Country (shows counties) -> County (shows
+    # Three levels: World -> Country (shows regions) -> Region (shows
     # villages). Each level's "enter" sets state + zooms in; "exit" clears
     # that level's state and zooms back out to the level above.
     @staticmethod
@@ -1151,7 +1253,7 @@ class MapView(tk.Frame):
         """Where "back to world view" should zoom out to: a padded box
         around everything fog of war has actually revealed so far, not the
         full map. Early on, most of the map is still black — snapping the
-        camera all the way out to it every time you back out of a county is
+        camera all the way out to it every time you back out of a region is
         jarring whiplash; zooming only as far as you've actually explored
         keeps the transition proportional, and it naturally widens on its
         own as more gets revealed. Falls back to the full map for sandbox
@@ -1176,22 +1278,22 @@ class MapView(tk.Frame):
     def _exit_ui(self):
         self.back_btn.pack_forget()
 
-    def _enter_county_view(self, faction):
+    def _enter_region_view(self, faction):
         self.zoom_faction = faction
-        self.zoom_county = None
-        self.selected_county = None
+        self.zoom_region = None
+        self.selected_region = None
         self.selected_village = None
         self._base_key = None
-        self.title_lbl.config(text="Counties")
+        self.title_lbl.config(text="Regions")
         self.info.config(fg=theme.MUTED,
-                         text=f"{faction.name}\nClick a county to inspect it.")
-        self._enter_ui("COUNTY", "← Back to World", self._exit_county_view)
+                         text=f"{faction.name}\nClick a region to inspect it.")
+        self._enter_ui("REGION", "← Back to World", self._exit_region_view)
         self._start_zoom(self._padded_rect(faction.meta["bbox"]))
 
-    def _exit_county_view(self):
+    def _exit_region_view(self):
         self.zoom_faction = None
-        self.zoom_county = None
-        self.selected_county = None
+        self.zoom_region = None
+        self.selected_region = None
         self.selected_village = None
         self._base_key = None
         self._exit_ui()
@@ -1199,29 +1301,30 @@ class MapView(tk.Frame):
             self._show_faction(self.selected)
         self._start_zoom(self._world_view_rect())
 
-    def _enter_village_view(self, county):
-        self.zoom_county = county
+    def _enter_village_view(self, region):
+        self.zoom_region = region
         self.selected_village = None
         self._base_key = None
         self.title_lbl.config(text="Villages")
         self.info.config(fg=theme.MUTED,
-                         text=f"{county.name}\nClick a village to inspect it.")
-        self._enter_ui("VILLAGE", "← Back to County", self._exit_village_view)
-        self._start_zoom(self._padded_rect(county.bbox, min_pad_frac=0.2, min_size=6))
+                         text=f"{region.name}\nClick a village to inspect it.")
+        self._enter_ui("VILLAGE", "← Back to Region", self._exit_village_view)
+        self._start_zoom(self._padded_rect(region.bbox, min_pad_frac=0.2, min_size=6))
 
     def _exit_village_view(self):
-        self.zoom_county = None
+        self.zoom_region = None
         self.selected_village = None
         self._base_key = None
-        self._enter_ui("COUNTY", "← Back to World", self._exit_county_view)
-        if self.selected_county:
-            self._show_county(self.selected_county)
+        self.title_lbl.config(text="Regions")
+        self._enter_ui("REGION", "← Back to World", self._exit_region_view)
+        if self.selected_region:
+            self._show_region(self.selected_region)
         self._start_zoom(self._padded_rect(self.zoom_faction.meta["bbox"]))
 
     # --- attack targeting ----------------------------------------------------
     def _begin_attack_setup(self, enemy, naval=False):
         """Zoom to the shared border (or coastline, for a naval invasion)
-        with `enemy` and let the player pick which frontline/coastal county
+        with `enemy` and let the player pick which frontline/coastal region
         to attack. If `naval` isn't explicitly requested, land is tried
         first and naval is the automatic fallback when there's no land
         connection (e.g. the double-click-to-attack shortcut doesn't know
@@ -1231,11 +1334,11 @@ class MapView(tk.Frame):
         enemy_idx = self.world.factions.index(enemy)
 
         if naval:
-            frontier = naval_reachable_counties(self.world, player_idx, enemy_idx)
+            frontier = naval_reachable_regions(self.world, player_idx, enemy_idx)
         else:
-            frontier = bordering_counties(self.world, player_idx, enemy_idx)
+            frontier = bordering_regions(self.world, player_idx, enemy_idx)
             if not frontier:
-                frontier = naval_reachable_counties(self.world, player_idx, enemy_idx)
+                frontier = naval_reachable_regions(self.world, player_idx, enemy_idx)
                 naval = bool(frontier)
 
         if not frontier:
@@ -1247,23 +1350,23 @@ class MapView(tk.Frame):
         self.attack_mode = enemy
         self._attack_enemy = enemy
         self._attack_frontier = frontier
-        self.selected_county = None
+        self.selected_region = None
         self._base_key = None
 
-        xs = [x for county in frontier for x, y in county.cells]
-        ys = [y for county in frontier for x, y in county.cells]
+        xs = [x for region in frontier for x, y in region.cells]
+        ys = [y for region in frontier for x, y in region.cells]
         bbox = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
 
         self.title_lbl.config(text="Choose a Target")
         if naval:
             self.info.config(fg=theme.MUTED,
                              text=f"Launching a naval invasion of {enemy.name}.\n"
-                                  "Click a highlighted county along the coast "
+                                  "Click a highlighted region along the coast "
                                   "to attack it.")
         else:
             self.info.config(fg=theme.MUTED,
                              text=f"Attacking {enemy.name}.\nClick a highlighted "
-                                  "county along the border to attack it.")
+                                  "region along the border to attack it.")
         self._enter_ui("ATTACK", "← Cancel", self._cancel_attack_setup)
         self._start_zoom(self._padded_rect(bbox, min_pad_frac=0.3, min_size=10))
         self.render()
@@ -1278,7 +1381,7 @@ class MapView(tk.Frame):
             self._show_faction(self.selected)
         self._start_zoom(self._world_view_rect())
 
-    def _launch_attack(self, county):
+    def _launch_attack(self, region):
         enemy = self._attack_enemy
         player = self._player_faction()
         self.attack_mode = None
@@ -1289,51 +1392,53 @@ class MapView(tk.Frame):
         if self.selected:
             self._show_faction(self.selected)
         # Camera is deliberately left zoomed on the border so, on return from
-        # battle, flash_county() can highlight the (possibly newly-won)
-        # county right where the player is already looking.
-        self.on_attack(player, enemy, county)
+        # battle, flash_region() can highlight the (possibly newly-won)
+        # region right where the player is already looking.
+        self.on_attack(player, enemy, region)
 
-    # --- castle placement ----------------------------------------------------
-    def _begin_castle_placement(self, county):
-        self.building_mode = county
+    # --- settlement placement -------------------------------------------------
+    def _begin_settlement_placement(self, region, kind):
+        self.building_mode = (region, kind)
+        cost = construction.SETTLEMENT_BUILD_COST[kind]
+        turns = construction.SETTLEMENT_BUILD_TURNS[kind]
         self.info.config(fg=theme.MUTED,
-                         text=f"{county.name}\nClick a spot in this county to "
-                              "begin building a castle there.\n\n"
-                              f"Cost: {_format_resources(construction.CASTLE_COST)}\n"
-                              f"Build time: {construction.CASTLE_BUILD_TURNS} turns")
+                         text=f"{region.name}\nClick a spot in this region to "
+                              f"begin building a {kind} there.\n\n"
+                              f"Cost: {_format_resources(cost)}\n"
+                              f"Build time: {turns} turns")
         for w in self.actions.winfo_children():
             w.destroy()
-        tk.Button(self.actions, text="Cancel", command=self._cancel_castle_placement,
+        tk.Button(self.actions, text="Cancel", command=self._cancel_settlement_placement,
                   bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                   relief="flat", font=theme.FONT).pack(fill="x", pady=2)
         self.render()
 
-    def _cancel_castle_placement(self):
+    def _cancel_settlement_placement(self):
         self.building_mode = None
-        if self.selected_county is not None:
-            self._show_county(self.selected_county)
+        if self.selected_region is not None:
+            self._show_region(self.selected_region)
         self.render()
 
     # --- post-battle conquest flash ------------------------------------------
-    def flash_county(self, county, outcome="success"):
-        """Briefly blink a county's border — gold for a county gained,
+    def flash_region(self, region, outcome="success"):
+        """Briefly blink a region's border — gold for a region gained,
         red for a failed attack — fading out over a couple of seconds. A
         failed attack also zooms back out to the world view once the blink
         finishes, since there's nothing new to look at up close."""
         if self._flash_id is not None:
             self.after_cancel(self._flash_id)
             self._flash_id = None
-        self._flash_county = county
+        self._flash_region = region
         self._flash_outcome = outcome
         self._flash_start = time.time()
         self._flash_tick()
 
     def _flash_tick(self):
-        if self._flash_county is None:
+        if self._flash_region is None:
             return
         if time.time() - self._flash_start >= _FLASH_DURATION:
             failed = self._flash_outcome == "failure"
-            self._flash_county = None
+            self._flash_region = None
             self._flash_id = None
             if failed:
                 self._start_zoom(self._world_view_rect())
@@ -1451,22 +1556,22 @@ class MapView(tk.Frame):
 
         if self.attack_mode is not None:
             # --- ATTACK-TARGET PICKING: zoomed to a shared border ---------
-            cid = wd.county_grid[gy][gx]
+            cid = wd.region_grid[gy][gx]
             if any(c.id == cid for c in self._attack_frontier):
-                self._launch_attack(wd.counties[cid])
+                self._launch_attack(wd.regions[cid])
             return
 
         if self.building_mode is not None:
-            # --- CASTLE PLACEMENT: pick a spot within the armed county -----
-            county = self.building_mode
-            if wd.county_grid[gy][gx] == county.id:
+            # --- SETTLEMENT PLACEMENT: pick a spot within the armed region ---
+            region, kind = self.building_mode
+            if wd.region_grid[gy][gx] == region.id:
                 player = self._player_faction()
-                msg = construction.start_castle(wd, player, (gx, gy))
+                msg = construction.start_settlement(wd, player, (gx, gy), kind)
                 self.building_mode = None
                 self._base_key = None
                 self.show_bottom_message(msg)
-                if self.selected_county is county:
-                    self._show_county(county)
+                if self.selected_region is region:
+                    self._show_region(region)
                 self.render()
             return
 
@@ -1482,7 +1587,7 @@ class MapView(tk.Frame):
             return
 
         # --- COMMANDER SELECTION: click-radius test against every one of
-        # the player's own commanders, checked before normal county/faction
+        # the player's own commanders, checked before normal region/faction
         # selection so a commander is selectable identically at any zoom
         # level rather than duplicating this in all three click branches.
         player = self._player_faction()
@@ -1510,23 +1615,23 @@ class MapView(tk.Frame):
             if faction is self.selected:          # 2nd click -> zoom in / act
                 player = self._player_faction()
                 if player is None or faction is player:
-                    self._enter_county_view(faction)
+                    self._enter_region_view(faction)
                 else:
                     rel = self.world.world_map.get_relationship(player.id, faction.id)
                     if rel["stance"] == Stance.ENEMY:
                         self._begin_attack_setup(faction)   # at war -> attack
                     else:
-                        self._enter_county_view(faction)    # not at war -> browse
+                        self._enter_region_view(faction)    # not at war -> browse
             else:                                 # 1st click -> select country
                 self.selected = faction
                 self._base_key = None
                 self._show_faction(faction)
                 self.render()
 
-        elif self.zoom_county is None:
-            # --- LEVEL 1: county view (zoomed into a country) -------------
+        elif self.zoom_region is None:
+            # --- LEVEL 1: region view (zoomed into a country) -------------
             zf = wd.factions.index(self.zoom_faction)
-            # settlement markers take priority over county selection
+            # settlement markers take priority over region selection
             for sid in self.zoom_faction.meta.get("settlements", []):
                 st = wd.settlements[sid]
                 sx = (st.pos[0] + 0.5 - vx0) * scale
@@ -1537,38 +1642,38 @@ class MapView(tk.Frame):
                     self.render()
                     return
             self.selected_settlement = None
-            cid = wd.county_grid[gy][gx]
+            cid = wd.region_grid[gy][gx]
             if cid < 0:
-                self._exit_county_view()          # clicked away -> zoom out
+                self._exit_region_view()          # clicked away -> zoom out
                 return
-            county = wd.counties[cid]
-            if county.faction_idx != zf:
+            region = wd.regions[cid]
+            if region.faction_idx != zf:
                 # UNCLAIMED land adjacent to your own realm -> select it
                 # (shows wildland info + a Claim button); anything else
                 # (foreign-owned land, or unclaimed land while browsing a
                 # foreign realm) just zooms back out as before.
                 is_own = self.zoom_faction is self._player_faction()
-                if is_own and county.faction_idx < 0:
-                    self.selected_county = county
+                if is_own and region.faction_idx < 0:
+                    self.selected_region = region
                     self._base_key = None
-                    self._show_county(county)
+                    self._show_region(region)
                     self.render()
                 else:
-                    self._exit_county_view()
+                    self._exit_region_view()
                 return
-            # Foreign browsing stops at the county level (diplomacy actions
+            # Foreign browsing stops at the region level (diplomacy actions
             # only) — no drilling into a foreign nation's villages.
-            if not self._zoom_is_foreign() and county is self.selected_county:
-                self._enter_village_view(county)  # 2nd click -> village view
-            else:                                 # 1st click -> select county
-                self.selected_county = county
+            if not self._zoom_is_foreign() and region is self.selected_region:
+                self._enter_village_view(region)  # 2nd click -> village view
+            else:                                 # 1st click -> select region
+                self.selected_region = region
                 self._base_key = None
-                self._show_county(county)
+                self._show_region(region)
                 self.render()
 
         else:
-            # --- LEVEL 2: village view (zoomed into a county) -------------
-            for vid in self.zoom_county.villages:
+            # --- LEVEL 2: village view (zoomed into a region) -------------
+            for vid in self.zoom_region.villages:
                 v = wd.villages[vid]
                 sx = (v.pos[0] + 0.5 - vx0) * scale
                 sy = (v.pos[1] + 0.5 - vy0) * scale
@@ -1577,7 +1682,7 @@ class MapView(tk.Frame):
                     self._show_village(v)
                     self.render()
                     return
-            for sid in self.zoom_county.meta_settlements:
+            for sid in self.zoom_region.meta_settlements:
                 st = wd.settlements[sid]
                 sx = (st.pos[0] + 0.5 - vx0) * scale
                 sy = (st.pos[1] + 0.5 - vy0) * scale
@@ -1586,10 +1691,10 @@ class MapView(tk.Frame):
                     self._show_settlement(st)
                     self.render()
                     return
-            cid = wd.county_grid[gy][gx]
-            if cid != self.zoom_county.id:
+            cid = wd.region_grid[gy][gx]
+            if cid != self.zoom_region.id:
                 self._exit_village_view()         # clicked away -> zoom out
-            # else: clicked empty land within the same county — no-op
+            # else: clicked empty land within the same region — no-op
 
     def _on_right_click(self, event):
         """QoL: right-click sends the currently-selected Commander toward
@@ -1615,8 +1720,8 @@ class MapView(tk.Frame):
         """Rebuild the full-grid PIL image only when what it depicts changes."""
         wd = self.world
         if self.zoom_faction is not None:
-            sc = self.selected_county.id if self.selected_county else -1
-            key = ("county", sc)
+            sc = self.selected_region.id if self.selected_region else -1
+            key = ("region", sc)
         elif self.mode != "political":
             key = (self.mode,)
         else:
@@ -1625,13 +1730,13 @@ class MapView(tk.Frame):
             return
 
         if self.zoom_faction is not None:
-            if self.selected_county is not None:
-                sc = self.selected_county.id
-                base, hi = self._px_county, self._px_county_hi
+            if self.selected_region is not None:
+                sc = self.selected_region.id
+                base, hi = self._px_region, self._px_region_hi
                 data = [hi[i] if cid == sc else base[i]
-                        for i, cid in enumerate(self._county_flat)]
+                        for i, cid in enumerate(self._region_flat)]
             else:
-                data = self._px_county
+                data = self._px_region
         elif self.mode == "fertility":
             data = self._px_fert
         elif self.mode == "elevation":
@@ -1769,7 +1874,7 @@ class MapView(tk.Frame):
     def _draw_commanders(self, c, screen):
         """Commander(s) (app/world/commander.py) — a distinct diamond
         marker, shown at every zoom level since it's a single mobile unit
-        rather than something tied to one county, plus a thin dashed
+        rather than something tied to one region, plus a thin dashed
         preview of its queued path (if any) so a move order is visible at a
         glance."""
         wd = self.world
@@ -1794,7 +1899,7 @@ class MapView(tk.Frame):
 
     def _draw_settlements(self, c, screen):
         """Markers: city = circle, castle = triangle, town = square. The world
-        view shows only cities (to avoid clutter); the county view shows every
+        view shows only cities (to avoid clutter); the region view shows every
         settlement of the zoomed faction, with names."""
         wd = self.world
         if self.zoom_faction is not None:
@@ -1834,7 +1939,7 @@ class MapView(tk.Frame):
     def _draw_trade_routes(self, c, screen):
         """Long-haul trade routes: land roads (solid gold, terrain-following)
         and sea lanes (dotted pale-blue), shown at every zoom level since they
-        span the whole world rather than one county."""
+        span the whole world rather than one region."""
         width = max(1.0, self._place[2] * 0.22)
         for r in self.world.trade_routes:
             cells = r["cells"]
@@ -1916,7 +2021,7 @@ class MapView(tk.Frame):
     def _draw_construction(self, c, screen):
         """A growing dashed road (only the portion actually built so far —
         it physically extends turn by turn) and a hollow, dashed
-        construction-site marker for each castle being built."""
+        construction-site marker for each City/Town/Castle being built."""
         wd = self.world
         width = max(1.0, self._place[2] * 0.18)
         for road in wd.road_projects:
@@ -1929,65 +2034,105 @@ class MapView(tk.Frame):
             c.create_line(*pts, fill=_DIRT_ROAD_COLOR, width=width, capstyle="round",
                           dash=(4, 3), smooth=True)
 
-        for castle in wd.castle_projects:
-            x, y = screen(castle.pos[0] + 0.5, castle.pos[1] + 0.5)
+        for project in wd.settlement_projects:
+            x, y = screen(project.pos[0] + 0.5, project.pos[1] + 0.5)
             r = 4
             c.create_rectangle(x - r, y - r, x + r, y + r, outline="#f2e9c9",
                                width=2, dash=(2, 2))
-            c.create_text(x + 1, y + r + 8, text=f"{castle.turns_left}t",
+            label = f"{project.kind[0].upper()}·{project.turns_left}t"
+            c.create_text(x + 1, y + r + 8, text=label,
                          fill="#000000", font=("Segoe UI", 7))
-            c.create_text(x, y + r + 7, text=f"{castle.turns_left}t",
+            c.create_text(x, y + r + 7, text=label,
                          fill="#f2e9c9", font=("Segoe UI", 7))
+
+    def _river_span(self, ax, ay, bx, by):
+        """(t0, t1) fractional span along the straight segment (ax,ay)->
+        (bx,by) that passes over river cells, or None if it never does.
+        Endpoints are always village/settlement positions, which by
+        placement rules never sit on a river themselves, so any crossing is
+        strictly in the interior — used to redraw just that stretch as a
+        bridge instead of recoloring the whole road."""
+        wd = self.world
+        dx, dy = bx - ax, by - ay
+        steps = max(abs(dx), abs(dy))
+        if steps == 0:
+            return None
+        hits = [i for i in range(steps + 1)
+               if (round(ax + dx * i / steps), round(ay + dy * i / steps)) in wd.river_cells]
+        if not hits:
+            return None
+        return (max(0.0, (min(hits) - 0.5) / steps), min(1.0, (max(hits) + 0.5) / steps))
+
+    def _draw_road_segment(self, c, screen, ax, ay, bx, by, color, width, dash=None, bridge=False):
+        """One road segment. Stone roads (bridge=True) that cross a river
+        get the crossing stretch recolored brown (_BRIDGE_COLOR) — see
+        _river_span — so it visually reads as a bridge instead of the road
+        just barging through the water."""
+        x0, y0 = screen(ax + 0.5, ay + 0.5)
+        x1, y1 = screen(bx + 0.5, by + 0.5)
+        span = self._river_span(ax, ay, bx, by) if bridge else None
+        if span is None:
+            c.create_line(x0, y0, x1, y1, fill=color, width=width,
+                          capstyle="round", dash=dash)
+            return
+        t0, t1 = span
+        mx0, my0 = x0 + (x1 - x0) * t0, y0 + (y1 - y0) * t0
+        mx1, my1 = x0 + (x1 - x0) * t1, y0 + (y1 - y0) * t1
+        if t0 > 0:
+            c.create_line(x0, y0, mx0, my0, fill=color, width=width,
+                          capstyle="round", dash=dash)
+        c.create_line(mx0, my0, mx1, my1, fill=_BRIDGE_COLOR, width=width,
+                      capstyle="round")
+        if t1 < 1:
+            c.create_line(mx1, my1, x1, y1, fill=color, width=width,
+                          capstyle="round", dash=dash)
 
     def _draw_roads(self, c, screen):
         """Straight road segments linking every village and settlement
-        across a faction's counties (an MST per county — see
-        _place_villages_for_county). Per-segment tier, not per-county: Dirt
+        across a faction's regions (an MST per region — see
+        _place_villages_for_region). Per-segment tier, not per-region: Dirt
         (brown/dashed) for any road touching a village, Stone (gray/solid)
         for a road connecting two settlements. Dirt only shows once zoomed
-        into a specific nation's counties (too minor to matter at world
+        into a specific nation's regions (too minor to matter at world
         scale); Stone — the trunk network — is visible even from the world
         map, same idea as trade routes already being shown at every zoom
-        level."""
+        level. A stone road crossing a river gets a brown bridge span (see
+        _draw_road_segment) — dirt tracks don't bother with one."""
         wd = self.world
         width = max(1.0, self._place[2] * 0.18)
 
         if self.zoom_faction is None:
-            for county in wd.counties:
-                if county.faction_idx < 0:
+            for region in wd.regions:
+                if region.faction_idx < 0:
                     continue
-                for (ax, ay), (bx, by), tier in wd.roads_by_county.get(county.id, []):
+                for (ax, ay), (bx, by), tier in wd.roads_by_region.get(region.id, []):
                     if tier != "stone":
                         continue
                     if not (self._cell_revealed(ax, ay) or self._cell_revealed(bx, by)):
                         continue
-                    x0, y0 = screen(ax + 0.5, ay + 0.5)
-                    x1, y1 = screen(bx + 0.5, by + 0.5)
-                    c.create_line(x0, y0, x1, y1, fill=_STONE_ROAD_COLOR,
-                                  width=width, capstyle="round")
+                    self._draw_road_segment(c, screen, ax, ay, bx, by,
+                                            _STONE_ROAD_COLOR, width, bridge=True)
             return
 
-        for cid in self.zoom_faction.meta.get("counties", []):
-            for (ax, ay), (bx, by), tier in wd.roads_by_county.get(cid, []):
+        for cid in self.zoom_faction.meta.get("regions", []):
+            for (ax, ay), (bx, by), tier in wd.roads_by_region.get(cid, []):
                 if not (self._cell_revealed(ax, ay) or self._cell_revealed(bx, by)):
                     continue
                 is_stone = tier == "stone"
                 color = _STONE_ROAD_COLOR if is_stone else _DIRT_ROAD_COLOR
                 dash = None if is_stone else (4, 3)
-                x0, y0 = screen(ax + 0.5, ay + 0.5)
-                x1, y1 = screen(bx + 0.5, by + 0.5)
-                c.create_line(x0, y0, x1, y1, fill=color, width=width,
-                              capstyle="round", dash=dash)
+                self._draw_road_segment(c, screen, ax, ay, bx, by, color, width,
+                                        dash=dash, bridge=is_stone)
 
     def _draw_villages(self, c, screen):
         """Small dots for villages — only shown in village view. Names are
         skipped past a village-count threshold to avoid label soup."""
-        if self.zoom_county is None:
+        if self.zoom_region is None:
             return
         wd = self.world
         style = _VILLAGE_STYLE
         r = style["r"]
-        vids = self.zoom_county.villages
+        vids = self.zoom_region.villages
         show_names = len(vids) <= _VILLAGE_LABEL_LIMIT
         for vid in vids:
             v = wd.villages[vid]
@@ -2005,15 +2150,15 @@ class MapView(tk.Frame):
 
     def _draw_labels(self, c, screen):
         wd = self.world
-        if self.zoom_county is not None:
-            return   # village view: county/faction name labels aren't useful here
+        if self.zoom_region is not None:
+            return   # village view: region/faction name labels aren't useful here
         if self.zoom_faction is not None:
             items = []
-            for cid in self.zoom_faction.meta.get("counties", []):
-                county = wd.counties[cid]
-                cx, cy = int(county.center[0] * wd.w), int(county.center[1] * wd.h)
+            for cid in self.zoom_faction.meta.get("regions", []):
+                region = wd.regions[cid]
+                cx, cy = int(region.center[0] * wd.w), int(region.center[1] * wd.h)
                 if self._cell_revealed(cx, cy):
-                    items.append((county.name, county.center))
+                    items.append((region.name, region.center))
         else:
             items = [(f.name, f.center) for f in wd.factions if self._is_known(f)]
         for name, center in items:
@@ -2021,15 +2166,15 @@ class MapView(tk.Frame):
             c.create_text(lx + 1, ly + 1, text=name, fill="#000000", font=_LABEL_FONT)
             c.create_text(lx, ly, text=name, fill="#ffffff", font=_LABEL_FONT)
 
-    def _county_border_segments(self, county):
-        """Screen-space-independent (x,y) edge list tracing a county's
+    def _region_border_segments(self, region):
+        """Screen-space-independent (x,y) edge list tracing a region's
         outline: every cell-edge where the neighboring cell belongs to a
-        different county (or is off-map)."""
+        different region (or is off-map)."""
         wd = self.world
-        cg = wd.county_grid
-        cid = county.id
+        cg = wd.region_grid
+        cid = region.id
         segs = []
-        for x, y in county.cells:
+        for x, y in region.cells:
             for dx, dy, corners in (
                     (1, 0, ((1, 0), (1, 1))), (-1, 0, ((0, 0), (0, 1))),
                     (0, 1, ((0, 1), (1, 1))), (0, -1, ((0, 0), (1, 0)))):
@@ -2042,27 +2187,27 @@ class MapView(tk.Frame):
 
     def _draw_attack_targets(self, c, screen):
         """While picking an attack target, outline every attackable frontier
-        county in red so it's obvious which land can be struck."""
+        region in red so it's obvious which land can be struck."""
         if self.attack_mode is None:
             return
         wd = self.world
         width = max(2.0, self._place[2] * 0.3)
-        for county in self._attack_frontier:
-            for x0, y0, x1, y1 in self._county_border_segments(county):
+        for region in self._attack_frontier:
+            for x0, y0, x1, y1 in self._region_border_segments(region):
                 sx0, sy0 = screen(x0, y0)
                 sx1, sy1 = screen(x1, y1)
                 c.create_line(sx0, sy0, sx1, sy1, fill=theme.BAD, width=width,
                               capstyle="round")
-            lx, ly = screen(county.center[0] * wd.w, county.center[1] * wd.h)
-            c.create_text(lx + 1, ly + 1, text=county.name, fill="#000000",
+            lx, ly = screen(region.center[0] * wd.w, region.center[1] * wd.h)
+            c.create_text(lx + 1, ly + 1, text=region.name, fill="#000000",
                           font=_LABEL_FONT)
-            c.create_text(lx, ly, text=county.name, fill="#ffffff", font=_LABEL_FONT)
+            c.create_text(lx, ly, text=region.name, fill="#ffffff", font=_LABEL_FONT)
 
     def _draw_flash(self, c, screen):
-        """Blinking outline around a county after a battle: gold for a
-        county gained, red for a failed attack — a few strobes that settle
+        """Blinking outline around a region after a battle: gold for a
+        region gained, red for a failed attack — a few strobes that settle
         down as the overall fade envelope runs out."""
-        if self._flash_county is None:
+        if self._flash_region is None:
             return
         elapsed = time.time() - self._flash_start
         envelope = max(0.0, 1.0 - elapsed / _FLASH_DURATION)
@@ -2073,7 +2218,7 @@ class MapView(tk.Frame):
         color = "#%02x%02x%02x" % tuple(
             int(base[j] + (target[j] - base[j]) * fade) for j in range(3))
         width = max(2.0, self._place[2] * (0.18 + 0.35 * fade))
-        for x0, y0, x1, y1 in self._county_border_segments(self._flash_county):
+        for x0, y0, x1, y1 in self._region_border_segments(self._flash_region):
             sx0, sy0 = screen(x0, y0)
             sx1, sy1 = screen(x1, y1)
             c.create_line(sx0, sy0, sx1, sy1, fill=color, width=width,

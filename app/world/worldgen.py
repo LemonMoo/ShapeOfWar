@@ -18,13 +18,13 @@ from collections import deque, defaultdict
 
 from app.world.nation import Nation
 from app.world.world_map import WorldMap
-from app.world.lexicon import (SPECIES, make_faction_namer, make_county_namer,
+from app.world.lexicon import (SPECIES, make_faction_namer, make_region_namer,
                                make_settlement_namer)
 
 
 # Settlement archetypes — pure placement data (where they go); what they cost
 # to maintain each turn is SETTLEMENT_UPKEEP below, production itself is
-# county-level (biome-driven — see app/world/resources.py).
+# region-level (biome-driven — see app/world/resources.py).
 #   fert_w      : how strongly placement favors fertile land
 #   river_w     : ... proximity to rivers/lakes
 #   coast_w     : ... proximity to the sea
@@ -48,6 +48,13 @@ SETTLEMENT_TYPES = {
     },
 }
 
+# Every faction's starting foothold gets exactly this — a small, equal seed
+# regardless of how large its home region happens to be (the area-scaled
+# min/max/per_cells counts above only kick in later, for settlements placed
+# in newly *claimed* territory — see _place_settlements_for_faction's
+# `fixed_counts` param and its two call sites).
+STARTING_SETTLEMENT_COUNTS = {"city": 1, "town": 2, "castle": 0}
+
 # Resources each settlement kind consumes per turn (population/garrison
 # upkeep) — ranges rolled once per settlement at placement time.
 SETTLEMENT_UPKEEP = {
@@ -64,41 +71,83 @@ SETTLEMENT_TAX_INCOME = {
     "town": (2, 4),
 }
 
+# Bare-bones population, rolled once at placement (same treatment as
+# upkeep/tax_income — a flavor/info stat, not something the turn loop
+# grows or feeds back into the economy). A castle's population skews
+# toward garrison over civilians, hence the lower range.
+POPULATION_RANGE = {
+    "city": (4000, 12000),
+    "castle": (500, 1500),
+    "town": (1200, 3500),
+    "village": (80, 450),
+}
+CHILDREN_FRACTION_RANGE = (0.30, 0.42)   # share of population under working age
+
+
+def _roll_population(rng, kind):
+    """Total population plus its adult/child split for one settlement of
+    `kind`, rolled once at placement — see POPULATION_RANGE/
+    CHILDREN_FRACTION_RANGE above."""
+    total = round(rng.uniform(*POPULATION_RANGE[kind]))
+    children = round(total * rng.uniform(*CHILDREN_FRACTION_RANGE))
+    return total, total - children, children
+
 
 class Settlement:
     """A city, castle or town. Purely a consumer (population/garrison
-    upkeep, rolled once at placement) — production is county-level."""
+    upkeep, rolled once at placement) — production is region-level."""
 
-    def __init__(self, sid, kind, name, pos, faction_idx, county_id, upkeep, tax_income):
+    def __init__(self, sid, kind, name, pos, faction_idx, region_id, upkeep, tax_income,
+                population, adults, children, prosperity):
         self.id = sid
         self.kind = kind               # "city" | "castle" | "town"
         self.name = name
         self.pos = pos                 # (x, y) grid cell
         self.faction_idx = faction_idx
-        self.county_id = county_id
+        self.region_id = region_id
         self.upkeep = upkeep           # {resource: amount} consumed per turn
         self.tax_income = tax_income   # gold generated per turn
+        self.population = population   # total headcount, rolled once at placement
+        self.adults = adults
+        self.children = children
+        # 0..100 meter of goods/wealth value vs. the faction's overall
+        # economic health — eased toward a new target every turn, not
+        # recomputed from scratch (see resources._update_prosperity).
+        self.prosperity = prosperity
         # Coastal cities only — see app/world/construction.py's
         # ShipyardProject: launches free, faster ships once built.
         self.has_shipyard = False
+        # City-only organic growth (see resources._grow_city_villages): a
+        # full prosperity meter spawns a new village nearby and resets to
+        # 0. villages_spawned is a hidden running counter (not shown in the
+        # UI); village_growth_maxed permanently latches once no valid site
+        # remains within the growth radius, so a "full" city stops
+        # re-scanning every turn.
+        self.villages_spawned = 0
+        self.village_growth_maxed = False
 
 
 class Village:
-    """A small farming settlement within a county — the finest-grained unit on
-    the map (World -> Country -> County -> Village). Purely a producer: its
+    """A small farming settlement within a region — the finest-grained unit on
+    the map (World -> Country -> Region -> Village). Purely a producer: its
     farms generate resources scaled by the fertility of the land around it.
     No drain is modeled (villages are subsistence-level, unlike settlements)."""
 
-    def __init__(self, vid, county_id, faction_idx, name, pos, farm_output):
+    def __init__(self, vid, region_id, faction_idx, name, pos, farm_output,
+                population, adults, children, prosperity):
         self.id = vid
-        self.county_id = county_id
+        self.region_id = region_id
         self.faction_idx = faction_idx
         self.name = name
         self.pos = pos                 # (x, y) grid cell
         self.farm_output = farm_output
+        self.population = population   # total headcount, rolled once at placement
+        self.adults = adults
+        self.children = children
+        self.prosperity = prosperity   # 0..100 meter — see resources._update_prosperity
 
 
-class County:
+class Region:
     """A sub-region of a faction's territory. The unit of control that will be
     fought over once territory can change hands. Stats derive from the fertility
     of the land it covers."""
@@ -114,16 +163,16 @@ class County:
         # Economy (see app/world/resources.py): biome_counts/dominant_climate
         # are static geography, cached once here; settle_proximity is filled
         # in after settlements exist and village_grain_base after villages
-        # do. `resources` is this county's most recent turn's yield.
+        # do. `resources` is this region's most recent turn's yield.
         self.biome_counts = {}
         self.dominant_climate = "temperate"
         self.settle_proximity = 0.5
         self.village_grain_base = 0
         self.resources = {}
         # Progressive expansion (see app/world/expansion.py): garrison rating
-        # for UNCLAIMED land (irrelevant once claimed), whether this county's
+        # for UNCLAIMED land (irrelevant once claimed), whether this region's
         # settlements/villages have been generated yet (False for every
-        # UNCLAIMED county until claimed), and a claim-retry cooldown after a
+        # UNCLAIMED region until claimed), and a claim-retry cooldown after a
         # failed attempt.
         self.wildland_strength = 0
         self.settlements_generated = False
@@ -153,21 +202,21 @@ class County:
                                   if climate_counts else "temperate")
 
 
-def _generate_all_counties(world, rng, base_cost, land_cells):
-    """Bisect the *entire* landmass into counties before any faction owns
-    anything — county geometry becomes the fixed unit of territory that
+def _generate_all_regions(world, rng, base_cost, land_cells):
+    """Bisect the *entire* landmass into regions before any faction owns
+    anything — region geometry becomes the fixed unit of territory that
     ownership (starting footholds, later claims/conquests) maps onto,
     instead of being carved out of land a faction already owns. Seeds are
     spaced across all land, then grown with the same river-aware weighted
-    flooding used for country borders, so county borders follow rivers too.
-    Every county starts UNCLAIMED; callers assign faction_idx afterward."""
-    n_counties = max(1, len(land_cells) // 200)
-    min_d = max(3.0, (len(land_cells) / n_counties) ** 0.5 * 0.7)
+    flooding used for country borders, so region borders follow rivers too.
+    Every region starts UNCLAIMED; callers assign faction_idx afterward."""
+    n_regions = max(1, len(land_cells) // 200)
+    min_d = max(3.0, (len(land_cells) / n_regions) ** 0.5 * 0.7)
     shuffled = land_cells[:]
     rng.shuffle(shuffled)
     seeds = []
     for p in shuffled:
-        if len(seeds) >= n_counties:
+        if len(seeds) >= n_regions:
             break
         if all((p[0] - s[0]) ** 2 + (p[1] - s[1]) ** 2 >= min_d * min_d
                for s in seeds):
@@ -176,21 +225,21 @@ def _generate_all_counties(world, rng, base_cost, land_cells):
         seeds = [land_cells[0]]
 
     landset = set(land_cells)
-    assign = _grow_weighted(world, landset, seeds, base_cost, _COUNTY_RIVER_PEN)
+    assign = _grow_weighted(world, landset, seeds, base_cost, _REGION_RIVER_PEN)
     for p in land_cells:                # disconnected bits -> nearest seed
         if p not in assign:
             assign[p] = min(range(len(seeds)),
                             key=lambda i: (p[0] - seeds[i][0]) ** 2
                             + (p[1] - seeds[i][1]) ** 2)
 
-    namer = make_county_namer(rng)
-    objs = [County(i, UNCLAIMED, namer()) for i in range(len(seeds))]
+    namer = make_region_namer(rng)
+    objs = [Region(i, UNCLAIMED, namer()) for i in range(len(seeds))]
     for (x, y), i in assign.items():
-        world.county_grid[y][x] = i
+        world.region_grid[y][x] = i
         objs[i].cells.append((x, y))
     for cobj in objs:
         cobj.finalize(world)
-        world.counties.append(cobj)
+        world.regions.append(cobj)
 
 
 OCEAN = -1
@@ -251,7 +300,7 @@ _COST_FREQ_LO = 0.030         # broad wander (~33-cell wavelength)
 _COST_FREQ_MID = 0.085        # medium jaggedness (~12-cell wavelength)
 _COST_FREQ_HI = 0.35          # fine jaggedness (~3-cell wavelength)
 _COUNTRY_RIVER_PEN = 20.0     # surcharge to cross water when growing countries
-_COUNTY_RIVER_PEN = 12.0      # ... and (weaker) when growing counties
+_REGION_RIVER_PEN = 12.0      # ... and (weaker) when growing regions
 
 
 def _cost_field(world, nseed):
@@ -305,7 +354,7 @@ def _grow_weighted(world, cellset, seeds, base_cost, river_pen):
     return owner
 
 
-# Progressive expansion: how strongly an unclaimed county's neutral garrison
+# Progressive expansion: how strongly an unclaimed region's neutral garrison
 # scales with distance from the nearest capital (weak near everyone's start,
 # so early expansion is fast; strong deep in the interior, so it takes a
 # built-up military to reach) and with the land's own fertility (better land
@@ -318,76 +367,76 @@ MIN_FOOTHOLD_CELLS = 120   # every faction starts owning at least this many cell
 
 
 def _seed_wildland_strength(world, rng, capitals):
-    """Rate every county's neutral-garrison strength before any faction
+    """Rate every region's neutral-garrison strength before any faction
     claims anything — see the WILDLAND_* constants above."""
-    for county in world.counties:
-        cx, cy = county.center[0] * world.w, county.center[1] * world.h
+    for region in world.regions:
+        cx, cy = region.center[0] * world.w, region.center[1] * world.h
         dist = min(math.hypot(cx - px, cy - py) for px, py in capitals)
-        fert = county.stats.get("fertility", 50) / 100.0
+        fert = region.stats.get("fertility", 50) / 100.0
         base = (WILDLAND_BASE + WILDLAND_DIST_SCALE * dist
                 + WILDLAND_FERT_BONUS * fert)
         jitter = 1.0 + rng.uniform(-WILDLAND_JITTER, WILDLAND_JITTER)
-        county.wildland_strength = max(5, round(base * jitter))
+        region.wildland_strength = max(5, round(base * jitter))
 
 
-def _adjacent_county_ids(world, county):
-    """County ids sharing a cell edge with `county` (4-neighbor)."""
+def _adjacent_region_ids(world, region):
+    """Region ids sharing a cell edge with `region` (4-neighbor)."""
     ids = set()
-    w, h, cg = world.w, world.h, world.county_grid
-    for x, y in county.cells:
+    w, h, cg = world.w, world.h, world.region_grid
+    for x, y in region.cells:
         for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
             if 0 <= nx < w and 0 <= ny < h:
                 cid = cg[ny][nx]
-                if cid >= 0 and cid != county.id:
+                if cid >= 0 and cid != region.id:
                     ids.add(cid)
     return ids
 
 
-def _nearest_unclaimed_county(world, pos):
+def _nearest_unclaimed_region(world, pos):
     """Fallback for the rare case (tiny test maps, unlucky capital spacing)
-    where a capital's home county is already claimed by another faction:
-    the closest still-UNCLAIMED county by straight-line center distance."""
+    where a capital's home region is already claimed by another faction:
+    the closest still-UNCLAIMED region by straight-line center distance."""
     x, y = pos
     best, best_d = None, 1e18
-    for county in world.counties:
-        if county.faction_idx >= 0:
+    for region in world.regions:
+        if region.faction_idx >= 0:
             continue
-        cx, cy = county.center[0] * world.w, county.center[1] * world.h
+        cx, cy = region.center[0] * world.w, region.center[1] * world.h
         d = (cx - x) ** 2 + (cy - y) ** 2
         if d < best_d:
-            best_d, best = d, county.id
+            best_d, best = d, region.id
     return best
 
 
 def _assign_starting_footholds(world, capitals, min_cells=MIN_FOOTHOLD_CELLS):
-    """Hand each faction only its capital's home county (plus enough
-    bordering unclaimed counties to reach `min_cells`, largest first) —
+    """Hand each faction only its capital's home region (plus enough
+    bordering unclaimed regions to reach `min_cells`, largest first) —
     everything else on the map stays UNCLAIMED for players/AI to expand
     into over time, instead of the old "claim the whole map instantly"
     flood-fill."""
     for idx, (cx, cy) in enumerate(capitals):
-        home_id = world.county_grid[cy][cx]
-        if home_id < 0 or world.counties[home_id].faction_idx >= 0:
-            home_id = _nearest_unclaimed_county(world, (cx, cy))
+        home_id = world.region_grid[cy][cx]
+        if home_id < 0 or world.regions[home_id].faction_idx >= 0:
+            home_id = _nearest_unclaimed_region(world, (cx, cy))
         if home_id is None:
             continue   # ran out of unclaimed land — extremely unlikely
         claimed = {home_id}
-        total = len(world.counties[home_id].cells)
+        total = len(world.regions[home_id].cells)
         while total < min_cells:
             frontier = set()
             for cid in claimed:
-                frontier |= _adjacent_county_ids(world, world.counties[cid])
+                frontier |= _adjacent_region_ids(world, world.regions[cid])
             frontier = {cid for cid in frontier - claimed
-                       if world.counties[cid].faction_idx < 0}
+                       if world.regions[cid].faction_idx < 0}
             if not frontier:
                 break
-            best = max(frontier, key=lambda cid: len(world.counties[cid].cells))
+            best = max(frontier, key=lambda cid: len(world.regions[cid].cells))
             claimed.add(best)
-            total += len(world.counties[best].cells)
+            total += len(world.regions[best].cells)
         for cid in claimed:
-            county = world.counties[cid]
-            county.faction_idx = idx
-            for x, y in county.cells:
+            region = world.regions[cid]
+            region.faction_idx = idx
+            for x, y in region.cells:
                 world.owner[y][x] = idx
 
 
@@ -502,7 +551,7 @@ def _bfs_distance(world, sources):
 
 
 # Shared spatial-hash "occupancy" grid so settlement/village placement can
-# repel points from *other* factions/counties too, not just their own —
+# repel points from *other* factions/regions too, not just their own —
 # without it, e.g. two factions' frontier castles (which each independently
 # seek the border) can land right on top of each other. Bucket size is fixed
 # and decoupled from any one call's spacing value; the search radius scales
@@ -534,7 +583,7 @@ def _occupy(occupied, x, y):
 def _init_settlement_proximity_fields(world, rng):
     """Build the shared proximity fields + occupancy hash settlement
     placement scores against, and cache them on `world` — computed once
-    (O(w*h)) rather than per-claim, so a settlement placed in a county
+    (O(w*h)) rather than per-claim, so a settlement placed in a region
     claimed turn 400 scores against the same live geography as one placed at
     world-gen, without redoing a whole-map BFS every time."""
     w, h = world.w, world.h
@@ -560,8 +609,8 @@ def _init_settlement_proximity_fields(world, rng):
     # returns a closure, and closures can't be pickled (app/core/save.py
     # pickles the whole World). Each caller of _place_settlements_for_faction
     # builds its own short-lived namer instead (see _generate_settlements and
-    # expansion.settle_newly_claimed_county) — same "fresh per call, no
-    # global uniqueness guarantee" tradeoff _place_villages_for_county
+    # expansion.settle_newly_claimed_region) — same "fresh per call, no
+    # global uniqueness guarantee" tradeoff _place_villages_for_region
     # already makes, and for the same reason.
     world._settle_coast_d = coast_d
     world._settle_water_d = water_d
@@ -569,12 +618,25 @@ def _init_settlement_proximity_fields(world, rng):
     world._settle_occupied = {}
 
 
-def _place_settlements_for_faction(world, rng, fac_idx, cells, namer):
+def _place_settlements_for_faction(world, rng, fac_idx, cells, namer, fixed_counts=None):
     """Score and place cities/castles/towns for one faction's cells, using
     the shared proximity fields/occupancy hash `_init_settlement_proximity_
     fields` cached on `world`. Reusable both for the full initial pass (one
     call per faction's starting foothold) and, mid-game, for a single newly
-    claimed county's cells (see app/world/expansion.py)."""
+    claimed region's cells (see app/world/expansion.py).
+
+    `fixed_counts`, when given (a {kind: count} dict), overrides the usual
+    area-scaled min/max/per_cells count for whichever kinds it names — any
+    kind it *doesn't* name still falls back to the normal area-scaled
+    formula. Two callers: the starting foothold passes
+    STARTING_SETTLEMENT_COUNTS (names all three kinds, so every faction
+    begins with the same small seed regardless of how large its home region
+    turned out to be); newly claimed wildland (see
+    app/world/expansion.py's settle_newly_claimed_region) passes
+    {"city": 0, "town": 0} — no free City/Town, but Castle still scales with
+    area as before, since claiming land was never how you got one of those
+    for free in the first place."""
+    from app.world.resources import seed_prosperity
     sea = world.sea_level
     span = (1.0 - sea) or 1.0
     coast_d = world._settle_coast_d
@@ -585,7 +647,10 @@ def _place_settlements_for_faction(world, rng, fac_idx, cells, namer):
     species = world.factions[fac_idx].meta["species"]
 
     for kind, t in SETTLEMENT_TYPES.items():
-        count = max(t["min"], min(t["max"], len(cells) // t["per_cells"]))
+        if fixed_counts is not None and kind in fixed_counts:
+            count = fixed_counts[kind]
+        else:
+            count = max(t["min"], min(t["max"], len(cells) // t["per_cells"]))
         scored = []
         for x, y in cells:
             if (x, y) in world.river_cells:
@@ -609,45 +674,48 @@ def _place_settlements_for_faction(world, rng, fac_idx, cells, namer):
             upkeep = {res: round(rng.uniform(*rng_range))
                       for res, rng_range in SETTLEMENT_UPKEEP[kind].items()}
             tax_income = round(rng.uniform(*SETTLEMENT_TAX_INCOME[kind]))
-            county_id = world.county_grid[y][x]
+            population, adults, children = _roll_population(rng, kind)
+            prosperity = seed_prosperity()
+            region_id = world.region_grid[y][x]
             st = Settlement(len(world.settlements), kind, namer(kind, species),
-                            (x, y), fac_idx, county_id, upkeep, tax_income)
+                            (x, y), fac_idx, region_id, upkeep, tax_income,
+                            population, adults, children, prosperity)
             world.settlements.append(st)
             _occupy(occupied, x, y)
             world.factions[fac_idx].meta["settlements"].append(st.id)
-            if 0 <= county_id < len(world.counties):
-                world.counties[county_id].meta_settlements.append(st.id)
+            if 0 <= region_id < len(world.regions):
+                world.regions[region_id].meta_settlements.append(st.id)
             placed += 1
 
 
 def _recompute_settle_proximity_all(world):
-    """settle_proximity: how close each county is to *any* settlement (0..1,
+    """settle_proximity: how close each region is to *any* settlement (0..1,
     1 = right on top of one) — feeds the "remote areas are harder to acquire
     resources from" rule in app/world/resources.py. Full-map BFS; cheap
     enough at world-gen time (called once), not used again afterward — a
-    single newly claimed county instead uses the cheaper straight-line
+    single newly claimed region instead uses the cheaper straight-line
     version, territory._recompute_settle_proximity."""
     settle_d = (_bfs_distance(world, [st.pos for st in world.settlements])
                 if world.settlements else None)
-    for county in world.counties:
+    for region in world.regions:
         if settle_d is None:
-            county.settle_proximity = 0.5
+            region.settle_proximity = 0.5
             continue
-        avg_d = sum(settle_d[y][x] for x, y in county.cells) / len(county.cells)
-        county.settle_proximity = math.exp(-avg_d / 10.0)
+        avg_d = sum(settle_d[y][x] for x, y in region.cells) / len(region.cells)
+        region.settle_proximity = math.exp(-avg_d / 10.0)
 
 
 def _generate_settlements(world, rng):
     """Found cities, castles and towns for every faction that currently owns
-    land (their starting foothold — UNCLAIMED counties get settlements later,
+    land (their starting foothold — UNCLAIMED regions get settlements later,
     when claimed). Counts scale with territory size; placement follows the
     map: cities seek fertile, riverside or coastal land, castles guard
     frontiers and high ground, towns fill the countryside. Each settlement
     rolls its per-turn upkeep (population/garrison draw on the faction's
-    resource stockpile); production itself is county-level, computed later
+    resource stockpile); production itself is region-level, computed later
     from biome/climate/season."""
     w, h = world.w, world.h
-    for c in world.counties:
+    for c in world.regions:
         c.meta_settlements = []
     for f in world.factions:
         f.meta["settlements"] = []
@@ -663,15 +731,16 @@ def _generate_settlements(world, rng):
                 cells_by_fac[o].append((x, y))
 
     for fac_idx, cells in cells_by_fac.items():
-        _place_settlements_for_faction(world, rng, fac_idx, cells, namer)
-        for cid in world.factions[fac_idx].meta.get("counties", []):
-            world.counties[cid].settlements_generated = True
+        _place_settlements_for_faction(world, rng, fac_idx, cells, namer,
+                                       fixed_counts=STARTING_SETTLEMENT_COUNTS)
+        for cid in world.factions[fac_idx].meta.get("regions", []):
+            world.regions[cid].settlements_generated = True
 
     _recompute_settle_proximity_all(world)
 
 
-# Village generation. Count scales with county size: from ~3 villages for a
-# small county in a small country up to ~50 for a large county in a huge one.
+# Village generation. Count scales with region size: from ~3 villages for a
+# small region in a small country up to ~50 for a large region in a huge one.
 _VILLAGE_CELLS_PER = 22   # ~cells per village before min/max clamping
 _VILLAGE_MIN = 3
 _VILLAGE_MAX = 50
@@ -680,6 +749,9 @@ _VILLAGE_WATER_W = 0.55
 _VILLAGE_WATER_REACH = 5.0
 _VILLAGE_FARM_RANGE = (10, 26)   # base farm output before the fertility scalar
 _VILLAGE_FERT_PATCH = 2          # radius (cells) averaged for "land occupied"
+STARTING_VILLAGE_COUNT = 3       # every faction's starting foothold gets exactly
+                                  # this many, regardless of its region's area —
+                                  # see _place_villages_for_region's `fixed_n`
 
 
 def _mst_edges(points):
@@ -724,32 +796,42 @@ def _init_village_fields(world):
         _occupy(world._village_occupied, *st.pos)
 
 
-def _place_villages_for_county(world, rng, county):
-    """Sprinkle farming villages within one county — 3 for a small county,
+def _place_villages_for_region(world, rng, region, fixed_n=None):
+    """Sprinkle farming villages within one region — 3 for a small region,
     up to 50 for a large one — each producing farm output tied to the
     fertility of the land it sits on, linked by an MST of simple dirt roads.
-    Reusable both for the full initial pass (one call per starting county)
-    and, mid-game, for a single newly claimed county (see
-    app/world/expansion.py)."""
+    Reusable both for the full initial pass (one call per starting region)
+    and, mid-game, for a single newly claimed region (see
+    app/world/expansion.py).
+
+    `fixed_n`, when given, overrides the usual area-scaled village count —
+    used for the starting foothold (STARTING_VILLAGE_COUNT) so every
+    faction begins with the same small handful regardless of its home
+    region's actual size; ongoing expansion (fixed_n=None) keeps scaling
+    with the newly claimed region's area as before."""
+    from app.world.resources import seed_prosperity
     w, h = world.w, world.h
     water_d = world._village_water_d
     occupied = world._village_occupied
-    # A fresh namer per county: villages are only ever viewed one county at a
-    # time, so names need only be unique within a county (a handful to ~50),
+    # A fresh namer per region: villages are only ever viewed one region at a
+    # time, so names need only be unique within a region (a handful to ~50),
     # not across the whole world's thousands of villages.
     namer = make_settlement_namer(rng)
-    species = world.factions[county.faction_idx].meta["species"]
-    land_cells = [(x, y) for x, y in county.cells
+    species = world.factions[region.faction_idx].meta["species"]
+    land_cells = [(x, y) for x, y in region.cells
                   if (x, y) not in world.river_cells
                   and (x, y) not in world.lake_cells]
     if not land_cells:
-        county.villages = []
-        world.roads_by_county[county.id] = []
+        region.villages = []
+        world.roads_by_region[region.id] = []
         return
 
-    area = len(county.cells)
-    n = max(_VILLAGE_MIN, min(_VILLAGE_MAX, round(area / _VILLAGE_CELLS_PER)))
-    n = min(n, len(land_cells))
+    area = len(region.cells)
+    if fixed_n is not None:
+        n = min(fixed_n, len(land_cells))
+    else:
+        n = max(_VILLAGE_MIN, min(_VILLAGE_MAX, round(area / _VILLAGE_CELLS_PER)))
+        n = min(n, len(land_cells))
 
     scored = []
     for x, y in land_cells:
@@ -780,47 +862,73 @@ def _place_villages_for_county(world, rng, county):
             for dy in range(-r, r + 1):
                 nx, ny = x + dx, y + dy
                 if (0 <= nx < w and 0 <= ny < h
-                        and world.county_grid[ny][nx] == county.id):
+                        and world.region_grid[ny][nx] == region.id):
                     samples.append(world.fertility[ny][nx])
         local_fert = sum(samples) / len(samples) if samples else world.fertility[y][x]
         farm = round(rng.uniform(*_VILLAGE_FARM_RANGE) * (0.5 + 1.2 * local_fert))
-        v = Village(len(world.villages), county.id, county.faction_idx,
-                   namer("village", species), (x, y), farm)
+        population, adults, children = _roll_population(rng, "village")
+        prosperity = seed_prosperity()
+        v = Village(len(world.villages), region.id, region.faction_idx,
+                   namer("village", species), (x, y), farm,
+                   population, adults, children, prosperity)
         world.villages.append(v)
         vids.append(v.id)
 
-    county.villages = vids
-    # Villages are farms: their output feeds straight into this county's
+    region.villages = vids
+    # Villages are farms: their output feeds straight into this region's
     # Grain yield each turn (app/world/resources.py), climate/season
     # modulated same as everything else.
-    county.village_grain_base = sum(world.villages[i].farm_output for i in vids)
+    region.village_grain_base = sum(world.villages[i].farm_output for i in vids)
 
     # Local roads: an MST over the villages plus *every* settlement in the
-    # county (city/castle/town alike — previously only the first settlement
+    # region (city/castle/town alike — previously only the first settlement
     # was added, so a second town or castle was left with no road at all),
     # so the whole network ties every settlement into town. Each edge's
-    # tier is decided by what it connects, not by county wealth: a road
+    # tier is decided by what it connects, not by region wealth: a road
     # touching a village is a humble Dirt farm track; a road linking two
     # settlements (city/castle/town) is a proper Stone trunk road — see
     # app/ui/map_view.py's _draw_roads for the rendering side.
     points = [world.villages[i].pos for i in vids]
-    points += [world.settlements[sid].pos for sid in county.meta_settlements]
-    is_settlement = [False] * len(vids) + [True] * len(county.meta_settlements)
+    points += [world.settlements[sid].pos for sid in region.meta_settlements]
+    is_settlement = [False] * len(vids) + [True] * len(region.meta_settlements)
     edges = _mst_edges(points)
-    world.roads_by_county[county.id] = [
+    world.roads_by_region[region.id] = [
         (points[a], points[b], "stone" if (is_settlement[a] and is_settlement[b]) else "dirt")
         for a, b in edges]
 
 
 def _generate_villages(world, rng):
-    """Sprinkle small farming villages into every currently-owned county's
-    starting foothold (UNCLAIMED counties get villages later, when claimed —
-    see app/world/expansion.py)."""
+    """Sprinkle small farming villages into every currently-owned region's
+    starting foothold (UNCLAIMED regions get villages later, when claimed —
+    see app/world/expansion.py). A starting foothold can span more than one
+    region (_assign_starting_footholds folds in extra bordering regions
+    when the capital's home region alone falls short of MIN_FOOTHOLD_CELLS)
+    — STARTING_VILLAGE_COUNT is a total for the whole foothold, not per
+    region, so all of it lands in one "home" region and any padding
+    regions start with none. That's normally the capital's own region, but
+    a region is a Voronoi-style region independent of the capital's exact
+    cell, so it can end up entirely lake/river with no land at all to place
+    on — in that rare case, fall back to the largest owned region that
+    actually has land, rather than silently placing zero villages."""
     _init_village_fields(world)
-    for county in world.counties:
-        if county.faction_idx < 0:
+
+    def has_land(region):
+        return any(cell not in world.river_cells and cell not in world.lake_cells
+                  for cell in region.cells)
+
+    for faction in world.factions:
+        regions = faction.meta.get("regions", [])
+        if not regions:
             continue
-        _place_villages_for_county(world, rng, county)
+        cx, cy = faction.meta["capital"]
+        home_id = world.region_grid[cy][cx]
+        if home_id not in regions or not has_land(world.regions[home_id]):
+            landed = [cid for cid in regions if has_land(world.regions[cid])]
+            home_id = (max(landed, key=lambda cid: len(world.regions[cid].cells))
+                      if landed else None)
+        for cid in regions:
+            n = STARTING_VILLAGE_COUNT if cid == home_id else 0
+            _place_villages_for_region(world, rng, world.regions[cid], fixed_n=n)
 
 
 # Long-haul trade route pathfinding: used by app/world/trade.py both for the
@@ -1017,11 +1125,11 @@ class World:
         self.rivers = []               # list of {"cells": [(x,y)...], "flow": f}
         self.river_cells = set()       # all (x, y) cells a river runs through
         self.lake_cells = set()        # (x, y) land cells that are lake surface
-        self.counties = []             # list[County]; index == county id
-        self.county_grid = [[-1] * w for _ in range(h)]  # county id, -1 = none
+        self.regions = []             # list[Region]; index == region id
+        self.region_grid = [[-1] * w for _ in range(h)]  # region id, -1 = none
         self.settlements = []          # list[Settlement]; index == id
         self.villages = []             # list[Village]; index == id
-        self.roads_by_county = {}      # county_id -> [((x,y),(x,y),"dirt"/"stone"), ...] segments
+        self.roads_by_region = {}      # region_id -> [((x,y),(x,y),"dirt"/"stone"), ...] segments
         # Trade routes exist only once built/opened (app/world/trade.py) —
         # no faction starts pre-connected to any other. trade_routes is the
         # flat list rendering reads (kind/cells, plus a_faction/b_faction);
@@ -1032,7 +1140,7 @@ class World:
         self.trade_route_projects = []  # list[TradeRouteProject] — see app/world/trade.py
         self.trade_caravans = []       # list[TradeCaravan] — see app/world/trade.py
         self.trade_events = []         # this turn's dispatch/delivery/payment/loss events
-        self.castle_projects = []      # list[CastleProject] — see app/world/construction.py
+        self.settlement_projects = []  # list[SettlementProject] — see app/world/construction.py
         self.road_projects = []        # list[RoadProject] — see app/world/construction.py
         self.shipyard_projects = []    # list[ShipyardProject] — see app/world/construction.py
         self.claim_projects = []       # list[ClaimProject] — see app/world/expansion.py
@@ -1108,7 +1216,7 @@ def generate_world(width=440, height=264, seed=None, n_factions=14,
         capitals.append(rng.choice(land_cells))
 
     # 4. mark every land cell UNCLAIMED (distinct from OCEAN) before anyone
-    #    owns anything — geography (fertility/biome/county shape) no longer
+    #    owns anything — geography (fertility/biome/region shape) no longer
     #    depends on ownership, only on land-vs-water, so it can all be
     #    computed before territory is handed out at all.
     base_cost = _cost_field(world, nseed)
@@ -1121,12 +1229,12 @@ def generate_world(width=440, height=264, seed=None, n_factions=14,
     _compute_fertility(world, nseed)
     _classify_biomes_and_climate(world)
 
-    # 6. bisect the *entire* landmass into counties — the fixed unit of
+    # 6. bisect the *entire* landmass into regions — the fixed unit of
     #    territory, decoupled from ownership (see UNCLAIMED-land progressive
     #    expansion in app/world/expansion.py) — before any faction exists.
-    _generate_all_counties(world, rng, base_cost, land_cells)
+    _generate_all_regions(world, rng, base_cost, land_cells)
 
-    # 7. rate every county's neutral-garrison strength (defends UNCLAIMED land
+    # 7. rate every region's neutral-garrison strength (defends UNCLAIMED land
     #    against being claimed until a faction's military can overcome it).
     _seed_wildland_strength(world, rng, capitals)
 
@@ -1159,15 +1267,15 @@ def generate_world(width=440, height=264, seed=None, n_factions=14,
                          rng.uniform(0.55, 0.8), rng.uniform(0.65, 0.9))
         # military is a placeholder here — resources.seed_initial_stockpiles()
         # recomputes it for real from each faction's starting resource
-        # stockpile once counties/settlements/villages all exist.
+        # stockpile once regions/settlements/villages all exist.
         military = max(15, min(99, int(rng.uniform(45, 72) + traits["mil"]
                                        + min(20, cells / 40))))
         morale = max(15, min(99, int(rng.uniform(50, 75))))
         center = (sums[idx][1] / cells / width, sums[idx][2] / cells / height)
         name = player_name if (is_player and player_name) else namer(species)
-        county_ids = [c.id for c in world.counties if c.faction_idx == idx]
-        xs = [x for c in county_ids for x, y in world.counties[c].cells]
-        ys = [y for c in county_ids for x, y in world.counties[c].cells]
+        region_ids = [c.id for c in world.regions if c.faction_idx == idx]
+        xs = [x for c in region_ids for x, y in world.regions[c].cells]
+        ys = [y for c in region_ids for x, y in world.regions[c].cells]
         bbox = (min(xs), min(ys), max(xs) + 1, max(ys) + 1) if xs else (0, 0, 1, 1)
         nation = Nation(
             name, color, territory=[], center=center,
@@ -1175,7 +1283,7 @@ def generate_world(width=440, height=264, seed=None, n_factions=14,
             meta={"species": species, "trait": traits["trait"],
                   "cells": cells, "capital": capitals[idx],
                   "fertility": round(100 * fert_sum / cells),  # avg %, 0..100
-                  "counties": county_ids, "bbox": bbox})
+                  "regions": region_ids, "bbox": bbox})
         world.factions.append(nation)
         world.world_map.add_nation(nation)
 
@@ -1207,7 +1315,7 @@ def generate_world(width=440, height=264, seed=None, n_factions=14,
     #     foothold (UNCLAIMED land gets settlements later, when claimed)
     _generate_settlements(world, rng)
 
-    # 11. sprinkle villages within each starting county, linked by simple
+    # 11. sprinkle villages within each starting region, linked by simple
     #     dirt roads; each village's farm output tracks local fertility
     _generate_villages(world, rng)
 

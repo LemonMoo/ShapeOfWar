@@ -1,20 +1,36 @@
-"""Player-built castles: cost real resources, take real turns, and need a
-connecting road that's physically built cell-by-cell over time (using the
-same terrain-aware pathfinding as trade routes/village roads) before
+"""Player- and AI-built settlements: cost real resources, take real turns, and
+need a connecting road that's physically built cell-by-cell over time (using
+the same terrain-aware pathfinding as trade routes/village roads) before
 construction can run at full speed — modeling "the workers need a way to
 get there."
+
+Claiming wildland only ever hands out villages now (see
+app/world/expansion.py's settle_newly_claimed_region) — a City or Town has to
+be built here, by hand, the same as a Castle always has been. AI factions get
+the same requirement, so they need their own decision loop too: see
+run_settlement_ai, wired into the turn loop alongside advance_projects.
 """
 import math
 import random
 
 from app.world.worldgen import (OCEAN, Settlement, SETTLEMENT_UPKEEP,
-                                SETTLEMENT_TAX_INCOME, _path_dijkstra, _elev_cost,
-                                _SEA_COAST_REACH)
+                                SETTLEMENT_TAX_INCOME, _roll_population, _path_dijkstra,
+                                _elev_cost, _SEA_COAST_REACH)
 from app.world.lexicon import make_settlement_namer
+from app.world.resources import seed_prosperity
 
-CASTLE_COST = {"Stone": 400, "Wood": 200, "Iron": 100, "Gold": 300}
-CASTLE_BUILD_TURNS = 15          # at full speed
-ROAD_SPEED_PENALTY = 0.5         # castle progress rate while its road is incomplete
+# Cost/time to build each settlement kind. City is the crown jewel (biggest
+# population range, POPULATION_RANGE in worldgen.py) so it's the steepest;
+# Town is the cheap, fast starter settlement. Town/City run 5x their
+# original resource cost, Castle 4x — all deliberately steep, multi-turn
+# investments now that wildland claims never hand one out for free.
+SETTLEMENT_BUILD_COST = {
+    "town": {"Wood": 1000, "Stone": 500, "Gold": 750},
+    "castle": {"Stone": 1600, "Wood": 800, "Iron": 400, "Gold": 1200},
+    "city": {"Wood": 1750, "Stone": 1500, "Iron": 750, "Gold": 2500},
+}
+SETTLEMENT_BUILD_TURNS = {"town": 20, "castle": 25, "city": 40}   # at full speed
+ROAD_SPEED_PENALTY = 0.5         # project progress rate while its road is incomplete
 ROAD_CELLS_PER_TURN = 6          # how much of the route gets physically drawn each turn
 _BBOX_PAD = 20
 
@@ -41,13 +57,18 @@ class RoadProject:
         return self.path[:self.built_index + 1]
 
 
-class CastleProject:
-    def __init__(self, faction_idx, pos, county_id, road):
+class SettlementProject:
+    """A City, Town, or Castle under construction — one class for all three
+    since they only ever differed in cost/turns (SETTLEMENT_BUILD_COST/
+    SETTLEMENT_BUILD_TURNS) and the resulting Settlement's `kind`."""
+
+    def __init__(self, faction_idx, pos, region_id, road, kind):
         self.faction_idx = faction_idx
         self.pos = pos
-        self.county_id = county_id
+        self.region_id = region_id
         self.road = road            # RoadProject or None (already connected)
-        self.total_turns = CASTLE_BUILD_TURNS
+        self.kind = kind            # "city" | "town" | "castle"
+        self.total_turns = SETTLEMENT_BUILD_TURNS[kind]
         self.progress_turns = 0.0
 
     @property
@@ -183,95 +204,143 @@ def can_afford(nation, cost):
     return True
 
 
-def start_castle(world, player, pos):
-    """Validate and kick off building a castle at `pos` for the player's own
-    faction. Returns a message describing what happened (success or why
-    not)."""
+def start_settlement(world, nation, pos, kind):
+    """Validate and kick off building a City, Town, or Castle at `pos` for
+    `nation`'s own faction (works for the player or an AI nation alike —
+    see run_settlement_ai). Returns a message describing what happened
+    (success or why not)."""
     x, y = pos
     if not (0 <= x < world.w and 0 <= y < world.h):
         return "That's outside the map."
-    if world.owner[y][x] != world.player_faction_idx:
+    faction_idx = world.factions.index(nation)
+    if world.owner[y][x] != faction_idx:
         return "You can only build within your own territory."
-    county_id = world.county_grid[y][x]
-    if county_id < 0:
-        return "That location isn't part of any county."
+    region_id = world.region_grid[y][x]
+    if region_id < 0:
+        return "That location isn't part of any region."
     if any(st.pos == pos for st in world.settlements):
         return "There's already a settlement there."
-    if any(c.pos == pos for c in world.castle_projects):
+    if any(p.pos == pos for p in world.settlement_projects):
         return "Construction is already underway there."
-    if not can_afford(player, CASTLE_COST):
+    cost = SETTLEMENT_BUILD_COST[kind]
+    if not can_afford(nation, cost):
         return "You don't have enough resources to start construction."
 
-    res = player.stats.setdefault("resources", {})
-    for resource, amount in CASTLE_COST.items():
+    res = nation.stats.setdefault("resources", {})
+    for resource, amount in cost.items():
         if resource == "Gold":
-            player.stats["gold"] = player.stats.get("gold", 0) - amount
+            nation.stats["gold"] = nation.stats.get("gold", 0) - amount
         else:
             res[resource] = res.get(resource, 0) - amount
 
-    road_path = _find_road_path(world, world.player_faction_idx, pos)
-    road = RoadProject(world.player_faction_idx, road_path) if len(road_path) > 1 else None
-    castle = CastleProject(world.player_faction_idx, pos, county_id, road)
-    world.castle_projects.append(castle)
+    road_path = _find_road_path(world, faction_idx, pos)
+    road = RoadProject(faction_idx, road_path) if len(road_path) > 1 else None
+    project = SettlementProject(faction_idx, pos, region_id, road, kind)
+    world.settlement_projects.append(project)
     if road is not None:
         world.road_projects.append(road)
-    return f"Construction begins on a new castle — estimated {castle.total_turns} turns."
+    return (f"Construction begins on a new {kind} — estimated "
+            f"{project.total_turns} turns.")
 
 
-def _finish_castle(world, castle):
-    faction = world.factions[castle.faction_idx]
+def _finish_settlement(world, project):
+    kind = project.kind
+    faction = world.factions[project.faction_idx]
     species = faction.meta.get("species", "Humans")
     namer = make_settlement_namer(random)
     upkeep = {res: round(random.uniform(*rng_range))
-              for res, rng_range in SETTLEMENT_UPKEEP["castle"].items()}
-    tax_income = round(random.uniform(*SETTLEMENT_TAX_INCOME["castle"]))
-    st = Settlement(len(world.settlements), "castle", namer("castle", species),
-                    castle.pos, castle.faction_idx, castle.county_id, upkeep, tax_income)
+              for res, rng_range in SETTLEMENT_UPKEEP[kind].items()}
+    tax_income = round(random.uniform(*SETTLEMENT_TAX_INCOME[kind]))
+    population, adults, children = _roll_population(random, kind)
+    prosperity = seed_prosperity()
+    st = Settlement(len(world.settlements), kind, namer(kind, species),
+                    project.pos, project.faction_idx, project.region_id, upkeep, tax_income,
+                    population, adults, children, prosperity)
     world.settlements.append(st)
     faction.meta.setdefault("settlements", []).append(st.id)
-    if 0 <= castle.county_id < len(world.counties):
-        county = world.counties[castle.county_id]
-        if not hasattr(county, "meta_settlements"):
-            county.meta_settlements = []
-        county.meta_settlements.append(st.id)
+    if 0 <= project.region_id < len(world.regions):
+        region = world.regions[project.region_id]
+        if not hasattr(region, "meta_settlements"):
+            region.meta_settlements = []
+        region.meta_settlements.append(st.id)
 
 
 def _finish_road(world, road):
-    """Fold a completed road into the permanent per-county road network so
+    """Fold a completed road into the permanent per-region road network so
     it renders like any other established road from then on. Always a
     settlement-to-settlement connection (the nearest existing settlement to
-    a brand-new castle), so it's Stone — see app/world/worldgen.py's
-    _place_villages_for_county for the same tier rule applied at
+    a brand-new City/Town/Castle), so it's Stone — see app/world/worldgen.py's
+    _place_villages_for_region for the same tier rule applied at
     world-gen time."""
     x, y = road.path[-1]
     if not (0 <= x < world.w and 0 <= y < world.h):
         return
-    county_id = world.county_grid[y][x]
-    if county_id < 0:
+    region_id = world.region_grid[y][x]
+    if region_id < 0:
         return
-    segs = world.roads_by_county.setdefault(county_id, [])
+    segs = world.roads_by_region.setdefault(region_id, [])
     segs.extend((a, b, "stone") for a, b in zip(road.path, road.path[1:]))
 
 
 def advance_projects(world):
     """Called every turn (alongside the trade hooks): grow roads, advance
-    castles (at half speed while their road is unfinished), and finalize
-    anything that's crossed the finish line."""
+    settlement projects (at half speed while their road is unfinished), and
+    finalize anything that's crossed the finish line."""
     for road in world.road_projects:
         if not road.complete:
             road.built_index = min(len(road.path) - 1, road.built_index + ROAD_CELLS_PER_TURN)
 
-    finished_castles = []
-    for castle in world.castle_projects:
-        rate = ROAD_SPEED_PENALTY if castle.half_speed else 1.0
-        castle.progress_turns += rate
-        if castle.progress_turns >= castle.total_turns:
-            finished_castles.append(castle)
-    for castle in finished_castles:
-        _finish_castle(world, castle)
-        world.castle_projects.remove(castle)
+    finished_projects = []
+    for project in world.settlement_projects:
+        rate = ROAD_SPEED_PENALTY if project.half_speed else 1.0
+        project.progress_turns += rate
+        if project.progress_turns >= project.total_turns:
+            finished_projects.append(project)
+    for project in finished_projects:
+        _finish_settlement(world, project)
+        world.settlement_projects.remove(project)
 
     finished_roads = [r for r in world.road_projects if r.complete]
     for road in finished_roads:
         _finish_road(world, road)
         world.road_projects.remove(road)
+
+
+# --- AI settlement construction ----------------------------------------------
+def _region_settlement_pos(world, region):
+    """A free cell in `region` to build on: not a river, not already a
+    settlement or under construction. None if nothing's available."""
+    occupied = {st.pos for st in world.settlements}
+    occupied.update(p.pos for p in world.settlement_projects)
+    candidates = [c for c in region.cells
+                 if c not in world.river_cells and c not in occupied]
+    return random.choice(candidates) if candidates else None
+
+
+def run_settlement_ai(world):
+    """Every AI faction's equivalent of the player clicking "Build City"/
+    "Build Town": claiming wildland only ever yields villages now (see
+    expansion.settle_newly_claimed_region), so a faction has to actually
+    construct its City/Town settlements the same way the player does.
+    One new project per faction per turn at most (skip if it's already
+    building something), targeting a region it owns that has no
+    settlements in it yet — prefers a City if it can afford one, else a
+    Town. Deliberately simple: no site scoring, no catching up a faction
+    that's fallen behind faster than one project at a time."""
+    for fac_idx, nation in enumerate(world.factions):
+        if fac_idx == world.player_faction_idx:
+            continue
+        if any(p.faction_idx == fac_idx for p in world.settlement_projects):
+            continue
+        empty_regions = [r for r in world.regions
+                         if r.faction_idx == fac_idx and not getattr(r, "meta_settlements", [])]
+        if not empty_regions:
+            continue
+        region = random.choice(empty_regions)
+        pos = _region_settlement_pos(world, region)
+        if pos is None:
+            continue
+        for kind in ("city", "town"):
+            if can_afford(nation, SETTLEMENT_BUILD_COST[kind]):
+                start_settlement(world, nation, pos, kind)
+                break

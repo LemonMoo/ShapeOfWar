@@ -3,6 +3,10 @@ usable by any army. ``shape`` references a key in the shape registry.
 
 Speeds/ranges are in canvas pixels; times in seconds.
   ``ranged``    : True fires an animated arrow ('.') at the target on each hit.
+  ``accuracy``  : chance (0..1) an in-range, off-cooldown attack actually
+                  lands — a miss still spends the cooldown (and, if ranged,
+                  still fires the arrow) but deals no damage. Defaults to
+                  1.0 (always hits) via Unit.update's .get() when omitted.
   ``equipment`` : list of hand-held markers drawn by the battle view —
                   "sword" ('t', right hand) and "shield" ('o', left hand).
 """
@@ -20,6 +24,6 @@ UNIT_TYPES = {
     "archer": {
         "name": "Archer", "shape": "square", "radius": 5,
         "max_hp": 20, "speed": 30, "range": 90, "damage": 6, "cooldown": 0.9,
-        "ranged": True, "equipment": [],
+        "ranged": True, "accuracy": 0.8, "equipment": [],
     },
 }
