@@ -107,7 +107,7 @@ def start_claim(world, faction_idx, region):
 
     nation = world.factions[faction_idx]
     cost = claim_cost(region)
-    if not can_afford(nation, cost):
+    if not can_afford(nation, cost, world):
         return "You don't have enough resources to fund this expansion."
 
     res = nation.stats.setdefault("resources", {})

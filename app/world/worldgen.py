@@ -22,8 +22,11 @@ from app.world.lexicon import (SPECIES, make_faction_namer, make_region_namer,
                                make_settlement_namer)
 
 
-# Settlement archetypes — pure placement data (where they go); what they cost
-# to maintain each turn is SETTLEMENT_UPKEEP below, production itself is
+# Settlement archetypes — pure placement data (where they go). Upkeep used
+# to be rolled here too (SETTLEMENT_UPKEEP, a flat Grain/Fresh Water/Iron
+# draw); that's gone, fully replaced by app/world/resources.py's Phase 8
+# consumption model (settlement_needs — Food/Firewood/Clothes, scaled off
+# actual population instead of a fixed roll). Production itself is
 # region-level (biome-driven — see app/world/resources.py).
 #   fert_w      : how strongly placement favors fertile land
 #   river_w     : ... proximity to rivers/lakes
@@ -54,14 +57,6 @@ SETTLEMENT_TYPES = {
 # in newly *claimed* territory — see _place_settlements_for_faction's
 # `fixed_counts` param and its two call sites).
 STARTING_SETTLEMENT_COUNTS = {"city": 1, "town": 2, "castle": 0}
-
-# Resources each settlement kind consumes per turn (population/garrison
-# upkeep) — ranges rolled once per settlement at placement time.
-SETTLEMENT_UPKEEP = {
-    "city":   {"Grain": (20, 35), "Fresh Water": (15, 25)},
-    "castle": {"Grain": (10, 18), "Fresh Water": (8, 14), "Iron": (2, 5)},
-    "town":   {"Grain": (6, 12), "Fresh Water": (5, 10)},
-}
 
 # Gold tax revenue per settlement kind per turn — same "rolled once at
 # placement" treatment as upkeep, just positive instead of negative.
@@ -94,10 +89,12 @@ def _roll_population(rng, kind):
 
 
 class Settlement:
-    """A city, castle or town. Purely a consumer (population/garrison
-    upkeep, rolled once at placement) — production is region-level."""
+    """A city, castle or town. Purely a consumer (population's needs, see
+    app/world/resources.py's Phase 8 settlement_needs — scaled off
+    population, not a flat roll) — production is region-level, but
+    storage is this settlement's own (Phase 9 — see `resources` below)."""
 
-    def __init__(self, sid, kind, name, pos, faction_idx, region_id, upkeep, tax_income,
+    def __init__(self, sid, kind, name, pos, faction_idx, region_id, tax_income,
                 population, adults, children, prosperity):
         self.id = sid
         self.kind = kind               # "city" | "castle" | "town"
@@ -105,7 +102,6 @@ class Settlement:
         self.pos = pos                 # (x, y) grid cell
         self.faction_idx = faction_idx
         self.region_id = region_id
-        self.upkeep = upkeep           # {resource: amount} consumed per turn
         self.tax_income = tax_income   # gold generated per turn
         self.population = population   # total headcount, rolled once at placement
         self.adults = adults
@@ -114,9 +110,20 @@ class Settlement:
         # economic health — eased toward a new target every turn, not
         # recomputed from scratch (see resources._update_prosperity).
         self.prosperity = prosperity
+        # This settlement's own stockpile (Phase 9 — see
+        # app/world/resources.py's settlement_storage_capacity/
+        # advance_settlement_storage): resource -> amount, genuinely
+        # separate from every other settlement's, capped by a shared
+        # space budget rather than an independent cap per resource.
+        self.resources = {}
         # Coastal cities only — see app/world/construction.py's
         # ShipyardProject: launches free, faster ships once built.
         self.has_shipyard = False
+        # Storage-capacity buildings (Phase 9) — see construction.py's
+        # GranaryProject/WarehouseProject and resources.py's
+        # settlement_storage_capacity for what each actually adds.
+        self.has_granary = False
+        self.has_warehouse = False
         # City-only organic growth (see resources._grow_city_villages): a
         # full prosperity meter spawns a new village nearby and resets to
         # 0. villages_spawned is a hidden running counter (not shown in the
@@ -129,9 +136,16 @@ class Settlement:
 
 class Village:
     """A small farming settlement within a region — the finest-grained unit on
-    the map (World -> Country -> Region -> Village). Purely a producer: its
-    farms generate resources scaled by the fertility of the land around it.
-    No drain is modeled (villages are subsistence-level, unlike settlements)."""
+    the map (World -> Country -> Region -> Village). The actual farm unit:
+    Crop/Livestock production (see app/world/resources.py) lands here
+    first, not at a settlement — a village has no mill/loom/forge of its
+    own to do anything with raw Wheat, which is exactly why it has to be
+    physically shipped to a settlement that can (see Phase 10's
+    run_local_logistics), and why the resulting Bread has to be shipped
+    back for the village's own population to eat. Population still draws
+    real Food/Firewood/Clothes needs (see resources.advance_settlement_
+    consumption, which covers Villages too as of Phase 10) — no longer
+    the "subsistence-level, no drain" exemption from earlier phases."""
 
     def __init__(self, vid, region_id, faction_idx, name, pos, farm_output,
                 population, adults, children, prosperity):
@@ -145,6 +159,10 @@ class Village:
         self.adults = adults
         self.children = children
         self.prosperity = prosperity   # 0..100 meter — see resources._update_prosperity
+        # This village's own stockpile (Phase 10) — same shared-space-
+        # budget storage a Settlement has (Phase 9), just a smaller base
+        # capacity and no Granary/Warehouse of its own to expand it.
+        self.resources = {}
 
 
 class Region:
@@ -162,13 +180,17 @@ class Region:
         self.stats = {}                    # area, fertility %
         # Economy (see app/world/resources.py): biome_counts/dominant_climate
         # are static geography, cached once here; settle_proximity is filled
-        # in after settlements exist and village_grain_base after villages
-        # do. `resources` is this region's most recent turn's yield.
+        # in after settlements exist. `resources` is this region's most
+        # recent turn's yield.
         self.biome_counts = {}
         self.dominant_climate = "temperate"
         self.settle_proximity = 0.5
-        self.village_grain_base = 0
         self.resources = {}
+        # Livestock (see app/world/resources.py's Phase 7): animal name ->
+        # live head count, grown/shrunk once a year via births/natural
+        # deaths/slaughter -- unlike `resources` above (recomputed fresh
+        # every turn), this genuinely persists and accumulates over time.
+        self.livestock = {}
         # Progressive expansion (see app/world/expansion.py): garrison rating
         # for UNCLAIMED land (irrelevant once claimed), whether this region's
         # settlements/villages have been generated yet (False for every
@@ -700,14 +722,12 @@ def _place_settlements_for_faction(world, rng, fac_idx, cells, namer, fixed_coun
                 break
             if _too_close_any(world, x, y, t["spacing"]):
                 continue
-            upkeep = {res: round(rng.uniform(*rng_range))
-                      for res, rng_range in SETTLEMENT_UPKEEP[kind].items()}
             tax_income = round(rng.uniform(*SETTLEMENT_TAX_INCOME[kind]))
             population, adults, children = _roll_population(rng, kind)
             prosperity = seed_prosperity()
             region_id = world.region_grid[y][x]
             st = Settlement(len(world.settlements), kind, namer(kind, species),
-                            (x, y), fac_idx, region_id, upkeep, tax_income,
+                            (x, y), fac_idx, region_id, tax_income,
                             population, adults, children, prosperity)
             world.settlements.append(st)
             _mark_occupied_both(world, x, y)
@@ -903,10 +923,6 @@ def _place_villages_for_region(world, rng, region, fixed_n=None):
         vids.append(v.id)
 
     region.villages = vids
-    # Villages are farms: their output feeds straight into this region's
-    # Grain yield each turn (app/world/resources.py), climate/season
-    # modulated same as everything else.
-    region.village_grain_base = sum(world.villages[i].farm_output for i in vids)
 
     # Local roads: an MST over the villages plus *every* settlement in the
     # region (city/castle/town alike — previously only the first settlement
@@ -1173,10 +1189,15 @@ class World:
         self.trade_route_projects = []  # list[TradeRouteProject] — see app/world/trade.py
         self.trade_route_decline_until = {}  # frozenset({a_idx,b_idx}) -> turn a decline expires
         self.trade_caravans = []       # list[TradeCaravan] — see app/world/trade.py
+        self.local_shipments = []      # list[LocalShipment] — see app/world/resources.py's Phase 10
+        self.regional_shipments = []   # list[RegionalShipment] — see app/world/trade.py's Phase 11
+        self.regional_trade_events = []  # this turn's regional dispatch/delivery/loss events
         self.trade_events = []         # this turn's dispatch/delivery/payment/loss events
         self.settlement_projects = []  # list[SettlementProject] — see app/world/construction.py
         self.road_projects = []        # list[RoadProject] — see app/world/construction.py
         self.shipyard_projects = []    # list[ShipyardProject] — see app/world/construction.py
+        self.granary_projects = []     # list[GranaryProject] — see app/world/construction.py
+        self.warehouse_projects = []   # list[WarehouseProject] — see app/world/construction.py
         self.claim_projects = []       # list[ClaimProject] — see app/world/expansion.py
         self.commanders = []           # list[Commander] — see app/world/commander.py
         self.ships = []                 # list[Ship] — see app/world/commander.py

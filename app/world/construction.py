@@ -13,29 +13,43 @@ run_settlement_ai, wired into the turn loop alongside advance_projects.
 import math
 import random
 
-from app.world.worldgen import (OCEAN, Settlement, SETTLEMENT_UPKEEP,
+from app.world.worldgen import (OCEAN, Settlement,
                                 SETTLEMENT_TAX_INCOME, _roll_population, _path_dijkstra,
                                 _elev_cost, _SEA_COAST_REACH)
 from app.world.lexicon import make_settlement_namer
-from app.world.resources import seed_prosperity
+from app.world.resources import seed_prosperity, _SETTLEMENT_STORAGE_RESOURCES
 
 # Cost/time to build each settlement kind. City is the crown jewel (biggest
 # population range, POPULATION_RANGE in worldgen.py) so it's the steepest;
 # Town is the cheap, fast starter settlement. Town/City run 5x their
 # original resource cost, Castle 4x — all deliberately steep, multi-turn
 # investments now that wildland claims never hand one out for free.
+# Costs below use "Logs" where they used to say "Wood" -- "Wood" was
+# never a real registry resource even before Phase 12, just a stand-in;
+# the actual new-registry equivalent (RESOURCE_SPAWN's own note) is
+# Logs/Hardwood/Softwood, split apart back in Phase 3. Logs is the plain
+# structural-lumber one, so it's the natural fit for bulk construction.
 SETTLEMENT_BUILD_COST = {
-    "town": {"Wood": 1000, "Stone": 500, "Gold": 750},
-    "castle": {"Stone": 1600, "Wood": 800, "Iron": 400, "Gold": 1200},
-    "city": {"Wood": 1750, "Stone": 1500, "Iron": 750, "Gold": 2500},
+    "town": {"Logs": 1000, "Stone": 500, "Gold": 750},
+    "castle": {"Stone": 1600, "Logs": 800, "Iron": 400, "Gold": 1200},
+    "city": {"Logs": 1750, "Stone": 1500, "Iron": 750, "Gold": 2500},
 }
 SETTLEMENT_BUILD_TURNS = {"town": 20, "castle": 25, "city": 40}   # at full speed
 ROAD_SPEED_PENALTY = 0.5         # project progress rate while its road is incomplete
 ROAD_CELLS_PER_TURN = 6          # how much of the route gets physically drawn each turn
 _BBOX_PAD = 20
 
-SHIPYARD_COST = {"Wood": 600, "Gold": 200}
+SHIPYARD_COST = {"Logs": 600, "Gold": 200}
 SHIPYARD_BUILD_TURNS = 30        # deliberately steep -- "large amount of wood, very long cost"
+
+# Phase 9 storage buildings -- see app/world/resources.py's
+# GRANARY_STORAGE_BONUS/WAREHOUSE_STORAGE_BONUS for what they actually add
+# once built. Steep but not Shipyard-steep: these are meant to be a real,
+# reachable early investment, not a late-game luxury.
+GRANARY_COST = {"Logs": 300, "Stone": 100, "Gold": 150}
+GRANARY_BUILD_TURNS = 15
+WAREHOUSE_COST = {"Logs": 250, "Stone": 200, "Gold": 150}
+WAREHOUSE_BUILD_TURNS = 15
 
 
 class RoadProject:
@@ -143,15 +157,10 @@ def start_shipyard(world, nation, settlement):
     city. Returns a message describing what happened (success or why not)."""
     if not can_build_shipyard(world, settlement):
         return "A shipyard can't be built there."
-    if not can_afford(nation, SHIPYARD_COST):
+    if not can_afford(nation, SHIPYARD_COST, world):
         return "You don't have enough resources to start construction."
 
-    res = nation.stats.setdefault("resources", {})
-    for resource, amount in SHIPYARD_COST.items():
-        if resource == "Gold":
-            nation.stats["gold"] = nation.stats.get("gold", 0) - amount
-        else:
-            res[resource] = res.get(resource, 0) - amount
+    _pay_cost(nation, SHIPYARD_COST, world)
 
     project = ShipyardProject(settlement.faction_idx, settlement.id)
     world.shipyard_projects.append(project)
@@ -169,6 +178,105 @@ def advance_shipyard_projects(world):
         if st is not None:
             st.has_shipyard = True
         world.shipyard_projects.remove(project)
+
+
+class GranaryProject:
+    """A granary under construction -- see resources.py's Phase 9 storage
+    section for what it actually adds once built. No road, no site
+    restriction (any settlement kind can build one), just a flat
+    time+resource sink, same shape as ShipyardProject."""
+
+    def __init__(self, faction_idx, settlement_id):
+        self.faction_idx = faction_idx
+        self.settlement_id = settlement_id
+        self.total_turns = GRANARY_BUILD_TURNS
+        self.progress_turns = 0.0
+
+    @property
+    def turns_left(self):
+        return max(0, math.ceil(self.total_turns - self.progress_turns))
+
+
+class WarehouseProject:
+    """A warehouse under construction -- same shape as GranaryProject."""
+
+    def __init__(self, faction_idx, settlement_id):
+        self.faction_idx = faction_idx
+        self.settlement_id = settlement_id
+        self.total_turns = WAREHOUSE_BUILD_TURNS
+        self.progress_turns = 0.0
+
+    @property
+    def turns_left(self):
+        return max(0, math.ceil(self.total_turns - self.progress_turns))
+
+
+def can_build_granary(world, settlement):
+    if getattr(settlement, "has_granary", False):
+        return False
+    return not any(p.settlement_id == settlement.id for p in world.granary_projects)
+
+
+def can_build_warehouse(world, settlement):
+    if getattr(settlement, "has_warehouse", False):
+        return False
+    return not any(p.settlement_id == settlement.id for p in world.warehouse_projects)
+
+
+def start_granary(world, nation, settlement):
+    """Validate and kick off building a granary at `settlement`. Returns a
+    message describing what happened (success or why not)."""
+    if not can_build_granary(world, settlement):
+        return "A granary can't be built there."
+    if not can_afford(nation, GRANARY_COST, world):
+        return "You don't have enough resources to start construction."
+
+    _pay_cost(nation, GRANARY_COST, world)
+
+    project = GranaryProject(settlement.faction_idx, settlement.id)
+    world.granary_projects.append(project)
+    return f"Granary construction begins — estimated {project.total_turns} turns."
+
+
+def start_warehouse(world, nation, settlement):
+    """Validate and kick off building a warehouse at `settlement`. Returns
+    a message describing what happened (success or why not)."""
+    if not can_build_warehouse(world, settlement):
+        return "A warehouse can't be built there."
+    if not can_afford(nation, WAREHOUSE_COST, world):
+        return "You don't have enough resources to start construction."
+
+    _pay_cost(nation, WAREHOUSE_COST, world)
+
+    project = WarehouseProject(settlement.faction_idx, settlement.id)
+    world.warehouse_projects.append(project)
+    return f"Warehouse construction begins — estimated {project.total_turns} turns."
+
+
+def advance_granary_projects(world):
+    finished = []
+    for project in world.granary_projects:
+        project.progress_turns += 1.0
+        if project.progress_turns >= project.total_turns:
+            finished.append(project)
+    for project in finished:
+        st = next((s for s in world.settlements if s.id == project.settlement_id), None)
+        if st is not None:
+            st.has_granary = True
+        world.granary_projects.remove(project)
+
+
+def advance_warehouse_projects(world):
+    finished = []
+    for project in world.warehouse_projects:
+        project.progress_turns += 1.0
+        if project.progress_turns >= project.total_turns:
+            finished.append(project)
+    for project in finished:
+        st = next((s for s in world.settlements if s.id == project.settlement_id), None)
+        if st is not None:
+            st.has_warehouse = True
+        world.warehouse_projects.remove(project)
 
 
 def _path_between(world, origin, dest_pos):
@@ -206,15 +314,66 @@ def _find_road_path(world, faction_idx, dest_pos):
     return _path_between(world, origin, dest_pos)
 
 
-def can_afford(nation, cost):
-    res = nation.stats.get("resources", {})
+def _faction_settlement_stock(nation, resource, world):
+    """Sum of `resource` across every settlement this faction owns -- same
+    aggregate-economy view trade.py's _faction_settlement_total and
+    resources.py's _recompute_military already need for the same reason
+    (Phase 12: Logs/Stone/Iron are settlement-storage resources now, no
+    longer one national number)."""
+    return sum(getattr(world.settlements[sid], "resources", {}).get(resource, 0)
+              for sid in nation.meta.get("settlements", []))
+
+
+def can_afford(nation, cost, world):
+    """Gold from the treasury; anything in _SETTLEMENT_STORAGE_RESOURCES
+    (as of Phase 12, that includes Logs/Stone/Iron -- see
+    resources.py's Industry Specialization section) from the faction's
+    settlements in aggregate; anything else from the old shared national
+    pool (nothing left in these cost dicts falls in that last bucket any
+    more, but this stays generic rather than assuming that never
+    changes)."""
     for resource, amount in cost.items():
         if resource == "Gold":
             if nation.stats.get("gold", 0) < amount:
                 return False
-        elif res.get(resource, 0) < amount:
+        elif resource in _SETTLEMENT_STORAGE_RESOURCES:
+            if _faction_settlement_stock(nation, resource, world) < amount:
+                return False
+        elif nation.stats.get("resources", {}).get(resource, 0) < amount:
             return False
     return True
+
+
+def _pay_cost(nation, cost, world):
+    """Deduct `cost` from `nation`, the spending half of can_afford --
+    Gold from the treasury, a settlement-storage resource spread across
+    whichever of the faction's settlements actually have it (largest
+    stockpile first, the realistic "hauled in from wherever it's
+    stockpiled" reading -- the same aggregate-economy assumption trade.py's
+    sellable_surplus already makes), anything else from the old shared
+    pool. Caller must have already confirmed can_afford."""
+    for resource, amount in cost.items():
+        if resource == "Gold":
+            nation.stats["gold"] = nation.stats.get("gold", 0) - amount
+        elif resource in _SETTLEMENT_STORAGE_RESOURCES:
+            remaining = amount
+            sids = nation.meta.get("settlements", [])
+            ordered = sorted((world.settlements[sid] for sid in sids),
+                             key=lambda st: getattr(st, "resources", {}).get(resource, 0),
+                             reverse=True)
+            for st in ordered:
+                if remaining <= 0:
+                    break
+                if not hasattr(st, "resources"):
+                    st.resources = {}
+                have = st.resources.get(resource, 0)
+                take = min(have, remaining)
+                if take:
+                    st.resources[resource] = have - take
+                    remaining -= take
+        else:
+            res = nation.stats.setdefault("resources", {})
+            res[resource] = res.get(resource, 0) - amount
 
 
 def start_settlement(world, nation, pos, kind):
@@ -238,15 +397,10 @@ def start_settlement(world, nation, pos, kind):
     if any(v.pos == pos for v in world.villages):
         return "There's already a village there."
     cost = SETTLEMENT_BUILD_COST[kind]
-    if not can_afford(nation, cost):
+    if not can_afford(nation, cost, world):
         return "You don't have enough resources to start construction."
 
-    res = nation.stats.setdefault("resources", {})
-    for resource, amount in cost.items():
-        if resource == "Gold":
-            nation.stats["gold"] = nation.stats.get("gold", 0) - amount
-        else:
-            res[resource] = res.get(resource, 0) - amount
+    _pay_cost(nation, cost, world)
 
     road_path = _find_road_path(world, faction_idx, pos)
     road = RoadProject(faction_idx, road_path) if len(road_path) > 1 else None
@@ -263,13 +417,11 @@ def _finish_settlement(world, project):
     faction = world.factions[project.faction_idx]
     species = faction.meta.get("species", "Humans")
     namer = make_settlement_namer(random)
-    upkeep = {res: round(random.uniform(*rng_range))
-              for res, rng_range in SETTLEMENT_UPKEEP[kind].items()}
     tax_income = round(random.uniform(*SETTLEMENT_TAX_INCOME[kind]))
     population, adults, children = _roll_population(random, kind)
     prosperity = seed_prosperity()
     st = Settlement(len(world.settlements), kind, namer(kind, species),
-                    project.pos, project.faction_idx, project.region_id, upkeep, tax_income,
+                    project.pos, project.faction_idx, project.region_id, tax_income,
                     population, adults, children, prosperity)
     world.settlements.append(st)
     faction.meta.setdefault("settlements", []).append(st.id)
@@ -358,6 +510,6 @@ def run_settlement_ai(world):
         if pos is None:
             continue
         for kind in ("city", "town"):
-            if can_afford(nation, SETTLEMENT_BUILD_COST[kind]):
+            if can_afford(nation, SETTLEMENT_BUILD_COST[kind], world):
                 start_settlement(world, nation, pos, kind)
                 break

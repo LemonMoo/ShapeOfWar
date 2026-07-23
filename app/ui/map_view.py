@@ -23,6 +23,7 @@ from app.world.world_map import Stance
 from app.world.worldgen import OCEAN
 from app.world.territory import bordering_regions, naval_reachable_regions
 from app.world.resources import RESOURCES
+from app.world import resources
 from app.world import diplomacy
 from app.world import construction
 from app.world import trade
@@ -223,16 +224,23 @@ def _format_resources(res):
     return " · ".join(f"{r} {_fmt_amount(res[r])}" for r in order if res[r])
 
 
-def _resource_shortfall(nation, cost):
+def _resource_shortfall(nation, cost, world):
     """{resource: amount still missing} for whichever of `cost`'s resources
     the nation can't currently cover in full — empty once it can afford
-    all of it. Gold is tracked separately from the resources dict (see
-    construction.can_afford), so it's special-cased the same way here."""
+    all of it. Mirrors construction.can_afford's own three-way split:
+    Gold from the treasury, a settlement-storage resource (Phase 12:
+    includes Logs/Stone/Iron now) summed across the faction's settlements,
+    anything else from the old shared pool."""
     res = nation.stats.get("resources", {})
     gold = nation.stats.get("gold", 0)
     missing = {}
     for resource, amount in cost.items():
-        have = gold if resource == "Gold" else res.get(resource, 0)
+        if resource == "Gold":
+            have = gold
+        elif resource in resources._SETTLEMENT_STORAGE_RESOURCES:
+            have = construction._faction_settlement_stock(nation, resource, world)
+        else:
+            have = res.get(resource, 0)
         if have < amount:
             missing[resource] = amount - have
     return missing
@@ -637,7 +645,35 @@ class MapView(tk.Frame):
         self._resource_deltas = {r: after.get(r, 0) - before.get(r, 0)
                                   for r in set(before) | set(after)}
         self._report_trade_events()
+        self._report_regional_trade_events()
         self.refresh()
+
+    def _report_regional_trade_events(self):
+        """Same idea as _report_trade_events, for Phase 11's domestic
+        cross-region settlement trade — a separate event list (see
+        resources.advance_turn) since these describe one faction trading
+        with itself (a single faction_idx, an origin/dest settlement pair)
+        rather than the seller/buyer-faction shape foreign trade uses."""
+        player_idx = self.world.player_faction_idx
+        if player_idx is None:
+            return
+        for ev in self.world.regional_trade_events:
+            if ev["faction_idx"] != player_idx:
+                continue
+            etype = ev["type"]
+            if etype == "regional_dispatched":
+                msg = (f"{ev['origin_name']} ships {ev['quantity']} {ev['resource']} to "
+                       f"{ev['dest_name']} for {ev['price']} Gold.")
+            elif etype == "regional_delivered":
+                msg = (f"{ev['dest_name']} receives {ev['quantity']} {ev['resource']} "
+                       f"from {ev['origin_name']}.")
+            elif etype == "regional_lost":
+                msg = (f"A shipment of {ev['quantity']} {ev['resource']} from "
+                       f"{ev['origin_name']} to {ev['dest_name']} was lost in transit!")
+            else:
+                continue
+            self.show_bottom_message(msg)
+            return   # first relevant event only, to avoid message spam
 
     def _report_trade_events(self):
         """Surface this turn's autonomous trade activity to the player only
@@ -1004,7 +1040,7 @@ class MapView(tk.Frame):
                     continue
                 cost = construction.SETTLEMENT_BUILD_COST[kind]
                 turns = construction.SETTLEMENT_BUILD_TURNS[kind]
-                afford = construction.can_afford(player, cost)
+                afford = construction.can_afford(player, cost, self.world)
                 tk.Label(self.actions,
                          text=f"{kind.capitalize()} — Cost: {_format_resources(cost)}\n"
                               f"Build time: {turns} turns",
@@ -1069,7 +1105,7 @@ class MapView(tk.Frame):
                          justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
             return
         cost = expansion.claim_cost(region)
-        afford = construction.can_afford(player, cost)
+        afford = construction.can_afford(player, cost, self.world)
         tk.Label(self.actions, text=f"Cost: {_format_resources(cost)}\n"
                  f"Build time: {expansion.claim_turns(region)} turns",
                  bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
@@ -1136,15 +1172,24 @@ class MapView(tk.Frame):
             self.title_lbl.config(text=st.kind.capitalize())
         region = (wd.regions[st.region_id].name
                   if 0 <= st.region_id < len(wd.regions) else "?")
+        needs = resources.settlement_needs(st, wd.season)
         lines = [st.name, f"{st.kind.capitalize()} in {region}, "
                  f"{wd.factions[st.faction_idx].name}",
-                 f"Upkeep: {_format_resources(st.upkeep)} per turn"]
+                 f"Needs: {_format_resources(needs)} per turn"]
         population = getattr(st, "population", None)
         if population is not None:
             lines.append(f"Population: {population:,} "
                          f"({st.adults:,} adults, {st.children:,} children)")
+        stored = sum(getattr(st, "resources", {}).values())
+        capacity = resources.settlement_storage_capacity(st)
+        lines.append(f"Storage: {stored:,} / {capacity:,}"
+                     + (" — overflowing, spoiling faster" if stored > capacity else ""))
         if getattr(st, "has_shipyard", False):
             lines.append("Has a Shipyard — commanders here launch free, fast ships.")
+        if getattr(st, "has_granary", False):
+            lines.append("Has a Granary — more storage space.")
+        if getattr(st, "has_warehouse", False):
+            lines.append("Has a Warehouse — more storage space.")
         self.info.config(fg=theme.INK, text="\n".join(lines))
 
         prosperity = getattr(st, "prosperity", None)
@@ -1166,7 +1211,7 @@ class MapView(tk.Frame):
                      bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
                      justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
         elif construction.can_build_shipyard(wd, st):
-            afford = construction.can_afford(player, construction.SHIPYARD_COST)
+            afford = construction.can_afford(player, construction.SHIPYARD_COST, wd)
             tk.Label(self.actions,
                      text=f"Cost: {_format_resources(construction.SHIPYARD_COST)}\n"
                           f"Build time: {construction.SHIPYARD_BUILD_TURNS} turns",
@@ -1177,9 +1222,65 @@ class MapView(tk.Frame):
                       bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                       relief="flat", font=theme.FONT).pack(fill="x", pady=2)
 
+        granary_project = next((p for p in wd.granary_projects if p.settlement_id == st.id), None)
+        if granary_project is not None:
+            elapsed = granary_project.total_turns - granary_project.turns_left
+            tk.Label(self.actions, text=f"Granary under construction: "
+                     f"{elapsed}/{granary_project.total_turns} turns",
+                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+        elif construction.can_build_granary(wd, st):
+            afford = construction.can_afford(player, construction.GRANARY_COST, wd)
+            tk.Label(self.actions,
+                     text=f"Cost: {_format_resources(construction.GRANARY_COST)}\n"
+                          f"Build time: {construction.GRANARY_BUILD_TURNS} turns\n"
+                          f"+{resources.GRANARY_STORAGE_BONUS:,} storage space",
+                     bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+            tk.Button(self.actions, text="Build Granary",
+                      command=lambda s=st: self._do_build_granary(s),
+                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                      relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+
+        warehouse_project = next((p for p in wd.warehouse_projects if p.settlement_id == st.id), None)
+        if warehouse_project is not None:
+            elapsed = warehouse_project.total_turns - warehouse_project.turns_left
+            tk.Label(self.actions, text=f"Warehouse under construction: "
+                     f"{elapsed}/{warehouse_project.total_turns} turns",
+                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+        elif construction.can_build_warehouse(wd, st):
+            afford = construction.can_afford(player, construction.WAREHOUSE_COST, wd)
+            tk.Label(self.actions,
+                     text=f"Cost: {_format_resources(construction.WAREHOUSE_COST)}\n"
+                          f"Build time: {construction.WAREHOUSE_BUILD_TURNS} turns\n"
+                          f"+{resources.WAREHOUSE_STORAGE_BONUS:,} storage space",
+                     bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+            tk.Button(self.actions, text="Build Warehouse",
+                      command=lambda s=st: self._do_build_warehouse(s),
+                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                      relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+
     def _do_build_shipyard(self, st):
         player = self._player_faction()
         msg = construction.start_shipyard(self.world, player, st)
+        self.show_bottom_message(msg)
+        if self.selected_settlement is st:
+            self._show_settlement(st)
+        self.render()
+
+    def _do_build_granary(self, st):
+        player = self._player_faction()
+        msg = construction.start_granary(self.world, player, st)
+        self.show_bottom_message(msg)
+        if self.selected_settlement is st:
+            self._show_settlement(st)
+        self.render()
+
+    def _do_build_warehouse(self, st):
+        player = self._player_faction()
+        msg = construction.start_warehouse(self.world, player, st)
         self.show_bottom_message(msg)
         if self.selected_settlement is st:
             self._show_settlement(st)
@@ -1192,13 +1293,18 @@ class MapView(tk.Frame):
         region = wd.regions[v.region_id]
         lines = [v.name, f"Village in {region.name}, "
                  f"{wd.factions[v.faction_idx].name}",
-                 f"Farms here contribute {v.farm_output} Grain per turn "
-                 f"(before climate/season modifiers), scaled by local land "
-                 f"fertility."]
+                 f"Farm output: {v.farm_output} — a prosperity input for this "
+                 f"village, scaled by local land fertility."]
         population = getattr(v, "population", None)
         if population is not None:
             lines.append(f"Population: {population:,} "
                          f"({v.adults:,} adults, {v.children:,} children)")
+        needs = resources.settlement_needs(v, wd.season)
+        lines.append(f"Needs: {_format_resources(needs)} per turn")
+        stored = sum(getattr(v, "resources", {}).values())
+        capacity = resources._node_storage_capacity(v)
+        lines.append(f"Storage: {stored:,} / {capacity:,}"
+                     + (" — overflowing, spoiling faster" if stored > capacity else ""))
         self.info.config(fg=theme.INK, text="\n".join(lines))
 
         prosperity = getattr(v, "prosperity", None)
@@ -1250,11 +1356,11 @@ class MapView(tk.Frame):
                 else:
                     label = "Build Ship"
                     nation = wd.factions[cmd.faction_idx]
-                    afford = construction.can_afford(nation, commander.SHIP_COST)
+                    afford = construction.can_afford(nation, commander.SHIP_COST, wd)
                     cost_text = (f"Cost: {_format_resources(commander.SHIP_COST)}\n"
                                 f"Build time: {commander.SHIP_BUILD_TURNS} turns")
                     if not afford:
-                        missing = _resource_shortfall(nation, commander.SHIP_COST)
+                        missing = _resource_shortfall(nation, commander.SHIP_COST, wd)
                         cost_text += f"\nShort: {_format_resources(missing)}"
                     tk.Label(self.actions, text=cost_text,
                              bg=theme.PANEL, fg=theme.INK if afford else theme.BAD,

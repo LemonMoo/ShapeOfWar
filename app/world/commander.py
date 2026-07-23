@@ -24,13 +24,16 @@ import math
 from app.world.worldgen import (OCEAN, _path_dijkstra, _elev_cost, _sea_cost,
                                 _nearest_ocean_cell, _SEA_COAST_REACH,
                                 _NEIGH8, _DIAG)
-from app.world.construction import can_afford
+from app.world.construction import can_afford, _pay_cost
 
 COMMANDER_CELLS_PER_TURN = 5
 COMMANDER_VISION_RADIUS = 8
-SHIP_COST = {"Wood": 150, "Gold": 100}
+# "Logs" as of Phase 12, not "Wood" -- see construction.py's SETTLEMENT_BUILD_COST
+# comment: "Wood" was never a real registry resource, Logs is its direct
+# new-registry equivalent.
+SHIP_COST = {"Logs": 150, "Gold": 100}
 SHIP_BUILD_TURNS = 8
-SHIP_DISMANTLE_REFUND_FRACTION = 0.5   # of SHIP_COST["Wood"], salvaged on dismantle
+SHIP_DISMANTLE_REFUND_FRACTION = 0.5   # of SHIP_COST["Logs"], salvaged on dismantle
 SHIPYARD_SPEED_MULT = 1.5              # a shipyard-launched ship's per-turn speed bonus
 _BBOX_PAD = 20   # matches construction._BBOX_PAD
 
@@ -363,15 +366,10 @@ def start_ship(world, commander):
         return f"A new ship launches from the shipyard at {shipyard.name}, free of charge."
 
     nation = world.factions[commander.faction_idx]
-    if not can_afford(nation, SHIP_COST):
+    if not can_afford(nation, SHIP_COST, world):
         return "Not enough resources to build a ship."
 
-    res = nation.stats.setdefault("resources", {})
-    for resource, amount in SHIP_COST.items():
-        if resource == "Gold":
-            nation.stats["gold"] = nation.stats.get("gold", 0) - amount
-        else:
-            res[resource] = res.get(resource, 0) - amount
+    _pay_cost(nation, SHIP_COST, world)
 
     commander.path = None   # building locks the commander in place
     commander.path_index = 0
@@ -394,8 +392,14 @@ def board_ship(world, commander):
 
 def dismantle_ship(world, commander):
     """Salvage a beached ship for SHIP_DISMANTLE_REFUND_FRACTION of its
-    Wood cost back to the faction's stockpile. Must be standing at or next
-    to it, and not currently aboard it (disembark first)."""
+    Logs cost, delivered to the nearest same-faction settlement's own
+    storage -- Logs is a settlement-storage resource as of Phase 12 (see
+    resources.py's Industry Specialization section), so there's no more
+    one national stockpile to refund into; "nearest" is the same "hauled
+    to wherever's closest" reading construction._pay_cost's spend side
+    already uses, just picking one settlement instead of spreading across
+    several since a refund is a single small amount. Must be standing at
+    or next to it, and not currently aboard it (disembark first)."""
     if commander.aboard_ship_id is not None:
         return "Disembark before dismantling this ship."
     ship = find_ship_near(world, commander.faction_idx, commander.pos)
@@ -403,10 +407,19 @@ def dismantle_ship(world, commander):
         return "There's no ship here to dismantle."
     world.ships.remove(ship)
     nation = world.factions[commander.faction_idx]
-    refund = round(SHIP_COST["Wood"] * SHIP_DISMANTLE_REFUND_FRACTION)
-    res = nation.stats.setdefault("resources", {})
-    res["Wood"] = res.get("Wood", 0) + refund
-    return f"The ship is dismantled, salvaging {refund} Wood."
+    refund = round(SHIP_COST["Logs"] * SHIP_DISMANTLE_REFUND_FRACTION)
+    sids = nation.meta.get("settlements", [])
+    if sids:
+        cx, cy = commander.pos
+        st = min((world.settlements[sid] for sid in sids),
+                key=lambda s: (s.pos[0] - cx) ** 2 + (s.pos[1] - cy) ** 2)
+        if not hasattr(st, "resources"):
+            st.resources = {}
+        st.resources["Logs"] = st.resources.get("Logs", 0) + refund
+    else:
+        res = nation.stats.setdefault("resources", {})
+        res["Logs"] = res.get("Logs", 0) + refund
+    return f"The ship is dismantled, salvaging {refund} Logs."
 
 
 def ship_by_id(world, ship_id):
