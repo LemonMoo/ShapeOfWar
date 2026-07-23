@@ -279,13 +279,18 @@ def advance_warehouse_projects(world):
         world.warehouse_projects.remove(project)
 
 
-def _path_between(world, origin, dest_pos):
+def _path_between(world, origin, dest_pos, faction_idx=None):
     """Terrain-aware path between two specific points — the same Dijkstra +
     elevation-cost machinery worldgen already uses for trade routes/roads,
     so this can't cross a mountain or river any more than anything else in
     the game does. Shared by _find_road_path (nearest existing settlement
     to a new one) and expansion.ensure_interregion_roads (village to
-    village across a region border)."""
+    village across a region border).
+
+    `faction_idx`, when given, makes the path strongly (not absolutely)
+    prefer this faction's own territory over land owned by someone else —
+    see _elev_cost's own faction_idx param for why this only makes sense
+    for road pathing specifically, not every caller of this function."""
     if origin == dest_pos:
         return [origin]
     ox, oy = origin
@@ -298,7 +303,8 @@ def _path_between(world, origin, dest_pos):
     by1 = min(world.h, y1 + _BBOX_PAD + 1)
     land_cellset = {(x, y) for y in range(by0, by1) for x in range(bx0, bx1)
                      if world.owner[y][x] != OCEAN}
-    path = _path_dijkstra(land_cellset, lambda c: _elev_cost(world, world.base_cost, c),
+    path = _path_dijkstra(land_cellset,
+                          lambda c: _elev_cost(world, world.base_cost, c, faction_idx),
                           origin, dest_pos)
     return path or [origin, dest_pos]   # fallback straight segment if pathfinding fails
 
@@ -311,7 +317,7 @@ def _find_road_path(world, faction_idx, dest_pos):
         return [dest_pos]
     dx, dy = dest_pos
     origin = min(candidates, key=lambda p: (p[0] - dx) ** 2 + (p[1] - dy) ** 2)
-    return _path_between(world, origin, dest_pos)
+    return _path_between(world, origin, dest_pos, faction_idx=faction_idx)
 
 
 def _faction_settlement_stock(nation, resource, world):
@@ -325,18 +331,15 @@ def _faction_settlement_stock(nation, resource, world):
 
 
 def can_afford(nation, cost, world):
-    """Gold from the treasury; anything in _SETTLEMENT_STORAGE_RESOURCES
-    (as of Phase 12, that includes Logs/Stone/Iron -- see
-    resources.py's Industry Specialization section) from the faction's
-    settlements in aggregate; anything else from the old shared national
-    pool (nothing left in these cost dicts falls in that last bucket any
-    more, but this stays generic rather than assuming that never
-    changes)."""
+    """Anything in _SETTLEMENT_STORAGE_RESOURCES (as of Phase 12, that
+    includes Logs/Stone/Iron -- see resources.py's Industry Specialization
+    section; as of the Currency overhaul, Gold too -- see resources.py's
+    Currency section) from the faction's settlements in aggregate; anything
+    else from the old shared national pool (nothing left in these cost
+    dicts falls in that last bucket any more, but this stays generic
+    rather than assuming that never changes)."""
     for resource, amount in cost.items():
-        if resource == "Gold":
-            if nation.stats.get("gold", 0) < amount:
-                return False
-        elif resource in _SETTLEMENT_STORAGE_RESOURCES:
+        if resource in _SETTLEMENT_STORAGE_RESOURCES:
             if _faction_settlement_stock(nation, resource, world) < amount:
                 return False
         elif nation.stats.get("resources", {}).get(resource, 0) < amount:
@@ -345,17 +348,16 @@ def can_afford(nation, cost, world):
 
 
 def _pay_cost(nation, cost, world):
-    """Deduct `cost` from `nation`, the spending half of can_afford --
-    Gold from the treasury, a settlement-storage resource spread across
-    whichever of the faction's settlements actually have it (largest
-    stockpile first, the realistic "hauled in from wherever it's
-    stockpiled" reading -- the same aggregate-economy assumption trade.py's
-    sellable_surplus already makes), anything else from the old shared
-    pool. Caller must have already confirmed can_afford."""
+    """Deduct `cost` from `nation`, the spending half of can_afford -- a
+    settlement-storage resource (Gold included, as of the Currency
+    overhaul) spread across whichever of the faction's settlements
+    actually have it (largest stockpile first, the realistic "hauled in
+    from wherever it's stockpiled" reading -- the same aggregate-economy
+    assumption trade.py's sellable_surplus already makes), anything else
+    from the old shared pool. Caller must have already confirmed
+    can_afford."""
     for resource, amount in cost.items():
-        if resource == "Gold":
-            nation.stats["gold"] = nation.stats.get("gold", 0) - amount
-        elif resource in _SETTLEMENT_STORAGE_RESOURCES:
+        if resource in _SETTLEMENT_STORAGE_RESOURCES:
             remaining = amount
             sids = nation.meta.get("settlements", [])
             ordered = sorted((world.settlements[sid] for sid in sids),

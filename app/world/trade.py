@@ -40,13 +40,13 @@ from app.world.world_map import Stance
 from app.world.worldgen import (OCEAN, UNCLAIMED, _path_dijkstra, _nearest_ocean_cell,
                                 _elev_cost, _sea_cost, _bfs_distance,
                                 _SEA_COAST_REACH)
-from app.world.resources import (RESOURCES, BASE_VALUE_BY_TIER, _LOCAL_FOOD,
+from app.world.resources import (RESOURCES, BASE_VALUE_BY_TIER,
                                  _storage_cap, _clamp_to_storage,
                                  settlement_needs, _FOOD_PRODUCTS, _LUXURY_GOODS,
                                  _SETTLEMENT_STORAGE_RESOURCES,
                                  settlement_storage_capacity,
                                  _node_surplus, _node_wants,
-                                 _LOCAL_SHIPMENT_PRIORITY)
+                                 _LOCAL_SHIPMENT_PRIORITY, resource_value)
 from app.world.diplomacy import TRADE_STANDING_THRESHOLD
 
 # --- market ------------------------------------------------------------------
@@ -91,14 +91,6 @@ def _settlement_needs_total(nation, resource, world):
 
 
 def _safety_reserve(nation, resource, world):
-    if resource in _LOCAL_FOOD:
-        return 0   # Fish never had upkeep-based demand either (never in
-                   # the old SETTLEMENT_UPKEEP) -- Grain/Fresh Water, which
-                   # DID, are retired; Meat used to get the same free pass
-                   # here too, but it's no longer produced by the old
-                   # system at all (see resources.py's BIOME_YIELDS note),
-                   # so it now falls through to the real settlement-storage
-                   # reserve below like any other Food Product.
     needs_total = _settlement_needs_total(nation, resource, world)
     if needs_total > 0:
         return needs_total * SAFETY_RESERVE_TURNS
@@ -126,6 +118,114 @@ def _faction_capital_settlement(nation, world):
     "the capital" here. None if the faction has no settlement yet."""
     sids = nation.meta.get("settlements", [])
     return world.settlements[sids[0]] if sids else None
+
+
+# --- Currency overhaul: Gold payment, settlement-grounded, with a barter
+# fallback -- Gold is a real, mined-and-minted _SETTLEMENT_STORAGE_RESOURCES
+# good now (see resources.py's Currency section), not a bottomless national
+# wallet, so a specific paying settlement can genuinely run short. Rather
+# than blocking the deal, a settlement short on Gold barters real goods of
+# roughly equivalent value instead -- "countries who don't have access to
+# gold" (the request's own framing) still get to trade, just not for
+# currency. Applies to both foreign trade (TradeCaravan) and domestic
+# Regional Markets (RegionalShipment) below.
+_BARTER_EXCLUDE = {"Gold", "Gold Ore"}
+
+
+def _settlement_gold(st):
+    return getattr(st, "resources", {}).get("Gold", 0) if st is not None else 0
+
+
+def _find_barter_good(payer_st, world, season, value_needed):
+    """The single real (non-currency) resource `payer_st` can best spare --
+    real surplus, respecting its own safety reserve, same _node_surplus
+    logic every other logistics tier already uses -- picked by whichever
+    has the greatest spare gold-equivalent value. None if payer_st has no
+    meaningful surplus of anything. Doesn't try to match what the
+    recipient specifically wants (a real haggling model is out of scope
+    here) -- "equivalent value" is satisfied by resource_value() pricing
+    the swap fairly, not by hand-picking the ideal good."""
+    if payer_st is None or value_needed <= 0:
+        return None
+    needs = settlement_needs(payer_st, season)
+    best_resource, best_value = None, 0
+    for resource in _SETTLEMENT_STORAGE_RESOURCES:
+        if resource in _BARTER_EXCLUDE:
+            continue
+        surplus = _node_surplus(payer_st, resource, needs)
+        if surplus <= 0:
+            continue
+        value = resource_value(resource, surplus)
+        if value > best_value:
+            best_resource, best_value = resource, value
+    if best_resource is None:
+        return None
+    per_unit = resource_value(best_resource, 1) or 1
+    surplus = _node_surplus(payer_st, best_resource, needs)
+    qty = min(surplus, max(1, round(value_needed / per_unit)))
+    return (best_resource, qty)
+
+
+def _settlement_purchasing_power(st, world, season):
+    """Gold `st` has on hand, plus the gold-equivalent value of what it
+    could barter instead (see _find_barter_good) -- what actually caps how
+    big a trade this settlement can realistically pay for, now that Gold
+    has to be produced/stored/spent for real instead of drawn from a
+    bottomless national wallet. Used to size a deal at dispatch time, same
+    role nation.stats["gold"] used to play."""
+    if st is None:
+        return 0
+    needs = settlement_needs(st, season)
+    barter_value = 0
+    for resource in _SETTLEMENT_STORAGE_RESOURCES:
+        if resource in _BARTER_EXCLUDE:
+            continue
+        surplus = _node_surplus(st, resource, needs)
+        if surplus > 0:
+            barter_value += resource_value(resource, surplus)
+    return _settlement_gold(st) + barter_value
+
+
+def _collect_payment(payer_st, price, world, season):
+    """Deduct up to `price` Gold-equivalent value from payer_st -- real
+    Gold first, then a single barter good for any shortfall (see
+    _find_barter_good) -- and return what was actually taken, as a list of
+    (resource, quantity). Doesn't credit anywhere; see _deliver_payment for
+    the other half. Split in two so a caravan/shipment can collect payment
+    when goods are delivered but only credit the seller once the return
+    leg actually completes (see advance_caravans) -- the same real "the
+    payment can be lost with the caravan" risk the traded resource itself
+    already carries."""
+    if payer_st is None or price <= 0:
+        return []
+    if not hasattr(payer_st, "resources"):
+        payer_st.resources = {}
+    taken = []
+    gold_have = payer_st.resources.get("Gold", 0)
+    gold_paid = min(gold_have, price)
+    if gold_paid > 0:
+        payer_st.resources["Gold"] = gold_have - gold_paid
+        taken.append(("Gold", gold_paid))
+    shortfall = price - gold_paid
+    if shortfall > 0:
+        barter = _find_barter_good(payer_st, world, season, shortfall)
+        if barter is not None:
+            resource, qty = barter
+            have = payer_st.resources.get(resource, 0)
+            qty = min(qty, have)
+            if qty > 0:
+                payer_st.resources[resource] = have - qty
+                taken.append((resource, qty))
+    return taken
+
+
+def _deliver_payment(payee_st, paid):
+    if payee_st is None or not paid:
+        return
+    if not hasattr(payee_st, "resources"):
+        payee_st.resources = {}
+    for resource, qty in paid:
+        payee_st.resources[resource] = payee_st.resources.get(resource, 0) + qty
 
 
 def _nation_resource_stock(nation, resource, world):
@@ -368,13 +468,15 @@ def _capital_sea_path(world, a_idx, b_idx):
 # --- the caravan/ship itself -------------------------------------------------
 class TradeCaravan:
     """A caravan (land) or ship (sea) carrying one resource one way, then
-    gold back. `pos` interpolates along `path` from the current leg's
-    progress — purely for the "very basic" map marker, not physical
-    simulation."""
+    payment back -- Gold if the buyer's paying settlement has enough,
+    otherwise a barter good of roughly equivalent value (see trade.py's
+    Currency-overhaul helpers just above _nation_resource_stock). `pos`
+    interpolates along `path` from the current leg's progress — purely for
+    the "very basic" map marker, not physical simulation."""
     _next_id = 0
 
     def __init__(self, kind, seller_idx, buyer_idx, resource, quantity, price, path,
-                 speed_multiplier=1.0, dest_settlement_id=None):
+                 speed_multiplier=1.0, dest_settlement_id=None, origin_settlement_id=None):
         self.id = TradeCaravan._next_id
         TradeCaravan._next_id += 1
         self.kind = kind                # "land" | "sea"
@@ -390,6 +492,13 @@ class TradeCaravan:
         # None falls back to the capital, same as every caravan before
         # this phase (old-save-safe via getattr at the read site too).
         self.dest_settlement_id = dest_settlement_id
+        # Currency overhaul: which of the seller's settlements gets paid --
+        # collected from the buyer's paying settlement at outbound delivery,
+        # only actually credited here once the return leg completes (see
+        # advance_caravans). [(resource, quantity), ...], real Gold and/or
+        # a barter good -- empty until delivery actually happens.
+        self.origin_settlement_id = origin_settlement_id
+        self.payment = []
         self.leg = "outbound"           # "outbound" | "return"
         base_turns = max(MIN_TRANSIT_TURNS, min(MAX_TRANSIT_TURNS,
                          round(len(path) / CELLS_PER_TURN)))
@@ -424,8 +533,11 @@ def _dispatch_caravan(world, seller_idx, buyer_idx, resource, quantity, price, k
     rel = world.world_map.get_relationship(seller.id, buyer.id)
     speed = ALLY_TRANSIT_SPEEDUP if rel["stance"] == Stance.ALLY else 1.0
     dest_id = buyer_settlement.id if buyer_settlement is not None else None
+    origin_st = seller_settlement or _faction_capital_settlement(seller, world)
+    origin_id = origin_st.id if origin_st is not None else None
     world.trade_caravans.append(
-        TradeCaravan(kind, seller_idx, buyer_idx, resource, quantity, price, path, speed, dest_id))
+        TradeCaravan(kind, seller_idx, buyer_idx, resource, quantity, price, path, speed,
+                    dest_id, origin_id))
 
 
 def _active_trade_count(world, fac_idx):
@@ -470,34 +582,46 @@ def advance_caravans(world):
             remaining.append(c)
             continue
 
+        dest_id = getattr(c, "dest_settlement_id", None)
+        buyer_st = (world.settlements[dest_id] if dest_id is not None
+                   else _faction_capital_settlement(buyer, world))
+
         if c.leg == "outbound":
             if c.resource in _SETTLEMENT_STORAGE_RESOURCES:
-                dest_id = getattr(c, "dest_settlement_id", None)
-                st = (world.settlements[dest_id] if dest_id is not None
-                     else _faction_capital_settlement(buyer, world))
-                if st is not None:
-                    if not hasattr(st, "resources"):
-                        st.resources = {}
+                if buyer_st is not None:
+                    if not hasattr(buyer_st, "resources"):
+                        buyer_st.resources = {}
                     # No storage-cap check on delivery -- same "never reject
                     # at the door" grace-period philosophy as production
                     # (Phase 9): an over-full granary just spoils faster
                     # next turn (advance_settlement_storage), it doesn't
                     # refuse the caravan.
-                    st.resources[c.resource] = st.resources.get(c.resource, 0) + c.quantity
+                    buyer_st.resources[c.resource] = buyer_st.resources.get(c.resource, 0) + c.quantity
             else:
                 res = buyer.stats.setdefault("resources", {})
                 res[c.resource] = res.get(c.resource, 0) + c.quantity
                 _clamp_to_storage(buyer)
-            buyer.stats["gold"] = max(0, buyer.stats.get("gold", 0) - c.total_price)
+            # Currency overhaul: the buyer's paying settlement covers the
+            # price in Gold if it can, barters real goods for any shortfall
+            # otherwise (see _collect_payment) -- collected now, but only
+            # actually credited to the seller if the return leg completes
+            # (see the "else" branch below), same real risk the goods
+            # themselves already carried the other direction.
+            c.payment = _collect_payment(buyer_st, c.total_price, world, world.season)
             events.append({"type": "delivered", "seller_idx": c.seller_idx, "buyer_idx": c.buyer_idx,
-                          "resource": c.resource, "quantity": c.quantity, "price": c.total_price})
+                          "resource": c.resource, "quantity": c.quantity, "price": c.total_price,
+                          "payment": c.payment})
             c.leg = "return"
             c.turn_progress = 0
             remaining.append(c)
         else:
-            seller.stats["gold"] = seller.stats.get("gold", 0) + c.total_price
+            origin_id = getattr(c, "origin_settlement_id", None)
+            seller_st = (world.settlements[origin_id] if origin_id is not None
+                        else _faction_capital_settlement(seller, world))
+            _deliver_payment(seller_st, c.payment)
             events.append({"type": "paid", "seller_idx": c.seller_idx, "buyer_idx": c.buyer_idx,
-                          "resource": c.resource, "quantity": c.quantity, "price": c.total_price})
+                          "resource": c.resource, "quantity": c.quantity, "price": c.total_price,
+                          "payment": c.payment})
             # round trip complete — caravan is simply not carried forward
 
     world.trade_caravans = remaining
@@ -566,7 +690,17 @@ def run_trade_ai(world):
                 price = unit_price(resource, seller, buyer, world, seller_st, buyer_st)
                 if price <= 0:
                     continue
-                qty = int(min(surplus, buyer.stats.get("gold", 0) // price))
+                # Currency overhaul: the buyer's paying settlement caps how
+                # big a deal it can afford -- Gold on hand plus what it
+                # could barter instead (see _settlement_purchasing_power),
+                # not a bottomless national wallet. Falls back to the
+                # capital when this resource isn't settlement-storage
+                # (buyer_st is None) -- see the loop above.
+                power = (_settlement_purchasing_power(buyer_st, world, world.season)
+                        if buyer_st is not None
+                        else _settlement_purchasing_power(_faction_capital_settlement(buyer, world),
+                                                          world, world.season))
+                qty = int(min(surplus, power // price))
                 if qty < MIN_TRADE_QUANTITY:
                     continue
                 route = _route_for_pair(world, f_idx, p_idx)
@@ -880,6 +1014,12 @@ class RegionalShipment:
                               min(MAX_REGIONAL_TRANSIT_TURNS,
                                   round(len(path) / REGIONAL_SHIPMENT_CELLS_PER_TURN)))
         self.turn_progress = 0
+        # Currency overhaul: what the destination settlement actually paid
+        # at dispatch (Gold and/or a barter good, see _collect_payment) --
+        # set by the caller right after construction (price is 0.0/no
+        # payment for a free sell-to-city shipment, so this stays empty
+        # for those); credited to the origin settlement on delivery.
+        self.payment = []
 
     @property
     def pos(self):
@@ -928,8 +1068,11 @@ def run_regional_trade(world):
                     price = _regional_unit_price(resource, st, other, world)
                     if price <= 0:
                         continue
-                    qty = int(min(surplus, REGIONAL_TRADE_MAX_QUANTITY,
-                                 nation.stats.get("gold", 0) // price))
+                    # Currency overhaul: `other` (the buying settlement)
+                    # caps the deal by its own Gold + barter purchasing
+                    # power now, not the faction's old bottomless wallet.
+                    power = _settlement_purchasing_power(other, world, season)
+                    qty = int(min(surplus, REGIONAL_TRADE_MAX_QUANTITY, power // price))
                     if qty < REGIONAL_TRADE_MIN_QUANTITY:
                         continue
                     path = _regional_path(world, st, other)
@@ -940,9 +1083,9 @@ def run_regional_trade(world):
                         st.resources = {}
                     st.resources[resource] = max(0, st.resources.get(resource, 0) - qty)
                     total_price = round(qty * price)
-                    nation.stats["gold"] = max(0, nation.stats.get("gold", 0) - total_price)
-                    world.regional_shipments.append(RegionalShipment(
-                        fac_idx, resource, qty, price, path, st.id, other.id))
+                    shipment = RegionalShipment(fac_idx, resource, qty, price, path, st.id, other.id)
+                    shipment.payment = _collect_payment(other, total_price, world, season)
+                    world.regional_shipments.append(shipment)
                     events.append({"type": "regional_dispatched", "faction_idx": fac_idx,
                                   "resource": resource, "quantity": qty, "price": total_price,
                                   "origin_name": st.name, "dest_name": other.name})
@@ -985,10 +1128,122 @@ def advance_regional_shipments(world):
         if not hasattr(dest, "resources"):
             dest.resources = {}
         dest.resources[s.resource] = dest.resources.get(s.resource, 0) + s.quantity
-        nation.stats["gold"] = nation.stats.get("gold", 0) + s.total_price
+        # Currency overhaul: payment was collected from `dest` (the buyer)
+        # at dispatch time (see run_regional_trade) -- credited to `origin`
+        # (the seller) here, real Gold and/or a barter good, same shape as
+        # foreign trade's return leg.
+        _deliver_payment(origin, s.payment)
         events.append({"type": "regional_delivered", "faction_idx": s.faction_idx,
                       "resource": s.resource, "quantity": s.quantity, "price": s.total_price,
                       "origin_name": origin.name, "dest_name": dest.name})
 
     world.regional_shipments = remaining
+    return events
+
+
+# --- Sell to City: non-perishable overflow relief -----------------------------
+# Local Logistics (Phase 10) and Regional Markets (above) both only ever
+# move a resource to somewhere that genuinely NEEDS it (_node_wants) -- if
+# nothing anywhere in the faction currently needs more Iron, neither one
+# ever moves an overflowing settlement's surplus Iron anywhere, even to a
+# settlement with plenty of free storage, and it just decays via the
+# overflow penalty (see resources.py's Storage & Spoilage) for no real
+# reason. This closes that gap specifically for non-perishables
+# (spoil_rate == 0 -- there's no urgency for anything that already spoils
+# on its own timeline; that's what the need-based tiers above are for): a
+# City-kind settlement always has room for a same-faction settlement's
+# non-perishable surplus, whether or not it "needs" it in the
+# settlement_needs sense, acting as an internal trade hub that then
+# exports it through the faction's existing foreign trade (see
+# run_trade_ai/_best_surplus_settlement above). Since more supply sitting
+# at the city already lowers unit_price's surplus-based factor
+# automatically, the "sell off excess -> price drops -> corrects itself
+# over time" dynamic just falls out of pricing that already exists --
+# nothing new needed for that part.
+#
+# Reuses RegionalShipment/_regional_path/_active_regional_shipments
+# wholesale (same terrain-aware pathing, same risk of loss crossing
+# unclaimed/hostile territory) -- the only real difference is price is
+# always 0: unlike Regional Markets' genuine domestic sale, this leg is
+# free, the same "just relocate the goods" shape Local Logistics uses.
+# Charging Gold for it (even internally, same treasury either end) would
+# leave a cash-poor faction unable to ever relieve overflow decay exactly
+# when it matters most; the real Gold in this whole picture is what the
+# city eventually earns exporting it, unchanged from how foreign trade
+# already works.
+SELL_TO_CITY_MIN_QUANTITY = 15
+SELL_TO_CITY_MAX_QUANTITY = 50
+# A City stops absorbing once its own total stock reaches this fraction of
+# its own storage capacity, so this doesn't just relocate the overflow
+# problem from the settlement onto the city instead of actually helping.
+CITY_STOCKPILE_CEILING_FRACTION = 0.8
+
+_NONPERISHABLE_RESOURCES = {name for name in _SETTLEMENT_STORAGE_RESOURCES
+                            if RESOURCES.get(name, {}).get("spoil_rate", 0) <= 0}
+
+
+def _faction_cities(nation, world):
+    return [st for st in _faction_settlements(nation, world) if st.kind == "city"]
+
+
+def _nearest_city(st, cities):
+    if not cities:
+        return None
+    return min(cities, key=lambda c: (c.pos[0] - st.pos[0]) ** 2 + (c.pos[1] - st.pos[1]) ** 2)
+
+
+def run_sell_to_city(world):
+    """Called every turn: for each faction with at least one City, match a
+    settlement sitting on non-perishable surplus (the same _node_surplus
+    reserve logic every other logistics tier already uses) to its nearest
+    same-faction City, and dispatch a free RegionalShipment there --
+    greedy first-match, same style as run_regional_trade, and sharing that
+    same MAX_ACTIVE_REGIONAL_SHIPMENTS_PER_SETTLEMENT cap (both tiers pull
+    from the same world.regional_shipments pool, so a settlement's limited
+    outbound slots are shared between genuine domestic trade and this).
+    Returns "sold_to_city" event dicts -- delivery/loss are handled
+    generically by advance_regional_shipments, same as any other
+    RegionalShipment."""
+    events = []
+    season = world.season
+    for fac_idx, nation in enumerate(world.factions):
+        cities = _faction_cities(nation, world)
+        if not cities:
+            continue
+        sids = nation.meta.get("settlements", [])
+        settlements = [world.settlements[sid] for sid in sids]
+        needs_by_st = {st.id: settlement_needs(st, season) for st in settlements}
+
+        for st in settlements:
+            if st.kind == "city":
+                continue   # a City doesn't sell to itself
+            if _active_regional_shipments(world, st.id) >= MAX_ACTIVE_REGIONAL_SHIPMENTS_PER_SETTLEMENT:
+                continue
+            own_needs = needs_by_st[st.id]
+            for resource in sorted(_NONPERISHABLE_RESOURCES):
+                surplus = _node_surplus(st, resource, own_needs)
+                if surplus < SELL_TO_CITY_MIN_QUANTITY:
+                    continue
+                city = _nearest_city(st, [c for c in cities if c is not st])
+                if city is None:
+                    continue
+                cap = settlement_storage_capacity(city)
+                stock = sum(getattr(city, "resources", {}).values())
+                if cap <= 0 or stock >= cap * CITY_STOCKPILE_CEILING_FRACTION:
+                    continue
+                qty = min(surplus, SELL_TO_CITY_MAX_QUANTITY)
+                path = _regional_path(world, st, city)
+                if path is None:
+                    continue
+
+                if not hasattr(st, "resources"):
+                    st.resources = {}
+                st.resources[resource] = max(0, st.resources.get(resource, 0) - qty)
+                world.regional_shipments.append(RegionalShipment(
+                    fac_idx, resource, qty, 0.0, path, st.id, city.id))
+                events.append({"type": "sold_to_city", "faction_idx": fac_idx,
+                              "resource": resource, "quantity": qty,
+                              "origin_name": st.name, "dest_name": city.name})
+                break
+
     return events

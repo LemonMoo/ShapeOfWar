@@ -10,9 +10,11 @@ from app.ui.pause_menu import PauseMenuView
 from app.ui.load_game_menu import LoadGameMenuView
 from app.ui.map_view import MapView
 from app.ui.battle_view import BattleView
+from app.ui.changelog_view import ChangelogWindow
 from app.core.events import bus
 from app.core.save import (save_game, load_game, has_save, list_saves,
                            new_save_id, delete_save)
+from app.core import changelog
 from app.world.worldgen import generate_world
 from app.battle.battle import Battle, Army
 from app.battle.unit_types import UNIT_TYPES
@@ -80,6 +82,17 @@ class App(tk.Tk):
         self.bind("<F1>", self._on_f1)
 
         self.show_screen("menu")
+        self.after(150, self._maybe_show_changelog)
+
+    def _maybe_show_changelog(self):
+        """Once per update: a small "what's new" popup on the main menu,
+        listing everything since the player last dismissed one (see
+        app/core/changelog.py). Deferred slightly past startup (after(150))
+        so it appears as its own window on top of an already-drawn menu,
+        not fighting the main window for focus mid-construction."""
+        entries = changelog.unseen_entries()
+        if entries:
+            ChangelogWindow(self, entries)
 
     def _update_status(self):
         self.status.config(
@@ -284,6 +297,21 @@ class App(tk.Tk):
     _ACQUISITION_MEANS = "Military Conquest"
 
     def _on_battle_over(self, payload):
+        """Fires synchronously the instant the battle simulation itself
+        detects a winner (see Battle.update/bus.emit) -- still mid-frame
+        inside battle_view's own animation loop, well before the player
+        has dismissed the battle-over screen. World-state mutations
+        (transferring the region, resolving a claim) happen here since
+        they're cheap and need to take effect immediately regardless of
+        when the visuals catch up -- but map_view.refresh() specifically
+        does NOT: it's the single most expensive thing MapView ever does
+        (a full O(w*h) political-color rebuild once territory actually
+        changed hands), and running it here used to inject that cost into
+        the battle's own final animation frame, showing up as a visible
+        hitch right at the moment of victory, before the screen had even
+        switched. It's deferred to _return_from_battle instead, so any
+        pause lands on the screen transition the player already expects
+        to take a beat, not mid-fight."""
         winner = payload.get("winner")
         ctx, self._battle_context = getattr(self, "_battle_context", None), None
         self._battle_outcome = None
@@ -300,14 +328,12 @@ class App(tk.Tk):
                     from app.world.territory import transfer_region
                     transfer_region(self.world, region, attacker_idx)
                 conquest = f" {attacker.name} seizes {region.name}!"
-                self.map_view.refresh()
                 self._battle_outcome = {"result": "success", "region": region,
                                         "attacker": attacker, "defender": defender}
             else:
                 if claim_project is not None:
                     from app.world import expansion
                     expansion.resolve_claim_loss(self.world, region)
-                    self.map_view.refresh()
                 self._battle_outcome = {"result": "failure", "region": region,
                                         "attacker": attacker, "defender": defender,
                                         "stalemate": winner is None}
@@ -320,9 +346,14 @@ class App(tk.Tk):
     def _return_from_battle(self):
         """Called once the player dismisses the battle-over screen (click or
         keypress) — back to the map, blinking the contested region's border
-        gold (won) or red (lost/stalemate)."""
+        gold (won) or red (lost/stalemate). The expensive map_view.refresh()
+        deferred from _on_battle_over (see its docstring) runs here, right
+        before the screen actually switches, so any recompute cost lands on
+        the transition itself rather than the battle's last animation frame."""
         outcome = getattr(self, "_battle_outcome", None)
         self._battle_outcome = None
+        if outcome is not None:
+            self.map_view.refresh()
         self.show_screen("map")
         if outcome is None:
             return

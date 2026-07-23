@@ -243,10 +243,6 @@ def resource_children(category):
                   key=lambda n: (R.RESOURCES[n]["tier"], n))
 
 
-LEGACY_RESOURCES = sorted({name for d in (R.BIOME_YIELDS, R.CLIMATE_MODIFIERS, R.SEASON_MODIFIERS)
-                          for mapping in d.values() for name in mapping})
-
-
 # --- hand-written articles --------------------------------------------------
 
 def _settlements_article():
@@ -268,13 +264,16 @@ def _settlements_article():
             "total are children):"
         ),
         "\n".join([
-            f"  City:   {pop['city'][0]:,}–{pop['city'][1]:,} pop, tax {tax['city'][0]}–{tax['city'][1]} Gold/turn",
-            f"  Castle: {pop['castle'][0]:,}–{pop['castle'][1]:,} pop, tax {tax['castle'][0]}–{tax['castle'][1]} Gold/turn",
-            f"  Town:   {pop['town'][0]:,}–{pop['town'][1]:,} pop, tax {tax['town'][0]}–{tax['town'][1]} Gold/turn",
+            f"  City:   {pop['city'][0]:,}–{pop['city'][1]:,} pop, civic wealth {tax['city'][0]}–{tax['city'][1]}/turn",
+            f"  Castle: {pop['castle'][0]:,}–{pop['castle'][1]:,} pop, civic wealth {tax['castle'][0]}–{tax['castle'][1]}/turn",
+            f"  Town:   {pop['town'][0]:,}–{pop['town'][1]:,} pop, civic wealth {tax['town'][0]}–{tax['town'][1]}/turn",
         ]),
         (
             "(A Castle's population skews toward garrison over civilians, "
-            "hence the lower range despite outbuilding a Town.)"
+            "hence the lower range despite outbuilding a Town.) Civic "
+            "wealth doesn't generate any actual Gold any more (see "
+            "Currency) — it's purely a Prosperity input now, folded into "
+            "how big a settlement's target meter is."
         ),
         (
             "A Settlement is a consumer and a converter — it eats "
@@ -301,6 +300,14 @@ def _settlements_article():
             "A City can spawn a new Village nearby once its prosperity "
             "meter fills (see Prosperity) — the only way new Villages "
             "appear after world generation and initial wildland claims."
+        ),
+        (
+            "A Village's panel shows what it actually grows and how much "
+            "of each resource it's projected to produce over the coming "
+            "year — real numbers from the same crop/industry yield math "
+            "that drives production, not a flavor stat. A region's total "
+            "yield is split evenly across every Village in it, so this is "
+            "each Village's own share."
         ),
     ]
     return "\n\n".join(parts)
@@ -359,16 +366,72 @@ def _storage_article():
         ),
         "WHAT'S NOT YET REAL STORAGE",
         (
-            "Livestock is never a stockpiled quantity at all — it's a "
-            "living regional population (see Settlements & Villages). A "
-            "handful of old-world resources predating this whole storage "
-            f"system — {', '.join(LEGACY_RESOURCES)} — still live on a "
-            "single flat national pool per faction with no "
-            "per-settlement storage, spoilage limited to a couple of "
-            f"hardcoded rates (Fish {_pct(R_.SPOILAGE_RATE.get('Fish', 0))}/turn, "
-            f"Spices {_pct(R_.SPOILAGE_RATE.get('Spices', 0))}/turn, "
-            "everything else in that list never spoils), and no "
-            "building/recipe chain of their own."
+            "Livestock is the one exception — it's never a stockpiled "
+            "quantity at all, but a living regional population (see "
+            "Settlements & Villages). Every other resource in the game, "
+            "Gold included (see Currency), has a real per-settlement "
+            "stockpile now."
+        ),
+    ]
+    return "\n\n".join(parts)
+
+
+def _currency_article():
+    parts = [
+        "Currency",
+        (
+            "Gold is a real Manufactured Good now, not a flat per-turn tax "
+            "draw — it has to be mined and minted like anything else, "
+            "stockpiled at specific settlements (see Storage & Spoilage), "
+            "and physically spent from wherever it's actually sitting. "
+            "There's no faction-wide treasury any more: a settlement can "
+            "be Gold-rich while another of the same faction's own "
+            "settlements is Gold-poor, exactly like every other "
+            "settlement-storage resource."
+        ),
+        "MINING AND MINTING",
+        (
+            "Gold Ore is a Mining resource like Iron or Gems — it spawns "
+            "on mountain terrain, scarce (rare, the same rarity tier as "
+            "Gems), and comes in via a Gold Mine exactly like any other "
+            "ore. A Mint then converts Gold Ore into Gold, 1:1, the same "
+            "automatic conversion every other recipe in the game uses "
+            "(see Construction/the resource categories) — no separate "
+            "\"build a Mint\" step, it runs the moment a settlement is "
+            "holding both the ore and the recipe applies."
+        ),
+        "WHAT IT'S SPENT ON",
+        (
+            "Everything that used to draw from the old treasury still "
+            "costs Gold exactly the same way — expansion claims, "
+            "settlement/road/ship/shipyard construction — it's just paid "
+            "out of the faction's settlement storage now (spread across "
+            "whichever settlements actually have it, largest stockpile "
+            "first, same rule Iron/Logs/Stone already followed), and "
+            "trade (see Regional Markets/Foreign Trade) pays and collects "
+            "it at the specific settlements actually making the deal."
+        ),
+        "BARTER",
+        (
+            "A settlement short on Gold isn't shut out of trade — if it "
+            "can't cover a deal's price in Gold, it pays the shortfall "
+            "with a real surplus good instead, priced at that good's "
+            "normal gold-equivalent tier value (see the resource "
+            "categories), no penalty for using it. This applies to both "
+            "Regional Markets and Foreign Trade. A settlement with "
+            "nothing to spare either way still receives the goods it's "
+            "buying — payment just falls short, rather than the deal "
+            "being blocked outright."
+        ),
+        "STARTING RESERVE",
+        (
+            f"Every faction begins the game with a modest "
+            f"{R.STARTING_GOLD_PER_FACTION:,}-Gold reserve, split evenly "
+            "across its own starting settlements, so turn-1 construction "
+            "and trade aren't completely frozen while the first Gold Mine "
+            "and Mint get running. Every turn after that, Gold is exactly "
+            "as real and production-driven as any other Manufactured "
+            "Good — there's no ongoing free income any more."
         ),
     ]
     return "\n\n".join(parts)
@@ -384,8 +447,8 @@ def _prosperity_article():
             "rolled once. It eases toward a target each turn rather than "
             "jumping — by design, a slow, long-term payoff (roughly "
             f"{round(1/R.PROSPERITY_EASE)} turns / "
-            f"~{round(1/R.PROSPERITY_EASE/8)} years to close 90% of the "
-            "gap to a steady target)."
+            f"~{round(1/R.PROSPERITY_EASE/R.YEAR_LENGTH_TURNS, 1)} years to "
+            "close 90% of the gap to a steady target)."
         ),
         "THE TARGET",
         (
@@ -477,10 +540,9 @@ def _local_logistics_article():
         ),
         "THE SHIPMENT ITSELF",
         (
-            "A straight-line path between the two positions (not the "
-            "region's actual winding road — a deliberate "
-            f"simplification), taking {R.MIN_LOCAL_TRANSIT_TURNS}–"
-            f"{R.MAX_LOCAL_TRANSIT_TURNS} turns depending on distance, "
+            "A straight-line path between the two positions, taking "
+            f"{R.MIN_LOCAL_TRANSIT_TURNS}–{R.MAX_LOCAL_TRANSIT_TURNS} "
+            "turns depending on distance, "
             f"{R.LOCAL_SHIPMENT_MIN_QUANTITY}–"
             f"{R.LOCAL_SHIPMENT_MAX_QUANTITY} units per trip. A node can "
             f"have up to {R.MAX_ACTIVE_LOCAL_SHIPMENTS_PER_NODE} "
@@ -490,10 +552,9 @@ def _local_logistics_article():
             "isn't turned away."
         ),
         (
-            "Deliberately out of scope here: a region with no Settlement "
-            "of its own has nothing to ship raw goods to and just "
-            "accumulates them; reaching a DIFFERENT region is Regional "
-            "Markets, not this."
+            "A region with no Settlement of its own has nothing to ship "
+            "raw goods to, so they just accumulate. Reaching a different "
+            "region entirely is Regional Markets, not this."
         ),
     ]
     return "\n\n".join(parts)
@@ -513,12 +574,13 @@ def _regional_markets_article():
         "PRICE AND PAYMENT",
         (
             "Priced with the same tier/surplus/need formula foreign "
-            "trade uses (see Foreign Trade), drawn from and paid back "
-            "into the faction's own shared treasury — Gold is deducted "
-            "on dispatch and credited back on delivery, the same pool "
-            "either way, but it still ties up real working capital for "
-            "the length of the trip (a treasury too empty to front the "
-            "cost simply can't dispatch a shipment)."
+            "trade uses (see Foreign Trade), paid by the buying "
+            "settlement's own Gold on dispatch and credited to the "
+            "selling settlement's own storage on delivery (see Currency) "
+            "— a settlement genuinely short on Gold barters real goods of "
+            "roughly equivalent value instead, and how big a deal it can "
+            "strike at all is capped by its Gold plus what it could "
+            "barter, not a faction-wide wallet."
         ),
         "THE SHIPMENT ITSELF",
         (
@@ -541,8 +603,42 @@ def _regional_markets_article():
             f"geographically contiguous) — a "
             f"{_pct(trade.REGIONAL_SHIPMENT_RISK_PER_TURN)} chance per "
             "turn while in transit through risky territory. Both the "
-            "goods and the Gold already spent acquiring them are simply "
-            "gone if that happens."
+            "goods and the payment already collected for them (Gold "
+            "and/or barter goods) are simply gone if that happens."
+        ),
+        "SELLING NON-PERISHABLES TO A CITY",
+        (
+            "Local Logistics and the need-based market above both only "
+            "ever move a resource somewhere that genuinely needs it — if "
+            "nothing in the whole faction currently needs more Iron, "
+            "neither one ever rescues an overflowing settlement's surplus "
+            "Iron, and it just decays via the overflow penalty (see "
+            "Storage & Spoilage) for no real reason. For non-perishable "
+            "resources only (spoil rate 0 — Iron, Tools, Furniture, and "
+            "the like), any City-kind settlement always has room for a "
+            "same-faction settlement's surplus, whether or not it's "
+            "genuinely \"needed\" there, functioning as an internal "
+            "collection point that then exports the goods through the "
+            "faction's ordinary Foreign Trade. This leg is free — no Gold "
+            "either end, the same shape as Local Logistics — so a "
+            "cash-poor faction can always use it, unlike the Gold-priced "
+            "market above."
+        ),
+        (
+            f"Same terrain-aware pathing, transit, and risk of loss as "
+            f"the market above; {trade.SELL_TO_CITY_MIN_QUANTITY}–"
+            f"{trade.SELL_TO_CITY_MAX_QUANTITY} units per trip, sharing "
+            f"the same {trade.MAX_ACTIVE_REGIONAL_SHIPMENTS_PER_SETTLEMENT}"
+            "-outbound-shipment cap per settlement as the market above. A "
+            "City stops absorbing once its own total stock reaches "
+            f"{_pct(trade.CITY_STOCKPILE_CEILING_FRACTION)} of its own "
+            "storage capacity, so this can't just relocate the overflow "
+            "problem onto the city instead of actually solving it. "
+            "Flooding a city with surplus this way naturally makes its "
+            "own export price cheaper too (see Foreign Trade's pricing) "
+            "— more supply sitting there is exactly what already pulls "
+            "the price down, and it corrects itself over time as the "
+            "glut gets traded away."
         ),
     ]
     return "\n\n".join(parts)
@@ -596,8 +692,11 @@ def _foreign_trade_article():
         (
             f"Travels {trade.MIN_TRANSIT_TURNS}–{trade.MAX_TRANSIT_TURNS} "
             "turns out with the goods, delivers, then has to make it all "
-            "the way back before the seller actually gets paid — "
-            "modeling real risk, not an instant wire transfer. Allied "
+            "the way back before the seller actually gets paid — in real "
+            "Gold if the buyer's paying settlement has enough on hand, "
+            "otherwise a barter good of roughly equivalent value instead "
+            "(see Currency); either way, if the caravan is lost on the "
+            "way back, that payment is lost with it. Allied "
             f"caravans move {_pct(1 - trade.ALLY_TRANSIT_SPEEDUP)} "
             "faster. A caravan crossing hostile third-party territory "
             "risks being lost entirely "
@@ -701,10 +800,7 @@ def _expansion_article():
             "the region's wildland-strength rating, same composition "
             "math as a real nation's army, but each of its soldiers "
             f"fights at {_pct(expansion.WILDLAND_COMBAT_STRENGTH_MULT)} "
-            "strength (the same discount applied to the AI's instant "
-            "win/loss roll, which is what actually resolves an AI "
-            "faction's claims: military / (military + effective garrison "
-            "strength))."
+            "strength."
         ),
         (
             "Win: the region transfers, and gets settled fresh — "
@@ -741,10 +837,10 @@ def _construction_article():
         (
             "Every building costs real resources and takes real turns — "
             "nothing is free, and (except a Shipyard-launched ship, see "
-            "Commanders & Ships) nothing is instant. Costs are paid from "
-            "the faction's settlement storage (spread across whichever "
-            "settlements actually have the goods, largest stockpile "
-            "first) plus Gold from the treasury."
+            "Commanders & Ships) nothing is instant. Costs, Gold included "
+            "(see Currency), are paid from the faction's settlement "
+            "storage, spread across whichever settlements actually have "
+            "the goods, largest stockpile first."
         ),
         "SETTLEMENTS (City / Castle / Town)",
         "\n".join([
@@ -787,11 +883,9 @@ def _commanders_article():
             f"risk of being lost, moves {commander.COMMANDER_CELLS_PER_TURN} "
             "cells/turn on land, and reveals fog of war in a "
             f"{commander.COMMANDER_VISION_RADIUS}-cell radius around "
-            "itself — independent of owned territory, so an island start "
-            "with no adjacent unclaimed land still has a way to go find "
-            "someone. An order sent into fog never reports failure "
-            "(which would itself leak what's out there) — it just walks "
-            "or sails as far as it can and stops at the edge."
+            "itself, independent of owned territory. An order sent into "
+            "fog just walks or sails as far as it can and stops at the "
+            "edge."
         ),
         "SHIPS ARE PHYSICAL OBJECTS",
         (
@@ -878,10 +972,9 @@ def _military_article():
             "  + up to 20, scaled by territory (owned cells / 40, capped)",
             "  + up to 25, scaled by settlement-storage Iron (summed "
             "across every settlement the faction owns, stock / 40, capped)",
-            "  + up to 20, scaled by the old-world national Steel "
-            "stockpile (stock / 30, capped — Steel has no live production "
-            "chain of its own yet, see Storage & Spoilage's legacy-"
-            "resource note)",
+            "  + up to 20, scaled by the national Steel stockpile "
+            "(stock / 30, capped — see Storage & Spoilage for how Steel "
+            "is kept)",
             f"  + a flat per-species modifier: {sp}",
             "  clamped to 15..99 overall.",
         ]),
@@ -962,10 +1055,11 @@ def _overview_article():
             "convert what a Settlement is holding into Food Products, "
             "Manufactured Goods, and Luxury Goods; local shipments move "
             "within a region for free, regional shipments move across "
-            "regions for Gold, and caravans carry foreign trade deals; "
-            "every settlement/village eats and its prosperity meter "
-            "adjusts; construction/expansion/commander orders advance; "
-            "and the season clock ticks (8 turns per season)."
+            "regions for Gold (or barter, see Currency), and caravans "
+            "carry foreign trade deals; every settlement/village eats and "
+            "its prosperity meter adjusts; construction/expansion/"
+            "commander orders advance; and the season clock ticks "
+            f"({R.TURNS_PER_SEASON} turns per season)."
         ),
     ]
     return "\n\n".join(parts)
@@ -975,6 +1069,7 @@ ARTICLES = {
     "overview": ("Overview", _overview_article()),
     "settlements": ("Settlements & Villages", _settlements_article()),
     "storage": ("Storage & Spoilage", _storage_article()),
+    "currency": ("Currency", _currency_article()),
     "prosperity": ("Prosperity", _prosperity_article()),
     "local_logistics": ("Local Logistics", _local_logistics_article()),
     "regional_markets": ("Regional Markets", _regional_markets_article()),
@@ -1000,6 +1095,7 @@ NAV = [
     ("luxury_goods", "Luxury Goods", "resources"),
     ("settlements", "Settlements & Villages", "article"),
     ("storage", "Storage & Spoilage", "article"),
+    ("currency", "Currency", "article"),
     ("prosperity", "Prosperity", "article"),
     ("local_logistics", "Local Logistics", "article"),
     ("regional_markets", "Regional Markets", "article"),

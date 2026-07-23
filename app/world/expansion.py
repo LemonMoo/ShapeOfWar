@@ -14,7 +14,7 @@ from app.world import resources
 from app.world.worldgen import (UNCLAIMED, _place_settlements_for_faction,
                                 _place_villages_for_region, _adjacent_region_ids)
 from app.world.lexicon import make_settlement_namer
-from app.world.construction import can_afford, RoadProject, _path_between
+from app.world.construction import can_afford, _pay_cost, RoadProject, _path_between
 
 CLAIM_BASE_COST = {"Gold": 80}
 CLAIM_COST_PER_CELL = {"Gold": 0.6}
@@ -110,12 +110,7 @@ def start_claim(world, faction_idx, region):
     if not can_afford(nation, cost, world):
         return "You don't have enough resources to fund this expansion."
 
-    res = nation.stats.setdefault("resources", {})
-    for resource, amount in cost.items():
-        if resource == "Gold":
-            nation.stats["gold"] = nation.stats.get("gold", 0) - amount
-        else:
-            res[resource] = res.get(resource, 0) - amount
+    _pay_cost(nation, cost, world)
 
     project = ClaimProject(faction_idx, region)
     world.claim_projects.append(project)
@@ -162,9 +157,27 @@ def settle_newly_claimed_region(world, region):
 
 
 def _region_has_interregion_road(world, region):
-    for (ax, ay), (bx, by), _tier in world.roads_by_region.get(region.id, []):
-        if world.region_grid[ay][ax] != world.region_grid[by][bx]:
-            return True
+    """Whether `region` already has at least one interregion road --
+    checked across region.id's OWN bucket of world.roads_by_region *and*
+    every adjacent region's bucket. A completed road's segments are filed
+    entirely under whichever endpoint was the path's destination (see
+    construction._finish_road's use of path[-1]'s region), which could be
+    either side depending on which region initiated it -- checking only
+    region.id's own bucket used to miss a road a neighbor had already
+    built TO this region (filed under the neighbor's bucket instead),
+    leaving this region unaware it was already connected and free to
+    build its own redundant second road back toward that same neighbor,
+    often along a slightly different route since it's an independent
+    Dijkstra search. A road connecting `region` to some neighbor can only
+    ever be filed under one of those two regions' buckets, never a third
+    region's, so checking region.id's own bucket plus every adjacent
+    region's bucket is exhaustive."""
+    buckets = [region.id, *_adjacent_region_ids(world, region)]
+    for rid in buckets:
+        for (ax, ay), (bx, by), _tier in world.roads_by_region.get(rid, []):
+            ra, rb = world.region_grid[ay][ax], world.region_grid[by][bx]
+            if ra != rb and region.id in (ra, rb):
+                return True
     return False
 
 
@@ -230,7 +243,7 @@ def ensure_interregion_roads(world):
         if link is None:
             continue
         my_pos, neighbor_pos = link
-        path = _path_between(world, neighbor_pos, my_pos)
+        path = _path_between(world, neighbor_pos, my_pos, faction_idx=region.faction_idx)
         if len(path) > 1:
             world.road_projects.append(RoadProject(region.faction_idx, path, tier="dirt"))
 

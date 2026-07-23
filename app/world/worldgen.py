@@ -983,7 +983,16 @@ def _generate_villages(world, rng):
 # (for sea lanes) stay on open water the whole way.
 _ROAD_ELEV_START = 0.62   # elevation (0..1) above which roads start avoiding ground
 _ROAD_ELEV_PEN = 60.0     # steepness of that avoidance — pushes roads around peaks
-_ROAD_RIVER_PEN = 6.0     # crossing a river costs extra (a ford/bridge), not blocked
+_ROAD_RIVER_PEN = 25.0    # crossing a river costs extra (a ford/bridge), not blocked --
+                          # steep enough that a route only actually crosses when
+                          # there's genuinely no reasonable way around (raised from
+                          # 6.0, which let roads shrug off small, easily-avoidable
+                          # crossings for only a few cells' worth of detour)
+_ROAD_FOREIGN_TERRITORY_PEN = 20.0   # building a road across land you don't own
+                                     # costs extra (see _elev_cost's faction_idx
+                                     # param) -- not blocked, so a faction boxed
+                                     # into an awkward shape by its neighbors can
+                                     # still always connect its own settlements
 _SEA_COAST_REACH = 3      # cells from open water a settlement still counts as a port
 _DIAG = 2 ** 0.5
 
@@ -1026,12 +1035,22 @@ def _path_dijkstra(cellset, cost_fn, start, goal):
     return path
 
 
-def _elev_cost(world, base_cost, cell):
+def _elev_cost(world, base_cost, cell, faction_idx=None):
     """Land-routing cost: base terrain noise plus a steep penalty for high
     elevation and a toll for crossing a river/lake — shared by every land
     pathfinder in the game (castle-connecting roads in construction.py,
-    trade-route construction in trade.py) so they all route around
-    mountains/rivers identically, one formula."""
+    trade-route construction in trade.py, commander/ship movement) so they
+    all route around mountains/rivers identically, one formula.
+
+    `faction_idx`, when given, adds a further toll for any cell owned by a
+    DIFFERENT faction (not UNCLAIMED, not this one) — used only by road
+    pathing (construction.py/expansion.py), which is the one caller where
+    "whose land is this" should actually matter: a road is infrastructure
+    a faction builds for itself, not a diplomatic act like a trade route
+    (which necessarily crosses whoever's land sits between two capitals)
+    or a commander's own movement (a scout can walk anywhere). Left at its
+    default (None) for every other caller, which keeps their behavior
+    completely unchanged."""
     x, y = cell
     cost = base_cost[y][x]
     over = world.height[y][x] - _ROAD_ELEV_START
@@ -1039,6 +1058,10 @@ def _elev_cost(world, base_cost, cell):
         cost += _ROAD_ELEV_PEN * over * over
     if cell in world.river_cells or cell in world.lake_cells:
         cost += _ROAD_RIVER_PEN
+    if faction_idx is not None:
+        owner = world.owner[y][x]
+        if owner >= 0 and owner != faction_idx:
+            cost += _ROAD_FOREIGN_TERRITORY_PEN
     return cost
 
 
@@ -1093,17 +1116,29 @@ def _water_distance(world):
 _MOISTURE_OCTAVES = [(0.045, 1.0), (0.10, 0.5), (0.20, 0.25)]
 
 
+def _moisture_seed(nseed):
+    return nseed ^ 0x9E3779B9        # independent noise for rainfall
+
+
+def _quick_moisture(x, y, mseed):
+    """The same per-cell moisture formula _compute_moisture fills the real
+    world.moisture grid with, callable standalone for a handful of cells
+    before that grid exists yet — see _capital_has_nearby_farmland, which
+    needs it well before step 5's full moisture pass runs."""
+    m = sum(a * _vnoise(x * f, y * f, mseed) for f, a in _MOISTURE_OCTAVES)
+    return max(0.0, min(1.0, m / 1.75))
+
+
 def _compute_moisture(world, nseed):
     """Fill world.moisture (0..1 rainfall noise), land cells only. Factored
     out of fertility so biome/climate classification can share it too."""
     w, h = world.w, world.h
-    mseed = nseed ^ 0x9E3779B9        # independent noise for rainfall
+    mseed = _moisture_seed(nseed)
     for y in range(h):
         for x in range(w):
             if world.owner[y][x] == OCEAN or (x, y) in world.lake_cells:
                 continue
-            m = sum(a * _vnoise(x * f, y * f, mseed) for f, a in _MOISTURE_OCTAVES)
-            world.moisture[y][x] = max(0.0, min(1.0, m / 1.75))
+            world.moisture[y][x] = _quick_moisture(x, y, mseed)
 
 
 def _compute_fertility(world, nseed):
@@ -1297,6 +1332,64 @@ def _has_multiple_landmasses(land, width, height, land_cells):
     return False
 
 
+# --- capital placement: reject sites with no real farmland nearby ----------
+_CAPITAL_FOOD_CHECK_RADIUS = 8      # cells around a candidate site sampled
+_CAPITAL_FOOD_CHECK_STEP = 2        # sample every Nth cell in that box (speed)
+# Same thresholds resources.classify_biome uses for "mountain"/"desert"/
+# "forest" (the moisture band actually left over for "plains" once those
+# are excluded) -- not imported directly (capital placement runs long
+# before regions/resources are relevant to anything), just the same
+# values, since what actually matters here is the same "can a Crop grow
+# here" question classify_biome answers for real, later.
+_CAPITAL_MAX_RELIEF_FOR_FARMLAND = 0.55
+_CAPITAL_MIN_MOISTURE_FOR_FARMLAND = 0.32
+_CAPITAL_MAX_MOISTURE_FOR_FARMLAND = 0.50
+_CAPITAL_COASTAL_EXCLUDE_REACH = 3   # matches classify_biome's own coastal
+                                     # override -- a cell this close to open
+                                     # water becomes "coastal" biome for
+                                     # real, regardless of relief/moisture,
+                                     # so it doesn't count as plains here
+_CAPITAL_MIN_FOOD_CELL_FRACTION = 0.15   # of the sampled neighborhood
+
+
+def _capital_has_nearby_farmland(world, x, y, mseed, land_set, coast_d):
+    """Whether real Crop-supporting land (moderate elevation, not
+    desert-dry or rainforest-wet, not coastal, not open water) exists near
+    (x, y) -- a lightweight standalone stand-in for the real biome
+    classification (_classify_biomes_and_climate), which doesn't run until
+    much later in world-gen and needs data (a full moisture grid) that
+    doesn't exist yet at capital-placement time. `coast_d` (a one-time
+    _bfs_distance pass computed before the whole capital-placement loop
+    runs) gives an exact, cheap coast-distance lookup instead of re-
+    scanning each sample's own neighborhood for ocean on every call.
+    Doesn't try to be exact (no swamp exception for Rice) -- just close
+    enough to stop a faction spawning in the dead middle of a mountain
+    range, desert, or coastline with nothing farmable anywhere close by."""
+    sea = world.sea_level
+    span = (1.0 - sea) or 1.0
+    hits = total = 0
+    r = _CAPITAL_FOOD_CHECK_RADIUS
+    for dy in range(-r, r + 1, _CAPITAL_FOOD_CHECK_STEP):
+        for dx in range(-r, r + 1, _CAPITAL_FOOD_CHECK_STEP):
+            cx, cy = x + dx, y + dy
+            if (cx, cy) not in land_set:
+                continue
+            if (cx, cy) in world.river_cells or (cx, cy) in world.lake_cells:
+                continue
+            if coast_d[cy][cx] <= _CAPITAL_COASTAL_EXCLUDE_REACH:
+                continue
+            total += 1
+            relief = max(0.0, min(1.0, (world.height[cy][cx] - sea) / span))
+            if relief >= _CAPITAL_MAX_RELIEF_FOR_FARMLAND:
+                continue
+            moisture = _quick_moisture(cx, cy, mseed)
+            if not (_CAPITAL_MIN_MOISTURE_FOR_FARMLAND <= moisture
+                    <= _CAPITAL_MAX_MOISTURE_FOR_FARMLAND):
+                continue
+            hits += 1
+    return total > 0 and hits / total >= _CAPITAL_MIN_FOOD_CELL_FRACTION
+
+
 def generate_world(width=1100, height=660, seed=None, n_factions=14,
                     player_species=None, player_name=None, _attempt=0):
     """Generate a world. If `player_species`/`player_name` are given, faction
@@ -1357,17 +1450,38 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     #    to the sea. Done before fertility so water can irrigate nearby land.
     _generate_hydrology(world, land, rng)
 
-    # 3. scatter capitals with a minimum spacing
+    # 3. scatter capitals with a minimum spacing, each one required to have
+    #    real farmland somewhere nearby (see _capital_has_nearby_farmland) --
+    #    otherwise a faction could spawn in the dead middle of a mountain
+    #    range, desert, or coastline with no Crop-capable land anywhere
+    #    close to its starting foothold. world.owner isn't populated with
+    #    real OCEAN-vs-land data until step 4 below (it defaults to OCEAN
+    #    everywhere in World.__init__), so ocean cells for this one-time
+    #    coast-distance pass come from `land`/`land_cells` directly instead.
     min_dist = max(6.0, math.sqrt(len(land_cells) / n_factions) * 0.9)
+    land_set = set(land_cells)
+    ocean_cells = [(x, y) for y in range(height) for x in range(width)
+                  if not land[y][x]]
+    coast_d = _bfs_distance(world, ocean_cells)
+    mseed = _moisture_seed(nseed)
     capitals = []
     tries = 0
     while len(capitals) < n_factions and tries < 6000:
         tries += 1
         x, y = rng.choice(land_cells)
+        if not _capital_has_nearby_farmland(world, x, y, mseed, land_set, coast_d):
+            continue
         if all((x - px) ** 2 + (y - py) ** 2 >= min_dist ** 2 for px, py in capitals):
             capitals.append((x, y))
     if not capitals:
-        capitals.append(rng.choice(land_cells))
+        # Fell through 6000 tries without finding enough spaced, farmland-
+        # adjacent sites (an unusually barren map) -- relax to "just needs
+        # farmland nearby" for the rest, rather than leaving factions
+        # unplaced; if even that comes up empty, fall back to any land cell
+        # at all so world-gen never simply fails.
+        farmable = [c for c in land_cells
+                   if _capital_has_nearby_farmland(world, c[0], c[1], mseed, land_set, coast_d)]
+        capitals.append(rng.choice(farmable) if farmable else rng.choice(land_cells))
 
     # 4. mark every land cell UNCLAIMED (distinct from OCEAN) before anyone
     #    owns anything — geography (fertility/biome/region shape) no longer

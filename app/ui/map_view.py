@@ -156,6 +156,9 @@ _MOUNTAIN_SYMBOL_FILL = "#eef0f2"
 _MOUNTAIN_SYMBOL_OUTLINE = "#585860"
 _TERRAIN_SYMBOL_SCREEN_SPACING = 26   # target px between sampled points on screen
 _TERRAIN_SYMBOL_MIN_WORLD_SPACING = 3   # never sample closer than this many world cells
+_TERRAIN_SYMBOL_MAX_COUNT = 400   # hard cap on sampled points regardless of visible
+                                   # area -- see _draw_terrain_symbols for why this
+                                   # is needed on top of the spacing floor above
 
 
 def _climate_rgb(climate):
@@ -168,13 +171,21 @@ def _climate_rgb(climate):
 # a river reads as part of the terrain instead of a decal floating over it.
 _RIVER_RGB = (64, 112, 152)
 
-# Settlement marker styling (drawn as canvas shapes — no art assets).
+# Settlement/village marker styling (drawn as canvas shapes — no art
+# assets). "base" is a world-cell-unit size, not a screen-pixel one --
+# marker radius scales with the current zoom level (see _marker_radius)
+# instead of staying a fixed pixel size, which used to mean these never
+# got any easier to see zoomed in, and looked identically tiny at every
+# zoom level in Village view (the deepest, most-zoomed-in level) as
+# everywhere else.
 _SETTLE_STYLE = {
-    "city":   {"fill": "#f2e9c9", "outline": "#4a4230", "r": 5},
-    "castle": {"fill": "#c9ccd6", "outline": "#3a3f4c", "r": 4},
-    "town":   {"fill": "#d9b98a", "outline": "#4a3a24", "r": 3},
+    "city":   {"fill": "#f2e9c9", "outline": "#4a4230", "base": 0.42},
+    "castle": {"fill": "#c9ccd6", "outline": "#3a3f4c", "base": 0.34},
+    "town":   {"fill": "#d9b98a", "outline": "#4a3a24", "base": 0.27},
 }
-_VILLAGE_STYLE = {"fill": "#c9a06a", "outline": "#4a3418", "r": 2}
+_VILLAGE_STYLE = {"fill": "#c9a06a", "outline": "#4a3418", "base": 0.20}
+_MARKER_MIN_R = 3.5    # never smaller than this, however far zoomed out
+_MARKER_MAX_R = 18.0   # never larger than this, however far zoomed in
 # Local roads (village/settlement network within a region — see
 # _place_villages_for_region in app/world/worldgen.py): Dirt for a road
 # touching a village, brown; Stone for a road linking two settlements, gray.
@@ -228,17 +239,15 @@ def _format_resources(res):
 def _resource_shortfall(nation, cost, world):
     """{resource: amount still missing} for whichever of `cost`'s resources
     the nation can't currently cover in full — empty once it can afford
-    all of it. Mirrors construction.can_afford's own three-way split:
-    Gold from the treasury, a settlement-storage resource (Phase 12:
-    includes Logs/Stone/Iron now) summed across the faction's settlements,
-    anything else from the old shared pool."""
+    all of it. Mirrors construction.can_afford's own two-way split: a
+    settlement-storage resource (Phase 12: includes Logs/Stone/Iron; the
+    Currency overhaul added Gold to this bucket too, no longer a separate
+    treasury) summed across the faction's settlements, anything else from
+    the old shared pool."""
     res = nation.stats.get("resources", {})
-    gold = nation.stats.get("gold", 0)
     missing = {}
     for resource, amount in cost.items():
-        if resource == "Gold":
-            have = gold
-        elif resource in resources._SETTLEMENT_STORAGE_RESOURCES:
+        if resource in resources._SETTLEMENT_STORAGE_RESOURCES:
             have = construction._faction_settlement_stock(nation, resource, world)
         else:
             have = res.get(resource, 0)
@@ -303,6 +312,13 @@ class MapView(tk.Frame):
         # resource bar until the next End Turn overwrites them.
         self._resource_deltas = {}
 
+        # Year-rollover banner (see _show_year_banner): the player faction's
+        # resource snapshot as of the start of the current in-game year,
+        # diffed against the current snapshot the moment a new year begins
+        # to build that banner's summary text. Reset every rollover.
+        self._year_start_snapshot = {}
+        self._year_banner_after_id = None
+
         self._build_resource_bar()
 
         self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
@@ -320,6 +336,23 @@ class MapView(tk.Frame):
 
         self.bottom_msg = tk.Label(self, text="", bg="#0d1017", fg=theme.INK,
                                    font=("Segoe UI", 13, "bold"), padx=18, pady=10)
+
+        # Year-rollover banner (see _show_year_banner) — a big top-of-screen
+        # announcement, MMO-zone-reveal style, for the once-a-year moment a
+        # new year actually begins; distinct from bottom_msg's small
+        # one-line event banners above.
+        self.year_banner = tk.Frame(self, bg="#0d1017",
+                                    highlightbackground=theme.ACCENT,
+                                    highlightthickness=2)
+        self.year_title_lbl = tk.Label(self.year_banner, text="",
+                                       bg="#0d1017", fg=theme.INK,
+                                       font=("Segoe UI", 30, "bold"))
+        self.year_title_lbl.pack(padx=32, pady=(16, 2))
+        self.year_summary_lbl = tk.Label(self.year_banner, text="",
+                                         bg="#0d1017", fg=theme.MUTED,
+                                         font=("Segoe UI", 11), justify="center",
+                                         wraplength=560)
+        self.year_summary_lbl.pack(padx=32, pady=(0, 18))
 
         self._build_panel()
         self.set_world(world)
@@ -344,6 +377,7 @@ class MapView(tk.Frame):
             self.after_cancel(self._flash_id)
             self._flash_id = None
         self._hide_bottom_message()
+        self._hide_year_banner()
         self.view = self._world_view_rect()
         self.view_target = list(self.view)
         self._base_img = self._base_key = None
@@ -353,11 +387,13 @@ class MapView(tk.Frame):
         self._last_territory_version = getattr(self.world, "territory_version", 0)
         self._exit_ui()
         self._hide_prosperity_bar()
+        self._hide_storage_bar()
         self.info.config(fg=theme.MUTED, text="Click a faction to inspect it.")
         for frame in (self.rel_frame, self.actions):
             for w in frame.winfo_children():
                 w.destroy()
         self._resource_deltas = {}
+        self._year_start_snapshot = self._current_resource_snapshot()
         self._update_resource_bar()
         self._update_turn_label()
         self.render()
@@ -384,6 +420,12 @@ class MapView(tk.Frame):
             self._show_faction(self.selected)
         if self.selected_region is not None:
             self._show_region(self.selected_region)
+        if self.selected_settlement is not None:
+            self._show_settlement(self.selected_settlement)
+        if self.selected_village is not None:
+            self._show_village(self.selected_village)
+        if self.selected_commander is not None:
+            self._show_commander(self.selected_commander)
         self._update_resource_bar()
         self._update_turn_label()
         self.render()
@@ -537,12 +579,16 @@ class MapView(tk.Frame):
 
     def _current_resource_snapshot(self):
         """This turn's totals for the player faction: stockpiled resources
-        plus Gold, as one flat dict."""
+        plus Gold, as one flat dict. Gold is a real settlement-storage
+        resource now (Currency overhaul) -- summed across every settlement
+        this faction owns, same aggregate-economy view Iron/Logs/Stone
+        already get (construction._faction_settlement_stock), not a
+        separate treasury number any more."""
         player = self._player_faction()
         if player is None:
             return {}
         snap = dict(player.stats.get("resources", {}))
-        snap["Gold"] = player.stats.get("gold", 0)
+        snap["Gold"] = construction._faction_settlement_stock(player, "Gold", self.world)
         return snap
 
     def _update_resource_bar(self):
@@ -602,6 +648,22 @@ class MapView(tk.Frame):
                                             font=("Segoe UI", 8))
         self._prosperity_pct_lbl.pack(anchor="w")
 
+        # Storage meter — a settlement/village-only bar (see
+        # _show_storage_bar/_hide_storage_bar), same shape as the
+        # prosperity meter above; unlike prosperity this can exceed its
+        # own scale (overflowing storage), so its fill/color logic is its
+        # own, not shared with _draw_prosperity_bar.
+        self.storage_frame = tk.Frame(p, bg=theme.PANEL)
+        tk.Label(self.storage_frame, text="Storage", bg=theme.PANEL,
+                 fg=theme.MUTED, font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        self._storage_canvas = tk.Canvas(self.storage_frame, height=14,
+                                         bg=theme.PANEL, highlightthickness=0)
+        self._storage_canvas.pack(fill="x", pady=(2, 2))
+        self._storage_pct_lbl = tk.Label(self.storage_frame, text="",
+                                         bg=theme.PANEL, fg=theme.MUTED,
+                                         font=("Segoe UI", 8))
+        self._storage_pct_lbl.pack(anchor="w")
+
         self.rel_header = tk.Label(p, text="RELATIONSHIPS", bg=theme.PANEL,
                                    fg=theme.MUTED, font=("Segoe UI", 8, "bold"))
         self.rel_header.pack(anchor="w", padx=14, pady=(16, 4))
@@ -642,7 +704,8 @@ class MapView(tk.Frame):
         self.render()
 
     def _update_turn_label(self):
-        self.turn_lbl.config(text=f"Turn {self.world.turn} — {self.world.season}")
+        year = resources.current_year(self.world.turn)
+        self.turn_lbl.config(text=f"Year {year} — Turn {self.world.turn} — {self.world.season}")
 
     def open_compendium(self):
         """Create-or-raise: repeated presses (button or the F1 shortcut in
@@ -656,12 +719,21 @@ class MapView(tk.Frame):
 
     def _on_end_turn(self):
         before = self._current_resource_snapshot()
+        prev_year = resources.current_year(self.world.turn)
         self.on_end_turn()
         after = self._current_resource_snapshot()
         self._resource_deltas = {r: after.get(r, 0) - before.get(r, 0)
                                   for r in set(before) | set(after)}
         self._report_trade_events()
         self._report_regional_trade_events()
+
+        new_year = resources.current_year(self.world.turn)
+        if new_year != prev_year:
+            year_deltas = {r: after.get(r, 0) - self._year_start_snapshot.get(r, 0)
+                          for r in set(after) | set(self._year_start_snapshot)}
+            self._show_year_banner(new_year, year_deltas)
+            self._year_start_snapshot = after
+
         self.refresh()
 
     def _report_regional_trade_events(self):
@@ -686,6 +758,9 @@ class MapView(tk.Frame):
             elif etype == "regional_lost":
                 msg = (f"A shipment of {ev['quantity']} {ev['resource']} from "
                        f"{ev['origin_name']} to {ev['dest_name']} was lost in transit!")
+            elif etype == "sold_to_city":
+                msg = (f"{ev['origin_name']} sends {ev['quantity']} surplus "
+                       f"{ev['resource']} to {ev['dest_name']} for export.")
             else:
                 continue
             self.show_bottom_message(msg)
@@ -796,11 +871,17 @@ class MapView(tk.Frame):
 
     def _show_faction(self, nation):
         self._hide_prosperity_bar()
+        self._hide_storage_bar()
         player = self._player_faction()
         own = self._is_player(nation)
         self.title_lbl.config(text="Your Realm" if own else "Foreign Realm")
         s = nation.stats
         n_regions = len(nation.meta.get("regions", []))
+        # Gold is a real settlement-storage resource now (Currency
+        # overhaul) -- summed across every settlement this faction owns,
+        # same aggregate view Iron/Logs/Stone already get, not a separate
+        # treasury number any more.
+        gold = construction._faction_settlement_stock(nation, "Gold", self.world)
         if own or player is None:
             zoom_hint = "\nClick again to zoom in."
         elif self.world.world_map.get_relationship(player.id, nation.id)["stance"] == Stance.ENEMY:
@@ -812,7 +893,7 @@ class MapView(tk.Frame):
             text=f"{nation.name}\nSpecies: {nation.meta['species']} "
                  f"— {nation.meta['trait']}\n"
                  f"Military {s['military']} · Morale {s['morale']} · "
-                 f"Gold {s.get('gold', 0):,}\n"
+                 f"Gold {gold:,}\n"
                  f"Avg fertility {nation.meta['fertility']}%\n"
                  f"Population {self._total_population(nation):,}\n"
                  f"{self._settle_counts(nation)}\n"
@@ -989,6 +1070,7 @@ class MapView(tk.Frame):
 
     def _show_region(self, region):
         self._hide_prosperity_bar()
+        self._hide_storage_bar()
         if region.faction_idx < 0:
             self._show_wildland_region(region)
             return
@@ -1181,6 +1263,43 @@ class MapView(tk.Frame):
             c.create_rectangle(0, 0, w * frac, h, fill=color, outline="")
         self._prosperity_pct_lbl.config(text=f"{value:.0f} / 100")
 
+    def _hide_storage_bar(self):
+        self.storage_frame.pack_forget()
+
+    def _show_storage_bar(self, stored, capacity):
+        """Pack right under the prosperity meter (before rel_header, same
+        convention) and draw the current fill. `stored` can exceed
+        `capacity` (overflowing storage spoils faster — see Storage &
+        Spoilage) — the bar itself is capped at full, but the color and
+        caption both flag the overflow rather than silently clipping it."""
+        self.storage_frame.pack(anchor="w", padx=14, pady=(4, 0), fill="x",
+                                before=self.rel_header)
+        self._draw_storage_bar(stored, capacity)
+
+    def _draw_storage_bar(self, stored, capacity):
+        c = self._storage_canvas
+        c.update_idletasks()
+        w = c.winfo_width()
+        if w <= 1:
+            w = 270   # not yet laid out on the very first draw
+        h = 14
+        frac = stored / capacity if capacity > 0 else 0.0
+        display_frac = max(0.0, min(1.0, frac))
+        if frac > 1.0:
+            color = theme.BAD
+        elif frac > 0.85:
+            color = theme.WARN
+        else:
+            color = theme.GOOD
+        c.delete("all")
+        c.create_rectangle(0, 0, w, h, fill="#11151b", outline="")
+        if display_frac > 0:
+            c.create_rectangle(0, 0, w * display_frac, h, fill=color, outline="")
+        caption = f"{stored:,} / {capacity:,}"
+        if frac > 1.0:
+            caption += " — overflowing, spoiling faster"
+        self._storage_pct_lbl.config(text=caption)
+
     def _show_settlement(self, st):
         wd = self.world
         self.selected_village = None   # a settlement and a village are never both selected
@@ -1196,10 +1315,6 @@ class MapView(tk.Frame):
         if population is not None:
             lines.append(f"Population: {population:,} "
                          f"({st.adults:,} adults, {st.children:,} children)")
-        stored = sum(getattr(st, "resources", {}).values())
-        capacity = resources.settlement_storage_capacity(st)
-        lines.append(f"Storage: {stored:,} / {capacity:,}"
-                     + (" — overflowing, spoiling faster" if stored > capacity else ""))
         if getattr(st, "has_shipyard", False):
             lines.append("Has a Shipyard — commanders here launch free, fast ships.")
         if getattr(st, "has_granary", False):
@@ -1213,6 +1328,9 @@ class MapView(tk.Frame):
             self._show_prosperity_bar(prosperity)
         else:
             self._hide_prosperity_bar()
+        stored = sum(getattr(st, "resources", {}).values())
+        capacity = resources.settlement_storage_capacity(st)
+        self._show_storage_bar(stored, capacity)
 
         for w in self.actions.winfo_children():
             w.destroy()
@@ -1307,20 +1425,16 @@ class MapView(tk.Frame):
         self.selected_settlement = None   # a village and a settlement are never both selected
         self.title_lbl.config(text="Village")
         region = wd.regions[v.region_id]
+        annual_yield = resources.village_projected_annual_yield(wd, v)
         lines = [v.name, f"Village in {region.name}, "
                  f"{wd.factions[v.faction_idx].name}",
-                 f"Farm output: {v.farm_output} — a prosperity input for this "
-                 f"village, scaled by local land fertility."]
+                 f"Grows per year: {_format_resources(annual_yield)}"]
         population = getattr(v, "population", None)
         if population is not None:
             lines.append(f"Population: {population:,} "
                          f"({v.adults:,} adults, {v.children:,} children)")
         needs = resources.settlement_needs(v, wd.season)
         lines.append(f"Needs: {_format_resources(needs)} per turn")
-        stored = sum(getattr(v, "resources", {}).values())
-        capacity = resources._node_storage_capacity(v)
-        lines.append(f"Storage: {stored:,} / {capacity:,}"
-                     + (" — overflowing, spoiling faster" if stored > capacity else ""))
         self.info.config(fg=theme.INK, text="\n".join(lines))
 
         prosperity = getattr(v, "prosperity", None)
@@ -1328,6 +1442,18 @@ class MapView(tk.Frame):
             self._show_prosperity_bar(prosperity)
         else:
             self._hide_prosperity_bar()
+        stored = sum(getattr(v, "resources", {}).values())
+        capacity = resources._node_storage_capacity(v)
+        self._show_storage_bar(stored, capacity)
+
+        # Villages have no Build actions of their own (Granary/Warehouse/
+        # Shipyard are Settlement-only) -- but this still has to clear
+        # whatever a previously-selected Settlement's panel left behind,
+        # or its Build buttons stay stuck on screen after switching to a
+        # village (this used to be the one _show_* panel that never
+        # touched self.actions at all).
+        for w in self.actions.winfo_children():
+            w.destroy()
 
     def _show_commander(self, cmd):
         """Panel for a selected Commander: position, current order, and
@@ -1336,6 +1462,7 @@ class MapView(tk.Frame):
         beached one, or on foot with none nearby). A pure scout for now —
         no combat, so there's nothing here about strength or risk."""
         self._hide_prosperity_bar()
+        self._hide_storage_bar()
         wd = self.world
         aboard = commander.ship_by_id(wd, cmd.aboard_ship_id) if cmd.aboard_ship_id is not None else None
         beached = None if aboard is not None else commander.find_ship_near(
@@ -1474,6 +1601,7 @@ class MapView(tk.Frame):
         self.zoom_region = None
         self.selected_region = None
         self.selected_village = None
+        self.selected_settlement = None
         self._base_key = None
         self.title_lbl.config(text="Regions")
         self.info.config(fg=theme.MUTED,
@@ -1486,6 +1614,7 @@ class MapView(tk.Frame):
         self.zoom_region = None
         self.selected_region = None
         self.selected_village = None
+        self.selected_settlement = None
         self._base_key = None
         self._exit_ui()
         if self.selected:
@@ -1499,6 +1628,7 @@ class MapView(tk.Frame):
         the region you actually clicked through."""
         self.zoom_region = region
         self.selected_village = None
+        self.selected_settlement = None
         self._base_key = None
         self.title_lbl.config(text="Villages")
         self.info.config(fg=theme.MUTED,
@@ -1509,6 +1639,7 @@ class MapView(tk.Frame):
     def _exit_village_view(self):
         self.zoom_region = None
         self.selected_village = None
+        self.selected_settlement = None
         self._base_key = None
         self.title_lbl.config(text="Regions")
         self._enter_ui("REGION", "← Back to World", self._exit_region_view)
@@ -1656,6 +1787,37 @@ class MapView(tk.Frame):
             self._bottom_msg_after_id = None
         self.bottom_msg.place_forget()
 
+    # --- year-rollover banner --------------------------------------------------
+    def _year_delta_summary(self, deltas):
+        """'Wheat +1.2k · Gold -340 · ...' for the player faction's biggest
+        gains/losses since the year began, ordered by tier then name like
+        every other resource listing in this file -- only nonzero entries,
+        capped so the banner doesn't turn into a wall of text."""
+        order = sorted((r for r in deltas if deltas.get(r)),
+                       key=lambda r: (RESOURCES.get(r, {}).get("tier", 9), r))
+        if not order:
+            return "No significant change this year."
+        parts = []
+        for r in order[:10]:
+            d = deltas[r]
+            sign = "+" if d > 0 else "-"
+            parts.append(f"{r} {sign}{_fmt_amount(abs(d))}")
+        return " · ".join(parts)
+
+    def _show_year_banner(self, year, deltas):
+        self.year_title_lbl.config(text=f"YEAR {year}")
+        self.year_summary_lbl.config(text=self._year_delta_summary(deltas))
+        self.year_banner.place(relx=0.5, rely=0.08, anchor="n")
+        if self._year_banner_after_id is not None:
+            self.after_cancel(self._year_banner_after_id)
+        self._year_banner_after_id = self.after(6000, self._hide_year_banner)
+
+    def _hide_year_banner(self):
+        if self._year_banner_after_id is not None:
+            self.after_cancel(self._year_banner_after_id)
+            self._year_banner_after_id = None
+        self.year_banner.place_forget()
+
     # --- free camera: drag-pan / wheel-zoom ---------------------------------
     def _cancel_animation(self):
         """Manual camera control always wins over an in-flight click-drill
@@ -1704,7 +1866,18 @@ class MapView(tk.Frame):
         x0, y0, x1, y1 = self.view
         w = (x1 - x0) * factor
         h = (y1 - y0) * factor
-        max_span = max(self.world.w, self.world.h) * 1.2
+        if self.zoom_region is not None:
+            # Village view is meant to be the deepest zoom level -- cap
+            # zoom-out to (roughly) the faction's own territory, the same
+            # extent _enter_village_view already zooms to on entry, so the
+            # free camera can't wheel its way back out to seeing the whole
+            # world while nominally still "in" village view. "Back to
+            # Region"/"Back to World" are the correct way to go wider than
+            # that.
+            bx0, by0, bx1, by1 = self.zoom_faction.meta["bbox"]
+            max_span = max(bx1 - bx0, by1 - by0) * 1.3
+        else:
+            max_span = max(self.world.w, self.world.h) * 1.2
         w = max(_MIN_ZOOM_CELLS, min(max_span, w))
         h = max(_MIN_ZOOM_CELLS, min(max_span, h))
         fx = (wx - x0) / (x1 - x0) if x1 != x0 else 0.5
@@ -1785,6 +1958,16 @@ class MapView(tk.Frame):
         # the player's own commanders, checked before normal region/faction
         # selection so a commander is selectable identically at any zoom
         # level rather than duplicating this in all three click branches.
+        # Cleared here unconditionally first (only re-set below on an
+        # actual hit) — otherwise a commander selected earlier stays
+        # "selected" internally forever once the user clicks something
+        # else instead, since nothing else in this function used to clear
+        # it; that used to be harmless (nothing re-displayed a stale
+        # selection on its own), but refresh() now re-shows whatever's
+        # currently selected after every End Turn (see that method), so a
+        # stale commander selection would silently keep overriding
+        # whatever the player actually meant to have selected.
+        self.selected_commander = None
         player = self._player_faction()
         if player is not None:
             player_idx = wd.factions.index(player)
@@ -1831,7 +2014,8 @@ class MapView(tk.Frame):
                 st = wd.settlements[sid]
                 sx = (st.pos[0] + 0.5 - vx0) * scale
                 sy = (st.pos[1] + 0.5 - vy0) * scale
-                if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= 10 ** 2:
+                hit_r = self._marker_radius(_SETTLE_STYLE[st.kind]["base"]) + 4
+                if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= hit_r ** 2:
                     self.selected_settlement = st
                     self._show_settlement(st)
                     self.render()
@@ -1874,7 +2058,8 @@ class MapView(tk.Frame):
                     continue
                 sx = (v.pos[0] + 0.5 - vx0) * scale
                 sy = (v.pos[1] + 0.5 - vy0) * scale
-                if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= 8 ** 2:
+                hit_r = self._marker_radius(_VILLAGE_STYLE["base"]) + 4
+                if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= hit_r ** 2:
                     self.selected_village = v
                     self._show_village(v)
                     self.render()
@@ -1883,7 +2068,8 @@ class MapView(tk.Frame):
                 st = wd.settlements[sid]
                 sx = (st.pos[0] + 0.5 - vx0) * scale
                 sy = (st.pos[1] + 0.5 - vy0) * scale
-                if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= 10 ** 2:
+                hit_r = self._marker_radius(_SETTLE_STYLE[st.kind]["base"]) + 4
+                if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= hit_r ** 2:
                     self.selected_settlement = st
                     self._show_settlement(st)
                     self.render()
@@ -2093,13 +2279,33 @@ class MapView(tk.Frame):
         aren't about biome at all). Sample spacing is derived from the
         current zoom, not a fixed world-cell count, so on-screen symbol
         density — and render cost — stays roughly constant regardless of
-        how much world is visible (world view vs. zoomed into one region)."""
+        how much world is visible (world view vs. zoomed into one region).
+
+        That screen-spacing formula alone used to leave a mid-zoom
+        performance cliff: for any zoom level where it computes LESS than
+        _TERRAIN_SYMBOL_MIN_WORLD_SPACING, the floor overrides it and
+        spacing stays pinned at the floor while the visible world AREA
+        keeps growing as you zoom out further -- sample count grows with
+        that area (quadratically with view span) until the screen-spacing
+        formula finally exceeds the floor on its own and takes back over.
+        Very close zoom never notices (visible area too small to matter)
+        and very far zoom never notices either (screen-spacing formula is
+        already the binding constraint by then) -- it's specifically the
+        middle band in between, right where a player actually spends most
+        of their time, that used to pay for thousands of extra canvas draw
+        calls a frame. _TERRAIN_SYMBOL_MAX_COUNT closes that gap directly
+        with a hard cap on total sampled points, rather than retuning the
+        floor (which would just move the same cliff to a different zoom
+        range instead of removing it)."""
         if self.mode != "political":
             return
         wd = self.world
         scale = self._place[2]
         spacing = max(_TERRAIN_SYMBOL_MIN_WORLD_SPACING,
                      round(_TERRAIN_SYMBOL_SCREEN_SPACING / max(scale, 0.01)))
+        visible_area = max(1, (bx1 - bx0) * (by1 - by0))
+        area_spacing = math.ceil(math.sqrt(visible_area / _TERRAIN_SYMBOL_MAX_COUNT))
+        spacing = max(spacing, area_spacing)
         r = max(2.5, scale * spacing * 0.22)
         gy0 = by0 - by0 % spacing
         gx0 = bx0 - bx0 % spacing
@@ -2187,6 +2393,15 @@ class MapView(tk.Frame):
             c.create_polygon(x, y - r, x + r, y, x, y + r, x - r, y,
                              fill=style["fill"], outline=style["outline"], width=1.5)
 
+    def _marker_radius(self, base_world_size):
+        """Screen-pixel radius for a settlement/village marker: `base_world_size`
+        (world-cell units) times the current zoom scale, floored/capped so a
+        marker is never illegibly tiny zoomed out nor a giant blob zoomed
+        all the way in. Shared by the draw calls and the click hit-tests
+        (_on_click) so a marker's clickable area always matches what's
+        actually drawn."""
+        return max(_MARKER_MIN_R, min(_MARKER_MAX_R, base_world_size * self._place[2]))
+
     def _draw_settlements(self, c, screen):
         """Markers: city = circle, castle = triangle, town = square. The world
         view shows only cities (to avoid clutter); the region view shows every
@@ -2205,7 +2420,7 @@ class MapView(tk.Frame):
             st = wd.settlements[sid]
             style = _SETTLE_STYLE[st.kind]
             x, y = screen(st.pos[0] + 0.5, st.pos[1] + 0.5)
-            r = style["r"]
+            r = self._marker_radius(style["base"])
             if st is self.selected_settlement:      # selection ring
                 c.create_oval(x - r - 3, y - r - 3, x + r + 3, y + r + 3,
                               outline="#ffffff", width=2)
@@ -2423,7 +2638,7 @@ class MapView(tk.Frame):
             return
         wd = self.world
         style = _VILLAGE_STYLE
-        r = style["r"]
+        r = self._marker_radius(style["base"])
         zf = wd.factions.index(self.zoom_faction)
         villages = [v for v in wd.villages if v.faction_idx == zf]
         show_names = len(villages) <= _VILLAGE_LABEL_LIMIT

@@ -167,11 +167,22 @@ def form_alliance(world, player, target):
     score = standing + species_score * _SPECIES_WEIGHT + complementarity * _COMPLEMENTARITY_WEIGHT
 
     if score < ALLIANCE_ACCEPT_THRESHOLD:
+        # ALLY_THRESHOLD == ALLIANCE_ACCEPT_THRESHOLD (both 50), so once
+        # standing clears the gate above to even reach this weighing step,
+        # it alone already meets the accept threshold -- species_score and
+        # complementarity can only add from there, and complementarity
+        # (see _resource_complementarity) is always >= 0. That leaves
+        # species_score < 0 as the ONLY way this branch is ever actually
+        # reached (species_score is always an integer in -2..2, so that's
+        # either -2 or -1) -- there's no reachable "economics were too
+        # weak" case to attribute here, unlike it might first appear.
         if species_score <= -2:
             reason = (f"the {target.meta.get('species')} have never trusted "
                       f"the {player.meta.get('species')}")
         else:
-            reason = "they see little to gain from closer ties"
+            reason = (f"relations between the {player.meta.get('species')} "
+                      f"and the {target.meta.get('species')} have never "
+                      f"been especially warm")
         return f"{target.name} declines the alliance — {reason}."
 
     wm.set_relationship(player.id, target.id, stance=Stance.ALLY, tension=0,
@@ -198,7 +209,17 @@ def evaluate_trade_route(world, proposer, target):
             + complementarity * _TRADE_COMPLEMENTARITY_WEIGHT)
     if score >= TRADE_ROUTE_ACCEPT_THRESHOLD:
         return True, None
-    if species_score <= -2:
-        return False, (f"the {target.meta.get('species')} have never trusted "
-                       f"{proposer.meta.get('species')} traders")
-    return False, "they see too little economic benefit in it right now"
+    # Unlike form_alliance, species distrust is the ONLY thing that can
+    # ever actually cause a trade-route decline here, not just the
+    # dominant one: eligible_to_trade already guarantees standing >= 10
+    # by the time this runs, complementarity is always >= 0 (can only
+    # help, never hurt), and this function's own weight/threshold
+    # (_TRADE_SPECIES_WEIGHT=10, TRADE_ROUTE_ACCEPT_THRESHOLD=0) make
+    # species_score == -1 break exactly even in the worst case (10 - 10 +
+    # 0 = 0, which still clears the >= 0 bar) -- only species_score <= -2
+    # can ever push the total under it. So there's no "genuinely low
+    # complementarity" case to attribute here the way there is for
+    # form_alliance (a much higher bar, see that function) -- if this
+    # ever declines, it's species.
+    return False, (f"the {target.meta.get('species')} have never trusted "
+                   f"{proposer.meta.get('species')} traders")

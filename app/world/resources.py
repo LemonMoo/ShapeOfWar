@@ -17,12 +17,11 @@ real populations (LIVESTOCK_DYNAMICS), and finally consumption
 advance_settlement_consumption is what makes a settlement's population
 need Food/Firewood/Clothes for real, replacing the old flat
 SETTLEMENT_UPKEEP draw entirely — see Phase 8's section for the full
-story). BIOME_YIELDS/CLIMATE_MODIFIERS/SEASON_MODIFIERS below still
-reference old aggregated resource names (Wood, Fish, Gems, Spices,
-Textiles, Mithril, Steel...) from before this overhaul and haven't been
-migrated to the new registry yet -- Grain and Fresh Water are the two
-exceptions, fully retired rather than left stale (see the STALE section
-below for why).
+story). The old aggregated-resource system this overhaul replaced (Wood,
+Fish, Gems, Spices, Textiles, Mithril, Steel, Grain, Fresh Water...) is
+fully gone now -- each name was either retired outright or migrated to a
+real entry in the registry above (see the removal note above
+compute_region_yield for the full history).
 """
 import random
 from collections import defaultdict
@@ -75,6 +74,8 @@ RESOURCES = {
     "Gems":     {"category": "Mining", "tier": 2},   # Phase 13 -- Jewelry's raw input;
                                                        # promoted from the old stale BIOME_YIELDS
                                                        # name (see the STALE section)
+    "Gold Ore": {"category": "Mining", "tier": 2},   # Gold's raw input -- see the Currency
+                                                       # section below
 
     # Food Products
     "Flour":    {"category": "Food Products", "tier": 3},
@@ -84,12 +85,17 @@ RESOURCES = {
     "Cheese":   {"category": "Food Products", "tier": 3},
     "Eggs":     {"category": "Food Products", "tier": 3},
     "Honey":    {"category": "Food Products", "tier": 3},
-    "Wool":     {"category": "Food Products", "tier": 3},
 
     # Manufactured Goods
     "Planks":   {"category": "Manufactured Goods", "tier": 4},
     "Bricks":   {"category": "Manufactured Goods", "tier": 4},
     "Glass":    {"category": "Manufactured Goods", "tier": 4},
+    # Wool: a sheared (not eaten) Livestock byproduct -- a fiber, not food,
+    # so it belongs here rather than Food Products despite being a
+    # "processed once from Livestock" good like the rest of that category.
+    # Tier 4 to match every other Manufactured Good (this registry has no
+    # resource anywhere whose tier doesn't match its category).
+    "Wool":     {"category": "Manufactured Goods", "tier": 4},
     "Cloth":    {"category": "Manufactured Goods", "tier": 4},
     "Clothes":  {"category": "Manufactured Goods", "tier": 4},
     "Leather":  {"category": "Manufactured Goods", "tier": 4},
@@ -100,6 +106,13 @@ RESOURCES = {
     # plain processed intermediate exactly like Flour or Cloth, just one
     # more step removed from its raw input (Cotton).
     "Paper":    {"category": "Manufactured Goods", "tier": 4},
+    # Gold -- the currency itself, as of the Currency overhaul (see that
+    # section below): a real Manufactured Good now, minted from Gold Ore at
+    # a Mint, not a flat per-turn tax number. Tier 4 like every other
+    # Manufactured Good; its actual gold-equivalent VALUE is handled as a
+    # special case in resource_value() (1 unit of Gold is worth 1 Gold, by
+    # definition) rather than the tier-9 default every other tier-4 good gets.
+    "Gold":     {"category": "Manufactured Goods", "tier": 4},
 
     # Luxury Goods (Phase 13) -- "only after the core economy works should
     # luxuries exist." First real use of the `luxury` property flag (see
@@ -172,7 +185,6 @@ _CATEGORY_PROPERTY_DEFAULTS = {
 _PROPERTY_OVERRIDES = {
     "Salt":    {"edible": True},     # the one edible Mining resource
     "Cotton":  {"edible": False},    # the one non-edible Crop -- a fiber, not a food
-    "Wool":    {"edible": False},    # the one non-edible Food Product -- a fiber, not a food
     "Bricks":  {"renewable": False},  # fired from Clay -- a Mining (non-renewable) input
     "Glass":   {"renewable": False},  # made from Sand -- a Mining (non-renewable) input
     "Tools":   {"renewable": False},  # smithed from Iron/other ore
@@ -181,6 +193,7 @@ _PROPERTY_OVERRIDES = {
     "Wine":    {"edible": True},     # drunk, not eaten, but still consumed by mouth
     "Beer":    {"edible": True},
     "Jewelry": {"renewable": False},  # set with Gems -- a Mining (non-renewable) input
+    "Gold":    {"renewable": False},  # struck from Gold Ore -- a Mining (non-renewable) input
 }
 
 _SPOIL_RATE = {
@@ -196,17 +209,18 @@ _SPOIL_RATE = {
     "Logs": 0.0, "Hardwood": 0.0, "Softwood": 0.0, "Firewood": 0.0, "Resin": 0.02,
     # Mining -- nothing here spoils, salt included (it's a preservative).
     "Iron": 0.0, "Copper": 0.0, "Tin": 0.0, "Coal": 0.0,
-    "Stone": 0.0, "Clay": 0.0, "Sand": 0.0, "Salt": 0.0, "Gems": 0.0,
+    "Stone": 0.0, "Clay": 0.0, "Sand": 0.0, "Salt": 0.0, "Gems": 0.0, "Gold Ore": 0.0,
     # Food Products -- the most perishable tier by far. Milk worst, then
     # Bread ("spoils quickly"), then Meat/Eggs; Cheese is cured/durable;
-    # Honey essentially never spoils. Wool is the outlier in this category
-    # (raw fiber, not food) -- durable, only mildly at risk from moths/damp.
+    # Honey essentially never spoils.
     "Flour": 0.05, "Bread": 0.35, "Meat": 0.30, "Milk": 0.40,
-    "Cheese": 0.05, "Eggs": 0.15, "Honey": 0.0, "Wool": 0.01,
-    # Manufactured Goods -- finished/durable, none of them spoil. Paper is
-    # the one exception in this tier (damp/mildew risk), a small nonzero.
+    "Cheese": 0.05, "Eggs": 0.15, "Honey": 0.0,
+    # Manufactured Goods -- finished/durable, almost none of them spoil.
+    # Wool is a mild exception (raw fiber, only lightly at risk from moths/
+    # damp); Paper is the other (damp/mildew risk).
     "Planks": 0.0, "Bricks": 0.0, "Glass": 0.0, "Cloth": 0.0, "Clothes": 0.0,
     "Leather": 0.0, "Tools": 0.0, "Weapons": 0.0, "Shields": 0.0, "Paper": 0.02,
+    "Wool": 0.01, "Gold": 0.0,
     # Luxury Goods -- Beer spoils fastest (real shelf life is short); Wine
     # keeps much better but still ages; Candles slowly degrade (melt/go
     # brittle). Jewelry/Furniture/Fine Clothes/Books are all finished,
@@ -236,7 +250,12 @@ BASE_VALUE_BY_TIER = {1: 2, 2: 3, 3: 5, 4: 9, 5: 15}   # gold/unit before scarci
 BIOMES = ["mountain", "forest", "plains", "coastal", "desert", "swamp"]
 CLIMATES = ["temperate", "arid", "cold", "humid"]
 SEASONS = ["Spring", "Summer", "Autumn", "Winter"]
-TURNS_PER_SEASON = 8
+# 25 turns/season (100 turns/year) -- raised from 8 (32 turns/year) so a
+# year is a round, legible number and travel time reads as a smaller
+# fraction of a year now that the map itself has gotten larger (multi-
+# continent worldgen) without movement speed itself changing.
+TURNS_PER_SEASON = 25
+YEAR_LENGTH_TURNS = TURNS_PER_SEASON * len(SEASONS)
 
 # --- Phase 3: where a resource actually appears -----------------------------
 # Only the 28 *raw* resources (Crops/Livestock/Forestry/Mining -- tiers 1-2)
@@ -385,6 +404,12 @@ RESOURCE_SPAWN = {
                 # which sourced it from the same two biomes (mountain seams,
                 # desert placer deposits) -- kept that geography, just made
                 # it real.
+    "Gold Ore": {"biomes": {"mountain"}, "elevation": (0.55, 0.80),
+                "climate": {}, "fertility_weight": 0.0, "rarity": "rare"},
+                # Currency overhaul -- real deposits, mountain seams like
+                # Iron/Coal, but scarcer (rare, same as Gems) so a Mint's
+                # output stays meaningfully bottlenecked by geography, not
+                # something every mountain region can freely mass-produce.
 }
 
 # "How rare" as a multiplier -- deliberately separate from crafting tier
@@ -396,8 +421,7 @@ RARITY_ABUNDANCE = {"common": 1.0, "uncommon": 0.5, "rare": 0.2}
 
 def climate_affinity(resource, climate):
     """Yield multiplier for `resource` in `climate`, per RESOURCE_SPAWN --
-    missing = 1.0 (neutral), same convention as the old
-    get_climate_modifier() below."""
+    missing = 1.0 (neutral)."""
     return RESOURCE_SPAWN.get(resource, {}).get("climate", {}).get(climate, 1.0)
 
 
@@ -429,16 +453,13 @@ def raw_resources_for_biome(biome):
 # requirement of their own -- they're presumably built at a settlement, not
 # tied to a specific tile.
 #
-# Deliberately NOT defined yet, per the "outputs only for now" decision:
-# what raw input(s) a processing building actually consumes, at what ratio,
-# or where a workshop needs to be sited relative to its input's source (a
+# Where a workshop needs to be sited relative to its input's source (a
 # Sawmill presumably wants to be near a Forester, a Mill near grain
-# farmland, etc.) -- that's the production-chain step, still to come. Nor
-# do these buildings gate/replace the automatic per-region yield in
-# BIOME_YIELDS below yet, even though that's the intended eventual
-# direction (a region should only yield Iron once an Iron Mine actually
-# stands on it) -- wiring that in is its own future step, same as
-# everything else already marked STALE below.
+# farmland, etc.) is still not modeled -- a building name here is
+# informational/flavor, not a placement requirement, for anything past a
+# raw resource's own biome. What a processing building actually consumes,
+# at what ratio, IS defined now (see RECIPES below) -- that part of the
+# original "outputs only for now" deferral has since been done.
 #
 # One modeling wrinkle worth flagging rather than silently smoothing over:
 # Milk/Eggs/Honey each get their own dedicated building (Dairy/Henhouse/
@@ -495,6 +516,7 @@ BUILDINGS = {
     "Sand":     {"name": "Sand Pit"},
     "Salt":     {"name": "Saltern"},
     "Gems":     {"name": "Gem Mine"},
+    "Gold Ore": {"name": "Gold Mine"},
 
     # Food Products -- workshops, no biome requirement of their own.
     "Flour":    {"name": "Mill"},
@@ -517,6 +539,7 @@ BUILDINGS = {
     "Weapons":  {"name": "Weaponsmith"},
     "Shields":  {"name": "Shieldwright"},
     "Paper":    {"name": "Papermill"},
+    "Gold":     {"name": "Mint"},
 
     # Luxury Goods (Phase 13) -- workshops, no biome requirement of their
     # own, same as every other processed-good building.
@@ -616,6 +639,10 @@ RECIPES = {
     "Weapons": [{"inputs": ["Iron", "Softwood"]}],       # Weaponsmith -- blade + haft
     "Shields": [{"inputs": ["Iron", "Hardwood"]}],       # Shieldwright -- metal rim/boss + wooden face
     "Paper":   [{"inputs": ["Cotton"]}],                 # Papermill -- rag paper, not wood pulp
+    "Gold":    [{"inputs": ["Gold Ore"]}],                # Mint -- struck into coin from raw ore,
+                                                          # same 1:1 conversion shape as every
+                                                          # other recipe here (see the Currency
+                                                          # section for the full picture)
 
     # Luxury Goods (Phase 13). Wine/Beer/Furniture/Fine Clothes/Candles all
     # reuse an existing raw/processed resource one step further down the
@@ -840,6 +867,31 @@ def compute_industry_yield(region, season):
     return result
 
 
+def village_projected_annual_yield(world, village):
+    """{resource: amount} this Village can expect to receive over a full
+    year (len(SEASONS) * TURNS_PER_SEASON turns) from its region's
+    production -- real numbers, not the flavor farm_output stat (see the
+    Village class). Crops only count during their own Harvest season (see
+    GROWTH_CYCLE/compute_crop_yield); Forestry/Mining are continuous,
+    every turn, all year (see compute_industry_yield). Both are actually
+    computed at the REGION level and split evenly across every Village the
+    region has (see _route_farm_production), so this is specifically this
+    village's own share, not the region's raw total -- a region with more
+    villages means a smaller individual share of the same regional yield,
+    not a bigger one."""
+    region = world.regions[village.region_id]
+    n_targets = max(1, len(getattr(region, "villages", [])))
+    annual = defaultdict(float)
+    for season in SEASONS:
+        for crop, amount in compute_crop_yield(region, season).items():
+            annual[crop] += amount * TURNS_PER_SEASON
+    # No season gating for Forestry/Mining -- one season's worth already
+    # represents every season, so just scale by the full year's turn count.
+    for resource, amount in compute_industry_yield(region, world.season).items():
+        annual[resource] += amount * TURNS_PER_SEASON * len(SEASONS)
+    return {r: round(a / n_targets) for r, a in annual.items() if round(a / n_targets) > 0}
+
+
 # --- Phase 7: livestock -- populations, not crops ---------------------------
 # Animals don't behave like Crops: instead of a stateless stage that's just
 # a function of the current season, a Livestock population is real,
@@ -929,12 +981,19 @@ def _ensure_region_livestock(region):
     return region.livestock
 
 
+def current_year(turn):
+    """1-indexed in-game year for `turn` -- turn 1..YEAR_LENGTH_TURNS is
+    Year 1, etc. The UI's persistent year counter and year-rollover popup
+    both derive from this, same YEAR_LENGTH_TURNS boundary _is_new_year
+    uses below."""
+    return (turn - 1) // YEAR_LENGTH_TURNS + 1
+
+
 def _is_new_year(turn):
     """True on the first turn of every 4-season cycle -- the "every year"
     boundary births/natural deaths/slaughter fire on, unlike a Crop
     harvest (within-year) or the old Grain system (every turn)."""
-    turns_per_year = TURNS_PER_SEASON * len(SEASONS)
-    return (turn - 1) % turns_per_year == 0
+    return (turn - 1) % YEAR_LENGTH_TURNS == 0
 
 
 def advance_livestock(world):
@@ -1323,9 +1382,9 @@ _SETTLEMENT_STORAGE_RESOURCES = ({name for name, spec in RESOURCES.items()
                                  if spec["category"] in
                                  ("Crops", "Food Products", "Forestry", "Mining",
                                   "Luxury Goods")}
-                                 | {"Cloth", "Clothes", "Leather",
+                                 | {"Wool", "Cloth", "Clothes", "Leather",
                                     "Planks", "Bricks", "Glass",
-                                    "Tools", "Weapons", "Shields", "Paper"})
+                                    "Tools", "Weapons", "Shields", "Paper", "Gold"})
 
 # Rough placeholders, not balance-tuned (same caveat as every quantity in
 # this file).
@@ -1741,75 +1800,21 @@ def advance_local_shipments(world):
     world.local_shipments = remaining
 
 
-# --- STALE, pending the next overhaul step ----------------------------------
-# BIOME_YIELDS, CLIMATE_MODIFIERS, and SEASON_MODIFIERS below still
-# reference old aggregated resource names (Fish, Spices, Textiles,
-# Mithril, Steel, Silks...), not the new registry above. Region yield
-# generation (compute_region_yield) still runs on these for whatever
-# hasn't been migrated yet, so the game still functions on the old names
-# for those -- rewiring the rest to the new per-resource registry is later
-# work, not part of this step. Grain and Fresh Water were fully retired
-# (not just left stale) in an earlier phase: Grain held no value in the
-# new system at all (never part of the tier-based registry to begin
-# with), and its role -- population's food need -- is now Phase 8's
-# settlement_needs, scaled off real population instead of a flat
-# per-biome/per-settlement roll; Fresh Water was in the exact same spot
-# (Water consumption is explicitly future work, never modeled). Iron,
-# Coal, Stone, and Wood were retired in Phase 12 (see
-# compute_industry_yield above); Gems is the most recent retirement
-# (Phase 13, see the Luxury Goods section below -- Jewelry's raw input),
-# promoted into RESOURCE_SPAWN with the same mountain/desert geography the
-# old entry used. All of these now have a real, live replacement, so
-# keeping them here too would double-produce them -- once for free into
-# the old national pool, once for real into village storage -- the same
-# reasoning each time, going back to the original Meat/BIOME_YIELDS
-# cleanup. Mithril/Textiles/Silks/Spices/Steel have no new-registry
-# equivalent yet and are deliberately left alone, same as Fish.
-
-# Fish is grown and eaten locally, so it's exempt from the remoteness
-# penalty applied to everything else below. Meat used to be here too, but
-# it's retired from this whole old system now (see the module docstring's
-# note on the BIOME_YIELDS incompatibility) -- there's no reason for meat
-# to flow continuously from the land like a passive yield once it has a
-# real source: Livestock populations that actually have to be raised and
-# slaughtered (Phase 7/Butcher), not an infinite backdrop resource.
-_LOCAL_FOOD = {"Fish"}
-
-# --- geography -> base yield (per cell, before climate/season/distance) ----
-BIOME_YIELDS = {
-    "mountain": {"Steel": 1.2, "Mithril": 0.04},
-    "forest":   {"Textiles": 0.1},
-    "plains":   {"Textiles": 1.0},
-    "coastal":  {"Fish": 2.5, "Silks": 0.15},
-    "desert":   {"Spices": 1.2},
-    "swamp":    {"Fish": 0.3},
-}
-
-# --- climate/season -> per-resource multiplier (missing = 1.0) -------------
-CLIMATE_MODIFIERS = {
-    "temperate": {},
-    "arid": {"Spices": 1.6, "Textiles": 0.8},
-    "cold": {"Fish": 0.85},
-    "humid": {"Fish": 1.3, "Steel": 0.85, "Textiles": 1.1},
-}
-
-SEASON_MODIFIERS = {
-    "Spring": {"Textiles": 1.1},
-    "Summer": {"Fish": 1.15, "Spices": 1.1},
-    "Autumn": {"Spices": 1.3, "Textiles": 1.2},
-    "Winter": {"Fish": 0.7},
-}
-
-
-def get_climate_modifier(resource, climate):
-    return CLIMATE_MODIFIERS.get(climate, {}).get(resource, 1.0)
-
-
-def get_seasonal_modifier(resource, season):
-    return SEASON_MODIFIERS.get(season, {}).get(resource, 1.0)
-
-
 # --- biome / climate classification -----------------------------------------
+# BIOME_YIELDS/CLIMATE_MODIFIERS/SEASON_MODIFIERS (the old geography-driven
+# aggregate-resource system that predates the tier-based registry above)
+# used to still be live here for whichever old names hadn't been migrated
+# yet: Grain/Fresh Water were retired outright (no value in the new system
+# at all); Iron/Coal/Stone/Wood/Gems each got a real replacement in the new
+# registry (Phase 12/13) and were removed once that replacement existed, to
+# avoid double-producing them; Mithril/Textiles had no replacement and were
+# just removed outright. Fish/Silks/Spices/Steel were the last four still
+# running on this old system -- also removed outright now (no live-registry
+# equivalent, same clean removal Mithril/Textiles got), which leaves
+# nothing left running on it at all, so the whole old system (BIOME_YIELDS/
+# CLIMATE_MODIFIERS/SEASON_MODIFIERS/get_climate_modifier/
+# get_seasonal_modifier, and compute_region_yield's old geography-driven
+# raw-yield loop) is removed along with them rather than kept around empty.
 _MOUNTAIN_RELIEF = 0.55     # elevation (0..1 above sea level) that reads as mountains
 _COASTAL_REACH = 3          # cells from open water that still count as coastal
 _DESERT_MOISTURE = 0.32
@@ -1853,43 +1858,17 @@ def classify_climate(latitude_temp, moisture):
 
 
 # --- per-turn yield ----------------------------------------------------------
-# Non-food resources are harder to get to market from remote regions; food
-# is grown and eaten locally so it's unaffected by distance from a settlement.
-_REMOTE_MIN = 0.55
-_REMOTE_SPAN = 0.45
-
-
 def compute_region_yield(region, season):
-    """This region's resource production for `season`, using its cached
-    (static) biome_counts/dominant_climate/settle_proximity plus villages'
-    farm output (folded into Grain) — everything geography contributes,
-    modulated by climate and the current season. Also folds in the new
-    per-crop, season-gated production from compute_crop_yield (Phase 6) --
-    real, live output for Wheat/Barley/Rice/Cotton/etc -- and the
-    continuous, un-gated Forestry/Mining production from
-    compute_industry_yield (Phase 12). Villages' own farm_output no longer
-    feeds any region yield at all (it used to feed a now-retired aggregate
-    Grain line) -- it's purely a village prosperity input now, same role
-    population plays for a settlement (see village_goods_wealth_value)."""
-    raw = defaultdict(float)
-    for biome, count in getattr(region, "biome_counts", {}).items():
-        for resource, weight in BIOME_YIELDS.get(biome, {}).items():
-            raw[resource] += weight * count
-
-    climate = getattr(region, "dominant_climate", "temperate")
-    proximity = getattr(region, "settle_proximity", 0.5)
-    remote_factor = _REMOTE_MIN + _REMOTE_SPAN * proximity
-
+    """This region's resource production for `season`: the per-crop,
+    season-gated production from compute_crop_yield (real, live output for
+    Wheat/Barley/Rice/Cotton/etc) plus the continuous, un-gated Forestry/
+    Mining production from compute_industry_yield (Phase 12). Every raw
+    resource in the game comes from one of these two now -- the old
+    geography-driven BIOME_YIELDS/CLIMATE_MODIFIERS/SEASON_MODIFIERS system
+    this function used to also blend in has been fully retired (see the
+    STALE-removal note above compute_region_yield's neighboring biome/
+    climate classification functions)."""
     result = {}
-    for resource, amount in raw.items():
-        amount *= get_climate_modifier(resource, climate)
-        amount *= get_seasonal_modifier(resource, season)
-        if resource not in _LOCAL_FOOD:
-            amount *= remote_factor
-        amount = round(amount)
-        if amount:
-            result[resource] = amount
-
     for crop, amount in compute_crop_yield(region, season).items():
         result[crop] = result.get(crop, 0) + amount
     for resource, amount in compute_industry_yield(region, season).items():
@@ -1905,17 +1884,16 @@ STORAGE_CAP_SCALE_PER_SETTLEMENT = 0.1
 _DEFAULT_CAP_BASE = 3000
 
 # Perishables rot in storage even under cap; everything else defaults to 0.
-# STALE (see the module docstring): this is still what actually runs, keyed
-# to the old resource names production still emits today. The new registry
-# above already carries an equivalent per-resource "spoil_rate" property for
-# every current resource -- once production is rewired to emit those names,
-# _apply_spoilage should read RESOURCES[resource]["spoil_rate"] instead and
-# this dict can go away. Grain/Fresh Water dropped from here along with
-# everywhere else they used to appear (see the module docstring).
-SPOILAGE_RATE = {
-    "Fish": 0.30,
-    "Spices": 0.05,
-}
+# This is the old shared-national-pool spoilage table -- every resource
+# that used to key into it (Grain/Fresh Water, Iron/Coal/Stone/Wood/Gems,
+# Mithril/Textiles, Fish/Silks/Spices/Steel) has since been either retired
+# outright or migrated to the new registry's own per-resource "spoil_rate"
+# property (see _apply_settlement_spoilage_and_overflow, the real spoilage
+# path every current resource actually uses), leaving this permanently
+# empty -- kept only as the generic "old shared pool" fallback can_afford/
+# _pay_cost/etc. still nominally support, same as nation.stats["resources"]
+# itself (see that dict's own note).
+SPOILAGE_RATE = {}
 
 
 def _storage_cap(nation, resource):
@@ -1953,16 +1931,16 @@ def _recompute_military(nation, world):
     one national Iron number to read off nation.stats["resources"] --
     summed across every settlement this faction owns instead, same
     aggregate-economy view trade.py's _faction_settlement_total already
-    needed for the same reason. Steel has no live-registry replacement yet
-    (see the STALE section) and still reads the old national pool."""
+    needed for the same reason. There used to be a second bonus term here
+    reading Steel off the old national pool -- removed along with Steel
+    itself (see the legacy-resource removal note above compute_region_yield)
+    rather than left reading a resource that no longer exists."""
     species = SPECIES.get(nation.meta.get("species"), {})
-    res = nation.stats.get("resources", {})
     cells = nation.meta.get("cells", 0)
     iron_stock = sum(getattr(world.settlements[sid], "resources", {}).get("Iron", 0)
                      for sid in nation.meta.get("settlements", []))
     iron_bonus = min(25, iron_stock / 40)
-    steel_bonus = min(20, res.get("Steel", 0) / 30)
-    military = 30 + min(20, cells / 40) + iron_bonus + steel_bonus + species.get("mil", 0)
+    military = 30 + min(20, cells / 40) + iron_bonus + species.get("mil", 0)
     nation.stats["military"] = max(15, min(99, int(military)))
 
 
@@ -1975,15 +1953,21 @@ PROSPERITY_STARTING = 0.0       # every settlement/village starts with none — 
 PROSPERITY_VALUE_CEIL = 140.0   # goods+wealth gold-value at which prosperity hits 100
 # Fraction of the gap to target closed each turn -- deliberately slow, so a
 # meter is a long-term payoff (~90% of the way to a steady target takes
-# roughly 230 turns / ~7 in-game years at TURNS_PER_SEASON=8), not something
-# that fills up within the first few turns of a new settlement's life.
+# roughly 230 turns, ~2.3 in-game years at the current TURNS_PER_SEASON),
+# not something that fills up within the first few turns of a new
+# settlement's life.
 PROSPERITY_EASE = 0.01
 
 
 def resource_value(resource, amount):
     """Gold-equivalent value of `amount` units of `resource` — the tier
     pricing every trade deal already uses (app/world/trade.py), reused here
-    so "value of goods" means the same thing everywhere in the economy."""
+    so "value of goods" means the same thing everywhere in the economy.
+    Gold itself is the one special case: it doesn't get priced off its
+    (Manufactured Goods) tier like everything else -- a unit of Gold IS a
+    unit of gold-equivalent value, by definition, 1:1."""
+    if resource == "Gold":
+        return amount
     tier = RESOURCES.get(resource, {}).get("tier", 3)
     return amount * BASE_VALUE_BY_TIER.get(tier, 3)
 
@@ -2023,31 +2007,35 @@ def seed_prosperity():
     return PROSPERITY_STARTING
 
 
-def _faction_health_factor(production_value, consumption_value, gold_income):
-    """>1 when a faction produced more value (+ gold income) than its
-    settlements needed this turn, <1 when it's running a deficit — the
-    thing that actually makes every one of its settlements' prosperity
-    meters rise or fall over time, on top of each settlement's own goods/
-    wealth value. `consumption_value` is the gold-value of what
-    settlements needed under Phase 8 (see advance_settlement_consumption's
-    return value) — used to be the old flat upkeep roll's value."""
+def _faction_health_factor(production_value, consumption_value):
+    """>1 when a faction produced more value than its settlements needed
+    this turn, <1 when it's running a deficit — the thing that actually
+    makes every one of its settlements' prosperity meters rise or fall over
+    time, on top of each settlement's own goods/wealth value.
+    `consumption_value` is the gold-value of what settlements needed under
+    Phase 8 (see advance_settlement_consumption's return value) — used to
+    be the old flat upkeep roll's value. There used to be a separate
+    `gold_income` term here on top of `production_value` (the old flat
+    per-turn tax draw) -- retired along with that whole mechanic (see the
+    Currency overhaul section): Gold is real settlement-storage production
+    now, so its value already flows through `production_value` the exact
+    same way Iron's or Wheat's does, with nothing left to add separately."""
     if consumption_value <= 0:
         return 1.0
-    return max(0.5, min(1.5, (production_value + gold_income) / consumption_value))
+    return max(0.5, min(1.5, production_value / consumption_value))
 
 
-def _update_prosperity(world, production_value, consumption_value, gold_income):
+def _update_prosperity(world, production_value, consumption_value):
     """Ease every settlement's and village's prosperity meter toward this
     turn's target — called once per turn from advance_turn, after
-    production/consumption/gold for every faction is known."""
+    production/consumption for every faction is known."""
     villages_by_fac = defaultdict(list)
     for v in world.villages:
         villages_by_fac[v.faction_idx].append(v)
 
     for fac_idx, nation in enumerate(world.factions):
         health = _faction_health_factor(production_value.get(fac_idx, 0.0),
-                                        consumption_value.get(fac_idx, 0.0),
-                                        gold_income.get(fac_idx, 0.0))
+                                        consumption_value.get(fac_idx, 0.0))
         for sid in nation.meta.get("settlements", []):
             st = world.settlements[sid]
             target = _prosperity_target(
@@ -2185,6 +2173,13 @@ def _grow_city_villages(world):
 
 # --- turn loop ---------------------------------------------------------------
 _STARTING_STOCKPILE_TURNS = 6   # turns' worth of production seeded at gen time
+STARTING_GOLD_PER_FACTION = 900   # a faction's total starting Gold reserve
+                                   # (Currency overhaul), split evenly across
+                                   # its own settlements -- not derived from
+                                   # _STARTING_STOCKPILE_TURNS like everything
+                                   # else above, since Gold has no organic
+                                   # "per-turn production" figure to scale
+                                   # from until a Mint is actually running
 
 
 def seed_initial_stockpiles(world):
@@ -2197,7 +2192,6 @@ def seed_initial_stockpiles(world):
     military from it."""
     for nation in world.factions:
         nation.stats["resources"] = {}
-        nation.stats["gold"] = 0
     for settlement in world.settlements:
         settlement.resources = {}
     for village in world.villages:
@@ -2217,9 +2211,20 @@ def seed_initial_stockpiles(world):
         for resource, amount in faction_bound.items():
             res[resource] = res.get(resource, 0) + amount * _STARTING_STOCKPILE_TURNS
     for nation in world.factions:
-        tax_per_turn = sum(world.settlements[sid].tax_income
-                           for sid in nation.meta.get("settlements", []))
-        nation.stats["gold"] = tax_per_turn * _STARTING_STOCKPILE_TURNS
+        # Currency overhaul: Gold is minted from Gold Ore now, not drawn
+        # from a flat per-turn tax -- a brand new faction wouldn't have
+        # struck a single coin yet even though _route_farm_production just
+        # seeded its Gold Ore stock like any other raw resource (production
+        # chains only run turn-to-turn, not during this one-time seed). A
+        # modest starting reserve, split evenly across this faction's own
+        # settlements, keeps turn-1 construction/claims/trade from being
+        # completely frozen while the first Mint gets running.
+        sids = nation.meta.get("settlements", [])
+        if sids:
+            share = STARTING_GOLD_PER_FACTION / len(sids)
+            for sid in sids:
+                st = world.settlements[sid]
+                st.resources["Gold"] = st.resources.get("Gold", 0) + round(share)
         _clamp_to_storage(nation)     # the seeded reserve mustn't itself exceed the cap
         _recompute_military(nation, world)
 
@@ -2260,7 +2265,6 @@ def advance_turn(world):
     for fac_idx, value in advance_livestock(world).items():
         production_value[fac_idx] += value
 
-    gold_income_by_fac = {}
     for fac_idx, nation in enumerate(world.factions):
         res = nation.stats.setdefault("resources", {})
         _apply_spoilage(res)
@@ -2268,10 +2272,6 @@ def advance_turn(world):
         for resource, amount in fac_production.items():
             res[resource] = int(res.get(resource, 0) + amount)
         production_value[fac_idx] += _resource_bundle_value(fac_production)
-        gold_income = sum(world.settlements[sid].tax_income
-                          for sid in nation.meta.get("settlements", []))
-        gold_income_by_fac[fac_idx] = gold_income
-        nation.stats["gold"] = nation.stats.get("gold", 0) + gold_income
         _clamp_to_storage(nation)
         _recompute_military(nation, world)
 
@@ -2282,7 +2282,7 @@ def advance_turn(world):
     advance_settlement_storage(world)
     consumption_value = advance_settlement_consumption(world)
 
-    _update_prosperity(world, production_value, consumption_value, gold_income_by_fac)
+    _update_prosperity(world, production_value, consumption_value)
     _grow_city_villages(world)
 
     # Autonomous trade (app/world/trade.py): move existing caravans first —
@@ -2308,7 +2308,8 @@ def advance_turn(world):
     # buyer_idx shape every foreign-trade event has, and map_view's
     # _report_trade_events reads that shape unconditionally.
     world.regional_trade_events = (trade.advance_regional_shipments(world)
-                                   + trade.run_regional_trade(world))
+                                   + trade.run_regional_trade(world)
+                                   + trade.run_sell_to_city(world))
 
     # Player/AI-built settlements + their connecting roads
     # (app/world/construction.py).
