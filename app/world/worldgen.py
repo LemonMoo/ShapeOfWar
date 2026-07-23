@@ -132,6 +132,16 @@ class Settlement:
         # re-scanning every turn.
         self.villages_spawned = 0
         self.village_growth_maxed = False
+        # Consecutive turns this settlement has gone with an unmet Food
+        # need (see resources._consume_node_needs) -- population loss only
+        # actually starts once this crosses STARVATION_GRACE_TURNS, reset
+        # to 0 the moment Food is fully met again. A single bad turn (or a
+        # short rough patch) shouldn't be an irreversible death spiral.
+        self.turns_without_food = 0
+        # Same idea, for an unmet Firewood need in Winter (see
+        # FREEZE_GRACE_TURNS) -- naturally resets to 0 outside Winter too,
+        # since Firewood isn't even needed then.
+        self.turns_without_firewood = 0
 
 
 class Village:
@@ -163,6 +173,11 @@ class Village:
         # budget storage a Settlement has (Phase 9), just a smaller base
         # capacity and no Granary/Warehouse of its own to expand it.
         self.resources = {}
+        # See Settlement.turns_without_food/turns_without_firewood -- same
+        # starvation/freezing-grace counters, same meaning, for a
+        # Village's own population.
+        self.turns_without_food = 0
+        self.turns_without_firewood = 0
 
 
 class Region:
@@ -983,6 +998,12 @@ def _generate_villages(world, rng):
 # (for sea lanes) stay on open water the whole way.
 _ROAD_ELEV_START = 0.62   # elevation (0..1) above which roads start avoiding ground
 _ROAD_ELEV_PEN = 60.0     # steepness of that avoidance — pushes roads around peaks
+_ROAD_MOUNTAIN_MULT = 1.5   # Mountain-biome cells cost 50% more outright (real quarrying/
+                            # grading expense, not just the elevation curve above) --
+                            # on top of, not instead of, the elevation penalty, so a
+                            # low-relief mountain-biome cell (e.g. a foothill just past
+                            # the classification threshold) still costs a bit extra even
+                            # where the elevation curve alone wouldn't yet notice it
 _ROAD_RIVER_PEN = 25.0    # crossing a river costs extra (a ford/bridge), not blocked --
                           # steep enough that a route only actually crosses when
                           # there's genuinely no reasonable way around (raised from
@@ -1056,6 +1077,8 @@ def _elev_cost(world, base_cost, cell, faction_idx=None):
     over = world.height[y][x] - _ROAD_ELEV_START
     if over > 0:
         cost += _ROAD_ELEV_PEN * over * over
+    if world.biome_grid[y][x] == "mountain":
+        cost *= _ROAD_MOUNTAIN_MULT
     if cell in world.river_cells or cell in world.lake_cells:
         cost += _ROAD_RIVER_PEN
     if faction_idx is not None:
@@ -1223,6 +1246,14 @@ class World:
         self.trade_routes_by_pair = {}  # frozenset({a_idx,b_idx}) -> route dict
         self.trade_route_projects = []  # list[TradeRouteProject] — see app/world/trade.py
         self.trade_route_decline_until = {}  # frozenset({a_idx,b_idx}) -> turn a decline expires
+        # AI factions proposing a trade route TO the player wait for an
+        # actual player response instead of auto-resolving through
+        # diplomacy.evaluate_trade_route the way two AI factions do
+        # between themselves -- see trade.run_trade_route_ai/
+        # accept_trade_route_proposal/decline_trade_route_proposal.
+        # list of {"from_idx": int, "turn_proposed": int}, at most one
+        # entry per proposing faction at a time.
+        self.incoming_trade_proposals = []
         self.trade_caravans = []       # list[TradeCaravan] — see app/world/trade.py
         self.local_shipments = []      # list[LocalShipment] — see app/world/resources.py's Phase 10
         self.regional_shipments = []   # list[RegionalShipment] — see app/world/trade.py's Phase 11

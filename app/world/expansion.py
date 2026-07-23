@@ -14,7 +14,8 @@ from app.world import resources
 from app.world.worldgen import (UNCLAIMED, _place_settlements_for_faction,
                                 _place_villages_for_region, _adjacent_region_ids)
 from app.world.lexicon import make_settlement_namer
-from app.world.construction import can_afford, _pay_cost, RoadProject, _path_between
+from app.world.construction import (can_afford, _pay_cost, RoadProject, _path_between,
+                                    _ai_has_active_construction)
 
 CLAIM_BASE_COST = {"Gold": 80}
 CLAIM_COST_PER_CELL = {"Gold": 0.6}
@@ -288,3 +289,27 @@ def advance_claims(world):
             resolve_claim_win(world, region, project.faction_idx)
         else:
             resolve_claim_loss(world, region)
+
+
+def run_expansion_ai(world):
+    """Every AI faction's equivalent of the player clicking "Claim
+    Territory": each turn, a faction with no construction/expansion
+    project currently in flight (see construction._ai_has_active_
+    construction -- the same shared anti-overbuild gate run_settlement_ai
+    and run_storage_ai use) looks at its own claimable frontier and starts
+    a claim on one candidate if it can afford it. Deliberately simple,
+    same philosophy as run_settlement_ai: picks a random frontier region
+    rather than scoring candidates by garrison strength/fertility/
+    adjacency-to-a-weak-point/etc -- a reasonable future refinement, not
+    this one."""
+    for fac_idx, nation in enumerate(world.factions):
+        if fac_idx == world.player_faction_idx:
+            continue
+        if _ai_has_active_construction(world, fac_idx):
+            continue
+        frontier = claimable_frontier(world, fac_idx)
+        if not frontier:
+            continue
+        region = random.choice(frontier)
+        if can_afford(nation, claim_cost(region), world):
+            start_claim(world, fac_idx, region)

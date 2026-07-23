@@ -17,7 +17,8 @@ from app.world.worldgen import (OCEAN, Settlement,
                                 SETTLEMENT_TAX_INCOME, _roll_population, _path_dijkstra,
                                 _elev_cost, _SEA_COAST_REACH)
 from app.world.lexicon import make_settlement_namer
-from app.world.resources import seed_prosperity, _SETTLEMENT_STORAGE_RESOURCES
+from app.world.resources import (seed_prosperity, _SETTLEMENT_STORAGE_RESOURCES,
+                                 settlement_storage_capacity)
 
 # Cost/time to build each settlement kind. City is the crown jewel (biggest
 # population range, POPULATION_RANGE in worldgen.py) so it's the steepest;
@@ -472,6 +473,33 @@ def advance_projects(world):
         world.road_projects.remove(road)
 
 
+# --- AI construction/expansion pacing ----------------------------------------
+def _ai_has_active_construction(world, fac_idx):
+    """Whether this AI faction currently has ANY construction or expansion
+    project in flight -- a settlement, a Granary/Warehouse/Shipyard, or a
+    wildland claim. Every AI decision loop (run_settlement_ai,
+    run_storage_ai, expansion.run_expansion_ai) checks this first and
+    skips the faction entirely if it's already busy, capping every AI
+    faction at ONE such project at a time regardless of how wealthy it
+    is. That's the actual safeguard against a well-funded faction chain-
+    building across many regions at once and overrunning the map far
+    faster than a player (or a poorer AI) ever could -- growth is paced
+    by build TIME (15-40 turns per project) instead of by treasury size,
+    the same "deliberately simple" philosophy the rest of this AI already
+    uses rather than a more elaborate scoring/budget system."""
+    if any(p.faction_idx == fac_idx for p in world.settlement_projects):
+        return True
+    if any(p.faction_idx == fac_idx for p in world.granary_projects):
+        return True
+    if any(p.faction_idx == fac_idx for p in world.warehouse_projects):
+        return True
+    if any(p.faction_idx == fac_idx for p in world.shipyard_projects):
+        return True
+    if any(p.faction_idx == fac_idx for p in world.claim_projects):
+        return True
+    return False
+
+
 # --- AI settlement construction ----------------------------------------------
 def _region_settlement_pos(world, region):
     """A free cell in `region` to build on: not a river, not already a
@@ -490,18 +518,23 @@ def _region_settlement_pos(world, region):
 
 def run_settlement_ai(world):
     """Every AI faction's equivalent of the player clicking "Build City"/
-    "Build Town": claiming wildland only ever yields villages now (see
-    expansion.settle_newly_claimed_region), so a faction has to actually
-    construct its City/Town settlements the same way the player does.
-    One new project per faction per turn at most (skip if it's already
-    building something), targeting a region it owns that has no
-    settlements in it yet — prefers a City if it can afford one, else a
-    Town. Deliberately simple: no site scoring, no catching up a faction
-    that's fallen behind faster than one project at a time."""
+    "Build Town"/"Build Castle": claiming wildland only ever yields
+    villages now (see expansion.settle_newly_claimed_region), so a
+    faction has to actually construct its own settlements the same way
+    the player does -- and the player can build any of the three kinds
+    anywhere in their own territory, so AI gets the same menu. Skips a
+    faction entirely if it already has any construction/expansion project
+    in flight (see _ai_has_active_construction) -- the actual anti-
+    overbuild safeguard, not just "no second settlement project" -- and
+    targets a region it owns that has no settlements in it yet, reaching
+    for the priciest/most-capable kind it can currently afford (City,
+    then Castle, then Town). Deliberately simple: no site scoring, no
+    catching up a faction that's fallen behind faster than one project at
+    a time."""
     for fac_idx, nation in enumerate(world.factions):
         if fac_idx == world.player_faction_idx:
             continue
-        if any(p.faction_idx == fac_idx for p in world.settlement_projects):
+        if _ai_has_active_construction(world, fac_idx):
             continue
         empty_regions = [r for r in world.regions
                          if r.faction_idx == fac_idx and not getattr(r, "meta_settlements", [])]
@@ -511,7 +544,59 @@ def run_settlement_ai(world):
         pos = _region_settlement_pos(world, region)
         if pos is None:
             continue
-        for kind in ("city", "town"):
+        for kind in ("city", "castle", "town"):
             if can_afford(nation, SETTLEMENT_BUILD_COST[kind], world):
                 start_settlement(world, nation, pos, kind)
                 break
+
+
+# --- AI storage construction ---------------------------------------------
+STORAGE_AI_PRESSURE_THRESHOLD = 0.8   # trigger a Granary/Warehouse once a
+                                      # settlement's own storage is at
+                                      # least this full -- a real reason,
+                                      # not blind busywork: the same
+                                      # "storage is under real pressure"
+                                      # signal the player's own storage
+                                      # progress bar/overflow-spoilage
+                                      # penalty already make visible
+
+
+def run_storage_ai(world):
+    """Every AI faction's equivalent of the player clicking "Build
+    Granary"/"Build Warehouse": triggered by real storage pressure, not
+    an unconditional habit -- only fires when at least one of the
+    faction's settlements has filled STORAGE_AI_PRESSURE_THRESHOLD or
+    more of its own storage capacity (see resources.
+    settlement_storage_capacity), the same overflow risk the player
+    already sees reflected in that settlement's storage bar. Skips a
+    faction entirely if it already has any construction/expansion project
+    in flight (see _ai_has_active_construction). Targets whichever
+    settlement is under the most pressure, prefers a Granary (the bigger
+    of the two bonuses), falls back to a Warehouse if it already has one.
+    Deliberately simple: one settlement, one building, per faction per
+    turn at most, same philosophy as run_settlement_ai."""
+    for fac_idx, nation in enumerate(world.factions):
+        if fac_idx == world.player_faction_idx:
+            continue
+        if _ai_has_active_construction(world, fac_idx):
+            continue
+        sids = nation.meta.get("settlements", [])
+        if not sids:
+            continue
+        pressured = []
+        for sid in sids:
+            st = world.settlements[sid]
+            cap = settlement_storage_capacity(st)
+            if cap <= 0:
+                continue
+            stock = sum(getattr(st, "resources", {}).values())
+            if stock / cap >= STORAGE_AI_PRESSURE_THRESHOLD:
+                pressured.append((stock / cap, st))
+        if not pressured:
+            continue
+        pressured.sort(key=lambda t: -t[0])
+        st = pressured[0][1]
+        if can_build_granary(world, st) and can_afford(nation, GRANARY_COST, world):
+            start_granary(world, nation, st)
+        elif can_build_warehouse(world, st) and can_afford(nation, WAREHOUSE_COST, world):
+            start_warehouse(world, nation, st)

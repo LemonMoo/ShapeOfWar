@@ -10,11 +10,9 @@ from app.ui.pause_menu import PauseMenuView
 from app.ui.load_game_menu import LoadGameMenuView
 from app.ui.map_view import MapView
 from app.ui.battle_view import BattleView
-from app.ui.changelog_view import ChangelogWindow
 from app.core.events import bus
 from app.core.save import (save_game, load_game, has_save, list_saves,
                            new_save_id, delete_save)
-from app.core import changelog
 from app.world.worldgen import generate_world
 from app.battle.battle import Battle, Army
 from app.battle.unit_types import UNIT_TYPES
@@ -82,17 +80,6 @@ class App(tk.Tk):
         self.bind("<F1>", self._on_f1)
 
         self.show_screen("menu")
-        self.after(150, self._maybe_show_changelog)
-
-    def _maybe_show_changelog(self):
-        """Once per update: a small "what's new" popup on the main menu,
-        listing everything since the player last dismissed one (see
-        app/core/changelog.py). Deferred slightly past startup (after(150))
-        so it appears as its own window on top of an already-drawn menu,
-        not fighting the main window for focus mid-construction."""
-        entries = changelog.unseen_entries()
-        if entries:
-            ChangelogWindow(self, entries)
 
     def _update_status(self):
         self.status.config(

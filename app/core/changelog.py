@@ -19,6 +19,61 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # for someone playing the game), not a commit log.
 CHANGELOG_ENTRIES = [
     {
+        "version": 5,
+        "title": "Alerts: Know When Something's Wrong",
+        "items": [
+            "New Alerts panel (top-left of the map): every settlement or "
+            "village currently short on Food or Firewood, actually losing "
+            "population to starvation/freezing, or overflowing its "
+            "storage now shows up automatically -- click one to jump "
+            "straight to it. A matching warning badge also appears "
+            "directly on that settlement/village's own map marker.",
+            "No more needing to babysit every settlement's numbers turn "
+            "after turn to notice something's going wrong.",
+        ],
+    },
+    {
+        "version": 4,
+        "title": "Fishing, Smarter AI & Trade Diplomacy",
+        "items": [
+            "New Fishing industry: settlements/villages near open ocean, a "
+            "river, or a lake now catch Fish for free every turn (bigger "
+            "water = more fish, and it never runs out), smoked into Smoked "
+            "Fish for storage.",
+            "Trade routes now require a real decision: an AI proposing a "
+            "route to you shows up as a pending proposal you can Accept or "
+            "Decline, alongside what they have that you don't -- it never "
+            "auto-forms behind your back, and a route is never even "
+            "offered if there's no possible path between your capitals.",
+            "Enemy factions now behave like real rivals: claiming wildland, "
+            "building settlements (including Castles) and storage when "
+            "they actually need it, and trading with each other and you -- "
+            "capped at one active project at a time so a wealthy AI can't "
+            "steamroll the map.",
+            "Starvation and freezing no longer set in immediately -- a "
+            "settlement gets a real grace period without Food or Firewood "
+            "before population actually starts to suffer, plus several "
+            "food-supply and storage fixes so villages stop starving in "
+            "fresh territory.",
+            "Prosperity now takes roughly a year of sustained good "
+            "conditions to approach full strength, instead of maxing out "
+            "in the first 20-40 turns.",
+            "New villages a growing city spins off now also build roads to "
+            "nearby villages in the same region, not just back to the city.",
+            "Starting Gold raised substantially, so you can actually fund "
+            "early construction or a first trade partnership.",
+            "New Trade Log panel (lower-left, resizable) tracks every "
+            "turn's foreign and domestic trade income/cost, not just a "
+            "single flashed message.",
+            "Roads, trade routes, and every other overland path now avoid "
+            "mountainous terrain much more strongly, and a route is never "
+            "blocked by a river alone -- only a genuine lack of any land "
+            "or sea connection at all stops one from forming.",
+            "Fixed an occasional freeze/skip on End Turn caused by AI "
+            "trade-route activity.",
+        ],
+    },
+    {
         "version": 3,
         "title": "Roads, Spawns & Live Stats",
         "items": [

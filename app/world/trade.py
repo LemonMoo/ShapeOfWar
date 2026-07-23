@@ -40,9 +40,9 @@ from app.world.world_map import Stance
 from app.world.worldgen import (OCEAN, UNCLAIMED, _path_dijkstra, _nearest_ocean_cell,
                                 _elev_cost, _sea_cost, _bfs_distance,
                                 _SEA_COAST_REACH)
-from app.world.resources import (RESOURCES, BASE_VALUE_BY_TIER,
+from app.world.resources import (RESOURCES, BASE_VALUE_BY_TIER, RESOURCE_SPAWN,
                                  _storage_cap, _clamp_to_storage,
-                                 settlement_needs, _FOOD_PRODUCTS, _LUXURY_GOODS,
+                                 settlement_needs, _FOOD_SOURCES, _LUXURY_GOODS,
                                  _SETTLEMENT_STORAGE_RESOURCES,
                                  settlement_storage_capacity,
                                  _node_surplus, _node_wants,
@@ -70,16 +70,18 @@ def _settlement_needs_total(nation, resource, world):
     """How much of `resource` this nation's settlements actually need per
     turn under Phase 8's consumption model (see resources.settlement_needs)
     — the replacement for the old upkeep-dict-based figure now that
-    SETTLEMENT_UPKEEP is gone. For a Food Product this is deliberately
+    SETTLEMENT_UPKEEP is gone. For a food source (Food Product or edible
+    raw Crop — see resources._FOOD_SOURCES) this is deliberately
     conservative: it assumes the whole nation's food need could fall on
-    this one resource alone (food actually comes from whichever Food
-    Products are in stock, not one specific one), erring toward reserving
-    too much rather than too little — safer than accidentally trading away
-    food a settlement needs to survive."""
+    this one resource alone (food actually comes from whichever of them is
+    in stock, not one specific one), erring toward reserving too much
+    rather than too little — safer than accidentally trading away food a
+    settlement (or, now that raw Crops count too, a Village that's never
+    converted a single one of them) needs to survive."""
     total = 0
     for sid in nation.meta.get("settlements", []):
         needs = settlement_needs(world.settlements[sid], world.season)
-        if resource in _FOOD_PRODUCTS:
+        if resource in _FOOD_SOURCES:
             total += needs["Food"]
         elif resource == "Firewood":
             total += needs.get("Firewood", 0)
@@ -465,6 +467,41 @@ def _capital_sea_path(world, a_idx, b_idx):
     return result
 
 
+def route_path_possible(world, a_idx, b_idx):
+    """Whether a trade route between these two capitals could ever actually
+    form -- land OR sea, same check start_trade_route/accept_trade_route_
+    proposal fall through to. eligible_to_trade only checks diplomacy
+    (contact/standing), not geography, so without this a route can be
+    proposed -- by the AI, or offered as a button in the player's own UI --
+    between two capitals with no possible connection at all (different,
+    unconnected landmasses where at least one side isn't even coastal), and
+    the player only finds out it was never achievable after already
+    accepting/clicking. Checked up front instead, so a proposal is only
+    ever made when it can actually succeed.
+
+    Cached on `world` -- capitals never move, so like _capital_sea_path
+    this is turn-invariant. Without caching, run_trade_route_ai would
+    re-run a full uncached land Dijkstra (_land_capital_path deliberately
+    isn't cached -- see its own docstring, it used to only ever run once
+    per accepted proposal) for every candidate pair, every single turn,
+    which is real, avoidable per-turn cost on top of what was already
+    there."""
+    cache = getattr(world, "_route_path_possible_cache", None)
+    if cache is None:
+        cache = {}
+        world._route_path_possible_cache = cache
+    key = frozenset((a_idx, b_idx))
+    if key in cache:
+        return cache[key]
+    result = _land_capital_path(world, a_idx, b_idx) is not None
+    if not result:
+        coastal = _coastal_factions(world)
+        if a_idx in coastal and b_idx in coastal:
+            result = _capital_sea_path(world, a_idx, b_idx) is not None
+    cache[key] = result
+    return result
+
+
 # --- the caravan/ship itself -------------------------------------------------
 class TradeCaravan:
     """A caravan (land) or ship (sea) carrying one resource one way, then
@@ -763,6 +800,109 @@ class TradeRouteProject:
 TRADE_ROUTE_DECLINE_COOLDOWN_TURNS = 10   # matches expansion.CLAIM_FAIL_COOLDOWN_TURNS in spirit
 
 
+# --- what a trade partner actually brings to the table ----------------------
+def _faction_biome_set(world, faction_idx):
+    """Every biome present anywhere in this faction's own territory --
+    used to judge geographic resource ACCESS (could they ever produce
+    this, given their land), not just what they're currently harvesting."""
+    biomes = set()
+    for region in world.regions:
+        if region.faction_idx != faction_idx:
+            continue
+        biomes.update(getattr(region, "biome_counts", {}).keys())
+    return biomes
+
+
+def _accessible_raw_resources(world, faction_idx):
+    """Every raw resource (RESOURCE_SPAWN) this faction could plausibly
+    produce somewhere in its own territory, based on biome alone --
+    regardless of whether it's actually being harvested yet."""
+    biomes = _faction_biome_set(world, faction_idx)
+    return {name for name, spec in RESOURCE_SPAWN.items() if spec["biomes"] & biomes}
+
+
+def _faction_stocked_resources(world, faction_idx, min_amount=1):
+    """Resources this faction currently holds a real stockpile of,
+    aggregated across its own settlements."""
+    nation = world.factions[faction_idx]
+    totals = {}
+    for sid in nation.meta.get("settlements", []):
+        for r, amt in getattr(world.settlements[sid], "resources", {}).items():
+            totals[r] = totals.get(r, 0) + amt
+    return {r for r, amt in totals.items() if amt >= min_amount}
+
+
+def trade_complementarity_summary(world, viewer_idx, other_idx):
+    """What `other_idx` brings to a trade route, from `viewer_idx`'s own
+    point of view: resources they currently HAVE real stock of that the
+    viewer doesn't, and raw resources they could ACCESS somewhere in
+    their own territory (by biome) that the viewer's territory has no
+    access to at all -- whether or not it's actually being harvested yet.
+    Used by the trade-route proposal UI (both directions: the player's
+    own outgoing proposal and an AI's incoming one) so accepting/
+    proposing is actually informed by what's on the table, not a blind
+    guess. Returns {"have": [...], "access": [...]}, both sorted."""
+    their_stock = _faction_stocked_resources(world, other_idx)
+    our_stock = _faction_stocked_resources(world, viewer_idx)
+    have_advantage = their_stock - our_stock
+
+    their_access = _accessible_raw_resources(world, other_idx)
+    our_access = _accessible_raw_resources(world, viewer_idx)
+    # Excludes anything already listed under "have" so a resource they're
+    # both stocking AND geographically favored for isn't listed twice
+    # under two different framings.
+    access_advantage = their_access - our_access - have_advantage
+
+    return {"have": sorted(have_advantage), "access": sorted(access_advantage)}
+
+
+def _has_pending_proposal(world, from_idx):
+    return any(p["from_idx"] == from_idx for p in world.incoming_trade_proposals)
+
+
+def accept_trade_route_proposal(world, from_idx):
+    """The player accepts an AI's pending trade-route proposal (see
+    run_trade_route_ai) -- the same route-formation logic
+    start_trade_route uses once a proposal is agreed to (land path takes
+    priority, physically built over time; a sea route opens immediately),
+    just skipping diplomacy.evaluate_trade_route entirely, since the
+    player's own acceptance already IS the decision it would otherwise
+    make on their behalf."""
+    world.incoming_trade_proposals = [p for p in world.incoming_trade_proposals
+                                      if p["from_idx"] != from_idx]
+    player_idx = world.player_faction_idx
+    key = frozenset((from_idx, player_idx))
+    if key in world.trade_routes_by_pair:
+        return "A trade route already connects you."
+    a = world.factions[from_idx]
+    land_path = _land_capital_path(world, from_idx, player_idx)
+    coastal = _coastal_factions(world)
+    sea_result = (_capital_sea_path(world, from_idx, player_idx)
+                 if from_idx in coastal and player_idx in coastal else None)
+    if land_path is not None:
+        world.trade_route_projects.append(TradeRouteProject(from_idx, player_idx, land_path))
+        return f"You agree — construction begins on a trade route with {a.name}."
+    if sea_result is not None:
+        kind, sea_path = sea_result
+        route = {"kind": kind, "cells": sea_path, "a_faction": from_idx, "b_faction": player_idx}
+        world.trade_routes.append(route)
+        world.trade_routes_by_pair[key] = route
+        return f"You agree — a sea trade route opens with {a.name}."
+    return "No viable route exists between your capitals after all."
+
+
+def decline_trade_route_proposal(world, from_idx):
+    """The player declines an AI's pending proposal -- sets the same
+    decline cooldown a formula-driven AI-to-AI decline would (see
+    start_trade_route), so the same faction doesn't just re-propose again
+    next turn."""
+    world.incoming_trade_proposals = [p for p in world.incoming_trade_proposals
+                                      if p["from_idx"] != from_idx]
+    key = frozenset((from_idx, world.player_faction_idx))
+    world.trade_route_decline_until[key] = world.turn + TRADE_ROUTE_DECLINE_COOLDOWN_TURNS
+    return f"You decline {world.factions[from_idx].name}'s trade proposal."
+
+
 def start_trade_route(world, a_idx, b_idx):
     """Propose a trade route (land or sea, whichever exists — land takes
     priority when both do, since it's the more substantial connection)
@@ -863,6 +1003,10 @@ def run_trade_route_ai(world):
     for f_idx in order:
         if active.get(f_idx, 0) >= MAX_ACTIVE_ROUTE_PROJECTS_PER_FACTION:
             continue
+        if f_idx == world.player_faction_idx:
+            continue   # the player proposes for themself, via their own UI
+        if _has_pending_proposal(world, f_idx):
+            continue   # already waiting on a player response, don't pile on
         seller = world.factions[f_idx]
         decline_until = getattr(world, "trade_route_decline_until", {})
         candidates = []
@@ -874,7 +1018,7 @@ def run_trade_route_ai(world):
                 continue
             if world.turn < decline_until.get(key, -1):
                 continue   # declined recently -- don't re-pester them every turn
-            if eligible_to_trade(world, f_idx, p_idx):
+            if eligible_to_trade(world, f_idx, p_idx) and route_path_possible(world, f_idx, p_idx):
                 candidates.append(p_idx)
         if not candidates:
             continue
@@ -882,6 +1026,20 @@ def run_trade_route_ai(world):
         best = max(candidates, key=lambda p:
                    diplomacy._resource_complementarity(world, seller, world.factions[p]))
         key = frozenset((f_idx, best))
+
+        if best == world.player_faction_idx:
+            # The player gets an actual choice instead of this auto-
+            # resolving through diplomacy.evaluate_trade_route the way an
+            # AI-to-AI proposal does -- see accept_trade_route_proposal/
+            # decline_trade_route_proposal (map_view.py surfaces this on
+            # the proposing faction's info panel).
+            world.incoming_trade_proposals.append(
+                {"from_idx": f_idx, "turn_proposed": world.turn})
+            events.append({"type": "route_proposed", "from_idx": f_idx})
+            active[f_idx] = active.get(f_idx, 0) + 1
+            building_pairs.add(key)
+            continue
+
         start_trade_route(world, f_idx, best)
         established = key in world.trade_routes_by_pair
         building = key in {frozenset((p.a_idx, p.b_idx)) for p in world.trade_route_projects}

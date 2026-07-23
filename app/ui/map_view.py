@@ -319,6 +319,18 @@ class MapView(tk.Frame):
         self._year_start_snapshot = {}
         self._year_banner_after_id = None
 
+        # Alerts (settlement/village trouble the player should know about --
+        # see resources.faction_alerts): recomputed once per turn (refresh())
+        # and once per load (set_world()), NOT per render() -- render() can
+        # fire many times a second during camera pan/zoom animation, and
+        # faction_alerts walks every settlement/village, so recomputing it
+        # there would reintroduce exactly the kind of per-frame cost the
+        # earlier mid-zoom performance fix was about. _alert_node_ids is the
+        # cached O(1) lookup _draw_settlements/_draw_villages actually use
+        # for badges; _current_alerts is what the Alerts panel lists.
+        self._current_alerts = []
+        self._alert_node_ids = {}
+
         self._build_resource_bar()
 
         self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
@@ -354,6 +366,8 @@ class MapView(tk.Frame):
                                          wraplength=560)
         self.year_summary_lbl.pack(padx=32, pady=(0, 18))
 
+        self._build_trade_log()
+        self._build_alerts_panel()
         self._build_panel()
         self.set_world(world)
 
@@ -396,6 +410,7 @@ class MapView(tk.Frame):
         self._year_start_snapshot = self._current_resource_snapshot()
         self._update_resource_bar()
         self._update_turn_label()
+        self._refresh_alerts()
         self.render()
 
     def refresh(self):
@@ -428,6 +443,7 @@ class MapView(tk.Frame):
             self._show_commander(self.selected_commander)
         self._update_resource_bar()
         self._update_turn_label()
+        self._refresh_alerts()
         self.render()
 
     def _precompute_colors(self):
@@ -564,6 +580,250 @@ class MapView(tk.Frame):
                     self._px_region[i] = _rgb(*(_shade(shade, -0.5) if border else shade))
                     self._px_region_hi[i] = _rgb(*_lighten(shade, 0.45))
                 i += 1
+
+    # --- trade log -------------------------------------------------------------
+    _TRADE_LOG_MAX_LINES = 200   # trim oldest once exceeded, so it can't grow forever
+
+    _TRADE_LOG_MIN_WIDTH = 260
+    _TRADE_LOG_MAX_WIDTH = 900
+
+    def _build_trade_log(self):
+        """A persistent, scrolling ledger of the player's own trade income/
+        cost, docked to the bottom-left corner of the map canvas (floated
+        via place(), same technique bottom_msg/year_banner already use, so
+        it doesn't eat into the fixed side panels' width). Distinct from
+        show_bottom_message's one-line banner: that shows only the FIRST
+        relevant event each turn and auto-dismisses; this accumulates
+        every financial trade event, turn after turn, foreign and
+        domestic both, so the player can actually review what happened
+        instead of catching a single flashed line.
+
+        Horizontally resizable (drag the handle on the right edge) plus a
+        horizontal scrollbar, since a fixed 46-char width was cutting off
+        longer lines (long faction names, big Gold amounts) with no way
+        to see the rest -- both together mean any line can always be
+        read, whether by widening the panel or scrolling to it."""
+        # Parented to the canvas itself (not `self`) so place()'s relx/rely
+        # below are relative to the map's own drawing area -- the
+        # RESOURCES sidebar (packed side="left") already occupies the true
+        # left edge of the whole MapView, so anchoring to `self` instead
+        # would draw this right on top of it.
+        self._trade_log_width = 340
+        self.trade_log_frame = tk.Frame(self.canvas, bg="#0d1017",
+                                        highlightbackground=theme.LINE,
+                                        highlightthickness=1)
+        body = tk.Frame(self.trade_log_frame, bg="#0d1017")
+        body.pack(side="left", fill="both", expand=True)
+        header = tk.Frame(body, bg=theme.PANEL)
+        header.pack(fill="x")
+        tk.Label(header, text="TRADE LOG", bg=theme.PANEL, fg=theme.MUTED,
+                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=8, pady=4)
+
+        text_row = tk.Frame(body, bg="#0d1017")
+        text_row.pack(fill="both", expand=True, padx=6, pady=(4, 0))
+        self._trade_log_text = tk.Text(
+            text_row, height=10, bg="#0d1017", fg=theme.INK,
+            font=("Segoe UI", 8), relief="flat", wrap="none", state="disabled",
+            cursor="arrow")
+        self._trade_log_text.pack(side="top", fill="both", expand=True)
+        self._trade_log_text.tag_config("income", foreground=theme.GOOD)
+        self._trade_log_text.tag_config("cost", foreground=theme.BAD)
+        self._trade_log_text.tag_config("muted", foreground=theme.MUTED)
+        self._trade_log_text.tag_config("turn_header", foreground=theme.ACCENT,
+                                        font=("Segoe UI", 8, "bold"))
+
+        hbar = tk.Scrollbar(body, orient="horizontal",
+                            command=self._trade_log_text.xview)
+        hbar.pack(side="bottom", fill="x", pady=(2, 6))
+        self._trade_log_text.config(xscrollcommand=hbar.set)
+
+        # Drag handle: a thin strip on the right edge that resizes the
+        # whole panel's width -- clamped so it can't be dragged smaller
+        # than the header text or wider than the map canvas itself.
+        handle = tk.Frame(self.trade_log_frame, bg=theme.LINE, width=4,
+                          cursor="sb_h_double_arrow")
+        handle.pack(side="right", fill="y")
+        handle.bind("<B1-Motion>", self._on_trade_log_drag)
+        self._trade_log_frame_widget = self.trade_log_frame
+
+        self._resize_trade_log(self._trade_log_width)
+        self.trade_log_frame.place(relx=0.0, rely=1.0, anchor="sw", x=0, y=0)
+
+    def _resize_trade_log(self, width):
+        width = max(self._TRADE_LOG_MIN_WIDTH, min(self._TRADE_LOG_MAX_WIDTH, width))
+        self._trade_log_width = width
+        self.trade_log_frame.config(width=width)
+        self.trade_log_frame.pack_propagate(False)
+
+    def _on_trade_log_drag(self, event):
+        # event.x is relative to the handle itself; the handle sits at the
+        # panel's right edge, so the panel's own left-anchored x plus the
+        # drag position IS the new total width.
+        self._resize_trade_log(self._trade_log_width + event.x)
+
+    def _trade_log_append(self, text, tag=None):
+        t = self._trade_log_text
+        t.config(state="normal")
+        t.insert("end", text + "\n", tag or ())
+        # trim from the top once over budget, cheaply (count newlines rather
+        # than re-scanning the whole buffer every turn)
+        line_count = int(t.index("end-1c").split(".")[0])
+        if line_count > self._TRADE_LOG_MAX_LINES:
+            t.delete("1.0", f"{line_count - self._TRADE_LOG_MAX_LINES + 1}.0")
+        t.see("end")
+        t.config(state="disabled")
+
+    def _log_trade_events(self):
+        """Called once per End Turn: append every financial trade event
+        involving the player this turn to the trade log (unlike
+        _report_trade_events/_report_regional_trade_events, which only
+        surface the FIRST one on the transient bottom banner) -- foreign
+        trade income/cost and domestic regional transfers both, clearly
+        tagged so they don't read as the same kind of event. Purely
+        informational events with no Gold changing hands (a caravan
+        departing, a free sell-to-city shipment) are left out — this is
+        specifically an income/cost ledger, not a general activity log."""
+        player_idx = self.world.player_faction_idx
+        if player_idx is None:
+            return
+        lines = []
+
+        for ev in self.world.trade_events:
+            etype = ev["type"]
+            if "seller_idx" not in ev or "buyer_idx" not in ev:
+                continue   # route_proposed/route_started -- no seller/buyer, not a ledger event
+            is_seller = ev["seller_idx"] == player_idx
+            is_buyer = ev["buyer_idx"] == player_idx
+            if not (is_seller or is_buyer):
+                continue
+            other_idx = ev["buyer_idx"] if is_seller else ev["seller_idx"]
+            other_name = self.world.factions[other_idx].name
+            if etype == "delivered" and is_buyer:
+                lines.append((f"  [Foreign] Bought {ev['quantity']} {ev['resource']} "
+                             f"from {other_name} — -{ev['price']:,}g", "cost"))
+            elif etype == "paid" and is_seller:
+                lines.append((f"  [Foreign] Sold {ev['quantity']} {ev['resource']} "
+                             f"to {other_name} — +{ev['price']:,}g", "income"))
+            elif etype == "lost":
+                lines.append((f"  [Foreign] Caravan lost ({ev['quantity']} "
+                             f"{ev['resource']}, {other_name}) — payment forfeited", "muted"))
+
+        for ev in self.world.regional_trade_events:
+            if ev.get("faction_idx") != player_idx:
+                continue
+            etype = ev["type"]
+            # regional_dispatched/regional_delivered are also the generic
+            # delivery-completion events for a FREE sell-to-city shipment
+            # (see trade.run_sell_to_city -- price is always 0.0 there by
+            # design, indistinguishable at this point from a real
+            # regional-market sale) -- only log ones with a real price,
+            # so a free internal restock doesn't show up as "paid +0g".
+            if etype == "regional_dispatched" and ev["price"] > 0:
+                lines.append((f"  [Domestic] {ev['dest_name']} buys {ev['quantity']} "
+                             f"{ev['resource']} from {ev['origin_name']} — "
+                             f"-{ev['price']:,}g", "cost"))
+            elif etype == "regional_delivered" and ev["price"] > 0:
+                lines.append((f"  [Domestic] {ev['origin_name']} paid "
+                             f"+{ev['price']:,}g for {ev['quantity']} {ev['resource']} "
+                             f"sent to {ev['dest_name']}", "income"))
+            elif etype == "regional_lost":
+                lines.append((f"  [Domestic] Shipment lost ({ev['quantity']} "
+                             f"{ev['resource']}, {ev['origin_name']} → "
+                             f"{ev['dest_name']})", "muted"))
+
+        if not lines:
+            return
+        self._trade_log_append(f"Turn {self.world.turn}", "turn_header")
+        for text, tag in lines:
+            self._trade_log_append(text, tag)
+
+    # --- alerts ------------------------------------------------------------
+    _ALERTS_MAX_VISIBLE = 8
+    _ALERT_WARN_COLOR = "#e0a030"
+
+    def _build_alerts_panel(self):
+        """A persistent top-left panel listing every current problem at one
+        of the player's own settlements/villages (see resources.
+        faction_alerts) -- food/firewood shortage, starving/freezing,
+        overflowing storage -- so trouble is visible without having to
+        click through every node's numbers to notice it. Unlike the Trade
+        Log (an accumulating ledger), this is a snapshot of CURRENT state:
+        rebuilt from scratch each refresh, not appended to, so a problem
+        still shows here for as long as it's actually ongoing.  Hidden
+        entirely (via place_forget) when there's nothing wrong."""
+        self.alerts_frame = tk.Frame(self.canvas, bg="#1a0d0d",
+                                     highlightbackground=theme.BAD,
+                                     highlightthickness=1, width=300)
+        header = tk.Frame(self.alerts_frame, bg=theme.PANEL)
+        header.pack(fill="x")
+        self._alerts_header_lbl = tk.Label(
+            header, text="ALERTS", bg=theme.PANEL, fg=theme.BAD,
+            font=("Segoe UI", 8, "bold"))
+        self._alerts_header_lbl.pack(side="left", padx=8, pady=4)
+        self._alerts_rows_frame = tk.Frame(self.alerts_frame, bg="#1a0d0d")
+        self._alerts_rows_frame.pack(fill="both", expand=True, padx=4, pady=(2, 6))
+
+    def _refresh_alerts(self):
+        """Recompute the current alert set (see the __init__ note on why
+        this only runs from set_world()/refresh(), never render()) and
+        rebuild the panel from it. Also rebuilds _alert_node_ids, the
+        cached {id(node): worst severity} lookup _draw_settlements/
+        _draw_villages use for map badges."""
+        player_idx = self.world.player_faction_idx
+        alerts = resources.faction_alerts(self.world, player_idx) if player_idx is not None else []
+        # Critical (population actively being lost) always sorts above a
+        # mere warning, so the most urgent problems are never scrolled
+        # past the visible-rows cap by a pile of lesser ones.
+        alerts.sort(key=lambda a: 0 if a["severity"] == "critical" else 1)
+        self._current_alerts = alerts
+
+        node_ids = {}
+        for a in alerts:
+            nid = id(a["node"])
+            if nid not in node_ids or a["severity"] == "critical":
+                node_ids[nid] = a["severity"]
+        self._alert_node_ids = node_ids
+
+        for w in self._alerts_rows_frame.winfo_children():
+            w.destroy()
+        if not alerts:
+            self.alerts_frame.place_forget()
+            return
+        self._alerts_header_lbl.config(text=f"ALERTS ({len(alerts)})")
+        for a in alerts[:self._ALERTS_MAX_VISIBLE]:
+            color = theme.BAD if a["severity"] == "critical" else self._ALERT_WARN_COLOR
+            row = tk.Button(self._alerts_rows_frame, text="⚠ " + a["message"],
+                            command=lambda n=a["node"]: self._jump_to_alert_node(n),
+                            bg="#1a0d0d", fg=color, activebackground="#2a1515",
+                            activeforeground=color, relief="flat", anchor="w",
+                            justify="left", wraplength=280, font=("Segoe UI", 8),
+                            cursor="hand2", bd=0, highlightthickness=0)
+            row.pack(fill="x", pady=1)
+        remaining = len(alerts) - self._ALERTS_MAX_VISIBLE
+        if remaining > 0:
+            tk.Label(self._alerts_rows_frame, text=f"+ {remaining} more...",
+                     bg="#1a0d0d", fg=theme.MUTED, font=("Segoe UI", 8),
+                     anchor="w").pack(fill="x")
+        self.alerts_frame.place(relx=0.0, rely=0.0, anchor="nw", x=0, y=0)
+
+    def _jump_to_alert_node(self, node):
+        """Navigate straight to an alerted settlement/village and select it
+        -- reuses the same zoom-level machinery a normal click-through
+        would (_enter_region_view/_enter_village_view both zoom to the
+        owning faction's whole bbox, not a specific point, so getting to
+        the right ZOOM LEVEL is all "jumping" here actually means)."""
+        wd = self.world
+        faction = wd.factions[node.faction_idx]
+        self._enter_region_view(faction)
+        if hasattr(node, "kind"):   # Settlement
+            self.selected_settlement = node
+            self._show_settlement(node)
+        else:                       # Village
+            region = wd.regions[node.region_id]
+            self._enter_village_view(region)
+            self.selected_village = node
+            self._show_village(node)
+        self.render()
 
     # --- resource bar --------------------------------------------------------
     def _build_resource_bar(self):
@@ -726,6 +986,7 @@ class MapView(tk.Frame):
                                   for r in set(before) | set(after)}
         self._report_trade_events()
         self._report_regional_trade_events()
+        self._log_trade_events()
 
         new_year = resources.current_year(self.world.turn)
         if new_year != prev_year:
@@ -775,6 +1036,19 @@ class MapView(tk.Frame):
         if player_idx is None:
             return
         for ev in self.world.trade_events:
+            etype = ev["type"]
+            if etype == "route_proposed":
+                if ev["from_idx"] == player_idx:
+                    continue   # can't happen (AI never proposes to itself), but guard anyway
+                proposer = self.world.factions[ev["from_idx"]]
+                self.show_bottom_message(
+                    f"{proposer.name} proposes a trade route with you — "
+                    f"see their faction panel to respond.")
+                return
+            if etype == "route_started":
+                continue   # AI-to-AI route (never involves the player -- see run_trade_route_ai)
+            if "seller_idx" not in ev or "buyer_idx" not in ev:
+                continue   # unrecognized event shape -- don't risk a KeyError below
             seller = self.world.factions[ev["seller_idx"]]
             buyer = self.world.factions[ev["buyer_idx"]]
             is_seller = ev["seller_idx"] == player_idx
@@ -782,7 +1056,6 @@ class MapView(tk.Frame):
             if not (is_seller or is_buyer):
                 continue
 
-            etype = ev["type"]
             if etype == "dispatched" and is_seller:
                 msg = (f"Your caravan departs for {buyer.name} with "
                        f"{ev['quantity']} {ev['resource']}.")
@@ -1021,6 +1294,12 @@ class MapView(tk.Frame):
                      justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
             return
 
+        pending = next((p for p in getattr(wd, "incoming_trade_proposals", [])
+                        if p["from_idx"] == target_idx), None)
+        if pending is not None:
+            self._show_incoming_trade_proposal(player_idx, target_idx, nation)
+            return
+
         if not trade.eligible_to_trade(wd, player_idx, target_idx):
             tk.Label(self.actions, text=f"Standing needs to reach "
                      f"{diplomacy.TRADE_STANDING_THRESHOLD} before you can "
@@ -1037,10 +1316,62 @@ class MapView(tk.Frame):
                      justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
             return
 
+        if not trade.route_path_possible(wd, player_idx, target_idx):
+            tk.Label(self.actions, text=f"No land or sea connection exists "
+                     f"to {nation.name}'s capital — a route isn't possible.",
+                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+            return
+
+        self._show_trade_complementarity(player_idx, target_idx, nation)
+
         tk.Button(self.actions, text=f"Propose Trade Route with {nation.name}",
                   command=lambda: self._do_propose_trade_route(player_idx, target_idx),
                   bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                   relief="flat", font=theme.FONT).pack(fill="x", pady=(8, 2))
+
+    def _show_trade_complementarity(self, viewer_idx, other_idx, nation):
+        """What `nation` brings to the table that the player doesn't already
+        have — currently stocked goods ("have") vs raw resources it could
+        geographically produce that the player's own territory has no
+        access to at all ("access"), per the player's explicit request that
+        a trade decision (incoming or outgoing) show this before they commit."""
+        summary = trade.trade_complementarity_summary(self.world, viewer_idx, other_idx)
+        lines = []
+        if summary["have"]:
+            lines.append("Currently has: " + ", ".join(summary["have"]))
+        if summary["access"]:
+            lines.append("Could produce: " + ", ".join(summary["access"]))
+        text = "\n".join(lines) if lines else "Nothing you don't already have access to."
+        tk.Label(self.actions, text=text, bg=theme.PANEL, fg=theme.MUTED,
+                 font=("Segoe UI", 8), justify="left",
+                 wraplength=260).pack(anchor="w", pady=(4, 2))
+
+    def _show_incoming_trade_proposal(self, player_idx, target_idx, nation):
+        tk.Label(self.actions, text=f"{nation.name} proposes a trade route with you.",
+                 bg=theme.PANEL, fg=theme.INK, font=theme.FONT,
+                 justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+        self._show_trade_complementarity(player_idx, target_idx, nation)
+        row = tk.Frame(self.actions, bg=theme.PANEL)
+        row.pack(fill="x", pady=(2, 2))
+        tk.Button(row, text="Accept", command=lambda: self._do_respond_trade_proposal(
+                      target_idx, player_idx, accept=True),
+                  bg="#1f3a24", fg=theme.GOOD, activebackground=theme.ACCENT,
+                  relief="flat", font=theme.FONT).pack(side="left", fill="x", expand=True, padx=(0, 3))
+        tk.Button(row, text="Decline", command=lambda: self._do_respond_trade_proposal(
+                      target_idx, player_idx, accept=False),
+                  bg="#3a1f1f", fg=theme.BAD, activebackground=theme.ACCENT,
+                  relief="flat", font=theme.FONT).pack(side="left", fill="x", expand=True, padx=(3, 0))
+
+    def _do_respond_trade_proposal(self, from_idx, player_idx, accept):
+        if accept:
+            msg = trade.accept_trade_route_proposal(self.world, from_idx)
+        else:
+            msg = trade.decline_trade_route_proposal(self.world, from_idx)
+        self.show_bottom_message(msg)
+        if self.selected is self.world.factions[from_idx]:
+            self._show_faction(self.selected)
+        self.render()
 
     def _do_propose_trade_route(self, a_idx, b_idx):
         msg = trade.start_trade_route(self.world, a_idx, b_idx)
@@ -2440,6 +2771,25 @@ class MapView(tk.Frame):
                               font=("Segoe UI", 7))
                 c.create_text(x, y + r + 7, text=st.name, fill="#e8e8e8",
                               font=("Segoe UI", 7))
+            self._draw_alert_badge(c, x, y, r, st)
+
+    def _draw_alert_badge(self, c, x, y, r, node):
+        """A small warning triangle at a marker's upper-right, for any of
+        the player's own settlements/villages with an active alert (see
+        _refresh_alerts/_alert_node_ids) -- red for a critical problem
+        (population actively being lost), amber for a mere warning. Not
+        shown for anyone else's territory -- another faction's internal
+        struggles aren't the player's to track."""
+        severity = self._alert_node_ids.get(id(node))
+        if severity is None:
+            return
+        color = theme.BAD if severity == "critical" else self._ALERT_WARN_COLOR
+        bx, by = x + r * 0.75, y - r * 0.75
+        br = max(4, r * 0.55)
+        c.create_polygon(bx, by - br, bx + br, by + br, bx - br, by + br,
+                         fill=color, outline="#1a0d0d", width=1)
+        c.create_text(bx, by + br * 0.35, text="!", fill="#1a0d0d",
+                      font=("Segoe UI", max(6, int(br)), "bold"))
 
     def _draw_trade_routes(self, c, screen):
         """Long-haul trade routes: land roads (solid gold, terrain-following)
@@ -2654,6 +3004,7 @@ class MapView(tk.Frame):
                               font=("Segoe UI", 6))
                 c.create_text(x, y + r + 6, text=v.name, fill="#e8e8e8",
                               font=("Segoe UI", 6))
+            self._draw_alert_badge(c, x, y, r, v)
 
     def _draw_labels(self, c, screen):
         wd = self.world

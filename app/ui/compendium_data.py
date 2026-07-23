@@ -33,14 +33,19 @@ from app.world import diplomacy
 from app.world.worldgen import POPULATION_RANGE, SETTLEMENT_TAX_INCOME, CHILDREN_FRACTION_RANGE
 from app.world.lexicon import SPECIES
 
-RESOURCE_CATEGORIES = ["Crops", "Livestock", "Forestry", "Mining",
+RESOURCE_CATEGORIES = ["Crops", "Livestock", "Forestry", "Mining", "Fishing",
                        "Food Products", "Manufactured Goods", "Luxury Goods"]
 
 CATEGORY_BLURB = {
     "Crops": (
         "Grown by Villages on suitable terrain (mostly Plains, Rice on "
         "Swamp). Each Crop only produces during its own Harvest season "
-        "(see its Growth Cycle) — nothing outside that window."
+        "(see its Growth Cycle) — nothing outside that window. Every "
+        "edible Crop (all of them except Cotton, a fiber) can be eaten "
+        "raw to satisfy a settlement/village's Food need directly, on top "
+        "of being the raw input a Food Product is made from — a Village "
+        "with no Settlement nearby to mill/bake for it can still feed "
+        "itself off its own harvest, not just once it's been converted."
     ),
     "Livestock": (
         "Living, breeding animal populations kept at the region level "
@@ -55,11 +60,22 @@ CATEGORY_BLURB = {
         "terrain, geological rather than seasonal — production is "
         "continuous, every turn, unlike a Crop's one-season harvest."
     ),
+    "Fishing": (
+        f"Caught directly by a Settlement or Village sited near open "
+        f"ocean, a river, or a lake (within {R.FISH_ADJACENCY_REACH} "
+        f"cells) — the one raw resource that isn't a biome share at all: "
+        f"ocean gives a flat catch, a river or lake scales with that "
+        f"specific body of water's own real size, not just its presence. "
+        f"Unlike Mining, it never depletes — the same adjacency yields "
+        f"fresh Fish every turn, forever. Not edible raw; has to be "
+        f"Smoked first (see Food Products)."
+    ),
     "Food Products": (
         "Made at a Settlement from a Crop, Livestock byproduct, or "
         "another Food Product. Any Food Product in storage can satisfy a "
         "settlement's Food need — they're fully interchangeable for that "
-        "purpose."
+        "purpose, and pool together with raw edible Crops (see that "
+        "category) as one shared Food supply."
     ),
     "Manufactured Goods": (
         "Finished goods made at a Settlement from raw Forestry/Mining "
@@ -178,7 +194,15 @@ def resource_entry_text(name):
         lines.append("")
         lines.append(
             "Satisfies a settlement/village's Food need — any Food "
-            "Product in storage counts, fully interchangeably."
+            "Product (or edible raw Crop) in storage counts, fully "
+            "interchangeably."
+        )
+    elif name in R._RAW_FOOD_CROPS:
+        lines.append("")
+        lines.append(
+            "Edible raw — satisfies a settlement/village's Food need "
+            "directly, pooled together with Food Products, no conversion "
+            "needed."
         )
     if name in R._LUXURY_GOODS:
         lines.append("")
@@ -187,6 +211,16 @@ def resource_entry_text(name):
             "Good in storage counts, fully interchangeably. Raises "
             "prosperity when met; going without one is simply a "
             "non-event, never a penalty."
+        )
+    if name == "Fish":
+        lines.append("")
+        lines.append(
+            f"Caught by adjacency, not biome — a Settlement or Village "
+            f"within {R.FISH_ADJACENCY_REACH} cells of open ocean, a "
+            f"river, or a lake catches some every turn, scaled by that "
+            f"specific water body's own size (ocean flat; a river by its "
+            f"real flow; a lake by its own connected size). Never "
+            f"depletes."
         )
     if name == "Firewood":
         lines.append("")
@@ -289,12 +323,17 @@ def _settlements_article():
             "A Village is purely a producer — the actual farm/logging "
             "camp/mine, wherever a region's terrain supports one (see the "
             "Crops/Livestock/Forestry/Mining categories). It has no mill, "
-            "loom, or forge of its own: raw Wheat or Logs sitting in a "
-            "village's storage is genuinely stuck there until Local "
-            "Logistics (see that article) physically ships it to a "
-            "Settlement that can convert it. A Village's population eats "
-            "exactly like a Settlement's does — it is not exempt from "
-            "Food/Firewood/Clothes/Luxury needs."
+            "loom, or forge of its own: raw Logs (or any non-food raw "
+            "material) sitting in a village's storage is genuinely stuck "
+            "there until Local Logistics (see that article) physically "
+            "ships it to a Settlement that can convert it — raw Crops are "
+            "the one exception, edible on their own (see the Crops "
+            "category), so a Village can feed itself straight off its own "
+            "harvest without needing a Settlement's Bakery at all. A "
+            "Village's population eats exactly like a Settlement's does "
+            "— it is not exempt from Food/Firewood/Clothes/Luxury needs, "
+            "though see Prosperity for the grace period before a Food "
+            "shortfall actually costs population."
         ),
         (
             "A City can spawn a new Village nearby once its prosperity "
@@ -474,12 +513,34 @@ def _prosperity_article():
             f"  Clothes shortage:  −{R._SHORTAGE_PROSPERITY_PENALTY['Clothes']:.1f} x deficit fraction",
         ]),
         (
-            "A Food shortfall costs population too (up to "
-            f"{_pct(R.STARVATION_SEVERITY)} of the settlement/village per "
-            "turn under total famine); a Firewood shortfall in Winter "
-            "costs population the same way (up to "
-            f"{_pct(R.FREEZE_SEVERITY)} under total shortage). Clothes "
-            "never costs population, only prosperity."
+            "A Food or Firewood shortfall costs population too, but not "
+            "immediately — a settlement/village can go "
+            f"{R.STARVATION_GRACE_TURNS} consecutive turns without enough "
+            "Food, or "
+            f"{R.FREEZE_GRACE_TURNS} consecutive turns without enough "
+            "Firewood in Winter, with no population loss at all (the "
+            "prosperity penalty above still applies right away either "
+            "way). Only once that streak runs longer does starvation "
+            f"(up to {_pct(R.STARVATION_SEVERITY)} per turn) or freezing "
+            f"(up to {_pct(R.FREEZE_SEVERITY)} per turn) actually start "
+            "costing population, and the streak resets to zero the "
+            "moment the need is fully met again — a short rough patch "
+            "isn't a death sentence. Clothes never costs population, "
+            "only prosperity."
+        ),
+        "ALERTS",
+        (
+            "The player's own settlements/villages are watched every turn "
+            "for exactly these conditions — a Food or Firewood shortfall "
+            "(still inside its grace period, or past it and actively "
+            "costing population), and storage sitting over capacity and "
+            "spoiling the overage. Anything currently wrong shows up in "
+            "the Alerts panel (top-left of the map) and as a warning "
+            "badge directly on that settlement/village's own map marker "
+            "— click an alert to jump straight to it. This reflects "
+            "CURRENT state, not a one-time event: a problem stays listed "
+            "for as long as it's actually still happening, whether or "
+            "not the player was watching when it started."
         ),
         (
             "Luxury Goods (Wine, Beer, Jewelry, Furniture, Fine Clothes, "
@@ -495,7 +556,13 @@ def _prosperity_article():
             f"A City whose prosperity meter fills all the way to "
             f"{R.PROSPERITY_MAX:.0f} spawns a brand-new Village nearby "
             "and resets to 0 — the only way new Villages appear after "
-            "world generation and initial wildland claims."
+            "world generation and initial wildland claims. The new "
+            "Village gets a road back to its founding City AND a direct "
+            f"road to up to {R.VILLAGE_MESH_MAX_LINKS} other villages "
+            "already in the same region (whichever are closest, within "
+            f"{R.VILLAGE_MESH_LINK_RADIUS} cells) — a real interconnected "
+            "region instead of every village only ever linking back to "
+            "one city."
         ),
     ]
     return "\n\n".join(parts)
@@ -519,19 +586,26 @@ def _local_logistics_article():
         "WHAT COUNTS AS SURPLUS/NEED",
         (
             f"A node keeps a floor of {R.LOCAL_SURPLUS_RESERVE} units of "
-            "anything before shipping the rest, plus "
+            f"most things (a smaller {R.LOCAL_HOUSEHOLD_SURPLUS_RESERVE}-"
+            "unit floor for Firewood/Clothes specifically — genuinely "
+            "small-scale, per-capita goods, not bulk resources like Iron "
+            "or Logs) before shipping the rest, plus "
             f"{R.LOCAL_RESERVE_BUFFER_TURNS} turns' worth of its own "
             "near-term need for consumption goods "
             "(Food/Firewood/Clothes/Luxury) — it won't ship away food "
-            "it's about to need itself. Food Products and Luxury Goods "
-            "are pooled (any Bread/Meat/Milk/... covers \"Food\"; any "
-            "Wine/Jewelry/... covers \"Luxury\") rather than reserved "
-            "individually, since they're fully interchangeable for that "
-            "purpose. A Settlement additionally \"wants\" any "
-            "production-input resource (Wheat, Flour, Milk, Wool, "
-            "Cotton, Cloth, and the Mining/Forestry raw materials) once "
-            f"its own stock drops below {R.LOCAL_NEED_THRESHOLD} units "
-            "— a Village never does, since it can't convert anything."
+            "it's about to need itself. Food Products, edible raw Crops, "
+            "and Luxury Goods are each pooled (any Bread/Meat/Milk/... OR "
+            "raw Wheat/Potatoes/... covers \"Food\"; any Wine/Jewelry/... "
+            "covers \"Luxury\") rather than reserved individually, since "
+            "they're fully interchangeable for that purpose. A Settlement "
+            "additionally \"wants\" any production-input resource (Wheat, "
+            "Flour, Milk, Wool, Cotton, Cloth, and the Mining/Forestry raw "
+            f"materials) once its own stock drops below "
+            f"{R.LOCAL_NEED_THRESHOLD} units — a Village never does for a "
+            "non-food input, since it can't convert anything; an edible "
+            "Crop like Wheat can still move toward a Village that's "
+            "actually low on Food, just not toward one that already has "
+            "plenty."
         ),
         (
             "Survival needs are checked before ordinary production-input "
@@ -659,11 +733,17 @@ def _foreign_trade_article():
             f"{diplomacy.TRADE_STANDING_THRESHOLD}) before a route can "
             "even be proposed. Neither side gets to open one "
             "unilaterally: whoever proposes it still needs the other "
-            "side to actually agree (weighing standing, species "
-            "affinity, and real economic complementarity — the same "
-            "test Diplomacy's Form Alliance uses, just a much lower "
-            "bar). A land route then has to be physically built (growing "
-            "from both capitals at once, "
+            "side to actually agree. Between two AI factions this is "
+            "weighed automatically (standing, species affinity, and real "
+            "economic complementarity — the same test Diplomacy's Form "
+            "Alliance uses, just a much lower bar). The player is never "
+            "auto-decided for either way: an AI proposing to you queues "
+            "an incoming proposal on that faction's panel instead, "
+            "showing what it currently has stocked that you don't and "
+            "what it could produce that you have no access to at all, "
+            "for you to Accept or Decline yourself; proposing to an AI "
+            "is always your own click. A land route then has to be "
+            "physically built (growing from both capitals at once, "
             f"{trade.TRADE_ROUTE_CELLS_PER_TURN} cells/turn per end); a "
             "sea route opens immediately once agreed, since there's "
             "nothing to construct across open water. A decline sets a "
@@ -1090,6 +1170,7 @@ NAV = [
     ("livestock", "Livestock", "resources"),
     ("forestry", "Forestry", "resources"),
     ("mining", "Mining", "resources"),
+    ("fishing", "Fishing", "resources"),
     ("food_products", "Food Products", "resources"),
     ("manufactured_goods", "Manufactured Goods", "resources"),
     ("luxury_goods", "Luxury Goods", "resources"),
@@ -1110,7 +1191,7 @@ NAV = [
 
 _NAV_ID_TO_CATEGORY = {
     "crops": "Crops", "livestock": "Livestock", "forestry": "Forestry",
-    "mining": "Mining", "food_products": "Food Products",
+    "mining": "Mining", "fishing": "Fishing", "food_products": "Food Products",
     "manufactured_goods": "Manufactured Goods", "luxury_goods": "Luxury Goods",
 }
 
