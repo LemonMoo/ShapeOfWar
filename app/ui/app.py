@@ -77,6 +77,7 @@ class App(tk.Tk):
 
         bus.on("battle:over", self._on_battle_over)
         self.bind("<Escape>", self._on_escape)
+        self.bind("<F1>", self._on_f1)
 
         self.show_screen("menu")
 
@@ -179,6 +180,13 @@ class App(tk.Tk):
             view.render()
         else:
             self.nav_frame.pack_forget()
+
+    def _on_f1(self, event):
+        """Global shortcut for the Compendium (see MapView.open_compendium) —
+        works from any game screen, not just the map, since the content
+        doesn't depend on world state."""
+        if self.map_view is not None:
+            self.map_view.open_compendium()
 
     # --- pause menu (world map only) ----------------------------------------
     def _on_escape(self, event):

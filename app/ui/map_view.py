@@ -29,6 +29,7 @@ from app.world import construction
 from app.world import trade
 from app.world import expansion
 from app.world import commander
+from app.ui.compendium import CompendiumWindow
 
 _FLASH_COLOR = (255, 236, 120)   # bright gold — region gained
 _FLASH_FAIL_COLOR = (232, 74, 62)  # bright red — region attack failed
@@ -295,6 +296,7 @@ class MapView(tk.Frame):
         self._flash_start = 0.0
         self._flash_id = None
         self._bottom_msg_after_id = None
+        self._compendium_window = None
 
         # Resources gained/lost on the turn just ended, keyed by resource
         # name (including "Gold"); shown alongside current totals in the
@@ -609,6 +611,10 @@ class MapView(tk.Frame):
         self.actions = tk.Frame(p, bg=theme.PANEL)
         self.actions.pack(fill="x", padx=14, pady=16)
 
+        tk.Button(p, text="Compendium (F1)", command=self.open_compendium,
+                  bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                  relief="flat", font=theme.FONT).pack(side="bottom", fill="x",
+                                                       padx=14, pady=(0, 6))
         self.view_btn = tk.Button(p, text="View: Political", command=self._toggle_mode,
                                   bg="#232a36", fg=theme.INK,
                                   activebackground=theme.ACCENT, relief="flat",
@@ -637,6 +643,16 @@ class MapView(tk.Frame):
 
     def _update_turn_label(self):
         self.turn_lbl.config(text=f"Turn {self.world.turn} — {self.world.season}")
+
+    def open_compendium(self):
+        """Create-or-raise: repeated presses (button or the F1 shortcut in
+        app.py) focus the existing window instead of spawning duplicates."""
+        if self._compendium_window is not None and self._compendium_window.winfo_exists():
+            self._compendium_window.deiconify()
+            self._compendium_window.lift()
+            self._compendium_window.focus_set()
+            return
+        self._compendium_window = CompendiumWindow(self)
 
     def _on_end_turn(self):
         before = self._current_resource_snapshot()
