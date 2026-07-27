@@ -19,6 +19,12 @@ _FRAME_MS = 16              # ~60 fps
 _DT = 1 / 60                # fixed simulation step (seconds)
 _SPEEDS = [1, 2, 4, 8]      # sim sub-steps per frame (battle speed multiplier)
 _CLICK_SLOP = 4             # px of movement still counted as a click, not a drag
+_EQUIPMENT_DETAIL_MAX_UNITS = 160   # above this many living soldiers, stop drawing
+                                     # per-soldier sword/shield glyphs -- see render().
+                                     # Set from measurement, not taste: the glyphs cost
+                                     # ~0.13ms per soldier, so 160 is about where a
+                                     # fully-detailed frame still fits in the 16.7ms
+                                     # 60fps budget
 
 
 class BattleView(tk.Frame):
@@ -41,6 +47,11 @@ class BattleView(tk.Frame):
         self._drag_start = None     # (x, y) canvas coords at mouse-down
         self._drag_last = None      # (x, y) last motion event, for move deltas
         self._marquee = None        # (x0, y0, x1, y1) while box-selecting
+        # Formation tool (right-drag): draw a line, preview rally-flag slots,
+        # snap the selection into ranks on release — see _on_rmb_* below.
+        self._formation_line = None    # (x0, y0, x1, y1) while right-dragging
+        self._formation_slots = []     # [(unit, x, y), ...] previewed placement
+        self._planning_keys_bound = False
 
         self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
         self.canvas.pack(side="left", fill="both", expand=True)
@@ -48,6 +59,9 @@ class BattleView(tk.Frame):
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<ButtonPress-3>", self._on_rmb_press)
+        self.canvas.bind("<B3-Motion>", self._on_rmb_drag)
+        self.canvas.bind("<ButtonRelease-3>", self._on_rmb_release)
 
         self._build_panel()
 
@@ -84,6 +98,19 @@ class BattleView(tk.Frame):
                                    relief="flat", font=theme.FONT)
         self.speed_btn.pack(side="left", padx=2)
 
+        # Per-type quick-select (planning only) — mirror the 1/2/3 hotkeys.
+        self.select_frame = tk.Frame(p, bg=theme.PANEL)
+        self.select_frame.pack(fill="x", padx=14, pady=(0, 4))
+        tk.Label(self.select_frame, text="Select:", bg=theme.PANEL, fg=theme.MUTED,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 4))
+        for label, key, hot in (("Swordsmen", "infantry", "1"),
+                                ("Cavalry", "cavalry", "2"),
+                                ("Archers", "archer", "3")):
+            tk.Button(self.select_frame, text=f"{label} ({hot})",
+                      command=lambda k=key: self._select_type(k),
+                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                      relief="flat", font=("Segoe UI", 8)).pack(side="left", padx=1)
+
         self.log = tk.Label(p, text="", bg=theme.PANEL, fg=theme.MUTED,
                             font=("Consolas", 8), justify="left",
                             wraplength=270, anchor="nw")
@@ -104,10 +131,15 @@ class BattleView(tk.Frame):
         self.selected_units = set()
         self._drag_mode = None
         self._marquee = None
-        self.plan_hint.config(text="Planning phase — drag your units (highlighted "
-                              "outline when selected) into position. Drag over "
-                              "empty ground to box-select several at once. Click "
-                              "\"Deploy Army\" when ready.")
+        self._formation_line = None
+        self._formation_slots = []
+        self.plan_hint.config(text="Planning phase — left-drag your units into "
+                              "position, or box-select several. Keys 1/2/3 (or "
+                              "the buttons) select all Swordsmen / Cavalry / "
+                              "Archers. Right-drag a line to form the selection "
+                              "up along it. Space (or \"Deploy Army\") starts "
+                              "the fight.")
+        self._bind_planning_keys()
         self._update_toggle_label()
         self.render()
 
@@ -116,17 +148,65 @@ class BattleView(tk.Frame):
         self.selected_units = set()
         self._drag_mode = None
         self._marquee = None
+        self._formation_line = None
+        self._formation_slots = []
+        self._unbind_planning_keys()
         self.plan_hint.config(text="")
         self._update_toggle_label()
+
+    # --- planning-phase key bindings (per-type select + Space deploy) -------
+    def _bind_planning_keys(self):
+        if self._planning_keys_bound:
+            return
+        self._planning_keys_bound = True
+        self.bind_all("<Key-1>", lambda e: self._select_type("infantry"), add="+")
+        self.bind_all("<Key-2>", lambda e: self._select_type("cavalry"), add="+")
+        self.bind_all("<Key-3>", lambda e: self._select_type("archer"), add="+")
+        self.bind_all("<space>", self._on_space_deploy, add="+")
+
+    def _unbind_planning_keys(self):
+        if not self._planning_keys_bound:
+            return
+        self._planning_keys_bound = False
+        for seq in ("<Key-1>", "<Key-2>", "<Key-3>", "<space>"):
+            self.unbind_all(seq)
+
+    def _on_space_deploy(self, event):
+        if self.planning:
+            self.toggle()   # "Deploy Army" — end planning + start in one press
+
+    def _select_type(self, type_key):
+        """Select every living army-0 unit of ``type_key`` (the 1/2/3 hotkeys
+        and the panel buttons both land here)."""
+        if not self.planning:
+            return
+        self.selected_units = {u for u in self._plannable_units()
+                               if u.type_key == type_key}
+        self.render()
 
     def _update_toggle_label(self):
         self.toggle_btn.config(text="Deploy Army" if self.planning else "Start / Pause")
 
-    def _on_attack(self, attacker, target):
+    def _on_attack(self, attacker, target, outcome="hit"):
         import random
+        if outcome == "block":
+            if random.random() < 0.15:   # sample blocks so the log isn't spammed
+                self._add_log(f"{target.faction.name} {target.type['name']} "
+                              f"blocks with their shield")
+            return
+        if outcome == "dodge":
+            if random.random() < 0.15:   # sampled, same reasoning as blocks
+                self._add_log(f"{target.faction.name} {target.type['name']} "
+                              f"ducks under the blow")
+            return
         if not target.alive and random.random() < 0.5:
-            self._add_log(f"{attacker.faction.name} {attacker.type['name']} "
-                          f"downs a {target.type['name']}")
+            downs = (f"{attacker.faction.name} {attacker.type['name']} "
+                     f"downs a {target.type['name']}")
+            if attacker.type.get("charge") and attacker.charge == 0.0:
+                # charge just spent on this killing blow -> it was a couched hit
+                downs = (f"{attacker.faction.name} {attacker.type['name']} "
+                         f"rides down a {target.type['name']}")
+            self._add_log(downs)
 
     def _add_log(self, line):
         self._log_lines.insert(0, line)
@@ -191,7 +271,7 @@ class BattleView(tk.Frame):
         """The plannable unit under (x, y), nearest first, or None."""
         best, best_d2 = None, None
         for u in self._plannable_units():
-            r = u.type["radius"]
+            r = u.radius
             d2 = (u.x - x) ** 2 + (u.y - y) ** 2
             if d2 <= r * r and (best_d2 is None or d2 < best_d2):
                 best, best_d2 = u, d2
@@ -222,7 +302,7 @@ class BattleView(tk.Frame):
             dx, dy = x - lx, y - ly
             x_min, x_max = self.battle.zone_bounds(0)
             for u in self.selected_units:
-                r = u.type["radius"]
+                r = u.radius
                 u.x = min(x_max - r, max(x_min + r, u.x + dx))
                 u.y = min(self.battle.height - r, max(r, u.y + dy))
             self._drag_last = (x, y)
@@ -248,6 +328,73 @@ class BattleView(tk.Frame):
         self._marquee = None
         self.render()
 
+    # --- formation tool: right-drag a line, snap the selection into ranks ---
+    _SLOT_SPACING = 16   # px between soldiers in a formation (matches deploy grid)
+
+    def _on_rmb_press(self, event):
+        if not self.planning or not self.selected_units:
+            return
+        self._formation_line = (event.x, event.y, event.x, event.y)
+        self._formation_slots = self._compute_formation_slots(
+            self.selected_units, event.x, event.y, event.x, event.y)
+        self.render()
+
+    def _on_rmb_drag(self, event):
+        if not self.planning or self._formation_line is None:
+            return
+        x0, y0, _, _ = self._formation_line
+        self._formation_line = (x0, y0, event.x, event.y)
+        self._formation_slots = self._compute_formation_slots(
+            self.selected_units, x0, y0, event.x, event.y)
+        self.render()
+
+    def _on_rmb_release(self, event):
+        if not self.planning or self._formation_line is None:
+            return
+        for u, sx, sy in self._formation_slots:
+            u.x, u.y = sx, sy
+        self._formation_line = None
+        self._formation_slots = []
+        self.render()
+
+    def _compute_formation_slots(self, units, x0, y0, x1, y1):
+        """One target (x, y) per selected unit, laid out in ranks along the
+        drawn line A->B: units fill the front rank left-to-right along the
+        line, then wrap into successive ranks stacked *behind* it (toward your
+        own edge, away from the enemy), spaced by _SLOT_SPACING and clamped to
+        your half. Sorted by type so like troops cluster. Returns
+        [(unit, x, y), ...]."""
+        order = {"infantry": 0, "cavalry": 1, "archer": 2}
+        us = sorted(units, key=lambda u: (order.get(u.type_key, 9), id(u)))
+        if not us:
+            return []
+        ax, ay = x0, y0
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length < 1.0:
+            along = (0.0, 1.0)         # a mere click -> a single column downward
+        else:
+            along = (dx / length, dy / length)
+        # "behind" = the perpendicular pointing toward your own (left) edge, so
+        # extra ranks stack away from the enemy rather than toward them.
+        p1 = (-along[1], along[0])
+        perp = p1 if p1[0] <= 0 else (-p1[0], -p1[1])
+
+        spacing = self._SLOT_SPACING
+        capacity = max(1, int(length // spacing) + 1)
+        x_min, x_max = self.battle.zone_bounds(0)
+        h = self.battle.height
+        slots = []
+        for i, u in enumerate(us):
+            col, rank = i % capacity, i // capacity
+            sx = ax + along[0] * col * spacing + perp[0] * rank * spacing
+            sy = ay + along[1] * col * spacing + perp[1] * rank * spacing
+            r = u.radius
+            sx = min(x_max - r, max(x_min + r, sx))
+            sy = min(h - r, max(r, sy))
+            slots.append((u, sx, sy))
+        return slots
+
     # --- "click any button to continue" after a battle ----------------------
     def _arm_continue(self):
         if self._continue_armed:
@@ -270,23 +417,22 @@ class BattleView(tk.Frame):
         if self.on_continue:
             self.on_continue()
 
+    def _living_unit_count(self):
+        return sum(1 for army in self.battle.armies for u in army.units if u.alive)
+
     def _draw_equipment(self, c, u):
         """Sword ('t') in the right hand, shield ('o') in the left, oriented to
         whichever way the unit is facing (toward its target)."""
         eq = u.type.get("equipment")
         if not eq:
             return
-        t = u.target
-        if t and t.alive:
-            fx, fy = t.x - u.x, t.y - u.y
-            d = math.hypot(fx, fy) or 1.0
-            fx, fy = fx / d, fy / d
-        else:
-            fx, fy = 1.0, 0.0                 # default facing: east
+        # Unit.facing is the shared source of truth (also drives the shield's
+        # frontal block arc) — defaults to east until the unit picks a target.
+        fx, fy = u.facing
         # Right-hand / left-hand offset directions (perpendicular to facing).
         rhx, rhy = -fy, fx
         lhx, lhy = fy, -fx
-        r = u.type["radius"]
+        r = u.radius
         if "sword" in eq:
             # Scimitar thrust forward: the blade points in the facing direction
             # (tip toward the enemy, hilt toward the body), held out in front and
@@ -302,6 +448,48 @@ class BattleView(tk.Frame):
         if "shield" in eq:                    # 'o' is symmetric — no rotation needed
             c.create_text(u.x + lhx * (r + 4), u.y + lhy * (r + 4), text="o",
                           fill="#a9d4ff", font=("Consolas", 8, "bold"))
+
+    def _draw_effects(self, c):
+        """Block sparks (a quick light-blue ring where a shield deflected a
+        blow) and charge impacts (a bigger burst in the rider's color where a
+        couched hit landed) — both from battle.effects, fading as t/dur → 1."""
+        for e in self.battle.effects:
+            f = min(1.0, e.t / e.dur)      # 0 (fresh) .. 1 (faded)
+            if e.kind == "block":
+                r = 5 + 6 * f
+                c.create_oval(e.x - r, e.y - r, e.x + r, e.y + r,
+                              outline=e.color, width=max(1, int(2 * (1 - f))))
+            elif e.kind == "dodge":
+                # A quick sidestep: a short motion-blur streak that drifts and
+                # fades, rather than the ring a solid parry gets.
+                off = 10 * f
+                c.create_line(e.x - off, e.y - off * 0.4, e.x + off, e.y + off * 0.4,
+                              fill=e.color, width=max(1, int(2 * (1 - f))))
+            elif e.kind == "shock":
+                # The charge's AOE going off: a heavy ring racing out to the
+                # real radius that was damaged (Effect.size), with a second
+                # ring chasing it, so a cavalry charge slamming a line reads as
+                # one big shared event rather than a scatter of single hits.
+                r = e.size * (0.35 + 0.65 * f)
+                width = max(1, int(4 * (1 - f)))
+                c.create_oval(e.x - r, e.y - r, e.x + r, e.y + r,
+                              outline=e.color, width=width)
+                r2 = r * 0.6
+                c.create_oval(e.x - r2, e.y - r2, e.x + r2, e.y + r2,
+                              outline=e.color, width=max(1, width - 1))
+                for ang in (0.0, 1.05, 2.09, 3.14, 4.19, 5.24):
+                    c.create_line(e.x + math.cos(ang) * r2, e.y + math.sin(ang) * r2,
+                                  e.x + math.cos(ang) * r, e.y + math.sin(ang) * r,
+                                  fill=e.color, width=width)
+            else:  # "impact" — a couched charge landing
+                r = 7 + 12 * f
+                c.create_oval(e.x - r, e.y - r, e.x + r, e.y + r,
+                              outline=e.color, width=max(1, int(3 * (1 - f))))
+                # a couple of radial spokes for a "slam" read
+                for ang in (0.4, 2.0, 3.6, 5.2):
+                    c.create_line(e.x, e.y,
+                                  e.x + math.cos(ang) * r, e.y + math.sin(ang) * r,
+                                  fill=e.color, width=max(1, int(2 * (1 - f))))
 
     # --- rendering ---------------------------------------------------------
     def render(self):
@@ -321,20 +509,44 @@ class BattleView(tk.Frame):
             c.create_text(10, 8, text="PLANNING PHASE — drag your units into position",
                          fill=theme.ACCENT, font=("Segoe UI", 11, "bold"), anchor="nw")
 
+        # Level of detail: the per-soldier sword/shield glyphs are two extra
+        # canvas items each, one of them ROTATED text, and they measure at
+        # ~70-80% of the entire frame cost. Armies now scale with a realm's
+        # population (see resources._recompute_military), so a developed one
+        # fields hundreds of soldiers -- at which point each is a few pixels
+        # across and the glyphs are illegible anyway. Drop them past the
+        # threshold and the same frame costs ~5x less; below it nothing
+        # changes and every soldier still shows its kit.
+        show_equipment = self._living_unit_count() <= _EQUIPMENT_DETAIL_MAX_UNITS
         for army in self.battle.armies:
             for u in army.units:
                 if u.alive:
                     draw_shape(c, u.type["shape"], u.x, u.y,
-                               u.type["radius"], army.color)
-                    self._draw_equipment(c, u)
+                               u.radius, army.color)
+                    if show_equipment:
+                        self._draw_equipment(c, u)
                     if u in self.selected_units:
-                        r = u.type["radius"]
+                        r = u.radius
                         c.create_oval(u.x - r - 3, u.y - r - 3, u.x + r + 3, u.y + r + 3,
                                      outline="#ffffff", width=2)
 
         if self._marquee is not None:
             x0, y0, x1, y1 = self._marquee
             c.create_rectangle(x0, y0, x1, y1, outline=theme.ACCENT, dash=(3, 2))
+
+        # Formation tool: the drawn line + a rally flag / ghost at each slot
+        # the selection will snap into.
+        if self._formation_line is not None:
+            fx0, fy0, fx1, fy1 = self._formation_line
+            c.create_line(fx0, fy0, fx1, fy1, fill=theme.ACCENT, dash=(2, 2))
+        for u, sx, sy in self._formation_slots:
+            r = u.radius
+            draw_shape(c, u.type["shape"], sx, sy, r, "#3d4757")   # dim ghost
+            c.create_line(sx, sy - r, sx, sy - r - 11, fill=theme.ACCENT)  # flag pole
+            c.create_polygon(sx, sy - r - 11, sx + 7, sy - r - 8,
+                             sx, sy - r - 5, fill=theme.ACCENT, outline="")
+
+        self._draw_effects(c)
 
         # Arrows in flight, drawn on top as '.'.
         for p in self.battle.projectiles:

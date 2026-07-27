@@ -38,16 +38,18 @@ import random
 
 from app.world.world_map import Stance
 from app.world.worldgen import (OCEAN, UNCLAIMED, _path_dijkstra, _nearest_ocean_cell,
-                                _elev_cost, _sea_cost, _bfs_distance,
-                                _SEA_COAST_REACH)
-from app.world.resources import (RESOURCES, BASE_VALUE_BY_TIER,
+                                _elev_cost, _sea_cost, _bfs_distance, road_cells,
+                                path_transit_cells, _SEA_COAST_REACH)
+from app.world.resources import (RESOURCES, BASE_VALUE_BY_TIER, RESOURCE_SPAWN,
                                  _storage_cap, _clamp_to_storage,
-                                 settlement_needs, _FOOD_PRODUCTS, _LUXURY_GOODS,
+                                 settlement_needs, _FOOD_SOURCES, _LUXURY_GOODS,
                                  _SETTLEMENT_STORAGE_RESOURCES,
-                                 settlement_storage_capacity,
+                                 settlement_storage_capacity, _node_storage_capacity,
                                  _node_surplus, _node_wants,
                                  _LOCAL_SHIPMENT_PRIORITY, resource_value)
 from app.world.diplomacy import TRADE_STANDING_THRESHOLD
+from app.world import wrap
+from app.world import rivers
 
 # --- market ------------------------------------------------------------------
 MIN_TRADE_QUANTITY = 20
@@ -56,7 +58,15 @@ NON_FOOD_RESERVE_FRACTION = 0.1   # non-food: never sell below 10% of storage ca
 
 MAX_ACTIVE_TRADES_PER_FACTION = 3
 CELLS_PER_TURN = 15
+# A river barge outruns an overland caravan for the same reason a river
+# shipment outruns a wagon (see RIVER_SHIPMENT_CELLS_PER_TURN): a prepared
+# waterway with no terrain to fight.
+RIVER_CELLS_PER_TURN = 30
 MIN_TRANSIT_TURNS, MAX_TRANSIT_TURNS = 5, 20
+# A river route's own, lower floor -- same reasoning as
+# MIN_RIVER_TRANSIT_TURNS for domestic shipments: without it a short river
+# haul just hits the general minimum and the waterway buys you nothing.
+MIN_RIVER_CARAVAN_TURNS = 2
 LAND_RISK_PER_TURN = 0.08         # per turn, crossing land at war with either party
 _TRADE_BBOX_PAD = 30
 
@@ -70,16 +80,18 @@ def _settlement_needs_total(nation, resource, world):
     """How much of `resource` this nation's settlements actually need per
     turn under Phase 8's consumption model (see resources.settlement_needs)
     — the replacement for the old upkeep-dict-based figure now that
-    SETTLEMENT_UPKEEP is gone. For a Food Product this is deliberately
+    SETTLEMENT_UPKEEP is gone. For a food source (Food Product or edible
+    raw Crop — see resources._FOOD_SOURCES) this is deliberately
     conservative: it assumes the whole nation's food need could fall on
-    this one resource alone (food actually comes from whichever Food
-    Products are in stock, not one specific one), erring toward reserving
-    too much rather than too little — safer than accidentally trading away
-    food a settlement needs to survive."""
+    this one resource alone (food actually comes from whichever of them is
+    in stock, not one specific one), erring toward reserving too much
+    rather than too little — safer than accidentally trading away food a
+    settlement (or, now that raw Crops count too, a Village that's never
+    converted a single one of them) needs to survive."""
     total = 0
     for sid in nation.meta.get("settlements", []):
         needs = settlement_needs(world.settlements[sid], world.season)
-        if resource in _FOOD_PRODUCTS:
+        if resource in _FOOD_SOURCES:
             total += needs["Food"]
         elif resource == "Firewood":
             total += needs.get("Firewood", 0)
@@ -120,6 +132,23 @@ def _faction_capital_settlement(nation, world):
     return world.settlements[sids[0]] if sids else None
 
 
+def _faction_has_gold_source(world, fac_idx):
+    """Whether this faction currently owns any Mountain-biome land at all --
+    the sole terrain Gold Ore ever spawns on (see RESOURCE_SPAWN), and
+    Mining is continuous/non-depleting (see compute_industry_yield), so
+    owning any is enough to call the resulting Gold Ore -> Gold conversion
+    ("a Mint", see RECIPES/resources.py's Currency section -- there's no
+    separate buildable structure, it just runs automatically wherever
+    Gold Ore is flowing in) genuinely RELIABLE, not a one-off windfall.
+    Used to gate Gold out of Regional Markets entirely for a faction with
+    no such access (see _collect_payment's allow_gold) -- without a real,
+    ongoing source, a faction's Gold is a fixed starting pile with nothing
+    replacing it, and letting internal trade spend it down would just be
+    a slow drain to zero, not real currency circulating."""
+    return any(r.faction_idx == fac_idx and r.biome_counts.get("mountain", 0) > 0
+              for r in world.regions)
+
+
 # --- Currency overhaul: Gold payment, settlement-grounded, with a barter
 # fallback -- Gold is a real, mined-and-minted _SETTLEMENT_STORAGE_RESOURCES
 # good now (see resources.py's Currency section), not a bottomless national
@@ -134,6 +163,26 @@ _BARTER_EXCLUDE = {"Gold", "Gold Ore"}
 
 def _settlement_gold(st):
     return getattr(st, "resources", {}).get("Gold", 0) if st is not None else 0
+
+
+# A settlement used to happily spend every last coin the instant it had
+# some to spend, in both foreign and domestic trade -- fine for a single
+# deal, but it meant a nation never actually held onto Gold long enough to
+# fund anything else, like claiming wildland (CLAIM_BASE_COST +
+# CLAIM_COST_PER_CELL in expansion.py -- a typical mid-size region runs
+# ~150-250 Gold) or any other future Gold cost. This is purely a trade-
+# spending floor, not a hard cap on the settlement's own Gold: claiming/
+# construction still draw on its FULL stockpile, reserve included, when
+# the settlement itself decides to spend it -- this only holds back what
+# gets offered up in commerce, so the reserve is actually still there
+# when a real opportunity (a wildland claim, say) comes along.
+GOLD_TRADE_RESERVE = 200
+
+
+def _spendable_gold(st):
+    """Gold a settlement will actually put toward a trade, after holding
+    back GOLD_TRADE_RESERVE -- see that constant's docstring."""
+    return max(0, _settlement_gold(st) - GOLD_TRADE_RESERVE)
 
 
 def _find_barter_good(payer_st, world, season, value_needed):
@@ -166,13 +215,21 @@ def _find_barter_good(payer_st, world, season, value_needed):
     return (best_resource, qty)
 
 
-def _settlement_purchasing_power(st, world, season):
+def _settlement_purchasing_power(st, world, season, include_gold=True):
     """Gold `st` has on hand, plus the gold-equivalent value of what it
     could barter instead (see _find_barter_good) -- what actually caps how
     big a trade this settlement can realistically pay for, now that Gold
     has to be produced/stored/spent for real instead of drawn from a
     bottomless national wallet. Used to size a deal at dispatch time, same
-    role nation.stats["gold"] used to play."""
+    role nation.stats["gold"] used to play.
+
+    `include_gold=False` (Regional Markets for a faction with no reliable
+    Gold source -- see _faction_has_gold_source) sizes the deal off barter
+    capacity alone, so a settlement never gets credited for spending power
+    it isn't actually allowed to use (see _collect_payment's matching
+    allow_gold). Gold itself only ever counts up to _spendable_gold (past
+    the GOLD_TRADE_RESERVE floor) -- a settlement flush with cash still
+    can't be sized as if the whole pile were up for trade."""
     if st is None:
         return 0
     needs = settlement_needs(st, season)
@@ -183,32 +240,65 @@ def _settlement_purchasing_power(st, world, season):
         surplus = _node_surplus(st, resource, needs)
         if surplus > 0:
             barter_value += resource_value(resource, surplus)
-    return _settlement_gold(st) + barter_value
+    return (_spendable_gold(st) if include_gold else 0) + barter_value
 
 
-def _collect_payment(payer_st, price, world, season):
-    """Deduct up to `price` Gold-equivalent value from payer_st -- real
-    Gold first, then a single barter good for any shortfall (see
-    _find_barter_good) -- and return what was actually taken, as a list of
-    (resource, quantity). Doesn't credit anywhere; see _deliver_payment for
-    the other half. Split in two so a caravan/shipment can collect payment
-    when goods are delivered but only credit the seller once the return
-    leg actually completes (see advance_caravans) -- the same real "the
-    payment can be lost with the caravan" risk the traded resource itself
-    already carries."""
+def _collect_payment(payer_st, price, world, season, barter_first=False, allow_gold=True):
+    """Deduct up to `price` Gold-equivalent value from payer_st, and return
+    what was actually taken, as a list of (resource, quantity). Doesn't
+    credit anywhere; see _deliver_payment for the other half. Split in two
+    so a caravan/shipment can collect payment when goods are delivered but
+    only credit the seller once the return leg actually completes (see
+    advance_caravans) -- the same real "the payment can be lost with the
+    caravan" risk the traded resource itself already carries.
+
+    `barter_first` (regional/domestic trade -- see run_regional_trade)
+    tries a real barter good (_find_barter_good) before touching Gold at
+    all: a realm moving goods between its OWN settlements has no reason to
+    burn its treasury doing it, any more than a farmer pays cash to move
+    grain from one of his own barns to another -- Gold only fills
+    whatever's left once there's nothing suitable left to barter with.
+    Foreign trade (the default, barter_first=False) keeps Gold-first,
+    since a real currency genuinely is the normal way two separate
+    nations settle a trade.
+
+    `allow_gold=False` (regional trade for a faction with no reliable Gold
+    source -- see _faction_has_gold_source) shuts Gold out of the payment
+    entirely, not just deprioritizes it: without a real, ongoing Gold Ore
+    -> Gold conversion running somewhere, a faction's starting Gold is a
+    one-time, non-renewable pile -- letting internal trade spend it down
+    would just be a slow-motion drain to zero with nothing replacing it,
+    not real currency circulating. A trade that barter alone can't fully
+    cover is undersized at dispatch instead (see run_regional_trade's own
+    purchasing-power check), so this should rarely leave real unmet
+    shortfall here -- it's a hard backstop, not the normal case.
+
+    Whenever Gold IS on the table (allow_gold=True), it's still capped at
+    _spendable_gold -- past GOLD_TRADE_RESERVE, a settlement won't put any
+    more toward a trade, foreign or domestic, so it actually keeps enough
+    on hand for its own future spending (a wildland claim, say) instead of
+    trading away every coin the moment it has one."""
     if payer_st is None or price <= 0:
         return []
     if not hasattr(payer_st, "resources"):
         payer_st.resources = {}
     taken = []
-    gold_have = payer_st.resources.get("Gold", 0)
-    gold_paid = min(gold_have, price)
-    if gold_paid > 0:
-        payer_st.resources["Gold"] = gold_have - gold_paid
-        taken.append(("Gold", gold_paid))
-    shortfall = price - gold_paid
-    if shortfall > 0:
-        barter = _find_barter_good(payer_st, world, season, shortfall)
+    remaining = price
+
+    def _pay_gold(amount):
+        nonlocal remaining
+        if not allow_gold:
+            return
+        gold_have = payer_st.resources.get("Gold", 0)
+        gold_paid = min(_spendable_gold(payer_st), amount)
+        if gold_paid > 0:
+            payer_st.resources["Gold"] = gold_have - gold_paid
+            taken.append(("Gold", gold_paid))
+            remaining -= gold_paid
+
+    def _pay_barter(amount):
+        nonlocal remaining
+        barter = _find_barter_good(payer_st, world, season, amount)
         if barter is not None:
             resource, qty = barter
             have = payer_st.resources.get(resource, 0)
@@ -216,6 +306,16 @@ def _collect_payment(payer_st, price, world, season):
             if qty > 0:
                 payer_st.resources[resource] = have - qty
                 taken.append((resource, qty))
+                remaining = max(0, remaining - resource_value(resource, qty))
+
+    if barter_first:
+        _pay_barter(remaining)
+        if remaining > 0:
+            _pay_gold(remaining)
+    else:
+        _pay_gold(remaining)
+        if remaining > 0:
+            _pay_barter(remaining)
     return taken
 
 
@@ -226,6 +326,34 @@ def _deliver_payment(payee_st, paid):
         payee_st.resources = {}
     for resource, qty in paid:
         payee_st.resources[resource] = payee_st.resources.get(resource, 0) + qty
+
+
+def _species_gold_bonus(world, faction_idx):
+    """Extra fraction of Gold this faction's species earns on a completed
+    foreign sale -- Humans' shrewd merchants, 0.0 for everyone else. See
+    app/world/lexicon.py's SPECIES."""
+    from app.world.lexicon import species_traits
+    nation = world.factions[faction_idx]
+    species = getattr(nation, "meta", {}).get("species")
+    return species_traits(species)["trade_gold_bonus"]
+
+
+def _with_gold_bonus(paid, bonus):
+    """(boosted_payment, extra_gold): `paid` with its Gold scaled up by
+    `bonus`. Only Gold is boosted -- bartered goods are physical crates that
+    don't multiply on the way home. Deliberately applied to FOREIGN sales
+    only (see advance_caravans): Regional Markets is a faction trading with
+    itself, so a bonus there would just mint Gold out of nothing."""
+    if not paid or bonus <= 0:
+        return paid, 0
+    out, extra = [], 0
+    for resource, qty in paid:
+        if resource == "Gold":
+            bumped = int(round(qty * (1.0 + bonus)))
+            extra += bumped - qty
+            qty = bumped
+        out.append((resource, qty))
+    return out, extra
 
 
 def _nation_resource_stock(nation, resource, world):
@@ -393,36 +521,51 @@ def _get_path_cache(world):
     return cache
 
 
-def _land_path_between(world, a_pos, b_pos, pad=_TRADE_BBOX_PAD):
+def _land_path_between(world, a_pos, b_pos, pad=_TRADE_BBOX_PAD, friendly_idxs=None):
     """Terrain-aware land path between two arbitrary points, or None if no
     land connection exists. Shared by _land_capital_path (foreign trade
     routes) and the Phase 11 regional-market path lookup below — same
     Dijkstra + elevation-cost machinery worldgen already uses everywhere
-    else a path needs to respect terrain."""
-    ax, ay = a_pos
-    bx, by = b_pos
-    x0, x1 = sorted((ax, bx))
+    else a path needs to respect terrain.
+
+    `friendly_idxs`, when given, makes the search prefer detouring around
+    any THIRD faction's territory (see worldgen._elev_cost) -- a real
+    preference, not a wall, so a route only actually crosses foreign land
+    when there's genuinely no reasonable way around it, same as every
+    other terrain toll here.
+
+    Every caller here is moving GOODS, not building anything, so all of
+    them get the road discount: a wagon train uses the road network where
+    one exists rather than striking off across the wilderness beside it."""
+    ay, by = a_pos[1], b_pos[1]
     y0, y1 = sorted((ay, by))
-    bx0 = max(0, x0 - pad)
     by0 = max(0, y0 - pad)
-    bx1 = min(world.w, x1 + pad + 1)
     by1 = min(world.h, y1 + pad + 1)
-    land_cellset = {(x, y) for y in range(by0, by1) for x in range(bx0, bx1)
+    xs = wrap.bbox_span_wrap(a_pos[0], b_pos[0], world.w, pad)
+    land_cellset = {(x, y) for y in range(by0, by1) for x in xs
                      if world.owner[y][x] != OCEAN}
     if a_pos not in land_cellset or b_pos not in land_cellset:
         return None
-    return _path_dijkstra(land_cellset, lambda c: _elev_cost(world, world.base_cost, c),
-                          a_pos, b_pos)
+    roads = road_cells(world)
+    return _path_dijkstra(land_cellset,
+                          lambda c: _elev_cost(world, world.base_cost, c,
+                                               friendly_idxs=friendly_idxs,
+                                               roads=roads),
+                          a_pos, b_pos, world.w)
 
 
 def _land_capital_path(world, a_idx, b_idx):
     """Terrain-aware land path between two factions' capitals — used once,
     when a land route is proposed (start_trade_route); unlike the sea case
     there's nothing to cache against since land routes are only ever
-    computed at proposal time, not re-derived every turn."""
+    computed at proposal time, not re-derived every turn. Prefers to
+    avoid a THIRD faction's territory (neither a's nor b's own land, which
+    are both fine to cross) -- a route "shouldn't" plow through some
+    other, uninvolved nation whenever a reasonable detour exists, the same
+    preference roads already apply to their own owning faction's land."""
     a_pos = world.factions[a_idx].meta["capital"]
     b_pos = world.factions[b_idx].meta["capital"]
-    return _land_path_between(world, a_pos, b_pos)
+    return _land_path_between(world, a_pos, b_pos, friendly_idxs=frozenset((a_idx, b_idx)))
 
 
 def _capital_sea_path(world, a_idx, b_idx):
@@ -441,28 +584,144 @@ def _capital_sea_path(world, a_idx, b_idx):
 
     a_pos = world.factions[a_idx].meta["capital"]
     b_pos = world.factions[b_idx].meta["capital"]
-    x0, x1 = sorted((a_pos[0], b_pos[0]))
     y0, y1 = sorted((a_pos[1], b_pos[1]))
-    bx0 = max(0, x0 - _TRADE_BBOX_PAD)
     by0 = max(0, y0 - _TRADE_BBOX_PAD)
-    bx1 = min(world.w, x1 + _TRADE_BBOX_PAD + 1)
     by1 = min(world.h, y1 + _TRADE_BBOX_PAD + 1)
+    xs = wrap.bbox_span_wrap(a_pos[0], b_pos[0], world.w, _TRADE_BBOX_PAD)
 
     path = None
     dock_a = _nearest_ocean_cell(world, a_pos)
     dock_b = _nearest_ocean_cell(world, b_pos)
     if dock_a and dock_b:
-        sea_cellset = {(x, y) for y in range(by0, by1) for x in range(bx0, bx1)
+        sea_cellset = {(x, y) for y in range(by0, by1) for x in xs
                        if world.owner[y][x] == OCEAN}
         sea_path = _path_dijkstra(sea_cellset,
                                   lambda c: _sea_cost(world, world.base_cost, c),
-                                  dock_a, dock_b)
+                                  dock_a, dock_b, world.w)
         if sea_path is not None:
             path = [a_pos] + sea_path + [b_pos]
 
     result = ("sea", path) if path else None
     cache[key] = result
     return result
+
+
+def route_path_possible(world, a_idx, b_idx):
+    """Whether a trade route between these two capitals could ever actually
+    form -- land OR sea, same check start_trade_route/accept_trade_route_
+    proposal fall through to. eligible_to_trade only checks diplomacy
+    (contact/standing), not geography, so without this a route can be
+    proposed -- by the AI, or offered as a button in the player's own UI --
+    between two capitals with no possible connection at all (different,
+    unconnected landmasses where at least one side isn't even coastal), and
+    the player only finds out it was never achievable after already
+    accepting/clicking. Checked up front instead, so a proposal is only
+    ever made when it can actually succeed.
+
+    Cached on `world` -- capitals never move, so like _capital_sea_path
+    this is turn-invariant. Without caching, run_trade_route_ai would
+    re-run a full uncached land Dijkstra (_land_capital_path deliberately
+    isn't cached -- see its own docstring, it used to only ever run once
+    per accepted proposal) for every candidate pair, every single turn,
+    which is real, avoidable per-turn cost on top of what was already
+    there."""
+    cache = getattr(world, "_route_path_possible_cache", None)
+    if cache is None:
+        cache = {}
+        world._route_path_possible_cache = cache
+    key = frozenset((a_idx, b_idx))
+    if key in cache:
+        return cache[key]
+    result = _capital_river_route(world, a_idx, b_idx) is not None
+    if not result:
+        result = _land_capital_path(world, a_idx, b_idx) is not None
+    if not result:
+        coastal = _coastal_factions(world)
+        if a_idx in coastal and b_idx in coastal:
+            result = _capital_sea_path(world, a_idx, b_idx) is not None
+    cache[key] = result
+    return result
+
+
+# A capital-to-capital route counts as a river route once at least this much of
+# it actually runs along water. Deliberately well below what a river-preferring
+# search really achieves in practice (measured 50-76% on real maps), so the
+# classification is decisive rather than marginal.
+RIVER_CORRIDOR_MIN_FRACTION = 0.35
+
+
+def _capital_river_route(world, a_idx, b_idx):
+    """``("river", cells)`` when two capitals can be linked by a route that
+    mostly follows navigable water, else None. Cached on the same "capitals
+    never move" assumption _capital_sea_path already relies on.
+
+    Note this deliberately does NOT require both capitals to sit on one shared
+    river system, the way domestic river shipments do (_regional_route). That
+    rule cannot ever fire between two factions: river systems here average a
+    few dozen cells while realms sit hundreds of cells apart, so no single
+    river is ever touched by two different nations -- measured across several
+    generated worlds, exactly zero river systems host settlements of more than
+    one faction. What foreign trade actually wants is the historical pattern
+    instead: barges working *along* a river corridor, hopping between the
+    waterways that happen to run the right way, reaching inland cities that no
+    coastline touches.
+
+    So the search is an ordinary overland route whose cost function makes river
+    cells nearly free rather than penalising them (the opposite of _elev_cost's
+    normal river toll, which exists to stop ROADS fording rivers repeatedly).
+    The result naturally hugs valleys; if enough of it ends up on water, it's a
+    river route -- faster, and needing no construction, since the waterway is
+    already there."""
+    cache = getattr(world, "_capital_river_route_cache", None)
+    if cache is None:
+        cache = {}
+        world._capital_river_route_cache = cache
+    key = frozenset((a_idx, b_idx))
+    if key in cache:
+        return cache[key]
+
+    a_st = _faction_capital_settlement(world.factions[a_idx], world)
+    b_st = _faction_capital_settlement(world.factions[b_idx], world)
+    result = None
+    if a_st is not None and b_st is not None:
+        path = _river_corridor_path(world, a_st.pos, b_st.pos,
+                                    friendly_idxs=frozenset((a_idx, b_idx)))
+        if path:
+            river_cells = getattr(world, "river_cells", None) or set()
+            share = sum(1 for c in path if c in river_cells) / len(path)
+            if share >= RIVER_CORRIDOR_MIN_FRACTION:
+                result = ("river", path)
+    cache[key] = result
+    return result
+
+
+# How cheap a river cell is to travel compared with ordinary ground. Low enough
+# that the search will detour a long way to pick a river up and stay on it.
+_RIVER_CORRIDOR_COST = 0.15
+
+
+def _river_corridor_path(world, a_pos, b_pos, friendly_idxs=None):
+    """Overland path that treats navigable river cells as the cheap option
+    instead of an obstacle -- the boat's-eye view of the same terrain
+    _land_path_between walks. Same bbox/cellset machinery as that function."""
+    river_cells = getattr(world, "river_cells", None) or set()
+    if not river_cells:
+        return None
+    y0, y1 = sorted((a_pos[1], b_pos[1]))
+    by0 = max(0, y0 - _TRADE_BBOX_PAD)
+    by1 = min(world.h, y1 + _TRADE_BBOX_PAD + 1)
+    xs = wrap.bbox_span_wrap(a_pos[0], b_pos[0], world.w, _TRADE_BBOX_PAD)
+    cellset = {(x, y) for y in range(by0, by1) for x in xs
+               if world.owner[y][x] != OCEAN}
+    if a_pos not in cellset or b_pos not in cellset:
+        return None
+
+    def cost(cell):
+        if cell in river_cells:
+            return _RIVER_CORRIDOR_COST
+        return _elev_cost(world, world.base_cost, cell, friendly_idxs=friendly_idxs)
+
+    return _path_dijkstra(cellset, cost, a_pos, b_pos, world.w)
 
 
 # --- the caravan/ship itself -------------------------------------------------
@@ -500,8 +759,11 @@ class TradeCaravan:
         self.origin_settlement_id = origin_settlement_id
         self.payment = []
         self.leg = "outbound"           # "outbound" | "return"
-        base_turns = max(MIN_TRANSIT_TURNS, min(MAX_TRANSIT_TURNS,
-                         round(len(path) / CELLS_PER_TURN)))
+        river = kind == "river"
+        cells_per_turn = RIVER_CELLS_PER_TURN if river else CELLS_PER_TURN
+        floor = MIN_RIVER_CARAVAN_TURNS if river else MIN_TRANSIT_TURNS
+        base_turns = max(floor, min(MAX_TRANSIT_TURNS,
+                         round(len(path) / cells_per_turn)))
         # allies move goods faster — "free[r] movement through borders"
         self.turns_total = max(MIN_TRANSIT_TURNS, round(base_turns * speed_multiplier))
         self.turn_progress = 0
@@ -618,10 +880,12 @@ def advance_caravans(world):
             origin_id = getattr(c, "origin_settlement_id", None)
             seller_st = (world.settlements[origin_id] if origin_id is not None
                         else _faction_capital_settlement(seller, world))
-            _deliver_payment(seller_st, c.payment)
+            payment, bonus_gold = _with_gold_bonus(
+                c.payment, _species_gold_bonus(world, c.seller_idx))
+            _deliver_payment(seller_st, payment)
             events.append({"type": "paid", "seller_idx": c.seller_idx, "buyer_idx": c.buyer_idx,
                           "resource": c.resource, "quantity": c.quantity, "price": c.total_price,
-                          "payment": c.payment})
+                          "payment": payment, "bonus_gold": bonus_gold})
             # round trip complete — caravan is simply not carried forward
 
     world.trade_caravans = remaining
@@ -763,6 +1027,109 @@ class TradeRouteProject:
 TRADE_ROUTE_DECLINE_COOLDOWN_TURNS = 10   # matches expansion.CLAIM_FAIL_COOLDOWN_TURNS in spirit
 
 
+# --- what a trade partner actually brings to the table ----------------------
+def _faction_biome_set(world, faction_idx):
+    """Every biome present anywhere in this faction's own territory --
+    used to judge geographic resource ACCESS (could they ever produce
+    this, given their land), not just what they're currently harvesting."""
+    biomes = set()
+    for region in world.regions:
+        if region.faction_idx != faction_idx:
+            continue
+        biomes.update(getattr(region, "biome_counts", {}).keys())
+    return biomes
+
+
+def _accessible_raw_resources(world, faction_idx):
+    """Every raw resource (RESOURCE_SPAWN) this faction could plausibly
+    produce somewhere in its own territory, based on biome alone --
+    regardless of whether it's actually being harvested yet."""
+    biomes = _faction_biome_set(world, faction_idx)
+    return {name for name, spec in RESOURCE_SPAWN.items() if spec["biomes"] & biomes}
+
+
+def _faction_stocked_resources(world, faction_idx, min_amount=1):
+    """Resources this faction currently holds a real stockpile of,
+    aggregated across its own settlements."""
+    nation = world.factions[faction_idx]
+    totals = {}
+    for sid in nation.meta.get("settlements", []):
+        for r, amt in getattr(world.settlements[sid], "resources", {}).items():
+            totals[r] = totals.get(r, 0) + amt
+    return {r for r, amt in totals.items() if amt >= min_amount}
+
+
+def trade_complementarity_summary(world, viewer_idx, other_idx):
+    """What `other_idx` brings to a trade route, from `viewer_idx`'s own
+    point of view: resources they currently HAVE real stock of that the
+    viewer doesn't, and raw resources they could ACCESS somewhere in
+    their own territory (by biome) that the viewer's territory has no
+    access to at all -- whether or not it's actually being harvested yet.
+    Used by the trade-route proposal UI (both directions: the player's
+    own outgoing proposal and an AI's incoming one) so accepting/
+    proposing is actually informed by what's on the table, not a blind
+    guess. Returns {"have": [...], "access": [...]}, both sorted."""
+    their_stock = _faction_stocked_resources(world, other_idx)
+    our_stock = _faction_stocked_resources(world, viewer_idx)
+    have_advantage = their_stock - our_stock
+
+    their_access = _accessible_raw_resources(world, other_idx)
+    our_access = _accessible_raw_resources(world, viewer_idx)
+    # Excludes anything already listed under "have" so a resource they're
+    # both stocking AND geographically favored for isn't listed twice
+    # under two different framings.
+    access_advantage = their_access - our_access - have_advantage
+
+    return {"have": sorted(have_advantage), "access": sorted(access_advantage)}
+
+
+def _has_pending_proposal(world, from_idx):
+    return any(p["from_idx"] == from_idx for p in world.incoming_trade_proposals)
+
+
+def accept_trade_route_proposal(world, from_idx):
+    """The player accepts an AI's pending trade-route proposal (see
+    run_trade_route_ai) -- the same route-formation logic
+    start_trade_route uses once a proposal is agreed to (land path takes
+    priority, physically built over time; a sea route opens immediately),
+    just skipping diplomacy.evaluate_trade_route entirely, since the
+    player's own acceptance already IS the decision it would otherwise
+    make on their behalf."""
+    world.incoming_trade_proposals = [p for p in world.incoming_trade_proposals
+                                      if p["from_idx"] != from_idx]
+    player_idx = world.player_faction_idx
+    key = frozenset((from_idx, player_idx))
+    if key in world.trade_routes_by_pair:
+        return "A trade route already connects you."
+    a = world.factions[from_idx]
+    land_path = _land_capital_path(world, from_idx, player_idx)
+    coastal = _coastal_factions(world)
+    sea_result = (_capital_sea_path(world, from_idx, player_idx)
+                 if from_idx in coastal and player_idx in coastal else None)
+    if land_path is not None:
+        world.trade_route_projects.append(TradeRouteProject(from_idx, player_idx, land_path))
+        return f"You agree — construction begins on a trade route with {a.name}."
+    if sea_result is not None:
+        kind, sea_path = sea_result
+        route = {"kind": kind, "cells": sea_path, "a_faction": from_idx, "b_faction": player_idx}
+        world.trade_routes.append(route)
+        world.trade_routes_by_pair[key] = route
+        return f"You agree — a sea trade route opens with {a.name}."
+    return "No viable route exists between your capitals after all."
+
+
+def decline_trade_route_proposal(world, from_idx):
+    """The player declines an AI's pending proposal -- sets the same
+    decline cooldown a formula-driven AI-to-AI decline would (see
+    start_trade_route), so the same faction doesn't just re-propose again
+    next turn."""
+    world.incoming_trade_proposals = [p for p in world.incoming_trade_proposals
+                                      if p["from_idx"] != from_idx]
+    key = frozenset((from_idx, world.player_faction_idx))
+    world.trade_route_decline_until[key] = world.turn + TRADE_ROUTE_DECLINE_COOLDOWN_TURNS
+    return f"You decline {world.factions[from_idx].name}'s trade proposal."
+
+
 def start_trade_route(world, a_idx, b_idx):
     """Propose a trade route (land or sea, whichever exists — land takes
     priority when both do, since it's the more substantial connection)
@@ -789,11 +1156,14 @@ def start_trade_route(world, a_idx, b_idx):
         return "They're not ready to reconsider a trade proposal yet."
 
     a, b = world.factions[a_idx], world.factions[b_idx]
+    # Priority: RIVER > LAND > SEA. A shared river is the best connection going
+    # -- fastest, and already navigable, so nothing has to be built.
+    river_result = _capital_river_route(world, a_idx, b_idx)
     land_path = _land_capital_path(world, a_idx, b_idx)
     coastal = _coastal_factions(world)
     sea_result = (_capital_sea_path(world, a_idx, b_idx)
                  if a_idx in coastal and b_idx in coastal else None)
-    if land_path is None and sea_result is None:
+    if river_result is None and land_path is None and sea_result is None:
         return "No viable route exists between these two capitals."
 
     from app.world import diplomacy
@@ -803,6 +1173,15 @@ def start_trade_route(world, a_idx, b_idx):
             world.trade_route_decline_until = {}
         world.trade_route_decline_until[key] = world.turn + TRADE_ROUTE_DECLINE_COOLDOWN_TURNS
         return f"{b.name} declines the trade proposal — {reason}."
+
+    if river_result is not None:
+        kind, river_path_cells = river_result
+        route = {"kind": kind, "cells": river_path_cells,
+                 "a_faction": a_idx, "b_faction": b_idx}
+        world.trade_routes.append(route)
+        world.trade_routes_by_pair[key] = route
+        return (f"{b.name} agrees — a river trade route opens between "
+                f"{a.name} and {b.name}.")
 
     if land_path is not None:
         world.trade_route_projects.append(TradeRouteProject(a_idx, b_idx, land_path))
@@ -863,6 +1242,10 @@ def run_trade_route_ai(world):
     for f_idx in order:
         if active.get(f_idx, 0) >= MAX_ACTIVE_ROUTE_PROJECTS_PER_FACTION:
             continue
+        if f_idx == world.player_faction_idx:
+            continue   # the player proposes for themself, via their own UI
+        if _has_pending_proposal(world, f_idx):
+            continue   # already waiting on a player response, don't pile on
         seller = world.factions[f_idx]
         decline_until = getattr(world, "trade_route_decline_until", {})
         candidates = []
@@ -874,7 +1257,7 @@ def run_trade_route_ai(world):
                 continue
             if world.turn < decline_until.get(key, -1):
                 continue   # declined recently -- don't re-pester them every turn
-            if eligible_to_trade(world, f_idx, p_idx):
+            if eligible_to_trade(world, f_idx, p_idx) and route_path_possible(world, f_idx, p_idx):
                 candidates.append(p_idx)
         if not candidates:
             continue
@@ -882,6 +1265,20 @@ def run_trade_route_ai(world):
         best = max(candidates, key=lambda p:
                    diplomacy._resource_complementarity(world, seller, world.factions[p]))
         key = frozenset((f_idx, best))
+
+        if best == world.player_faction_idx:
+            # The player gets an actual choice instead of this auto-
+            # resolving through diplomacy.evaluate_trade_route the way an
+            # AI-to-AI proposal does -- see accept_trade_route_proposal/
+            # decline_trade_route_proposal (map_view.py surfaces this on
+            # the proposing faction's info panel).
+            world.incoming_trade_proposals.append(
+                {"from_idx": f_idx, "turn_proposed": world.turn})
+            events.append({"type": "route_proposed", "from_idx": f_idx})
+            active[f_idx] = active.get(f_idx, 0) + 1
+            building_pairs.add(key)
+            continue
+
         start_trade_route(world, f_idx, best)
         established = key in world.trade_routes_by_pair
         building = key in {frozenset((p.a_idx, p.b_idx)) for p in world.trade_route_projects}
@@ -938,49 +1335,127 @@ REGIONAL_TRADE_MIN_QUANTITY = 15
 REGIONAL_TRADE_MAX_QUANTITY = 50
 MAX_ACTIVE_REGIONAL_SHIPMENTS_PER_SETTLEMENT = 2
 REGIONAL_SHIPMENT_CELLS_PER_TURN = 10
+# Boats beat wagons handily: a river is a prepared, downhill-assisted highway
+# with no terrain to fight, so a river-borne shipment covers far more ground
+# per turn than the same goods hauled overland. This is what makes "both ends
+# sit on the same river" a genuinely valuable position to hold.
+RIVER_SHIPMENT_CELLS_PER_TURN = 30
+# ...but the cells-per-turn rate alone delivers nothing here, because two nodes
+# on the same river system are nearly always CLOSE (river systems are small --
+# a few dozen cells) and both routes then bottom out at the same minimum
+# transit. The lower floor is what actually makes river trade quick: goods move
+# between neighbouring river towns in a turn instead of three.
+MIN_RIVER_TRANSIT_TURNS = 1
 MIN_REGIONAL_TRANSIT_TURNS, MAX_REGIONAL_TRANSIT_TURNS = 3, 25
 REGIONAL_SHIPMENT_RISK_PER_TURN = 0.08
 
 
 def _get_regional_path_cache(world):
-    """Settlement positions never change once built, so a path between two
-    of them is cacheable forever — same reasoning as _get_path_cache for
-    capital-to-capital sea paths, just keyed by settlement id pair instead
-    of faction id pair (and covering land only — see the module note
-    above)."""
-    cache = getattr(world, "_regional_path_cache", None)
+    """Settlement/village positions never change once placed, so a path
+    between two of them is cacheable forever — same reasoning as
+    _get_path_cache for capital-to-capital sea paths, just keyed by node
+    id pair instead of faction id pair (and covering land only — see the
+    module note above)."""
+    # NOTE the attribute name is versioned (_v2): the pre-river cache stored a
+    # bare path per key, this one stores a (transport, path) tuple. A save
+    # pickled before river trade carries the old dict, so reusing the old name
+    # would feed bare paths straight into tuple-unpacking call sites.
+    cache = getattr(world, "_regional_route_cache_v2", None)
     if cache is None:
         cache = {}
-        world._regional_path_cache = cache
+        world._regional_route_cache_v2 = cache
     return cache
 
 
-def _regional_path(world, a_st, b_st):
+def _regional_node_kind(node):
+    return "settlement" if hasattr(node, "kind") else "village"
+
+
+REGIONAL_PATH_BUDGET_PER_TURN = 1   # cap on brand-new (uncached) Dijkstra path
+                                     # lookups per turn, shared by
+                                     # run_regional_trade/run_sell_to_city --
+                                     # widening Regional Markets to include
+                                     # every Village (not just Settlements,
+                                     # see _faction_regional_nodes) means a
+                                     # much bigger pool of possible node
+                                     # pairs. Not just a one-time startup
+                                     # cost either: new Villages keep
+                                     # appearing all game (city growth),
+                                     # each one creating a fresh batch of
+                                     # never-yet-pathed pairs -- measured,
+                                     # real hitching without this cap, even
+                                     # well into the midgame. Kept
+                                     # deliberately tight (real per-turn
+                                     # cost measured down to ~1ms/turn
+                                     # amortized at 1) rather than a bigger
+                                     # number that only helps once at
+                                     # startup; already-cached pairs are
+                                     # completely unaffected and stay
+                                     # instant forever once resolved.
+
+
+def _regional_route(world, a_node, b_node):
+    """``(transport, path)`` between two of a faction's own nodes for Regional
+    Markets purposes -- ``("river", cells)`` when both ends sit on the same
+    connected river system and a navigable path exists, otherwise
+    ``("land", cells)``, or ``(None, None)`` when neither works.
+
+    Works for a Settlement or a Village on either side (see
+    run_regional_trade's node-widening). Settlement ids and Village ids are
+    separate, independently-numbered id spaces (world.settlements[5] and
+    world.villages[5] are unrelated objects) -- the cache key tags each side
+    with its own kind so a settlement and a village that happen to share a
+    numeric id can never collide.
+
+    River is tried first because it's both faster and, being water, free of
+    the terrain tolls a land haul pays. Falling back to land keeps the same
+    single-faction preference as before: both ends always belong to the SAME
+    faction here, so the land search prefers staying on that faction's own
+    territory and only crosses anyone else's when there's no reasonable way
+    around it (see worldgen._elev_cost's faction_idx param)."""
     cache = _get_regional_path_cache(world)
-    key = frozenset((a_st.id, b_st.id))
+    key = frozenset(((_regional_node_kind(a_node), a_node.id),
+                     (_regional_node_kind(b_node), b_node.id)))
     if key in cache:
         return cache[key]
-    path = _land_path_between(world, a_st.pos, b_st.pos, pad=_REGIONAL_BBOX_PAD)
-    cache[key] = path
-    return path
+    budget = getattr(world, "_regional_path_budget", REGIONAL_PATH_BUDGET_PER_TURN)
+    if budget <= 0:
+        # Not cached yet -- try again once the budget resets next turn.
+        return (None, None)
+    world._regional_path_budget = budget - 1
+
+    result = (None, None)
+    system_id = rivers.shared_river_system(world, a_node, b_node)
+    if system_id is not None:
+        river_cells = rivers.river_path(world, a_node.pos, b_node.pos, system_id)
+        if river_cells:
+            result = ("river", river_cells)
+    if result[1] is None:
+        land = _land_path_between(world, a_node.pos, b_node.pos, pad=_REGIONAL_BBOX_PAD,
+                                  friendly_idxs=frozenset((a_node.faction_idx,)))
+        if land:
+            result = ("land", land)
+    cache[key] = result
+    return result
 
 
 def _regional_unit_price(resource, seller_st, buyer_st, world):
     """Same tier/surplus/need formula as unit_price, evaluated at the
-    specific settlement pair (there's no nation-aggregate fallback here —
-    regional trade is settlement-to-settlement by construction). No ally
-    tariff discount: that's a foreign-diplomacy concept, meaningless
-    within one's own faction."""
+    specific node pair (there's no nation-aggregate fallback here —
+    regional trade is node-to-node by construction; either side can be a
+    Settlement or a Village -- see run_regional_trade's node-widening).
+    No ally tariff discount: that's a foreign-diplomacy concept,
+    meaningless within one's own faction."""
     tier = RESOURCES.get(resource, {}).get("tier", 3)
     base = BASE_VALUE_BY_TIER.get(tier, 3)
 
     seller_needs = settlement_needs(seller_st, world.season)
     surplus = _node_surplus(seller_st, resource, seller_needs)
-    seller_cap = settlement_storage_capacity(seller_st)
+    seller_cap = _node_storage_capacity(seller_st)
     surplus_ratio = min(2.0, surplus / (seller_cap * 0.1 + 1))
     seller_factor = max(0.6, 1.2 - 0.4 * surplus_ratio)
 
-    buyer_cap = settlement_storage_capacity(buyer_st)
+    buyer_cap = _node_storage_capacity(buyer_st)
     stock = getattr(buyer_st, "resources", {}).get(resource, 0)
     need = max(0.0, 1.0 - stock / buyer_cap) if buyer_cap > 0 else 0.0
     buyer_factor = min(2.5, 0.7 + 1.8 * need)
@@ -990,16 +1465,28 @@ def _regional_unit_price(resource, seller_st, buyer_st, world):
 
 class RegionalShipment:
     """Goods (and Gold) physically moving between two of the same faction's
-    Settlements in DIFFERENT regions — the cross-region follow-up to
-    resources.LocalShipment (same-region, free — see that class and the
-    module note above for why this one's separate). Real terrain-aware
-    path (via _regional_path), real multi-turn transit, real risk of loss
-    while in transit — the foreign-trade shape, not the free-logistics
-    shape, since this is priced."""
+    nodes in DIFFERENT regions — either a Settlement or a Village on
+    either end (see run_regional_trade's node-widening: a Village with
+    real surplus can export it just as a Settlement can, and a Village
+    lacking something can receive it directly too, not just whatever a
+    Settlement in its region happens to redistribute onward via local
+    logistics) — the cross-region follow-up to resources.LocalShipment
+    (same-region, free — see that class and the module note above for why
+    this one's separate). Real terrain-aware path (via _regional_route),
+    real multi-turn transit, real risk of loss while in transit — the
+    foreign-trade shape, not the free-logistics shape, since this is
+    priced.
+
+    origin_kind/dest_kind ("settlement" or "village") say which of
+    world.settlements/world.villages origin_id/dest_id actually indexes
+    into — the two id spaces are independent and can overlap, so the id
+    alone is never enough to resolve a node (see advance_regional_
+    shipments)."""
     _next_id = 0
 
     def __init__(self, faction_idx, resource, quantity, price, path,
-                origin_id, dest_id):
+                origin_id, dest_id, origin_kind="settlement", dest_kind="settlement",
+                transport="land", transit_cells=None):
         self.id = RegionalShipment._next_id
         RegionalShipment._next_id += 1
         self.faction_idx = faction_idx
@@ -1010,9 +1497,26 @@ class RegionalShipment:
         self.path = path
         self.origin_id = origin_id
         self.dest_id = dest_id
-        self.turns_total = max(MIN_REGIONAL_TRANSIT_TURNS,
+        self.origin_kind = origin_kind
+        self.dest_kind = dest_kind
+        # "land" (wagons) or "river" (boats) -- note this is the TRANSPORT
+        # mode, distinct from origin_kind/dest_kind which say whether each end
+        # is a settlement or a village. Defaults to "land" so a shipment
+        # unpickled from a pre-river save is still coherent.
+        self.transport = transport
+        river = transport == "river"
+        cells_per_turn = (RIVER_SHIPMENT_CELLS_PER_TURN if river
+                          else REGIONAL_SHIPMENT_CELLS_PER_TURN)
+        floor = MIN_RIVER_TRANSIT_TURNS if river else MIN_REGIONAL_TRANSIT_TURNS
+        # `transit_cells` is the path's length DISCOUNTED for the stretches
+        # that run along a road (worldgen.path_transit_cells) -- the caller
+        # computes it because it needs the world to know where the roads are.
+        # Falls back to the raw cell count, which is what a pre-roads pickle
+        # and any caller that doesn't care will get.
+        length = len(path) if transit_cells is None else transit_cells
+        self.turns_total = max(floor,
                               min(MAX_REGIONAL_TRANSIT_TURNS,
-                                  round(len(path) / REGIONAL_SHIPMENT_CELLS_PER_TURN)))
+                                  round(length / cells_per_turn)))
         self.turn_progress = 0
         # Currency overhaul: what the destination settlement actually paid
         # at dispatch (Gold and/or a barter good, see _collect_payment) --
@@ -1028,67 +1532,125 @@ class RegionalShipment:
         return self.path[idx]
 
 
-def _active_regional_shipments(world, settlement_id):
-    return sum(1 for s in world.regional_shipments if s.origin_id == settlement_id)
+def _active_regional_shipments(world, node_id, kind="settlement"):
+    """`kind` disambiguates settlement ids from village ids (independent,
+    overlapping id spaces -- see RegionalShipment's own docstring)."""
+    return sum(1 for s in world.regional_shipments
+              if s.origin_id == node_id and s.origin_kind == kind)
+
+
+def _faction_regional_nodes(world, fac_idx, nation):
+    """Every Settlement AND Village this faction owns, as (kind, node)
+    pairs -- what run_regional_trade actually matches surplus/need across.
+    Villages used to be invisible to this tier entirely: a Village could
+    only ever receive goods a same-region Settlement chose to pass along
+    (run_local_logistics), and could only ever export surplus to that same
+    Settlement -- stranding a Village sitting on real surplus (e.g. next
+    to the only forest for miles) whenever its own region's Settlement(s)
+    didn't happen to need what it had, and leaving a Village with no
+    Settlement in its region (or a region with no local source of some
+    good at all -- e.g. no forest anywhere in it) with no path to ever
+    receiving it, regardless of how much surplus the rest of the faction
+    was sitting on elsewhere."""
+    nodes = [("settlement", world.settlements[sid]) for sid in nation.meta.get("settlements", [])]
+    nodes += [("village", v) for v in world.villages if v.faction_idx == fac_idx]
+    return nodes
 
 
 def run_regional_trade(world):
     """Called every turn, after run_local_logistics has already had its
     shot at satisfying need within each region: for each faction, greedily
-    match a settlement sitting on cross-region-worthy surplus of a
-    household-economy resource to another of that faction's settlements
-    (in a DIFFERENT region) that genuinely needs it, and dispatch a paid
-    RegionalShipment — same greedy-first-match style as run_trade_ai/
-    run_local_logistics, not an optimizer. Returns "regional_dispatched"
-    event dicts (see advance_regional_shipments for the delivered/lost
-    counterparts)."""
+    match a Settlement or Village sitting on cross-region-worthy surplus
+    of a household-economy resource to another of that faction's
+    Settlements or Villages (in a DIFFERENT region) that genuinely needs
+    it, and dispatch a paid RegionalShipment — same greedy-first-match
+    style as run_trade_ai/run_local_logistics, not an optimizer. Returns
+    "regional_dispatched" event dicts (see advance_regional_shipments for
+    the delivered/lost counterparts)."""
+    world._regional_path_budget = REGIONAL_PATH_BUDGET_PER_TURN
     events = []
     season = world.season
     for fac_idx, nation in enumerate(world.factions):
-        sids = nation.meta.get("settlements", [])
-        if len(sids) < 2:
+        nodes = _faction_regional_nodes(world, fac_idx, nation)
+        if len(nodes) < 2:
             continue
-        settlements = [world.settlements[sid] for sid in sids]
-        needs_by_st = {st.id: settlement_needs(st, season) for st in settlements}
+        has_gold = _faction_has_gold_source(world, fac_idx)
+        needs_by_node = {(kind, node.id): settlement_needs(node, season) for kind, node in nodes}
 
-        for st in settlements:
-            if _active_regional_shipments(world, st.id) >= MAX_ACTIVE_REGIONAL_SHIPMENTS_PER_SETTLEMENT:
+        # Who wants what, computed ONCE per faction per turn rather than
+        # re-scanning every other node for every surplus resource a
+        # source might have (an O(nodes^2 * resources) scan otherwise) --
+        # widening this tier to include every Village, not just
+        # Settlements (see _faction_regional_nodes), made that quadratic
+        # cost real: a faction with a few dozen villages was re-checking
+        # "does this village want Wheat" dozens of times over for every
+        # single surplus-holding node's Wheat, every turn, forever. This
+        # collapses that scan to O(nodes * resources) up front, then the
+        # matching loop below only ever looks at nodes actually wanting
+        # the specific resource in hand.
+        wants_by_resource = {}
+        for wkind, wnode in nodes:
+            wneeds = needs_by_node[(wkind, wnode.id)]
+            for resource in _LOCAL_SHIPMENT_PRIORITY:
+                if _node_wants(wkind, wnode, resource, wneeds):
+                    wants_by_resource.setdefault(resource, []).append((wkind, wnode))
+
+        for kind, node in nodes:
+            if _active_regional_shipments(world, node.id, kind) >= MAX_ACTIVE_REGIONAL_SHIPMENTS_PER_SETTLEMENT:
                 continue
-            own_needs = needs_by_st[st.id]
+            own_needs = needs_by_node[(kind, node.id)]
             dispatched = False
             for resource in _LOCAL_SHIPMENT_PRIORITY:
-                surplus = _node_surplus(st, resource, own_needs)
+                surplus = _node_surplus(node, resource, own_needs)
                 if surplus < REGIONAL_TRADE_MIN_QUANTITY:
                     continue
-                for other in settlements:
-                    if other is st or other.region_id == st.region_id:
+                for other_kind, other in wants_by_resource.get(resource, ()):
+                    if other is node or other.region_id == node.region_id:
                         continue   # same region -- Phase 10 already covers this for free
-                    if not _node_wants("settlement", other, resource, needs_by_st[other.id]):
+                    # Path lookup first (and budget-limited -- see
+                    # REGIONAL_PATH_BUDGET_PER_TURN) since it's the
+                    # single most expensive check here: no point pricing
+                    # a deal (below) or checking purchasing power for a
+                    # candidate that can't be reached this turn anyway,
+                    # once the much bigger node pool _faction_regional_
+                    # nodes' village-widening created made that waste
+                    # actually add up.
+                    transport, path = _regional_route(world, node, other)
+                    if path is None:
                         continue
-                    price = _regional_unit_price(resource, st, other, world)
+                    price = _regional_unit_price(resource, node, other, world)
                     if price <= 0:
                         continue
-                    # Currency overhaul: `other` (the buying settlement)
-                    # caps the deal by its own Gold + barter purchasing
-                    # power now, not the faction's old bottomless wallet.
-                    power = _settlement_purchasing_power(other, world, season)
+                    # Currency overhaul: `other` (the buyer) caps the deal
+                    # by its own Gold + barter purchasing power now, not
+                    # the faction's old bottomless wallet -- unless this
+                    # faction has no reliable Gold source at all (see
+                    # _faction_has_gold_source), in which case Gold isn't
+                    # spendable here either, so it's excluded from the cap
+                    # too (matching _collect_payment's allow_gold below) --
+                    # otherwise a deal could get sized off spending power
+                    # the settlement is never actually allowed to use.
+                    power = _settlement_purchasing_power(other, world, season,
+                                                         include_gold=has_gold)
                     qty = int(min(surplus, REGIONAL_TRADE_MAX_QUANTITY, power // price))
                     if qty < REGIONAL_TRADE_MIN_QUANTITY:
                         continue
-                    path = _regional_path(world, st, other)
-                    if path is None:
-                        continue
 
-                    if not hasattr(st, "resources"):
-                        st.resources = {}
-                    st.resources[resource] = max(0, st.resources.get(resource, 0) - qty)
+                    if not hasattr(node, "resources"):
+                        node.resources = {}
+                    node.resources[resource] = max(0, node.resources.get(resource, 0) - qty)
                     total_price = round(qty * price)
-                    shipment = RegionalShipment(fac_idx, resource, qty, price, path, st.id, other.id)
-                    shipment.payment = _collect_payment(other, total_price, world, season)
+                    shipment = RegionalShipment(fac_idx, resource, qty, price, path,
+                                                node.id, other.id, kind, other_kind,
+                                                transport=transport,
+                                                transit_cells=path_transit_cells(world, path))
+                    shipment.payment = _collect_payment(other, total_price, world, season,
+                                                        barter_first=True, allow_gold=has_gold)
                     world.regional_shipments.append(shipment)
                     events.append({"type": "regional_dispatched", "faction_idx": fac_idx,
                                   "resource": resource, "quantity": qty, "price": total_price,
-                                  "origin_name": st.name, "dest_name": other.name})
+                                  "payment": shipment.payment,
+                                  "origin_name": node.name, "dest_name": other.name})
                     dispatched = True
                     break
                 if dispatched:
@@ -1112,8 +1674,10 @@ def advance_regional_shipments(world):
             owner_idx >= 0 and owner_idx != s.faction_idx
             and world.world_map.get_relationship(
                 nation.id, world.factions[owner_idx].id)["stance"] == Stance.ENEMY)
-        origin = world.settlements[s.origin_id]
-        dest = world.settlements[s.dest_id]
+        origin = (world.settlements[s.origin_id] if s.origin_kind == "settlement"
+                 else world.villages[s.origin_id])
+        dest = (world.settlements[s.dest_id] if s.dest_kind == "settlement"
+               else world.villages[s.dest_id])
         if risky and random.random() < REGIONAL_SHIPMENT_RISK_PER_TURN:
             events.append({"type": "regional_lost", "faction_idx": s.faction_idx,
                           "resource": s.resource, "quantity": s.quantity, "price": s.total_price,
@@ -1135,6 +1699,7 @@ def advance_regional_shipments(world):
         _deliver_payment(origin, s.payment)
         events.append({"type": "regional_delivered", "faction_idx": s.faction_idx,
                       "resource": s.resource, "quantity": s.quantity, "price": s.total_price,
+                      "payment": s.payment,
                       "origin_name": origin.name, "dest_name": dest.name})
 
     world.regional_shipments = remaining
@@ -1161,7 +1726,7 @@ def advance_regional_shipments(world):
 # over time" dynamic just falls out of pricing that already exists --
 # nothing new needed for that part.
 #
-# Reuses RegionalShipment/_regional_path/_active_regional_shipments
+# Reuses RegionalShipment/_regional_route/_active_regional_shipments
 # wholesale (same terrain-aware pathing, same risk of loss crossing
 # unclaimed/hostile territory) -- the only real difference is price is
 # always 0: unlike Regional Markets' genuine domestic sale, this leg is
@@ -1186,10 +1751,10 @@ def _faction_cities(nation, world):
     return [st for st in _faction_settlements(nation, world) if st.kind == "city"]
 
 
-def _nearest_city(st, cities):
+def _nearest_city(st, cities, world):
     if not cities:
         return None
-    return min(cities, key=lambda c: (c.pos[0] - st.pos[0]) ** 2 + (c.pos[1] - st.pos[1]) ** 2)
+    return min(cities, key=lambda c: wrap.dist2_wrap(c.pos, st.pos, world.w))
 
 
 def run_sell_to_city(world):
@@ -1224,7 +1789,7 @@ def run_sell_to_city(world):
                 surplus = _node_surplus(st, resource, own_needs)
                 if surplus < SELL_TO_CITY_MIN_QUANTITY:
                     continue
-                city = _nearest_city(st, [c for c in cities if c is not st])
+                city = _nearest_city(st, [c for c in cities if c is not st], world)
                 if city is None:
                     continue
                 cap = settlement_storage_capacity(city)
@@ -1232,7 +1797,7 @@ def run_sell_to_city(world):
                 if cap <= 0 or stock >= cap * CITY_STOCKPILE_CEILING_FRACTION:
                     continue
                 qty = min(surplus, SELL_TO_CITY_MAX_QUANTITY)
-                path = _regional_path(world, st, city)
+                transport, path = _regional_route(world, st, city)
                 if path is None:
                     continue
 
@@ -1240,7 +1805,9 @@ def run_sell_to_city(world):
                     st.resources = {}
                 st.resources[resource] = max(0, st.resources.get(resource, 0) - qty)
                 world.regional_shipments.append(RegionalShipment(
-                    fac_idx, resource, qty, 0.0, path, st.id, city.id))
+                    fac_idx, resource, qty, 0.0, path, st.id, city.id,
+                    transport=transport,
+                    transit_cells=path_transit_cells(world, path)))
                 events.append({"type": "sold_to_city", "faction_idx": fac_idx,
                               "resource": resource, "quantity": qty,
                               "origin_name": st.name, "dest_name": city.name})

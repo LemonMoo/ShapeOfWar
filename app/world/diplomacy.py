@@ -81,6 +81,45 @@ def establish_contact(world, a_id, b_id):
     wm.set_relationship(a_id, b_id, stance=stance, tension=tension, standing=standing)
 
 
+PROXIMITY_CONTACT_RANGE = 120  # cells -- two realms "discover" each other (via
+                               # scouts, travelers, rumor) once their nearest
+                               # settlements come this close, without needing
+                               # their territories to literally touch. Contact
+                               # only firing on an adjacent border tile left the
+                               # whole diplomacy/foreign-trade layer near-dormant
+                               # on a spacious map (factions sit dozens of cells
+                               # apart with wildland between them and almost
+                               # never share a border), so the Global trade tag
+                               # had nothing to show. See run_proximity_contact.
+
+
+def run_proximity_contact(world):
+    """Establish first contact between any two not-yet-acquainted factions
+    whose nearest settlements are within PROXIMITY_CONTACT_RANGE (wrap-aware,
+    so the east-west seam counts). Cheap: contacted pairs are skipped on a
+    dict lookup and never re-scanned, and the settlement scan early-exits on
+    the first in-range pair, so cost falls as the map fills in."""
+    from app.world import wrap
+    wm = world.world_map
+    by_fac = {}
+    for s in world.settlements:
+        by_fac.setdefault(s.faction_idx, []).append(s.pos)
+    facs = sorted(by_fac)
+    r2 = PROXIMITY_CONTACT_RANGE ** 2
+    w = world.w
+    for i in range(len(facs)):
+        a = facs[i]
+        aid = world.factions[a].id
+        for j in range(i + 1, len(facs)):
+            b = facs[j]
+            bid = world.factions[b].id
+            if frozenset((aid, bid)) in wm.relationships:
+                continue
+            if any(wrap.dist2_wrap(pa, pb, w) <= r2
+                   for pa in by_fac[a] for pb in by_fac[b]):
+                establish_contact(world, aid, bid)
+
+
 def _resource_complementarity(world, a, b):
     """0..~2: how much each side has spare that the other is short on —
     reuses trade.py's own surplus/need math (no separate scarcity model to

@@ -11,10 +11,12 @@ import random
 
 from app.world import territory
 from app.world import resources
+from app.world import wrap
 from app.world.worldgen import (UNCLAIMED, _place_settlements_for_faction,
                                 _place_villages_for_region, _adjacent_region_ids)
 from app.world.lexicon import make_settlement_namer
-from app.world.construction import can_afford, _pay_cost, RoadProject, _path_between
+from app.world.construction import (can_afford, _pay_cost, RoadProject, _path_between,
+                                    _ai_has_active_construction)
 
 CLAIM_BASE_COST = {"Gold": 80}
 CLAIM_COST_PER_CELL = {"Gold": 0.6}
@@ -22,6 +24,15 @@ CLAIM_BASE_TURNS = 4
 CLAIM_TURNS_PER_CELL = 0.03
 CLAIM_FAIL_COOLDOWN_TURNS = 5
 CLAIM_FAIL_STRENGTH_BUMP = 1.15   # a region "digs in" after repelling a claim
+
+# Amphibious ("sea-only") claims: a shore region reachable only across water,
+# with no land border to territory the faction already holds (see
+# is_sea_only_claim). These are deliberately far more expensive and better
+# defended than a normal land-adjacent claim, so neither the player nor the AI
+# can cheaply leapfrog across the sea and over-expand beyond their real reach
+# in the early game.
+SEA_ONLY_CLAIM_COST = {"Gold": 1000}
+SEA_ONLY_STRENGTH_MULT = 1.5      # its garrison is stronger (more soldiers) too
 
 # Wildland garrisons fight 10% below their nominal strength rating — applied
 # consistently wherever a garrison is actually fought: here (the AI's
@@ -33,9 +44,32 @@ CLAIM_FAIL_STRENGTH_BUMP = 1.15   # a region "digs in" after repelling a claim
 # actual combat.
 WILDLAND_COMBAT_STRENGTH_MULT = 0.9
 
+# How sharply a strength ADVANTAGE converts into a win. A plain
+# mil/(mil+strength) ratio is very forgiving of being outnumbered: it takes a
+# ~32x advantage to reach 97% odds, which no realm ever reaches. Raising both
+# sides to this power makes concentrated force tell the way it does in
+# practice -- being twice as strong is worth much more than twice the odds --
+# so a developed realm genuinely rolls over wildland (97%+ once it has the
+# population and the Weapons/Shields to arm it, see resources.
+# _recompute_military) while an early, unarmed one still faces a real fight
+# (~35%) against exactly the same garrison. Tuned against measured
+# early/mid/late military ratings from real games, not picked by feel.
+CLAIM_ODDS_EXPONENT = 1.75
 
-def claim_cost(region):
-    cost = dict(CLAIM_BASE_COST)
+
+def is_sea_only_claim(world, faction_idx, region):
+    """True when `region` is claimable only across water — naval-reachable
+    from the faction's territory but NOT sharing a land border with it. These
+    amphibious claims carry the steep SEA_ONLY_CLAIM_COST and a tougher
+    garrison (see SEA_ONLY_STRENGTH_MULT); a normal land-adjacent claim is
+    False and keeps the cheap per-cell cost."""
+    if region in territory.bordering_regions(world, faction_idx, UNCLAIMED):
+        return False
+    return region in territory.naval_reachable_regions(world, faction_idx, UNCLAIMED)
+
+
+def claim_cost(region, sea_only=False):
+    cost = dict(SEA_ONLY_CLAIM_COST if sea_only else CLAIM_BASE_COST)
     for resource, per_cell in CLAIM_COST_PER_CELL.items():
         cost[resource] = cost.get(resource, 0) + round(per_cell * len(region.cells))
     return cost
@@ -45,15 +79,20 @@ def claim_turns(region):
     return max(1, round(CLAIM_BASE_TURNS + CLAIM_TURNS_PER_CELL * len(region.cells)))
 
 
-def claim_odds(nation, region):
+def claim_odds(nation, region, sea_only=False):
     """Player-facing success-probability preview for a wildland claim (and
     what the AI's instant-resolve path in advance_claims actually rolls
     against) — the garrison's effective strength is discounted by
     WILDLAND_COMBAT_STRENGTH_MULT, same as its soldiers are in an
-    interactive battle."""
-    mil = nation.stats.get("military", 0)
-    effective_strength = max(1, region.wildland_strength * WILDLAND_COMBAT_STRENGTH_MULT)
-    return mil / (mil + effective_strength)
+    interactive battle, and bumped by SEA_ONLY_STRENGTH_MULT for an
+    amphibious claim (its garrison is bigger)."""
+    mil = max(0, nation.stats.get("military", 0))
+    strength = region.wildland_strength * (SEA_ONLY_STRENGTH_MULT if sea_only else 1.0)
+    effective_strength = max(1, strength * WILDLAND_COMBAT_STRENGTH_MULT)
+    if mil <= 0:
+        return 0.0
+    k = CLAIM_ODDS_EXPONENT
+    return mil ** k / (mil ** k + effective_strength ** k)
 
 
 def claimable_frontier(world, faction_idx):
@@ -75,11 +114,13 @@ class ClaimProject:
     and waits for the player to fight an interactive battle against the
     garrison — see app/ui/app.py's stage_wildland_battle."""
 
-    def __init__(self, faction_idx, region):
+    def __init__(self, faction_idx, region, sea_only=False):
         self.faction_idx = faction_idx
         self.region_id = region.id
         self.total_turns = claim_turns(region)
         self.progress_turns = 0.0
+        self.sea_only = sea_only   # amphibious claim -> tougher garrison in the
+                                   # resolving battle (see stage_wildland_battle)
 
     @property
     def turns_left(self):
@@ -106,13 +147,14 @@ def start_claim(world, faction_idx, region):
         return "A claim is already underway there."
 
     nation = world.factions[faction_idx]
-    cost = claim_cost(region)
+    sea_only = is_sea_only_claim(world, faction_idx, region)
+    cost = claim_cost(region, sea_only)
     if not can_afford(nation, cost, world):
         return "You don't have enough resources to fund this expansion."
 
     _pay_cost(nation, cost, world)
 
-    project = ClaimProject(faction_idx, region)
+    project = ClaimProject(faction_idx, region, sea_only)
     world.claim_projects.append(project)
     return (f"Expansion begins into {region.name} — estimated "
             f"{project.total_turns} turns.")
@@ -212,7 +254,7 @@ def _nearest_interregion_village_link(world, region):
     best, best_d2 = None, None
     for mp in my_villages:
         for np in neighbor_villages:
-            d2 = (mp[0] - np[0]) ** 2 + (mp[1] - np[1]) ** 2
+            d2 = wrap.dist2_wrap(mp, np, world.w)
             if best_d2 is None or d2 < best_d2:
                 best_d2, best = d2, (mp, np)
     return best
@@ -262,6 +304,12 @@ def resolve_claim_loss(world, region):
     can be attempted again. Shared the same way as resolve_claim_win."""
     region.wildland_strength = round(region.wildland_strength * CLAIM_FAIL_STRENGTH_BUMP)
     region.claim_cooldown_until_turn = world.turn + CLAIM_FAIL_COOLDOWN_TURNS
+    # The strength bump changes UNCLAIMED land's "danger" tint on the map
+    # (see map_view.py's _compute_cell) even though ownership itself never
+    # changed here -- territory_version alone wouldn't catch that, so it's
+    # bumped explicitly too, on top of marking the cells dirty.
+    world.territory_version = getattr(world, "territory_version", 0) + 1
+    territory.mark_cells_dirty(world, region.cells)
 
 
 def advance_claims(world):
@@ -284,7 +332,32 @@ def advance_claims(world):
         world.claim_projects.remove(project)
         region = world.regions[project.region_id]
         nation = world.factions[project.faction_idx]
-        if random.random() < claim_odds(nation, region):
+        if random.random() < claim_odds(nation, region, project.sea_only):
             resolve_claim_win(world, region, project.faction_idx)
         else:
             resolve_claim_loss(world, region)
+
+
+def run_expansion_ai(world):
+    """Every AI faction's equivalent of the player clicking "Claim
+    Territory": each turn, a faction with no construction/expansion
+    project currently in flight (see construction._ai_has_active_
+    construction -- the same shared anti-overbuild gate run_settlement_ai
+    and run_storage_ai use) looks at its own claimable frontier and starts
+    a claim on one candidate if it can afford it. Deliberately simple,
+    same philosophy as run_settlement_ai: picks a random frontier region
+    rather than scoring candidates by garrison strength/fertility/
+    adjacency-to-a-weak-point/etc -- a reasonable future refinement, not
+    this one."""
+    for fac_idx, nation in enumerate(world.factions):
+        if fac_idx == world.player_faction_idx:
+            continue
+        if _ai_has_active_construction(world, fac_idx):
+            continue
+        frontier = claimable_frontier(world, fac_idx)
+        if not frontier:
+            continue
+        region = random.choice(frontier)
+        sea_only = is_sea_only_claim(world, fac_idx, region)
+        if can_afford(nation, claim_cost(region, sea_only), world):
+            start_claim(world, fac_idx, region)

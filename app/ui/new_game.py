@@ -3,7 +3,7 @@ import random
 import tkinter as tk
 
 from app.ui import theme
-from app.world.lexicon import SPECIES, make_faction_namer
+from app.world.lexicon import SPECIES, make_faction_namer, species_trait_summary
 
 
 class NewGameView(tk.Frame):
@@ -33,6 +33,14 @@ class NewGameView(tk.Frame):
                           font=theme.FONT, activebackground=theme.ACCENT)
             b.pack(side="left", padx=4)
             self._species_buttons[sp] = b
+
+        # What the picked species actually does differently -- generated from
+        # the real trait numbers (see lexicon.species_trait_summary), so it can
+        # never drift out of sync with the balance values themselves.
+        self._trait_lbl = tk.Label(center, text="", bg=theme.BG, fg=theme.ACCENT,
+                                   font=("Segoe UI", 9), justify="left",
+                                   anchor="w", wraplength=430)
+        self._trait_lbl.pack(anchor="w", pady=(0, 18))
 
         tk.Label(center, text="Name your realm", bg=theme.BG, fg=theme.MUTED,
                  font=theme.FONT).pack(anchor="w")
@@ -78,6 +86,10 @@ class NewGameView(tk.Frame):
             picked = sp == species
             b.config(bg=theme.ACCENT if picked else "#232a36",
                      fg="#06121f" if picked else theme.INK)
+        traits = species_trait_summary(species)
+        flavor = SPECIES[species]["trait"]
+        self._trait_lbl.config(
+            text=f"{flavor}  ·  " + "   ".join(traits) if traits else flavor)
         if not self._name_is_custom:
             self._random_name()
 

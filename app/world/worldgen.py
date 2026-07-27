@@ -18,6 +18,7 @@ from collections import deque, defaultdict
 
 from app.world.nation import Nation
 from app.world.world_map import WorldMap
+from app.world import wrap
 from app.world.lexicon import (SPECIES, make_faction_namer, make_region_namer,
                                make_settlement_namer)
 
@@ -66,10 +67,12 @@ SETTLEMENT_TAX_INCOME = {
     "town": (2, 4),
 }
 
-# Bare-bones population, rolled once at placement (same treatment as
-# upkeep/tax_income — a flavor/info stat, not something the turn loop
-# grows or feeds back into the economy). A castle's population skews
-# toward garrison over civilians, hence the lower range.
+# This settlement's/village's real population CEILING, rolled once at
+# placement (see resources.POPULATION_GROWTH_RATE for the slow climb
+# toward it, and POPULATION_MIN_FRACTION for the floor a bad enough
+# shortage can never push it below) -- not a flavor stat any more. A
+# castle's ceiling skews toward garrison over civilians, hence the lower
+# range.
 POPULATION_RANGE = {
     "city": (4000, 12000),
     "castle": (500, 1500),
@@ -78,14 +81,26 @@ POPULATION_RANGE = {
 }
 CHILDREN_FRACTION_RANGE = (0.30, 0.42)   # share of population under working age
 
+# A freshly founded settlement/village starts well below what it could
+# eventually support (see resources.POPULATION_GROWTH_RATE) -- "roughly
+# 20%" per the request, with a small spread so every settlement of the
+# same kind doesn't start at an identical fraction.
+STARTING_POPULATION_FRACTION_RANGE = (0.15, 0.25)
+
 
 def _roll_population(rng, kind):
-    """Total population plus its adult/child split for one settlement of
-    `kind`, rolled once at placement — see POPULATION_RANGE/
-    CHILDREN_FRACTION_RANGE above."""
-    total = round(rng.uniform(*POPULATION_RANGE[kind]))
+    """(starting_population, adults, children, max_population) for one
+    settlement of `kind`, rolled once at placement -- `max_population` is
+    the real ceiling (see POPULATION_RANGE), `starting_population` is
+    roughly 20% of it (STARTING_POPULATION_FRACTION_RANGE) since a
+    freshly founded settlement hasn't grown into its potential yet. The
+    adult/child split (CHILDREN_FRACTION_RANGE) is rolled against the
+    STARTING population, not the ceiling -- there's no one alive yet to
+    split for population that hasn't been born."""
+    max_population = round(rng.uniform(*POPULATION_RANGE[kind]))
+    total = round(max_population * rng.uniform(*STARTING_POPULATION_FRACTION_RANGE))
     children = round(total * rng.uniform(*CHILDREN_FRACTION_RANGE))
-    return total, total - children, children
+    return total, total - children, children, max_population
 
 
 class Settlement:
@@ -95,7 +110,7 @@ class Settlement:
     storage is this settlement's own (Phase 9 — see `resources` below)."""
 
     def __init__(self, sid, kind, name, pos, faction_idx, region_id, tax_income,
-                population, adults, children, prosperity):
+                population, adults, children, prosperity, max_population=None):
         self.id = sid
         self.kind = kind               # "city" | "castle" | "town"
         self.name = name
@@ -103,9 +118,16 @@ class Settlement:
         self.faction_idx = faction_idx
         self.region_id = region_id
         self.tax_income = tax_income   # gold generated per turn
-        self.population = population   # total headcount, rolled once at placement
+        self.population = population   # current headcount -- starts around 20% of
+                                       # max_population, climbs slowly (see
+                                       # resources.POPULATION_GROWTH_RATE)
         self.adults = adults
         self.children = children
+        # The real ceiling this settlement can ever grow to (see
+        # POPULATION_RANGE/_roll_population) -- None only for old saves
+        # predating this, handled via getattr(node, "max_population", ...)
+        # fallbacks wherever it's read.
+        self.max_population = max_population
         # 0..100 meter of goods/wealth value vs. the faction's overall
         # economic health — eased toward a new target every turn, not
         # recomputed from scratch (see resources._update_prosperity).
@@ -132,6 +154,16 @@ class Settlement:
         # re-scanning every turn.
         self.villages_spawned = 0
         self.village_growth_maxed = False
+        # Consecutive turns this settlement has gone with an unmet Food
+        # need (see resources._consume_node_needs) -- population loss only
+        # actually starts once this crosses STARVATION_GRACE_TURNS, reset
+        # to 0 the moment Food is fully met again. A single bad turn (or a
+        # short rough patch) shouldn't be an irreversible death spiral.
+        self.turns_without_food = 0
+        # Same idea, for an unmet Firewood need in Winter (see
+        # FREEZE_GRACE_TURNS) -- naturally resets to 0 outside Winter too,
+        # since Firewood isn't even needed then.
+        self.turns_without_firewood = 0
 
 
 class Village:
@@ -148,21 +180,31 @@ class Village:
     the "subsistence-level, no drain" exemption from earlier phases."""
 
     def __init__(self, vid, region_id, faction_idx, name, pos, farm_output,
-                population, adults, children, prosperity):
+                population, adults, children, prosperity, max_population=None):
         self.id = vid
         self.region_id = region_id
         self.faction_idx = faction_idx
         self.name = name
         self.pos = pos                 # (x, y) grid cell
         self.farm_output = farm_output
-        self.population = population   # total headcount, rolled once at placement
+        self.population = population   # current headcount -- starts around 20% of
+                                       # max_population, climbs slowly (see
+                                       # resources.POPULATION_GROWTH_RATE)
         self.adults = adults
         self.children = children
+        # See Settlement.max_population -- same meaning, same old-save
+        # getattr fallback story.
+        self.max_population = max_population
         self.prosperity = prosperity   # 0..100 meter — see resources._update_prosperity
         # This village's own stockpile (Phase 10) — same shared-space-
         # budget storage a Settlement has (Phase 9), just a smaller base
         # capacity and no Granary/Warehouse of its own to expand it.
         self.resources = {}
+        # See Settlement.turns_without_food/turns_without_firewood -- same
+        # starvation/freezing-grace counters, same meaning, for a
+        # Village's own population.
+        self.turns_without_food = 0
+        self.turns_without_firewood = 0
 
 
 class Region:
@@ -275,7 +317,18 @@ _WATER_FALLOFF = 13.0     # cells; how fast the water bonus decays inland
 
 
 # --- value noise -----------------------------------------------------------
-def _vhash(ix, iy, seed):
+# The world wraps east-west (see app/world/wrap.py) -- x=width-1 is a real
+# neighbor of x=0 -- so every noise field sampled across the x axis (height,
+# moisture, region/country border cost) needs to be genuinely PERIODIC in x
+# with period `width`, or scrolling the camera across the seam would show a
+# visible discontinuity (an uncorrelated noise value jump) even in the
+# ocean cells that mask the coastline seam (see _pick_continent_centers'
+# margin, which keeps LAND off the seam but doesn't touch the underlying
+# noise field cells themselves, which still get sampled/colored). y never
+# wraps, so y-hashing is untouched.
+def _vhash(ix, iy, seed, period_x=None):
+    if period_x is not None:
+        ix = ix % period_x
     n = (ix * 73856093) ^ (iy * 19349663) ^ (seed * 83492791)
     n &= 0xFFFFFFFF
     n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
@@ -283,18 +336,35 @@ def _vhash(ix, iy, seed):
     return (n & 0xFFFF) / 0xFFFF
 
 
-def _vnoise(x, y, seed):
+def _vnoise(x, y, seed, period_x=None):
+    """Value noise at (x, y). `period_x`, if given, is the integer lattice
+    period _vhash wraps ix by -- pass it together with an x already rescaled
+    via _periodic_freq (below) so that x=width samples the exact same
+    lattice cell as x=0, closing the loop with no seam artifact."""
     x0, y0 = math.floor(x), math.floor(y)
     fx, fy = x - x0, y - y0
     sx = fx * fx * (3 - 2 * fx)
     sy = fy * fy * (3 - 2 * fy)
-    v00 = _vhash(x0, y0, seed)
-    v10 = _vhash(x0 + 1, y0, seed)
-    v01 = _vhash(x0, y0 + 1, seed)
-    v11 = _vhash(x0 + 1, y0 + 1, seed)
+    v00 = _vhash(x0, y0, seed, period_x)
+    v10 = _vhash(x0 + 1, y0, seed, period_x)
+    v01 = _vhash(x0, y0 + 1, seed, period_x)
+    v11 = _vhash(x0 + 1, y0 + 1, seed, period_x)
     a = v00 + (v10 - v00) * sx
     b = v01 + (v11 - v01) * sx
     return a + (b - a) * sy
+
+
+def _periodic_freq(width, freq):
+    """(effective_freq, period_x) for sampling _vnoise's x argument so it
+    tiles exactly across a map `width` cells wide at the requested `freq`.
+    period_x is the nearest integer lattice period to width*freq (must be
+    an integer since _vhash wraps a lattice coordinate, not a real number);
+    effective_freq is the tiny rescale of `freq` needed so that x=width
+    lands exactly on lattice coordinate `period_x` -- imperceptibly
+    different from `freq` for any reasonable width, but what makes x=0 and
+    x=width hash identically."""
+    period_x = max(1, round(width * freq))
+    return period_x / width, period_x
 
 
 def _hex(r, g, b):
@@ -333,12 +403,15 @@ def _cost_field(world, nseed):
     zone where two regions' accumulated costs are nearly tied."""
     w, h = world.w, world.h
     s1, s2, s3 = nseed ^ 0xABCDEF, nseed ^ 0x054321, nseed ^ 0x7A5D3E1
+    fx1, p1 = _periodic_freq(w, _COST_FREQ_LO)
+    fx2, p2 = _periodic_freq(w, _COST_FREQ_MID)
+    fx3, p3 = _periodic_freq(w, _COST_FREQ_HI)
     cost = [[1.0] * w for _ in range(h)]
     for y in range(h):
         for x in range(w):
-            n = (0.20 * _vnoise(x * _COST_FREQ_LO, y * _COST_FREQ_LO, s1)
-                 + 0.30 * _vnoise(x * _COST_FREQ_MID, y * _COST_FREQ_MID, s2)
-                 + 0.50 * _vnoise(x * _COST_FREQ_HI, y * _COST_FREQ_HI, s3))
+            n = (0.20 * _vnoise(x * fx1, y * _COST_FREQ_LO, s1, p1)
+                 + 0.30 * _vnoise(x * fx2, y * _COST_FREQ_MID, s2, p2)
+                 + 0.50 * _vnoise(x * fx3, y * _COST_FREQ_HI, s3, p3))
             cost[y][x] = 1.0 + _WARP_COST * n
     return cost
 
@@ -723,12 +796,12 @@ def _place_settlements_for_faction(world, rng, fac_idx, cells, namer, fixed_coun
             if _too_close_any(world, x, y, t["spacing"]):
                 continue
             tax_income = round(rng.uniform(*SETTLEMENT_TAX_INCOME[kind]))
-            population, adults, children = _roll_population(rng, kind)
+            population, adults, children, max_population = _roll_population(rng, kind)
             prosperity = seed_prosperity()
             region_id = world.region_grid[y][x]
             st = Settlement(len(world.settlements), kind, namer(kind, species),
                             (x, y), fac_idx, region_id, tax_income,
-                            population, adults, children, prosperity)
+                            population, adults, children, prosperity, max_population)
             world.settlements.append(st)
             _mark_occupied_both(world, x, y)
             world.factions[fac_idx].meta["settlements"].append(st.id)
@@ -914,11 +987,11 @@ def _place_villages_for_region(world, rng, region, fixed_n=None):
                     samples.append(world.fertility[ny][nx])
         local_fert = sum(samples) / len(samples) if samples else world.fertility[y][x]
         farm = round(rng.uniform(*_VILLAGE_FARM_RANGE) * (0.5 + 1.2 * local_fert))
-        population, adults, children = _roll_population(rng, "village")
+        population, adults, children, max_population = _roll_population(rng, "village")
         prosperity = seed_prosperity()
         v = Village(len(world.villages), region.id, region.faction_idx,
                    namer("village", species), (x, y), farm,
-                   population, adults, children, prosperity)
+                   population, adults, children, prosperity, max_population)
         world.villages.append(v)
         vids.append(v.id)
 
@@ -983,6 +1056,12 @@ def _generate_villages(world, rng):
 # (for sea lanes) stay on open water the whole way.
 _ROAD_ELEV_START = 0.62   # elevation (0..1) above which roads start avoiding ground
 _ROAD_ELEV_PEN = 60.0     # steepness of that avoidance — pushes roads around peaks
+_ROAD_MOUNTAIN_MULT = 1.5   # Mountain-biome cells cost 50% more outright (real quarrying/
+                            # grading expense, not just the elevation curve above) --
+                            # on top of, not instead of, the elevation penalty, so a
+                            # low-relief mountain-biome cell (e.g. a foothill just past
+                            # the classification threshold) still costs a bit extra even
+                            # where the elevation curve alone wouldn't yet notice it
 _ROAD_RIVER_PEN = 25.0    # crossing a river costs extra (a ford/bridge), not blocked --
                           # steep enough that a route only actually crosses when
                           # there's genuinely no reasonable way around (raised from
@@ -993,16 +1072,38 @@ _ROAD_FOREIGN_TERRITORY_PEN = 20.0   # building a road across land you don't own
                                      # param) -- not blocked, so a faction boxed
                                      # into an awkward shape by its neighbors can
                                      # still always connect its own settlements
+_ROAD_TRAVEL_MULT = 0.3   # a cell an existing road already runs through costs this
+                          # fraction of what the same terrain costs off-road -- roads
+                          # exist precisely so traffic doesn't have to fight the
+                          # ground, and this is what makes goods actually follow the
+                          # network instead of striking off across open wilderness.
+                          # Applied LAST, so it discounts the tolls above too: a road
+                          # crossing a river has a bridge on it, which is exactly why
+                          # a route should prefer to cross there rather than ford
+                          # somewhere random
+ROAD_TRAVEL_SPEEDUP = 1.6   # ...and once on a road, goods move this much faster per
+                            # turn. Without this, road-following would perversely make
+                            # deliveries SLOWER: transit time is derived from path
+                            # length in cells, and a road that bends around a ridge is
+                            # longer than the straight line it replaced
 _SEA_COAST_REACH = 3      # cells from open water a settlement still counts as a port
 _DIAG = 2 ** 0.5
 
 
-def _path_dijkstra(cellset, cost_fn, start, goal):
+def _path_dijkstra(cellset, cost_fn, start, goal, width):
     """Single-source/single-target Dijkstra over `cellset` (a set of (x,y)
     cells), 8-directional, diagonal steps costing sqrt(2) as much as
     orthogonal ones so the resulting path is geometrically honest. Returns the
     list of cells from start to goal (inclusive), or None if goal can't be
-    reached without leaving `cellset`."""
+    reached without leaving `cellset`.
+
+    `width` is required (not optional) because the map wraps east-west (see
+    app/world/wrap.py): a neighbor step's x is wrapped via wrap_x before
+    checking cellset membership, so a cellset built to straddle the seam
+    (see wrap.bbox_span_wrap) can actually be traversed across it -- without
+    this, stepping from x=width-1 toward x=width would produce a raw (width,
+    y) tuple that never matches the (0, y) cell actually in cellset, so the
+    search could never cross the seam even if both cells were present."""
     import heapq
     if start not in cellset or goal not in cellset:
         return None
@@ -1017,7 +1118,7 @@ def _path_dijkstra(cellset, cost_fn, start, goal):
             break
         cx, cy = cur
         for dx, dy in _NEIGH8:
-            nb = (cx + dx, cy + dy)
+            nb = (wrap.wrap_x(cx + dx, width), cy + dy)
             if nb not in cellset:
                 continue
             step = cost_fn(nb) * (_DIAG if dx and dy else 1.0)
@@ -1035,33 +1136,101 @@ def _path_dijkstra(cellset, cost_fn, start, goal):
     return path
 
 
-def _elev_cost(world, base_cost, cell, faction_idx=None):
+def road_cells(world):
+    """Every cell any road in the world runs through, as a set — the thing
+    that makes `_elev_cost`'s road discount a cheap set lookup instead of a
+    walk over every segment in the world per cell evaluated.
+
+    Roads are stored as endpoint segments per region (see
+    world.roads_by_region), so they have to be rasterized to get cells;
+    same straight-segment walk resources._nearby_road_cells does, just
+    world-wide and without a radius. Segments never straddle the east-west
+    seam (roads only connect nodes within/between adjacent land regions,
+    and land is never seamless-wrapped), so plain interpolation is correct.
+
+    Cached on the world, but unlike the other static-geography caches here
+    the road network genuinely does grow during play (construction.py
+    finishes a road project, a city grows a village and links it up), so
+    the cache is keyed on the total segment count — a cheap sum over
+    regions, not cells — and rebuilds itself whenever that changes. That
+    keeps every road-adding site from having to remember to invalidate."""
+    signature = sum(len(segs) for segs in world.roads_by_region.values())
+    cached = getattr(world, "_road_cells_cache", None)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    cells = set()
+    for segs in world.roads_by_region.values():
+        for (ax, ay), (bx, by), _tier in segs:
+            dx, dy = bx - ax, by - ay
+            steps = max(abs(dx), abs(dy), 1)
+            for i in range(steps + 1):
+                cells.add((round(ax + dx * i / steps), round(ay + dy * i / steps)))
+    world._road_cells_cache = (signature, cells)
+    return cells
+
+
+def path_transit_cells(world, path):
+    """Effective length of `path` for transit-time purposes: stretches that
+    run along an existing road count for less than open-country cells, by
+    ROAD_TRAVEL_SPEEDUP. See that constant for why deriving transit time
+    from the raw cell count would otherwise punish routes for using the
+    road network at all."""
+    roads = road_cells(world)
+    on_road = sum(1 for cell in path if cell in roads)
+    return len(path) - on_road * (1.0 - 1.0 / ROAD_TRAVEL_SPEEDUP)
+
+
+def _elev_cost(world, base_cost, cell, faction_idx=None, friendly_idxs=None, roads=None):
     """Land-routing cost: base terrain noise plus a steep penalty for high
     elevation and a toll for crossing a river/lake — shared by every land
     pathfinder in the game (castle-connecting roads in construction.py,
-    trade-route construction in trade.py, commander/ship movement) so they
-    all route around mountains/rivers identically, one formula.
+    trade-route construction/regional shipments in trade.py, commander/
+    ship movement) so they all route around mountains/rivers identically,
+    one formula.
 
     `faction_idx`, when given, adds a further toll for any cell owned by a
-    DIFFERENT faction (not UNCLAIMED, not this one) — used only by road
-    pathing (construction.py/expansion.py), which is the one caller where
-    "whose land is this" should actually matter: a road is infrastructure
-    a faction builds for itself, not a diplomatic act like a trade route
-    (which necessarily crosses whoever's land sits between two capitals)
-    or a commander's own movement (a scout can walk anywhere). Left at its
-    default (None) for every other caller, which keeps their behavior
-    completely unchanged."""
+    DIFFERENT single faction (not UNCLAIMED, not this one) — used by road
+    pathing (construction.py/expansion.py) and same-faction regional
+    shipments (a Village/Settlement trading with another node of its own
+    faction, just in a different region, should still prefer staying on
+    its own land). `friendly_idxs`, when given instead, generalizes that
+    to a SET of factions none of which count as foreign — used by land
+    trade routes between two DIFFERENT factions (trade._land_capital_
+    path), where "foreign" correctly means a THIRD party's land, not
+    either of the two actually trading. Either way this is a preference,
+    not a wall: steep enough that a route only actually crosses foreign
+    land when there's genuinely no reasonable way around it, same as the
+    existing river/mountain tolls above -- a trade route or a commander's
+    own movement can still cross it, unlike being flatly forbidden. Left
+    at its all-None default for every caller where "whose land is this"
+    shouldn't matter at all (a scout can walk anywhere).
+
+    `roads`, when given (the set from road_cells), makes cells an existing
+    road already runs through much cheaper, so traffic follows the network
+    rather than striking off cross-country. Opt-in per caller rather than
+    always-on: goods and travellers should use the roads, but road
+    CONSTRUCTION itself must keep pathing on raw terrain, or every new road
+    would snap onto whatever was built first instead of taking its own
+    honest line."""
     x, y = cell
     cost = base_cost[y][x]
     over = world.height[y][x] - _ROAD_ELEV_START
     if over > 0:
         cost += _ROAD_ELEV_PEN * over * over
+    if world.biome_grid[y][x] == "mountain":
+        cost *= _ROAD_MOUNTAIN_MULT
     if cell in world.river_cells or cell in world.lake_cells:
         cost += _ROAD_RIVER_PEN
-    if faction_idx is not None:
+    if friendly_idxs is not None:
+        owner = world.owner[y][x]
+        if owner >= 0 and owner not in friendly_idxs:
+            cost += _ROAD_FOREIGN_TERRITORY_PEN
+    elif faction_idx is not None:
         owner = world.owner[y][x]
         if owner >= 0 and owner != faction_idx:
             cost += _ROAD_FOREIGN_TERRITORY_PEN
+    if roads is not None and cell in roads:
+        cost *= _ROAD_TRAVEL_MULT
     return cost
 
 
@@ -1120,12 +1289,23 @@ def _moisture_seed(nseed):
     return nseed ^ 0x9E3779B9        # independent noise for rainfall
 
 
-def _quick_moisture(x, y, mseed):
+def _periodic_octaves(width, octaves):
+    """(eff_freq, period_x, orig_freq, amp) per (freq, amp) octave pair --
+    call once outside a per-cell loop (see _periodic_freq's own docstring
+    for why the x-sample needs both an effective frequency and its lattice
+    period) rather than recomputing the same tiny period every cell."""
+    return [(*_periodic_freq(width, f), f, a) for f, a in octaves]
+
+
+def _quick_moisture(x, y, mseed, moisture_octaves):
     """The same per-cell moisture formula _compute_moisture fills the real
     world.moisture grid with, callable standalone for a handful of cells
     before that grid exists yet — see _capital_has_nearby_farmland, which
-    needs it well before step 5's full moisture pass runs."""
-    m = sum(a * _vnoise(x * f, y * f, mseed) for f, a in _MOISTURE_OCTAVES)
+    needs it well before step 5's full moisture pass runs.
+    `moisture_octaves` is precomputed via _periodic_octaves(width,
+    _MOISTURE_OCTAVES) by the caller, once, not per cell."""
+    m = sum(amp * _vnoise(x * eff_freq, y * freq, mseed, period_x)
+           for eff_freq, period_x, freq, amp in moisture_octaves)
     return max(0.0, min(1.0, m / 1.75))
 
 
@@ -1134,11 +1314,12 @@ def _compute_moisture(world, nseed):
     out of fertility so biome/climate classification can share it too."""
     w, h = world.w, world.h
     mseed = _moisture_seed(nseed)
+    moisture_octaves = _periodic_octaves(w, _MOISTURE_OCTAVES)
     for y in range(h):
         for x in range(w):
             if world.owner[y][x] == OCEAN or (x, y) in world.lake_cells:
                 continue
-            world.moisture[y][x] = _quick_moisture(x, y, mseed)
+            world.moisture[y][x] = _quick_moisture(x, y, mseed, moisture_octaves)
 
 
 def _compute_fertility(world, nseed):
@@ -1223,6 +1404,14 @@ class World:
         self.trade_routes_by_pair = {}  # frozenset({a_idx,b_idx}) -> route dict
         self.trade_route_projects = []  # list[TradeRouteProject] — see app/world/trade.py
         self.trade_route_decline_until = {}  # frozenset({a_idx,b_idx}) -> turn a decline expires
+        # AI factions proposing a trade route TO the player wait for an
+        # actual player response instead of auto-resolving through
+        # diplomacy.evaluate_trade_route the way two AI factions do
+        # between themselves -- see trade.run_trade_route_ai/
+        # accept_trade_route_proposal/decline_trade_route_proposal.
+        # list of {"from_idx": int, "turn_proposed": int}, at most one
+        # entry per proposing faction at a time.
+        self.incoming_trade_proposals = []
         self.trade_caravans = []       # list[TradeCaravan] — see app/world/trade.py
         self.local_shipments = []      # list[LocalShipment] — see app/world/resources.py's Phase 10
         self.regional_shipments = []   # list[RegionalShipment] — see app/world/trade.py's Phase 11
@@ -1288,7 +1477,14 @@ def _pick_continent_centers(rng, width, height):
             y = (0.5 + side * dist / 2.0) * height
             y = max(margin_y, min(height - margin_y, y))
             x = rng.uniform(margin_x, width - margin_x)
-            if all(((x - ox) / radius_x) ** 2 + ((y - oy) / radius_y) ** 2 >= min_norm_dist ** 2
+            # Wrap-aware even though margin_x already keeps every center's
+            # own falloff off the seam (so two continents can never
+            # actually touch through it): this still stops two centers
+            # from being placed "close" purely because the seam happens to
+            # be the short way around between them, which a flat (x-ox)
+            # distance alone wouldn't catch.
+            if all((wrap.dx_wrap(ox, x, width) / radius_x) ** 2
+                  + ((y - oy) / radius_y) ** 2 >= min_norm_dist ** 2
                   for ox, oy in centers):
                 centers.append((x, y))
                 break
@@ -1369,6 +1565,7 @@ def _capital_has_nearby_farmland(world, x, y, mseed, land_set, coast_d):
     span = (1.0 - sea) or 1.0
     hits = total = 0
     r = _CAPITAL_FOOD_CHECK_RADIUS
+    moisture_octaves = _periodic_octaves(world.w, _MOISTURE_OCTAVES)
     for dy in range(-r, r + 1, _CAPITAL_FOOD_CHECK_STEP):
         for dx in range(-r, r + 1, _CAPITAL_FOOD_CHECK_STEP):
             cx, cy = x + dx, y + dy
@@ -1382,7 +1579,7 @@ def _capital_has_nearby_farmland(world, x, y, mseed, land_set, coast_d):
             relief = max(0.0, min(1.0, (world.height[cy][cx] - sea) / span))
             if relief >= _CAPITAL_MAX_RELIEF_FOR_FARMLAND:
                 continue
-            moisture = _quick_moisture(cx, cy, mseed)
+            moisture = _quick_moisture(cx, cy, mseed, moisture_octaves)
             if not (_CAPITAL_MIN_MOISTURE_FOR_FARMLAND <= moisture
                     <= _CAPITAL_MAX_MOISTURE_FOR_FARMLAND):
                 continue
@@ -1409,17 +1606,47 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     #    so the map is multiple separate landmasses ringed by ocean rather
     #    than one blob glued to the middle of the map.
     octaves = [(0.028, 1.0), (0.060, 0.5), (0.130, 0.25), (0.260, 0.12)]
+    height_octaves = _periodic_octaves(width, octaves)
     centers, radius_x, radius_y = _pick_continent_centers(rng, width, height)
     inv_rx2 = 1.0 / (radius_x * radius_x)
     inv_ry2 = 1.0 / (radius_y * radius_y)
     raw = [[0.0] * width for _ in range(height)]
     lo, hi = 1e9, -1e9
+    # _pick_continent_centers' own margin_x is a soft, best-effort spacing
+    # preference (its docstring: "so real open ocean forms... instead of
+    # one landmass touching every edge") -- NOT a hard guarantee; land
+    # regularly reaches x=0/width-1 in practice even in the non-wrap game,
+    # it just never mattered there since a flat edge with no wrap has
+    # nothing to look discontinuous against. Once x=0 and x=width-1 are
+    # real neighbors, two unrelated landmasses landing right at the seam
+    # would visibly collide. This explicit, always-applied falloff forces
+    # a real ocean band there regardless of how the margin's randomness
+    # shakes out for a given seed -- both edges are pushed toward the same
+    # floor value as they approach the seam, which also means they
+    # converge to identical depth-shading right at the wrap boundary.
+    seam_margin = max(6, round(width * 0.03))
     for y in range(height):
         for x in range(width):
-            v = sum(amp * _vnoise(x * f, y * f, nseed) for f, amp in octaves)
-            best_d2 = min((x - ccx) ** 2 * inv_rx2 + (y - ccy) ** 2 * inv_ry2
-                         for ccx, ccy in centers)
+            v = sum(amp * _vnoise(x * eff_freq, y * freq, nseed, period_x)
+                    for eff_freq, period_x, freq, amp in height_octaves)
+            # Wrap-aware even though the margin above is meant to keep
+            # every center far enough from x=0/width that land can never
+            # reach the seam: ocean cells are depth-shaded straight off
+            # this raw height value (see map_view.py's ocean color blend),
+            # so a FLAT best_d2 here would still make x=0 and x=width-1
+            # compute wildly different "distance to nearest continent"
+            # whenever centers aren't symmetric across the map, producing
+            # a visible depth-shading seam even where both sides are
+            # legitimately deep ocean.
+            best_d2 = min(wrap.dx_wrap(ccx, x, width) ** 2 * inv_rx2
+                          + (y - ccy) ** 2 * inv_ry2
+                          for ccx, ccy in centers)
             v -= 0.85 * best_d2                  # push far-from-any-continent cells underwater
+            seam_d = min(x, width - x)           # distance to the nearest edge of the seam
+            if seam_d < seam_margin:
+                t = seam_d / seam_margin
+                fade = t * t * (3 - 2 * t)       # smoothstep: 0 at the seam, 1 by seam_margin cells in
+                v = v * fade - 3.0 * (1 - fade)  # firmly underwater at the seam itself
             raw[y][x] = v
             lo = min(lo, v)
             hi = max(hi, v)

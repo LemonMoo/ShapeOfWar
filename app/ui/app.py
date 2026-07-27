@@ -10,11 +10,9 @@ from app.ui.pause_menu import PauseMenuView
 from app.ui.load_game_menu import LoadGameMenuView
 from app.ui.map_view import MapView
 from app.ui.battle_view import BattleView
-from app.ui.changelog_view import ChangelogWindow
 from app.core.events import bus
 from app.core.save import (save_game, load_game, has_save, list_saves,
                            new_save_id, delete_save)
-from app.core import changelog
 from app.world.worldgen import generate_world
 from app.battle.battle import Battle, Army
 from app.battle.unit_types import UNIT_TYPES
@@ -80,19 +78,12 @@ class App(tk.Tk):
         bus.on("battle:over", self._on_battle_over)
         self.bind("<Escape>", self._on_escape)
         self.bind("<F1>", self._on_f1)
+        self.bind("<e>", self._on_end_turn_key)
+        self.bind("<E>", self._on_end_turn_key)
+        self.bind("<v>", self._on_toggle_mode_key)
+        self.bind("<V>", self._on_toggle_mode_key)
 
         self.show_screen("menu")
-        self.after(150, self._maybe_show_changelog)
-
-    def _maybe_show_changelog(self):
-        """Once per update: a small "what's new" popup on the main menu,
-        listing everything since the player last dismissed one (see
-        app/core/changelog.py). Deferred slightly past startup (after(150))
-        so it appears as its own window on top of an already-drawn menu,
-        not fighting the main window for focus mid-construction."""
-        entries = changelog.unseen_entries()
-        if entries:
-            ChangelogWindow(self, entries)
 
     def _update_status(self):
         self.status.config(
@@ -201,6 +192,19 @@ class App(tk.Tk):
         if self.map_view is not None:
             self.map_view.open_compendium()
 
+    def _on_end_turn_key(self, event):
+        """E: End Turn -- only while actually looking at the map (not
+        paused, not mid-battle, not on a menu where 'e' should just be a
+        letter -- e.g. typing a faction name on the New Game screen)."""
+        if self._current_screen == "map" and not self._paused:
+            self.map_view._on_end_turn()
+
+    def _on_toggle_mode_key(self, event):
+        """V: cycle the map's view mode (Political/Fertility/Elevation/
+        Biome/Climate -- see MapView._toggle_mode), same gating as End Turn."""
+        if self._current_screen == "map" and not self._paused:
+            self.map_view._toggle_mode()
+
     # --- pause menu (world map only) ----------------------------------------
     def _on_escape(self, event):
         if self._paused:
@@ -238,13 +242,39 @@ class App(tk.Tk):
 
     # --- battle staging ----------------------------------------------------
     def _army_for(self, nation, side):
-        army = Army(nation.name, nation.color, side)
+        """Build a side's Army + unit composition from its military rating.
+
+        Composition is species-aware: a species flagged `no_cavalry` (Orcs --
+        see app/world/lexicon.py) fields none at all, and rolls that cavalry
+        share into its Swordsmen instead, so it brings the same headcount to
+        the field, just all on foot. A _WildlandDefender has no `meta` and so
+        no species: it gets the default mix and baseline stats."""
+        from app.world.lexicon import species_traits
+        species = getattr(nation, "meta", {}).get("species")
+        army = Army(nation.name, nation.color, side, species=species)
         power = nation.stats["military"]
+
+        traits = species_traits(species)
+        foot_share, archer_share, cav_share = 0.4, 0.25, 0.2
+        if traits["no_cavalry"]:
+            # Same headcount either way -- only where it lands differs. Orcs
+            # pour it all into Swordsmen (a heavier foot line); Goblins split
+            # it, coming out as skirmishers rather than a shield wall.
+            mode = traits["cavalry_becomes"]
+            if mode == "split":
+                foot_share += cav_share / 2
+                archer_share += cav_share / 2
+            elif mode == "archers":
+                archer_share += cav_share
+            else:
+                foot_share += cav_share
+            cav_share = 0.0
         composition = {
-            "infantry": round(power * 0.4),
-            "archer": round(power * 0.25),
-            "cavalry": round(power * 0.2),
+            "infantry": round(power * foot_share),
+            "archer": round(power * archer_share),
         }
+        if cav_share:
+            composition["cavalry"] = round(power * cav_share)
         return army, composition
 
     def stage_battle(self, attacker, defender, region=None, claim_project=None,
@@ -286,11 +316,17 @@ class App(tk.Tk):
         the exact same composition formula _army_for already uses for a
         real nation's military stat, but each of its soldiers fights at
         WILDLAND_COMBAT_STRENGTH_MULT — the same discount the AI's instant
-        formula applies to wildland_strength itself."""
+        formula applies to wildland_strength itself. An amphibious
+        (sea-only) claim faces a bigger garrison, SEA_ONLY_STRENGTH_MULT
+        more, matching the tougher odds its instant-resolve path rolls
+        against."""
         from app.world import expansion
         player = self.world.factions[project.faction_idx]
         region = self.world.regions[project.region_id]
-        defender = _WildlandDefender(region.wildland_strength)
+        strength = region.wildland_strength
+        if getattr(project, "sea_only", False):
+            strength = round(strength * expansion.SEA_ONLY_STRENGTH_MULT)
+        defender = _WildlandDefender(strength)
         self.stage_battle(player, defender, region, claim_project=project,
                           defender_strength_mult=expansion.WILDLAND_COMBAT_STRENGTH_MULT)
 

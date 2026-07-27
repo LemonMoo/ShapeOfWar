@@ -29,6 +29,7 @@ from app.world import construction
 from app.world import trade
 from app.world import expansion
 from app.world import commander
+from app.world import wrap
 from app.ui.compendium import CompendiumWindow
 
 _FLASH_COLOR = (255, 236, 120)   # bright gold — region gained
@@ -42,6 +43,11 @@ _LABEL_FONT = ("Segoe UI", 8, "bold")
 _DRAG_THRESHOLD_PX = 4   # movement past this on a press+move counts as a drag, not a click
 _ZOOM_STEP = 0.9         # view-span multiplier per wheel notch
 _MIN_ZOOM_CELLS = 6      # closest allowed zoom (world-cells across the short viewport edge)
+
+_END_TURN_COOLDOWN_MS = 220   # min gap between End Turns -- the side panels fully
+                              # rebuild each turn, so back-to-back turns faster than
+                              # a repaint leave them caught mid-teardown (flicker /
+                              # white flashes / vanishing panels). See _on_end_turn.
 
 _OCEAN_DEEP = (18, 30, 58)
 _OCEAN_SHALLOW = (44, 74, 120)
@@ -206,8 +212,23 @@ _ACTIVE_ROUTE_SEA_COLOR = "#a4ecff"
 _TRADE_ROUTE_CONSTRUCTION_COLOR = "#f2e9c9"
 # Moving caravan/ship markers — big, glowing (a dim halo behind a bright
 # core), so an active caravan is unmistakable even zoomed far out.
+# Caravan markers. The map shows EVERY faction's caravans (subject to fog), so
+# your own trade and a neighbor's passing through look identical unless they're
+# styled apart -- which made it genuinely impossible to tell whether a caravan
+# arriving at a city was your deal or someone else's. Your own are drawn bright
+# and full-size; everyone else's are smaller and muted.
 _CARAVAN_STYLE = {"fill": "#fff3c4", "outline": "#5a4318", "r": 6, "glow": "#ffcf5c"}
 _SEA_CARAVAN_STYLE = {"fill": "#c8f5ff", "outline": "#154a5c", "r": 6, "glow": "#5fd0ff"}
+_FOREIGN_CARAVAN_STYLE = {"fill": "#8d8261", "outline": "#3d3a2a", "r": 4, "glow": "#6b6244"}
+_FOREIGN_SEA_CARAVAN_STYLE = {"fill": "#6f8f9c", "outline": "#22333a", "r": 4, "glow": "#4d6470"}
+# River barges — a distinct green-teal from the sea's blue, so a boat working a
+# river inland doesn't read as an ocean ship that has somehow sailed ashore.
+_RIVER_CARAVAN_STYLE = {"fill": "#bff5e2", "outline": "#14513f", "r": 6, "glow": "#4fd6a8"}
+_FOREIGN_RIVER_CARAVAN_STYLE = {"fill": "#6f9c8a", "outline": "#223a33", "r": 4, "glow": "#4d7064"}
+
+# Domestic shipments (a faction moving goods around inside its own realm).
+# Smaller and quieter than foreign caravans on purpose: they're far more
+# numerous, so they read as background bustle rather than headline events.
 # Commander (app/world/commander.py) — a bright orchid diamond, deliberately
 # unlike any settlement/caravan color so the player's own unit never gets
 # confused with anything else on the map.
@@ -263,6 +284,9 @@ class MapView(tk.Frame):
         self.on_attack = on_attack
         self.on_end_turn = on_end_turn
         self.on_wildland_claim = on_wildland_claim
+        self._end_turn_busy = False     # re-entrancy/cooldown guard so mashing
+                                         # End Turn can't stack panel rebuilds
+                                         # mid-teardown (flicker) -- see _on_end_turn
         self.selected = None            # selected faction (world view)
         self.zoom_faction = None        # faction we've zoomed into (region view)
         self.selected_region = None
@@ -279,6 +303,8 @@ class MapView(tk.Frame):
         self._fog_key = None
         self._base_key = None           # signature of what _base_img depicts
         self._anim_id = None
+        self._px_pol = None             # None until the first _precompute_colors -- see
+                                         # _update_dirty_colors' fallback
 
         # Free camera (drag-pan / wheel-zoom): independent of the click-
         # driven drill-down zoom (_start_zoom/_animate below), but writes
@@ -286,6 +312,8 @@ class MapView(tk.Frame):
         self._press_xy = None
         self._dragged = False
         self._animating = False
+        self._drag_render_pending = False   # coalesces <B1-Motion> bursts into one
+                                             # render() per idle tick -- see _on_drag
 
         # Attack-target picking: when not None, we've zoomed to the shared
         # border with `_attack_enemy` and clicking one of `_attack_frontier`
@@ -317,7 +345,20 @@ class MapView(tk.Frame):
         # diffed against the current snapshot the moment a new year begins
         # to build that banner's summary text. Reset every rollover.
         self._year_start_snapshot = {}
+        self._year_start_population = 0
         self._year_banner_after_id = None
+
+        # Alerts (settlement/village trouble the player should know about --
+        # see resources.faction_alerts): recomputed once per turn (refresh())
+        # and once per load (set_world()), NOT per render() -- render() can
+        # fire many times a second during camera pan/zoom animation, and
+        # faction_alerts walks every settlement/village, so recomputing it
+        # there would reintroduce exactly the kind of per-frame cost the
+        # earlier mid-zoom performance fix was about. _alert_node_ids is the
+        # cached O(1) lookup _draw_settlements/_draw_villages actually use
+        # for badges; _current_alerts is what the Alerts panel lists.
+        self._current_alerts = []
+        self._alert_node_ids = {}
 
         self._build_resource_bar()
 
@@ -354,6 +395,8 @@ class MapView(tk.Frame):
                                          wraplength=560)
         self.year_summary_lbl.pack(padx=32, pady=(0, 18))
 
+        self._build_trade_log()
+        self._build_alerts_panel()
         self._build_panel()
         self.set_world(world)
 
@@ -381,6 +424,7 @@ class MapView(tk.Frame):
         self.view = self._world_view_rect()
         self.view_target = list(self.view)
         self._base_img = self._base_key = None
+        self._px_pol = None   # new world: force a full _precompute_colors rebuild, not a patch
         self._fog_overlay_img = None
         self._fog_key = object()   # never matches any real fog_version -> forces a rebuild
         self._precompute_colors()
@@ -394,8 +438,10 @@ class MapView(tk.Frame):
                 w.destroy()
         self._resource_deltas = {}
         self._year_start_snapshot = self._current_resource_snapshot()
+        self._year_start_population = self._current_population_total()
         self._update_resource_bar()
         self._update_turn_label()
+        self._refresh_alerts()
         self.render()
 
     def refresh(self):
@@ -403,17 +449,24 @@ class MapView(tk.Frame):
         ownership data was mutated in place (e.g. a territory transfer),
         without resetting the camera/selection the way set_world() does.
 
-        _precompute_colors() rebuilds every cell's color from scratch —
-        O(w*h), the single most expensive thing this view does on a large
-        map — so it's only actually re-run when region ownership changed
-        (world.territory_version, bumped by territory.transfer_region) since
-        the last time. Most End Turn calls don't transfer any territory, so
-        this used to be pure wasted work every single turn."""
+        Recoloring only happens when region ownership actually changed
+        (world.territory_version, bumped by territory.transfer_region)
+        since the last time — most End Turn calls transfer no territory at
+        all, so this used to be pure wasted work every single turn. And
+        when it DOES need to recolor, _update_dirty_colors patches only the
+        specific cells that changed (world._dirty_color_cells, also
+        maintained by transfer_region) instead of _precompute_colors'
+        full O(w*h) rebuild — once AI factions started claiming wildland
+        as often as the player, a full-map recolor on every single one of
+        those transfers became a real, noticeable per-turn cost spike."""
         from app.world import vision
         vision.recompute(self.world)
         territory_version = getattr(self.world, "territory_version", 0)
         if territory_version != getattr(self, "_last_territory_version", None):
-            self._precompute_colors()
+            dirty = getattr(self.world, "_dirty_color_cells", None)
+            self._update_dirty_colors(dirty or set())
+            if dirty:
+                dirty.clear()
             self._last_territory_version = territory_version
         self._base_img = self._base_key = None
         if self.selected is not None:
@@ -428,10 +481,42 @@ class MapView(tk.Frame):
             self._show_commander(self.selected_commander)
         self._update_resource_bar()
         self._update_turn_label()
+        self._refresh_alerts()
         self.render()
 
+    def _color_context(self):
+        """The per-faction/per-region color inputs _compute_cell needs --
+        cheap (O(factions)+O(regions), not O(w*h)) so it's fine to
+        recompute fresh on every call, full rebuild or incremental alike.
+
+        Each region's shade VARIATION is keyed by the region's own stable
+        id, not its position within f.meta["regions"] -- a region gained/
+        lost elsewhere can shift every other region's list position, which
+        used to shift their shade variation too even though their own
+        ownership never changed. That's harmless for a full rebuild (it
+        just repaints the whole map either way), but it broke
+        _update_dirty_colors' whole premise: a region far from the actual
+        transfer could need repainting even though it wasn't in the dirty
+        set. Keying by id instead makes a region's shade depend only on
+        its own id and its own current owner's color -- exactly the
+        "only the transferred region's own cells ever need repainting"
+        invariant the incremental path relies on."""
+        wd = self.world
+        fcolors = [_hex_to_rgb(f.color) for f in wd.factions]
+        cshade = [None] * len(wd.regions)
+        for f in wd.factions:
+            fc = _hex_to_rgb(f.color)
+            for cid in f.meta.get("regions", []):
+                cshade[cid] = _shade(fc, _REGION_SHADES[cid % len(_REGION_SHADES)])
+        return fcolors, cshade
+
     def _precompute_colors(self):
-        """Flat row-major RGB pixel lists for every view (for Image.putdata)."""
+        """Flat row-major RGB pixel lists for every view (for Image.putdata)
+        -- a full rebuild of every cell, O(w*h). Used once at load (see
+        set_world) and as _update_dirty_colors' fallback when there's no
+        existing array to patch yet. Ownership changes after that go
+        through _update_dirty_colors instead (see its docstring for why a
+        full rebuild on every single territory change got expensive)."""
         wd = self.world
         n = wd.w * wd.h
         self._px_pol = [None] * n
@@ -444,129 +529,656 @@ class MapView(tk.Frame):
         self._px_region_hi = [None] * n
         self._owner_flat = [OCEAN] * n
         self._region_flat = [-1] * n
-        sea = wd.sea_level
-        fcolors = [_hex_to_rgb(f.color) for f in wd.factions]
-
-        # a shaded color per region (varied within its faction)
-        cshade = [None] * len(wd.regions)
-        for f in wd.factions:
-            fc = _hex_to_rgb(f.color)
-            for li, cid in enumerate(f.meta.get("regions", [])):
-                cshade[cid] = _shade(fc, _REGION_SHADES[li % len(_REGION_SHADES)])
-
+        fcolors, cshade = self._color_context()
         cg = wd.region_grid
-        i = 0
         for y in range(wd.h):
             for x in range(wd.w):
-                o = wd.owner[y][x]
-                h = wd.height[y][x]
-                if o == OCEAN:
-                    depth = max(0.0, min(1.0, (sea - h) / (sea or 1)))
-                    px = _rgb(*(_OCEAN_DEEP[j] + (_OCEAN_SHALLOW[j] - _OCEAN_DEEP[j])
-                                * (1 - depth) for j in range(3)))
-                    self._px_pol[i] = self._px_pol_hi[i] = px
-                    self._px_fert[i] = self._px_elev[i] = px
-                    self._px_biome[i] = self._px_climate[i] = _rgb(*_NO_DATA_RGB)
-                    self._px_region[i] = self._px_region_hi[i] = px
-                elif (x, y) in wd.lake_cells:
-                    # lake surface: water in every mode, but keep owner/region
-                    # so clicks still resolve to the faction/region beneath.
-                    lk = _rgb(*_LAKE_RGB)
-                    self._px_pol[i] = self._px_pol_hi[i] = lk
-                    self._px_fert[i] = self._px_elev[i] = lk
-                    self._px_biome[i] = self._px_climate[i] = lk
-                    self._px_region[i] = self._px_region_hi[i] = lk
-                    self._owner_flat[i] = o
-                    self._region_flat[i] = cg[y][x]
-                elif (x, y) in wd.river_cells:
-                    # River surface: baked into the raster exactly like a
-                    # lake (flat tone, every mode, owner/region preserved
-                    # beneath) rather than drawn as a separate vector line on
-                    # top of everything — this is what makes it read as part
-                    # of the terrain instead of a decal, and it means fog of
-                    # war (which only ever composites over this raster)
-                    # covers rivers automatically, same as anything else.
-                    rv = _rgb(*_RIVER_RGB)
-                    self._px_pol[i] = self._px_pol_hi[i] = rv
-                    self._px_fert[i] = self._px_elev[i] = rv
-                    self._px_biome[i] = self._px_climate[i] = rv
-                    self._px_region[i] = self._px_region_hi[i] = rv
-                    self._owner_flat[i] = o
-                    self._region_flat[i] = cg[y][x]
-                else:
-                    relief = (h - sea) / (1 - sea) if sea < 1 else 0
-                    if o >= 0:
-                        base = _rgb(*_lighten(fcolors[o], 0.10 * relief))
-                    else:
-                        # UNCLAIMED — no faction color to draw from; a muted
-                        # neutral tone, darker/rustier where the wildland
-                        # garrison guarding it is stronger.
-                        cid_here = cg[y][x]
-                        strength = (wd.regions[cid_here].wildland_strength
-                                   if 0 <= cid_here < len(wd.regions) else 40)
-                        danger = max(0.0, min(1.0, strength / _WILDLAND_DANGER_REF))
-                        base = _rgb(*(_UNCLAIMED_RGB[j] + (_UNCLAIMED_DANGER_RGB[j]
-                                     - _UNCLAIMED_RGB[j]) * danger for j in range(3)))
-                        base = _rgb(*_lighten(base, 0.08 * relief))
+                self._compute_cell(x, y, y * wd.w + x, wd, cg, fcolors, cshade)
 
-                    biome_here = wd.biome_grid[y][x]
-                    if biome_here == "forest":
-                        base = _rgb(*_blend(base, _BIOME_COLORS["forest"], _POL_FOREST_TINT))
-                    elif biome_here == "mountain":
-                        base = _rgb(*_blend(base, _BIOME_COLORS["mountain"], _POL_MOUNTAIN_TINT))
+    def _update_dirty_colors(self, cells):
+        """Incremental counterpart to _precompute_colors: only redo the
+        specific cells whose faction ownership actually changed (see
+        territory.transfer_region's world._dirty_color_cells bookkeeping)
+        instead of recoloring the entire map every time. A cell's color
+        only ever depends on its OWN region's current owner/cshade entry
+        -- fertility/elevation/biome/climate/region-id/water-adjacency are
+        all static geography, and the region-border shading a neighboring
+        cell gets depends on region ID (never changes) not which faction
+        owns it -- so scoping strictly to the transferred region's own
+        cells is fully correct, no neighbor halo needed. Falls back to a
+        full rebuild if there's no existing array to patch (e.g. right
+        after set_world, before the first _precompute_colors has run)."""
+        if self._px_pol is None or not cells:
+            self._precompute_colors()
+            return
+        wd = self.world
+        fcolors, cshade = self._color_context()
+        cg = wd.region_grid
+        for x, y in cells:
+            if 0 <= x < wd.w and 0 <= y < wd.h:
+                self._compute_cell(x, y, y * wd.w + x, wd, cg, fcolors, cshade)
 
-                    # water-adjacent: any 4-neighbor is ocean, a lake, or a
-                    # river — every such shoreline/riverbank cell gets the
-                    # same darkened "carved edge" treatment, in any mode, so
-                    # a river reads as cutting a real channel through the
-                    # landscape rather than floating over flat, unshaded
-                    # ground on either side.
-                    water_adjacent = False
-                    for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-                        if 0 <= nx < wd.w and 0 <= ny < wd.h:
-                            no = wd.owner[ny][nx]
-                            if (no == OCEAN or (nx, ny) in wd.lake_cells
-                                    or (nx, ny) in wd.river_cells):
-                                water_adjacent = True
-                                break
+    def _compute_cell(self, x, y, i, wd, cg, fcolors, cshade):
+        """Write this one cell's color into every self._px_*[i]/
+        _owner_flat[i]/_region_flat[i] array -- the actual per-pixel work
+        shared by both the full rebuild (_precompute_colors) and the
+        incremental update (_update_dirty_colors), so the two can never
+        drift out of sync with each other."""
+        sea = wd.sea_level
+        o = wd.owner[y][x]
+        h = wd.height[y][x]
+        if o == OCEAN:
+            depth = max(0.0, min(1.0, (sea - h) / (sea or 1)))
+            px = _rgb(*(_OCEAN_DEEP[j] + (_OCEAN_SHALLOW[j] - _OCEAN_DEEP[j])
+                        * (1 - depth) for j in range(3)))
+            self._px_pol[i] = self._px_pol_hi[i] = px
+            self._px_fert[i] = self._px_elev[i] = px
+            self._px_biome[i] = self._px_climate[i] = _rgb(*_NO_DATA_RGB)
+            self._px_region[i] = self._px_region_hi[i] = px
+        elif (x, y) in wd.lake_cells:
+            # lake surface: water in every mode, but keep owner/region
+            # so clicks still resolve to the faction/region beneath.
+            lk = _rgb(*_LAKE_RGB)
+            self._px_pol[i] = self._px_pol_hi[i] = lk
+            self._px_fert[i] = self._px_elev[i] = lk
+            self._px_biome[i] = self._px_climate[i] = lk
+            self._px_region[i] = self._px_region_hi[i] = lk
+            self._owner_flat[i] = o
+            self._region_flat[i] = cg[y][x]
+        elif (x, y) in wd.river_cells:
+            # River surface: baked into the raster exactly like a
+            # lake (flat tone, every mode, owner/region preserved
+            # beneath) rather than drawn as a separate vector line on
+            # top of everything — this is what makes it read as part
+            # of the terrain instead of a decal, and it means fog of
+            # war (which only ever composites over this raster)
+            # covers rivers automatically, same as anything else.
+            rv = _rgb(*_RIVER_RGB)
+            self._px_pol[i] = self._px_pol_hi[i] = rv
+            self._px_fert[i] = self._px_elev[i] = rv
+            self._px_biome[i] = self._px_climate[i] = rv
+            self._px_region[i] = self._px_region_hi[i] = rv
+            self._owner_flat[i] = o
+            self._region_flat[i] = cg[y][x]
+        else:
+            relief = (h - sea) / (1 - sea) if sea < 1 else 0
+            if o >= 0:
+                base = _rgb(*_lighten(fcolors[o], 0.10 * relief))
+            else:
+                # UNCLAIMED — no faction color to draw from; a muted
+                # neutral tone, darker/rustier where the wildland
+                # garrison guarding it is stronger.
+                cid_here = cg[y][x]
+                strength = (wd.regions[cid_here].wildland_strength
+                           if 0 <= cid_here < len(wd.regions) else 40)
+                danger = max(0.0, min(1.0, strength / _WILDLAND_DANGER_REF))
+                base = _rgb(*(_UNCLAIMED_RGB[j] + (_UNCLAIMED_DANGER_RGB[j]
+                             - _UNCLAIMED_RGB[j]) * danger for j in range(3)))
+                base = _rgb(*_lighten(base, 0.08 * relief))
 
-                    fert_rgb = _fert_rgb(wd.fertility[y][x])
-                    elev_rgb = _elev_rgb(relief)
-                    if water_adjacent:
-                        base = _rgb(*_shade(base, -0.8))
-                        fert_rgb = _rgb(*_shade(fert_rgb, -0.8))
-                        elev_rgb = _rgb(*_shade(elev_rgb, -0.8))
+            biome_here = wd.biome_grid[y][x]
+            if biome_here == "forest":
+                base = _rgb(*_blend(base, _BIOME_COLORS["forest"], _POL_FOREST_TINT))
+            elif biome_here == "mountain":
+                base = _rgb(*_blend(base, _BIOME_COLORS["mountain"], _POL_MOUNTAIN_TINT))
 
-                    biome_rgb = _rgb(*_biome_rgb(biome_here))
-                    climate_rgb = _rgb(*_climate_rgb(wd.climate_grid[y][x]))
-                    if water_adjacent:
-                        biome_rgb = _rgb(*_shade(biome_rgb, -0.5))
-                        climate_rgb = _rgb(*_shade(climate_rgb, -0.5))
+            # water-adjacent: any 4-neighbor is ocean, a lake, or a
+            # river — every such shoreline/riverbank cell gets the
+            # same darkened "carved edge" treatment, in any mode, so
+            # a river reads as cutting a real channel through the
+            # landscape rather than floating over flat, unshaded
+            # ground on either side.
+            water_adjacent = False
+            for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if 0 <= nx < wd.w and 0 <= ny < wd.h:
+                    no = wd.owner[ny][nx]
+                    if (no == OCEAN or (nx, ny) in wd.lake_cells
+                            or (nx, ny) in wd.river_cells):
+                        water_adjacent = True
+                        break
 
-                    self._px_pol[i] = base
-                    self._px_pol_hi[i] = _rgb(*_lighten(base, 0.4))
-                    self._px_fert[i] = fert_rgb
-                    self._px_elev[i] = elev_rgb
-                    self._px_biome[i] = biome_rgb
-                    self._px_climate[i] = climate_rgb
-                    self._owner_flat[i] = o
+            fert_rgb = _fert_rgb(wd.fertility[y][x])
+            elev_rgb = _elev_rgb(relief)
+            if water_adjacent:
+                base = _rgb(*_shade(base, -0.8))
+                fert_rgb = _rgb(*_shade(fert_rgb, -0.8))
+                elev_rgb = _rgb(*_shade(elev_rgb, -0.8))
 
-                    cid = cg[y][x]
-                    self._region_flat[i] = cid
-                    shade = cshade[cid] if (cid >= 0 and cshade[cid] is not None) else base
-                    # region border: any 4-neighbor in a different region, or
-                    # a water-adjacent (coastline/riverbank) edge
-                    border = water_adjacent
-                    for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-                        if not (0 <= nx < wd.w and 0 <= ny < wd.h) or cg[ny][nx] != cid:
-                            border = True
-                            break
-                    self._px_region[i] = _rgb(*(_shade(shade, -0.5) if border else shade))
-                    self._px_region_hi[i] = _rgb(*_lighten(shade, 0.45))
-                i += 1
+            biome_rgb = _rgb(*_biome_rgb(biome_here))
+            climate_rgb = _rgb(*_climate_rgb(wd.climate_grid[y][x]))
+            if water_adjacent:
+                biome_rgb = _rgb(*_shade(biome_rgb, -0.5))
+                climate_rgb = _rgb(*_shade(climate_rgb, -0.5))
+
+            self._px_pol[i] = base
+            self._px_pol_hi[i] = _rgb(*_lighten(base, 0.4))
+            self._px_fert[i] = fert_rgb
+            self._px_elev[i] = elev_rgb
+            self._px_biome[i] = biome_rgb
+            self._px_climate[i] = climate_rgb
+            self._owner_flat[i] = o
+
+            cid = cg[y][x]
+            self._region_flat[i] = cid
+            shade = cshade[cid] if (cid >= 0 and cshade[cid] is not None) else base
+            # region border: any 4-neighbor in a different region, or
+            # a water-adjacent (coastline/riverbank) edge
+            border = water_adjacent
+            for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if not (0 <= nx < wd.w and 0 <= ny < wd.h) or cg[ny][nx] != cid:
+                    border = True
+                    break
+            self._px_region[i] = _rgb(*(_shade(shade, -0.5) if border else shade))
+            self._px_region_hi[i] = _rgb(*_lighten(shade, 0.45))
+
+    # --- trade log -------------------------------------------------------------
+    _TRADE_LOG_MAX_ENTRIES = 200   # trim oldest once exceeded, so it can't grow forever
+
+    _TRADE_LOG_MIN_WIDTH = 260
+    _TRADE_LOG_MAX_WIDTH = 900
+    _TRADE_LOG_HEIGHT = 210   # header/tabs + scrollable row list
+
+    _TRADE_LOG_TABS = (("domestic", "Domestic"), ("foreign", "Global"))
+
+    def _build_trade_log(self):
+        """A persistent, scrolling ledger of the player's own trade income/
+        cost, docked to the bottom-left corner of the map canvas (floated
+        via place(), same technique bottom_msg/year_banner already use, so
+        it doesn't eat into the fixed side panels' width). Distinct from
+        show_bottom_message's one-line banner: that shows only the FIRST
+        relevant event each turn and auto-dismisses; this accumulates
+        every financial trade event, turn after turn, so the player can
+        actually review what happened instead of catching a single
+        flashed line.
+
+        A tabbed, row-based widget (Canvas+Frame, same scrollable-list
+        pattern the RESOURCES sidebar and "What's New" panel already use)
+        rather than a plain Text log: Domestic and Global trade are
+        different enough in shape (settlement-to-settlement vs.
+        faction-to-faction) that mixing them in one undifferentiated feed
+        made it hard to follow either. Same-turn purchases made by the
+        same buyer are grouped into one expandable row (see
+        _refresh_trade_log_rows) instead of a wall of near-identical
+        lines.
+
+        Horizontally resizable (drag the handle on the right edge), since
+        a fixed width was cutting off longer lines (long faction names,
+        big Gold amounts) with no way to see the rest."""
+        self._trade_log_width = 340
+        self._trade_log_tab = "domestic"
+        self._trade_log_entries = []   # structured events, newest last -- see _log_trade_events
+        self._trade_log_expanded = set()   # {(turn, tab, group_label), ...} currently expanded
+        self._trade_log_scroll_pending = False   # see _scroll_trade_log_to_end
+
+        self.trade_log_frame = tk.Frame(self.canvas, bg="#0d1017",
+                                        highlightbackground=theme.LINE,
+                                        highlightthickness=1, height=self._TRADE_LOG_HEIGHT)
+        body = tk.Frame(self.trade_log_frame, bg="#0d1017")
+        body.pack(side="left", fill="both", expand=True)
+        header = tk.Frame(body, bg=theme.PANEL)
+        header.pack(fill="x")
+        tk.Label(header, text="TRADE LOG", bg=theme.PANEL, fg=theme.MUTED,
+                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=8, pady=4)
+        tabs = tk.Frame(header, bg=theme.PANEL)
+        tabs.pack(side="right", padx=6)
+        self._trade_log_tab_btns = {}
+        for tab_id, label in self._TRADE_LOG_TABS:
+            btn = tk.Button(tabs, text=label, font=("Segoe UI", 8),
+                            relief="flat", bd=0, cursor="hand2",
+                            command=lambda t=tab_id: self._set_trade_log_tab(t))
+            btn.pack(side="left", padx=2, pady=2)
+            self._trade_log_tab_btns[tab_id] = btn
+
+        rows_area = tk.Frame(body, bg="#0d1017")
+        rows_area.pack(fill="both", expand=True, padx=(6, 0), pady=(4, 6))
+        canvas = tk.Canvas(rows_area, bg="#0d1017", highlightthickness=0)
+        vbar = tk.Scrollbar(rows_area, orient="vertical", command=canvas.yview)
+        canvas.pack(side="left", fill="both", expand=True)
+        vbar.pack(side="right", fill="y")
+        canvas.configure(yscrollcommand=vbar.set)
+        self._trade_log_canvas = canvas
+        self._trade_log_rows_frame = tk.Frame(canvas, bg="#0d1017")
+        window = canvas.create_window((0, 0), window=self._trade_log_rows_frame, anchor="nw")
+        self._trade_log_rows_frame.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(window, width=e.width))
+        canvas.bind("<Enter>", lambda e: canvas.bind_all(
+            "<MouseWheel>", lambda ev: canvas.yview_scroll(int(-ev.delta / 120), "units")))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        # Drag handle: a thin strip on the right edge that resizes the
+        # whole panel's width -- clamped so it can't be dragged smaller
+        # than the header text or wider than the map canvas itself.
+        handle = tk.Frame(self.trade_log_frame, bg=theme.LINE, width=4,
+                          cursor="sb_h_double_arrow")
+        handle.pack(side="right", fill="y")
+        handle.bind("<B1-Motion>", self._on_trade_log_drag)
+        self._trade_log_frame_widget = self.trade_log_frame
+
+        self._resize_trade_log(self._trade_log_width)
+        self.trade_log_frame.place(relx=0.0, rely=1.0, anchor="sw", x=0, y=0)
+        self._refresh_trade_log_tab_styles()
+
+    def _resize_trade_log(self, width):
+        width = max(self._TRADE_LOG_MIN_WIDTH, min(self._TRADE_LOG_MAX_WIDTH, width))
+        self._trade_log_width = width
+        # pack_propagate(False) locks BOTH axes to whatever's configured,
+        # not just the width it's meant to pin here (Tkinter has no
+        # single-axis version) -- so height has to be re-asserted on every
+        # resize too, or it silently collapses toward 0 the moment this
+        # first runs (exactly what happened before this was caught: the
+        # panel was still technically "there", just squeezed to ~1px tall
+        # and invisible).
+        self.trade_log_frame.config(width=width, height=self._TRADE_LOG_HEIGHT)
+        self.trade_log_frame.pack_propagate(False)
+
+    def _on_trade_log_drag(self, event):
+        # event.x is relative to the handle itself; the handle sits at the
+        # panel's right edge, so the panel's own left-anchored x plus the
+        # drag position IS the new total width.
+        self._resize_trade_log(self._trade_log_width + event.x)
+
+    def _set_trade_log_tab(self, tab_id):
+        if tab_id == self._trade_log_tab:
+            return
+        self._trade_log_tab = tab_id
+        self._refresh_trade_log_tab_styles()
+        self._refresh_trade_log_rows()
+
+    def _refresh_trade_log_tab_styles(self):
+        for tab_id, btn in self._trade_log_tab_btns.items():
+            active = tab_id == self._trade_log_tab
+            btn.config(bg=theme.ACCENT if active else "#0d1017",
+                      fg="#0d1017" if active else theme.MUTED,
+                      activebackground=theme.ACCENT if active else "#1b2029")
+
+    def _payment_desc(self, payment, value, sign=0):
+        """Render a trade payment (a [(resource, qty), ...] list, real
+        Gold and/or a barter good -- see trade._collect_payment's
+        barter_first path) as trade-log text, e.g. "40 Wheat" or "40
+        Wheat + 12g" for an unsigned partial barter (sign=0); "-1,000g
+        + -50 Iron" for a buyer mix (sign=-1, EVERY item is a cost --
+        not just the first one visually tagged) so an Iron in a buyer
+        row doesn't read as a gain; "+115g" or "+1,000g + 50 Iron" for a
+        seller mix (sign=1, every item is incoming).
+
+        The sign lives on EVERY entry rather than just on the
+        outer " - " prefix because for a multi-item buyer payment
+        (a real, post-Currency-overhaul case -- reserved Gold at the
+        trade-spending floor short of the full price is now partially
+        made up with barter goods), prefixing only the joined string
+        reads as "-1,000g + 50 Iron" where the Iron item visually looks
+        like it's added to the row instead of it also leaving the
+        buyer -- same shape flatters the trade log into
+        mis-representing the settlement's actual delta. Falls back to a
+        plain signed gold-equivalent figure if `payment` is missing
+        (old saves/events from before this field existed) or empty."""
+        if not payment:
+            if sign < 0:
+                return f"-{value:,}g"
+            if sign > 0:
+                return f"+{value:,}g"
+            return f"{value:,}g"
+        prefix = "-" if sign < 0 else ("+" if sign > 0 else "")
+        return " + ".join(f"{prefix}{qty:,}g" if resource == "Gold"
+                          else f"{prefix}{qty:,} {resource}"
+                          for resource, qty in payment)
+
+    def _actual_payment_value(self, ev):
+        """Gold-equivalent value of an event's REAL payment list -- the
+        actual (resource, qty) tuple list trade._collect_payment returned
+        (filled in at event creation by advance_caravans /
+        run_regional_trade / advance_regional_shipments), which may be
+        Gold only, a mix of Gold and barter goods, or empty -- possibly
+        reflecting a settlement that ran short on Gold this turn and
+        had _find_barter_good substitute real goods for part of the
+        payment.
+
+        Falls back to ev['price'] for any legacy event predating the
+        payment field (eg. saves written before Currency overhaul, or
+        artificially-recorded informational events with no payment).
+
+        This is what the trade log should sum/display, not ev['price']:
+        agreed price is what the two sides SETTLED on, not what actually
+        left one settlement's resources this turn, and these two numbers
+        diverge whenever the buyer's paying settlement was capped by the
+        _spendable_gold floor, paid partly in barter, or had to
+        undersize the deal for purchasing-power reasons -- the case where
+        the trade log was previously showing numbers that didn't match
+        the resources tab (see also the screened trade-log/inventory
+        discrepancy)."""
+        payment = ev.get("payment")
+        if payment:
+            return sum((resources.resource_value(r, q) for r, q in payment), 0)
+        return ev.get("price", 0)
+
+    def _log_trade_events(self):
+        """Called once per End Turn: append every financial trade event
+        involving the player this turn to the trade log's structured
+        entry list (unlike _report_trade_events/_report_regional_trade_
+        events, which only surface the FIRST one on the transient bottom
+        banner) -- foreign trade income/cost and domestic regional
+        transfers both. Purely informational events with no Gold changing
+        hands (a caravan departing, a free sell-to-city shipment) are
+        left out — this is specifically an income/cost ledger, not a
+        general activity log. Each entry records a `group` label (the
+        buying party) so same-turn purchases from the same buyer can be
+        collapsed into one row -- see _refresh_trade_log_rows."""
+        player_idx = self.world.player_faction_idx
+        if player_idx is None:
+            return
+        turn = self.world.turn
+        new_entries = []
+
+        for ev in self.world.trade_events:
+            etype = ev["type"]
+            if "seller_idx" not in ev or "buyer_idx" not in ev:
+                continue   # route_proposed/route_started -- no seller/buyer, not a ledger event
+            is_seller = ev["seller_idx"] == player_idx
+            is_buyer = ev["buyer_idx"] == player_idx
+            if not (is_seller or is_buyer):
+                continue
+            other_idx = ev["buyer_idx"] if is_seller else ev["seller_idx"]
+            other_name = self.world.factions[other_idx].name
+            if etype == "delivered" and is_buyer:
+                # Use the real (resource, qty) list _collect_payment returned
+                # -- what actually left buyer_st.resources this turn, not the
+                # agreed price, which can differ when the buyer was capped by
+                # _spendable_gold or paid partly in barter (see
+                # trade._collect_payment's allow_gold/barter_first paths).
+                # sign=-1: both Gold AND any barter items in the payment
+                # leave the buyer (see _payment_desc docstring on why this
+                # matters for multi-item rows).
+                new_entries.append({"turn": turn, "tab": "foreign", "kind": "cost",
+                                    "group": "You",
+                                    "value": self._actual_payment_value(ev),
+                                    "text": f"Bought {ev['quantity']} {ev['resource']} "
+                                            f"from {other_name} — "
+                                            f"{self._payment_desc(ev.get('payment'), ev['price'], sign=-1)}"})
+            elif etype == "paid" and is_seller:
+                # bonus_gold: a species trade bonus (Humans) on top of the
+                # agreed price -- called out so the perk is visible, not just
+                # silently better numbers. The displayed amount is the
+                # ACTUAL boosted payment delivered to seller_st, which is
+                # what ev['payment'] already contains (post-_with_gold_bonus)
+                # -- not "price + bonus_gold", which only matches cleanly
+                # for a pure-Gold payment and silently mis-reports the
+                # seller-side delta for any barter mix the buyer paid in.
+                # sign=1: every item in the boosted payment is incoming
+                # (the seller really did get all of them).
+                bonus = ev.get("bonus_gold", 0)
+                suffix = f" (incl. +{bonus:,}g trade bonus)" if bonus else ""
+                new_entries.append({"turn": turn, "tab": "foreign", "kind": "income",
+                                    "group": None,
+                                    "value": self._actual_payment_value(ev),
+                                    "text": f"Sold {ev['quantity']} {ev['resource']} "
+                                            f"to {other_name} — "
+                                            f"{self._payment_desc(ev.get('payment'), ev['price'], sign=1)}{suffix}"})
+            elif etype == "lost":
+                # A "lost" event can fire on either leg: outbound (no payment
+                # yet — only the goods were in transit) or return (payment was
+                # already collected at destination and was riding home with
+                # the caravan). The event dict doesn't carry that distinction
+                # today, so the log entry just says both are gone — accurate
+                # in the worst case and never wrong about the goods, which are
+                # always gone.
+                new_entries.append({"turn": turn, "tab": "foreign", "kind": "muted",
+                                    "group": None,
+                                    "text": f"Caravan lost ({ev['quantity']} "
+                                            f"{ev['resource']}, {other_name}) — both the "
+                                            f"goods and any payment are gone"})
+
+        for ev in self.world.regional_trade_events:
+            if ev.get("faction_idx") != player_idx:
+                continue
+            etype = ev["type"]
+            # regional_dispatched/regional_delivered are also the generic
+            # delivery-completion events for a FREE sell-to-city shipment
+            # (see trade.run_sell_to_city -- price is always 0.0 there by
+            # design, indistinguishable at this point from a real
+            # regional-market sale) -- only log ones with a real price,
+            # so a free internal restock doesn't show up as "paid +0g".
+            if etype == "regional_dispatched" and ev["price"] > 0:
+                # sign=-1: same mix-payment sign rule as the foreign
+                # delivered buyer row above (see _payment_desc).
+                new_entries.append({"turn": turn, "tab": "domestic", "kind": "cost",
+                                    "group": ev["dest_name"],
+                                    "value": self._actual_payment_value(ev),
+                                    "text": f"buys {ev['quantity']} {ev['resource']} "
+                                            f"from {ev['origin_name']} — "
+                                            f"{self._payment_desc(ev.get('payment'), ev['price'], sign=-1)}"})
+            elif etype == "regional_delivered" and ev["price"] > 0:
+                # Mirror of the foreign-trade "Sold X to Y" wording just
+                # above: the seller (origin) RECEIVES payment, so the entry
+                # reports a +gain, not a +pay. An earlier draft phrased this
+                # as "{origin} paid +Ng", which flipped the direction of
+                # the money flow and read opposite of what actually happened.
+                # sign=1: every item in the payment is incoming to seller_st.
+                new_entries.append({"turn": turn, "tab": "domestic", "kind": "income",
+                                    "group": None,
+                                    "value": self._actual_payment_value(ev),
+                                    "text": f"{ev['origin_name']} sold "
+                                            f"{ev['quantity']} {ev['resource']} to {ev['dest_name']} "
+                                    f"— {self._payment_desc(ev.get('payment'), ev['price'], sign=1)}"})
+            elif etype == "regional_lost":
+                new_entries.append({"turn": turn, "tab": "domestic", "kind": "muted",
+                                    "group": None,
+                                    "text": f"Shipment lost ({ev['quantity']} "
+                                            f"{ev['resource']}, {ev['origin_name']} → "
+                                            f"{ev['dest_name']})"})
+
+        if not new_entries:
+            return
+        self._trade_log_entries.extend(new_entries)
+        overflow = len(self._trade_log_entries) - self._TRADE_LOG_MAX_ENTRIES
+        if overflow > 0:
+            del self._trade_log_entries[:overflow]
+        self._refresh_trade_log_rows()
+
+    def _refresh_trade_log_rows(self):
+        """Rebuild the visible row widgets for the current tab from
+        self._trade_log_entries -- same full-rebuild-on-refresh approach
+        the RESOURCES sidebar and changelog panel already use, cheap
+        enough at this data volume (a few hundred entries, trimmed).
+        Consecutive same-turn "cost" entries sharing a `group` label (the
+        buying settlement/faction) collapse into one summary row that
+        expands to show each individual purchase — see
+        _trade_log_expanded. A group of exactly one entry is shown plain,
+        no point collapsing a single line."""
+        frame = self._trade_log_rows_frame
+        for w in frame.winfo_children():
+            w.destroy()
+
+        entries = [e for e in self._trade_log_entries if e["tab"] == self._trade_log_tab]
+        if not entries:
+            tk.Label(frame, text="No trades yet.", bg="#0d1017", fg=theme.MUTED,
+                     font=("Segoe UI", 8), anchor="w").pack(fill="x", padx=4, pady=4)
+            self._scroll_trade_log_to_end()
+            return
+
+        # Group consecutive cost entries by (turn, group label); everything
+        # else (income, muted, ungrouped cost) passes through as its own
+        # single-item "group" so the render loop below is uniform.
+        groups = []
+        key_to_group = {}
+        for e in entries:
+            gkey = (e["turn"], e["group"]) if (e["kind"] == "cost" and e["group"]) else None
+            if gkey is not None and gkey in key_to_group:
+                key_to_group[gkey]["items"].append(e)
+                continue
+            g = {"key": gkey, "turn": e["turn"], "kind": e["kind"], "items": [e]}
+            groups.append(g)
+            if gkey is not None:
+                key_to_group[gkey] = g
+
+        last_turn = None
+        for g in groups:
+            if g["turn"] != last_turn:
+                last_turn = g["turn"]
+                tk.Label(frame, text=f"Turn {g['turn']}", bg="#0d1017", fg=theme.ACCENT,
+                         font=("Segoe UI", 8, "bold"), anchor="w"
+                         ).pack(fill="x", padx=4, pady=(6, 1))
+            color = {"income": theme.GOOD, "cost": theme.BAD,
+                    "muted": theme.MUTED}[g["kind"]]
+            if len(g["items"]) == 1:
+                tk.Label(frame, text="  " + g["items"][0]["text"], bg="#0d1017", fg=color,
+                         font=("Segoe UI", 8), anchor="w", justify="left"
+                         ).pack(fill="x", padx=4)
+                continue
+
+            expanded = g["key"] in self._trade_log_expanded
+            # Gold-equivalent total, from each entry's own stored `value`
+            # (the real price, same figure _payment_desc rendered into its
+            # text) -- not re-derived from the text itself, which would
+            # silently undercount a partially- or fully-bartered purchase
+            # (e.g. "-40 Wheat" has no "-Ng" token to parse back out).
+            total_value = sum(it.get("value", 0) for it in g["items"])
+            total_desc = (f"{g['items'][0]['group']} made {len(g['items'])} purchases "
+                         f"this turn ({'-' if g['kind'] == 'cost' else '+'}"
+                         f"{total_value:,}g total)")
+            arrow = "▾" if expanded else "▸"
+            row = tk.Label(frame, text=f"  {arrow} {total_desc}", bg="#0d1017", fg=color,
+                           font=("Segoe UI", 8), anchor="w", justify="left", cursor="hand2")
+            row.pack(fill="x", padx=4)
+            row.bind("<Button-1>", lambda e, k=g["key"]: self._toggle_trade_log_group(k))
+            if expanded:
+                for it in g["items"]:
+                    tk.Label(frame, text="      " + it["text"], bg="#0d1017", fg=color,
+                             font=("Segoe UI", 8), anchor="w", justify="left"
+                             ).pack(fill="x", padx=4)
+
+        self._scroll_trade_log_to_end()
+
+    def _scroll_trade_log_to_end(self):
+        """Scroll the row list to the newest entry -- deferred to idle, which
+        is the whole point.
+
+        The rows frame recomputes the canvas's scrollregion from its
+        <Configure> event, and that fires on idle, AFTER this refresh
+        returns. Scrolling inline therefore moved to the bottom of the
+        PREVIOUS tab's scrollregion: switching from a busy Domestic tab
+        (hundreds of rows) to a quiet Global one (a handful) left the canvas
+        parked hundreds of pixels below the new, much shorter content, and
+        the panel read as completely empty -- not even the "No trades yet."
+        placeholder was on screen. Waiting for idle means the scrollregion
+        matches the rows that actually exist before we move."""
+        canvas = self._trade_log_canvas
+        if self._trade_log_scroll_pending:
+            return
+        self._trade_log_scroll_pending = True
+
+        def do_scroll():
+            self._trade_log_scroll_pending = False
+            if not canvas.winfo_exists():
+                return
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.yview_moveto(1.0)
+
+        self.after_idle(do_scroll)
+
+    def _toggle_trade_log_group(self, key):
+        if key in self._trade_log_expanded:
+            self._trade_log_expanded.discard(key)
+        else:
+            self._trade_log_expanded.add(key)
+        self._refresh_trade_log_rows()
+
+    # --- alerts ------------------------------------------------------------
+    _ALERTS_MAX_VISIBLE = 8
+    _ALERT_WARN_COLOR = "#e0a030"
+
+    def _build_alerts_panel(self):
+        """A persistent top-left panel listing every current problem at one
+        of the player's own settlements/villages (see resources.
+        faction_alerts) -- food/firewood shortage, starving/freezing,
+        overflowing storage -- so trouble is visible without having to
+        click through every node's numbers to notice it. Unlike the Trade
+        Log (an accumulating ledger), this is a snapshot of CURRENT state:
+        rebuilt from scratch each refresh, not appended to, so a problem
+        still shows here for as long as it's actually ongoing.  Hidden
+        entirely (via place_forget) when there's nothing wrong."""
+        self.alerts_frame = tk.Frame(self.canvas, bg="#1a0d0d",
+                                     highlightbackground=theme.BAD,
+                                     highlightthickness=1, width=300)
+        header = tk.Frame(self.alerts_frame, bg=theme.PANEL)
+        header.pack(fill="x")
+        self._alerts_header_lbl = tk.Label(
+            header, text="ALERTS", bg=theme.PANEL, fg=theme.BAD,
+            font=("Segoe UI", 8, "bold"))
+        self._alerts_header_lbl.pack(side="left", padx=8, pady=4)
+        self._alerts_rows_frame = tk.Frame(self.alerts_frame, bg="#1a0d0d")
+        self._alerts_rows_frame.pack(fill="both", expand=True, padx=4, pady=(2, 6))
+
+    def _refresh_alerts(self):
+        """Recompute the current alert set (see the __init__ note on why
+        this only runs from set_world()/refresh(), never render()) and
+        rebuild the panel from it. Also rebuilds _alert_node_ids, the
+        cached {id(node): worst severity} lookup _draw_settlements/
+        _draw_villages use for map badges."""
+        player_idx = self.world.player_faction_idx
+        alerts = resources.faction_alerts(self.world, player_idx) if player_idx is not None else []
+        # Critical (population actively being lost) always sorts above a
+        # mere warning, so the most urgent problems are never scrolled
+        # past the visible-rows cap by a pile of lesser ones.
+        alerts.sort(key=lambda a: 0 if a["severity"] == "critical" else 1)
+        self._current_alerts = alerts
+
+        node_ids = {}
+        for a in alerts:
+            nid = id(a["node"])
+            if nid not in node_ids or a["severity"] == "critical":
+                node_ids[nid] = a["severity"]
+        self._alert_node_ids = node_ids
+
+        for w in self._alerts_rows_frame.winfo_children():
+            w.destroy()
+        if not alerts:
+            self.alerts_frame.place_forget()
+            return
+        self._alerts_header_lbl.config(text=f"ALERTS ({len(alerts)})")
+        for a in alerts[:self._ALERTS_MAX_VISIBLE]:
+            color = theme.BAD if a["severity"] == "critical" else self._ALERT_WARN_COLOR
+            row = tk.Button(self._alerts_rows_frame, text="⚠ " + a["message"],
+                            command=lambda n=a["node"]: self._jump_to_alert_node(n),
+                            bg="#1a0d0d", fg=color, activebackground="#2a1515",
+                            activeforeground=color, relief="flat", anchor="w",
+                            justify="left", wraplength=280, font=("Segoe UI", 8),
+                            cursor="hand2", bd=0, highlightthickness=0)
+            row.pack(fill="x", pady=1)
+        remaining = len(alerts) - self._ALERTS_MAX_VISIBLE
+        if remaining > 0:
+            tk.Label(self._alerts_rows_frame, text=f"+ {remaining} more...",
+                     bg="#1a0d0d", fg=theme.MUTED, font=("Segoe UI", 8),
+                     anchor="w").pack(fill="x")
+        self.alerts_frame.place(relx=0.0, rely=0.0, anchor="nw", x=0, y=0)
+
+    def _jump_to_alert_node(self, node):
+        """Navigate straight to an alerted settlement/village and select it
+        -- reuses the same zoom-level machinery a normal click-through
+        would (_enter_region_view/_enter_village_view both zoom to the
+        owning faction's whole bbox, not a specific point, so getting to
+        the right ZOOM LEVEL is all "jumping" here actually means)."""
+        wd = self.world
+        faction = wd.factions[node.faction_idx]
+        self._enter_region_view(faction)
+        if hasattr(node, "kind"):   # Settlement
+            self.selected_settlement = node
+            self._show_settlement(node)
+        else:                       # Village
+            region = wd.regions[node.region_id]
+            self._enter_village_view(region)
+            self.selected_village = node
+            self._show_village(node)
+        self.render()
 
     # --- resource bar --------------------------------------------------------
     def _build_resource_bar(self):
+        """The RESOURCES sidebar now shows the faction's real, whole
+        stockpile (see _current_resource_snapshot) rather than the old
+        national-pool number that was empty in practice -- which means
+        it's commonly a couple dozen rows long instead of one or two, so
+        this needs to actually scroll (a plain Frame doesn't) rather than
+        just clip silently past the bottom of the panel."""
         rb = tk.Frame(self, bg=theme.PANEL, width=190)
         rb.pack(side="left", fill="y")
         rb.pack_propagate(False)
@@ -574,22 +1186,58 @@ class MapView(tk.Frame):
 
         tk.Label(rb, text="RESOURCES", bg=theme.PANEL, fg=theme.MUTED,
                  font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=12, pady=(14, 6))
-        self._resource_rows = tk.Frame(rb, bg=theme.PANEL)
-        self._resource_rows.pack(fill="both", expand=True, padx=12)
+
+        scroll_area = tk.Frame(rb, bg=theme.PANEL)
+        scroll_area.pack(fill="both", expand=True, padx=(12, 0))
+        canvas = tk.Canvas(scroll_area, bg=theme.PANEL, highlightthickness=0)
+        canvas.pack(side="left", fill="both", expand=True)
+        vbar = tk.Scrollbar(scroll_area, orient="vertical", command=canvas.yview)
+        vbar.pack(side="right", fill="y")
+        canvas.configure(yscrollcommand=vbar.set)
+        self._resource_canvas = canvas
+
+        self._resource_rows = tk.Frame(canvas, bg=theme.PANEL)
+        window = canvas.create_window((0, 0), window=self._resource_rows, anchor="nw")
+        self._resource_rows.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(window, width=e.width))
+        canvas.bind("<Enter>", lambda e: canvas.bind_all(
+            "<MouseWheel>", lambda ev: canvas.yview_scroll(int(-ev.delta / 120), "units")))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
     def _current_resource_snapshot(self):
-        """This turn's totals for the player faction: stockpiled resources
-        plus Gold, as one flat dict. Gold is a real settlement-storage
-        resource now (Currency overhaul) -- summed across every settlement
-        this faction owns, same aggregate-economy view Iron/Logs/Stone
-        already get (construction._faction_settlement_stock), not a
-        separate treasury number any more."""
+        """This turn's REAL totals for the player faction: every resource
+        summed across every Settlement AND Village it owns (see
+        construction._faction_nodes) -- "our country's whole pool of
+        resources," matching what construction.can_afford/_pay_cost
+        actually draw on, not the old national-pool number (nation.stats
+        ["resources"]) that's empty in practice now that almost
+        everything lives in per-node storage (still included too, for
+        whatever narrow legacy case might still land there). This used
+        to only ever surface Gold this way and otherwise show the stale,
+        near-always-empty national pool -- which is why the sidebar used
+        to look basically blank."""
         player = self._player_faction()
         if player is None:
             return {}
         snap = dict(player.stats.get("resources", {}))
-        snap["Gold"] = construction._faction_settlement_stock(player, "Gold", self.world)
+        for node in construction._faction_nodes(player, self.world):
+            for resource, amount in getattr(node, "resources", {}).items():
+                snap[resource] = snap.get(resource, 0) + amount
         return snap
+
+    def _current_population_total(self):
+        """The player faction's total living population right now -- every
+        Settlement and Village added together (same construction.
+        _faction_nodes pool _current_resource_snapshot uses), for the
+        year-end banner's population line (see _on_end_turn/
+        _show_year_banner). Separate from the resource snapshot since
+        population isn't a resource entry on any node."""
+        player = self._player_faction()
+        if player is None:
+            return 0
+        return sum(getattr(node, "population", 0)
+                  for node in construction._faction_nodes(player, self.world))
 
     def _update_resource_bar(self):
         for w in self._resource_rows.winfo_children():
@@ -601,8 +1249,14 @@ class MapView(tk.Frame):
                      wraplength=160, justify="left").pack(anchor="w", pady=4)
             return
 
+        # Gold always shows, even at 0 -- everything else only if there's
+        # actually something to report (a real stock, or a delta that
+        # explains why it's now 0), so a couple dozen genuinely-empty
+        # resource types (e.g. crops that don't grow in this climate)
+        # don't bury the ones that actually matter.
         order = ["Gold"] + sorted(
-            (r for r in current if r != "Gold"),
+            (r for r in current if r != "Gold"
+             and (current.get(r, 0) > 0 or self._resource_deltas.get(r, 0) != 0)),
             key=lambda r: (RESOURCES.get(r, {}).get("tier", 9), r))
         for resource in order:
             amount = current.get(resource, 0)
@@ -717,7 +1371,30 @@ class MapView(tk.Frame):
             return
         self._compendium_window = CompendiumWindow(self)
 
+    def _clear_end_turn_busy(self):
+        self._end_turn_busy = False
+
     def _on_end_turn(self):
+        # Rate-limit + re-entrancy guard: the side panels (realm info,
+        # resources, trade log) fully tear down and rebuild every turn, so a
+        # second End Turn arriving before the first finished painting catches
+        # them half-built -- the flicker/white-flash/vanishing-panel jank when
+        # mashing the button or holding E. Drop any End Turn while one is still
+        # settling; a short cooldown after each keeps the cadence civilized.
+        if self._end_turn_busy:
+            return
+        self._end_turn_busy = True
+        try:
+            self._run_end_turn()
+        finally:
+            # Force the freshly-rebuilt panels to actually paint before we
+            # allow another End Turn (so there's never a visible half-built
+            # frame), then hold the guard for a short cooldown. In `finally`
+            # so a rare mid-turn error can never wedge End Turn permanently.
+            self.update_idletasks()
+            self.after(_END_TURN_COOLDOWN_MS, self._clear_end_turn_busy)
+
+    def _run_end_turn(self):
         before = self._current_resource_snapshot()
         prev_year = resources.current_year(self.world.turn)
         self.on_end_turn()
@@ -726,13 +1403,17 @@ class MapView(tk.Frame):
                                   for r in set(before) | set(after)}
         self._report_trade_events()
         self._report_regional_trade_events()
+        self._log_trade_events()
 
         new_year = resources.current_year(self.world.turn)
         if new_year != prev_year:
             year_deltas = {r: after.get(r, 0) - self._year_start_snapshot.get(r, 0)
                           for r in set(after) | set(self._year_start_snapshot)}
-            self._show_year_banner(new_year, year_deltas)
+            pop_now = self._current_population_total()
+            pop_delta = pop_now - self._year_start_population
+            self._show_year_banner(new_year, year_deltas, pop_delta)
             self._year_start_snapshot = after
+            self._year_start_population = pop_now
 
         self.refresh()
 
@@ -749,9 +1430,13 @@ class MapView(tk.Frame):
             if ev["faction_idx"] != player_idx:
                 continue
             etype = ev["type"]
-            if etype == "regional_dispatched":
+            if etype == "regional_dispatched" and ev["price"] > 0:
                 msg = (f"{ev['origin_name']} ships {ev['quantity']} {ev['resource']} to "
-                       f"{ev['dest_name']} for {ev['price']} Gold.")
+                       f"{ev['dest_name']} for "
+                       f"{self._payment_desc(ev.get('payment'), ev['price'])}.")
+            elif etype == "regional_dispatched":
+                msg = (f"{ev['origin_name']} ships {ev['quantity']} {ev['resource']} to "
+                       f"{ev['dest_name']}.")
             elif etype == "regional_delivered":
                 msg = (f"{ev['dest_name']} receives {ev['quantity']} {ev['resource']} "
                        f"from {ev['origin_name']}.")
@@ -775,6 +1460,19 @@ class MapView(tk.Frame):
         if player_idx is None:
             return
         for ev in self.world.trade_events:
+            etype = ev["type"]
+            if etype == "route_proposed":
+                if ev["from_idx"] == player_idx:
+                    continue   # can't happen (AI never proposes to itself), but guard anyway
+                proposer = self.world.factions[ev["from_idx"]]
+                self.show_bottom_message(
+                    f"{proposer.name} proposes a trade route with you — "
+                    f"see their faction panel to respond.")
+                return
+            if etype == "route_started":
+                continue   # AI-to-AI route (never involves the player -- see run_trade_route_ai)
+            if "seller_idx" not in ev or "buyer_idx" not in ev:
+                continue   # unrecognized event shape -- don't risk a KeyError below
             seller = self.world.factions[ev["seller_idx"]]
             buyer = self.world.factions[ev["buyer_idx"]]
             is_seller = ev["seller_idx"] == player_idx
@@ -782,7 +1480,6 @@ class MapView(tk.Frame):
             if not (is_seller or is_buyer):
                 continue
 
-            etype = ev["type"]
             if etype == "dispatched" and is_seller:
                 msg = (f"Your caravan departs for {buyer.name} with "
                        f"{ev['quantity']} {ev['resource']}.")
@@ -1021,6 +1718,12 @@ class MapView(tk.Frame):
                      justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
             return
 
+        pending = next((p for p in getattr(wd, "incoming_trade_proposals", [])
+                        if p["from_idx"] == target_idx), None)
+        if pending is not None:
+            self._show_incoming_trade_proposal(player_idx, target_idx, nation)
+            return
+
         if not trade.eligible_to_trade(wd, player_idx, target_idx):
             tk.Label(self.actions, text=f"Standing needs to reach "
                      f"{diplomacy.TRADE_STANDING_THRESHOLD} before you can "
@@ -1037,10 +1740,62 @@ class MapView(tk.Frame):
                      justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
             return
 
+        if not trade.route_path_possible(wd, player_idx, target_idx):
+            tk.Label(self.actions, text=f"No land or sea connection exists "
+                     f"to {nation.name}'s capital — a route isn't possible.",
+                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                     justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+            return
+
+        self._show_trade_complementarity(player_idx, target_idx, nation)
+
         tk.Button(self.actions, text=f"Propose Trade Route with {nation.name}",
                   command=lambda: self._do_propose_trade_route(player_idx, target_idx),
                   bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                   relief="flat", font=theme.FONT).pack(fill="x", pady=(8, 2))
+
+    def _show_trade_complementarity(self, viewer_idx, other_idx, nation):
+        """What `nation` brings to the table that the player doesn't already
+        have — currently stocked goods ("have") vs raw resources it could
+        geographically produce that the player's own territory has no
+        access to at all ("access"), per the player's explicit request that
+        a trade decision (incoming or outgoing) show this before they commit."""
+        summary = trade.trade_complementarity_summary(self.world, viewer_idx, other_idx)
+        lines = []
+        if summary["have"]:
+            lines.append("Currently has: " + ", ".join(summary["have"]))
+        if summary["access"]:
+            lines.append("Could produce: " + ", ".join(summary["access"]))
+        text = "\n".join(lines) if lines else "Nothing you don't already have access to."
+        tk.Label(self.actions, text=text, bg=theme.PANEL, fg=theme.MUTED,
+                 font=("Segoe UI", 8), justify="left",
+                 wraplength=260).pack(anchor="w", pady=(4, 2))
+
+    def _show_incoming_trade_proposal(self, player_idx, target_idx, nation):
+        tk.Label(self.actions, text=f"{nation.name} proposes a trade route with you.",
+                 bg=theme.PANEL, fg=theme.INK, font=theme.FONT,
+                 justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+        self._show_trade_complementarity(player_idx, target_idx, nation)
+        row = tk.Frame(self.actions, bg=theme.PANEL)
+        row.pack(fill="x", pady=(2, 2))
+        tk.Button(row, text="Accept", command=lambda: self._do_respond_trade_proposal(
+                      target_idx, player_idx, accept=True),
+                  bg="#1f3a24", fg=theme.GOOD, activebackground=theme.ACCENT,
+                  relief="flat", font=theme.FONT).pack(side="left", fill="x", expand=True, padx=(0, 3))
+        tk.Button(row, text="Decline", command=lambda: self._do_respond_trade_proposal(
+                      target_idx, player_idx, accept=False),
+                  bg="#3a1f1f", fg=theme.BAD, activebackground=theme.ACCENT,
+                  relief="flat", font=theme.FONT).pack(side="left", fill="x", expand=True, padx=(3, 0))
+
+    def _do_respond_trade_proposal(self, from_idx, player_idx, accept):
+        if accept:
+            msg = trade.accept_trade_route_proposal(self.world, from_idx)
+        else:
+            msg = trade.decline_trade_route_proposal(self.world, from_idx)
+        self.show_bottom_message(msg)
+        if self.selected is self.world.factions[from_idx]:
+            self._show_faction(self.selected)
+        self.render()
 
     def _do_propose_trade_route(self, a_idx, b_idx):
         msg = trade.start_trade_route(self.world, a_idx, b_idx)
@@ -1163,9 +1918,15 @@ class MapView(tk.Frame):
                  f"Area {region.stats['area']} · Fertility {region.stats['fertility']}%",
                  f"Biome: {biome_line}",
                  f"Wildland garrison strength: {region.wildland_strength}"]
+        sea_only = False
         if player is not None:
-            odds = expansion.claim_odds(player, region)
+            faction_idx = wd.factions.index(player)
+            sea_only = expansion.is_sea_only_claim(wd, faction_idx, region)
+            odds = expansion.claim_odds(player, region, sea_only)
             lines.append(f"Estimated success odds: {round(100 * odds)}%")
+            if sea_only:
+                lines.append("Across open water — no land border. An amphibious "
+                             "claim is far costlier and better defended.")
         self.info.config(fg=theme.INK, text="\n".join(lines))
 
         for w in self.actions.winfo_children():
@@ -1202,7 +1963,7 @@ class MapView(tk.Frame):
                          bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
                          justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
             return
-        cost = expansion.claim_cost(region)
+        cost = expansion.claim_cost(region, sea_only)
         afford = construction.can_afford(player, cost, self.world)
         tk.Label(self.actions, text=f"Cost: {_format_resources(cost)}\n"
                  f"Build time: {expansion.claim_turns(region)} turns",
@@ -1313,8 +2074,19 @@ class MapView(tk.Frame):
                  f"Needs: {_format_resources(needs)} per turn"]
         population = getattr(st, "population", None)
         if population is not None:
-            lines.append(f"Population: {population:,} "
+            max_pop = getattr(st, "max_population", None)
+            cap_text = f" of {max_pop:,} max" if max_pop else ""
+            lines.append(f"Population: {population:,}{cap_text} "
                          f"({st.adults:,} adults, {st.children:,} children)")
+        # What's actually sitting in THIS settlement's own storage right
+        # now -- distinct from "Needs" (a per-turn requirement) and, for a
+        # Village, from "Grows per year" (a projection) -- the one place a
+        # player can check ground truth instead of guessing why a
+        # settlement that "has food" is still going hungry (a raw Crop
+        # counts toward Food; a raw resource needing conversion first,
+        # like Fish -> Smoked Fish, does not, until it's actually been
+        # converted).
+        lines.append(f"Currently stored: {_format_resources(getattr(st, 'resources', {}))}")
         if getattr(st, "has_shipyard", False):
             lines.append("Has a Shipyard — commanders here launch free, fast ships.")
         if getattr(st, "has_granary", False):
@@ -1431,10 +2203,17 @@ class MapView(tk.Frame):
                  f"Grows per year: {_format_resources(annual_yield)}"]
         population = getattr(v, "population", None)
         if population is not None:
-            lines.append(f"Population: {population:,} "
+            max_pop = getattr(v, "max_population", None)
+            cap_text = f" of {max_pop:,} max" if max_pop else ""
+            lines.append(f"Population: {population:,}{cap_text} "
                          f"({v.adults:,} adults, {v.children:,} children)")
         needs = resources.settlement_needs(v, wd.season)
         lines.append(f"Needs: {_format_resources(needs)} per turn")
+        # "Grows per year" above is a PROJECTION (what this village would
+        # produce over a full year at current conditions) -- this is the
+        # actual current stock sitting in its own storage right now, same
+        # distinction _show_settlement makes.
+        lines.append(f"Currently stored: {_format_resources(getattr(v, 'resources', {}))}")
         self.info.config(fg=theme.INK, text="\n".join(lines))
 
         prosperity = getattr(v, "prosperity", None)
@@ -1788,25 +2567,32 @@ class MapView(tk.Frame):
         self.bottom_msg.place_forget()
 
     # --- year-rollover banner --------------------------------------------------
-    def _year_delta_summary(self, deltas):
-        """'Wheat +1.2k · Gold -340 · ...' for the player faction's biggest
-        gains/losses since the year began, ordered by tier then name like
-        every other resource listing in this file -- only nonzero entries,
-        capped so the banner doesn't turn into a wall of text."""
+    def _year_delta_summary(self, deltas, pop_delta=0):
+        """'Population +842 · Wheat +1.2k · Gold -340 · ...' for the player
+        faction's biggest gains/losses since the year began, ordered by
+        tier then name like every other resource listing in this file --
+        only nonzero entries, capped so the banner doesn't turn into a
+        wall of text. Population leads the line when it changed at all
+        (growth/starvation/freezing/combat losses across every settlement
+        and village, net for the year) since it's the single figure a
+        player cares most about at a glance, ahead of any one resource."""
+        parts = []
+        if pop_delta:
+            sign = "+" if pop_delta > 0 else "-"
+            parts.append(f"Population {sign}{_fmt_amount(abs(pop_delta))}")
         order = sorted((r for r in deltas if deltas.get(r)),
                        key=lambda r: (RESOURCES.get(r, {}).get("tier", 9), r))
-        if not order:
-            return "No significant change this year."
-        parts = []
         for r in order[:10]:
             d = deltas[r]
             sign = "+" if d > 0 else "-"
             parts.append(f"{r} {sign}{_fmt_amount(abs(d))}")
+        if not parts:
+            return "No significant change this year."
         return " · ".join(parts)
 
-    def _show_year_banner(self, year, deltas):
+    def _show_year_banner(self, year, deltas, pop_delta=0):
         self.year_title_lbl.config(text=f"YEAR {year}")
-        self.year_summary_lbl.config(text=self._year_delta_summary(deltas))
+        self.year_summary_lbl.config(text=self._year_delta_summary(deltas, pop_delta))
         self.year_banner.place(relx=0.5, rely=0.08, anchor="n")
         if self._year_banner_after_id is not None:
             self.after_cancel(self._year_banner_after_id)
@@ -1848,13 +2634,38 @@ class MapView(tk.Frame):
         self.view[3] -= wy
         self.view_target = list(self.view)
         self._press_xy = (event.x, event.y)
-        self.render()
+
+        # A real motion-driven mouse fires <B1-Motion> far faster than we
+        # can usefully redraw -- calling render() (which recreates every
+        # road/symbol/label item from scratch) on each and every one of
+        # those events queues up a backlog, so the visible map falls
+        # behind where the mouse actually is, which reads as everything
+        # on the map "lagging behind" the drag. (A cheaper canvas.move()
+        # per event was tried here instead of a full render(), but proved
+        # to have no visible effect on screen at all in practice -- items'
+        # internal coordinates shifted but Tk never repainted them until
+        # the next real render() -- so markers stayed frozen in place
+        # between renders instead of just being briefly stale.) Coalescing
+        # into a single pending render() per idle tick fixes the backlog
+        # directly: however many motion events land before Tk is free to
+        # repaint, only one render() runs, using wherever self.view ended
+        # up by then.
+        if not self._drag_render_pending:
+            self._drag_render_pending = True
+            self.after_idle(self._drag_render_tick)
+
+    def _drag_render_tick(self):
+        self._drag_render_pending = False
+        if self._dragged:
+            self.render()
 
     def _on_release(self, event):
         was_drag = self._dragged
         self._press_xy = None
         self._dragged = False
-        if not was_drag:
+        if was_drag:
+            self.render()   # final, fully correct frame once the drag actually stops
+        else:
             self._on_click(event)
 
     def _on_wheel(self, event):
@@ -1916,10 +2727,9 @@ class MapView(tk.Frame):
         if self._animating:
             return
         vx0, vy0, scale = self._place
-        gx = int(vx0 + event.x / scale)
-        gy = int(vy0 + event.y / scale)
+        gx, gy = self.screen_to_world(event.x, event.y)
         wd = self.world
-        if not (0 <= gx < wd.w and 0 <= gy < wd.h):
+        if not (0 <= gy < wd.h):
             return
 
         if self.attack_mode is not None:
@@ -1974,8 +2784,7 @@ class MapView(tk.Frame):
             for cmd in wd.commanders:
                 if cmd.faction_idx != player_idx:
                     continue
-                csx = (cmd.pos[0] + 0.5 - vx0) * scale
-                csy = (cmd.pos[1] + 0.5 - vy0) * scale
+                csx, csy = self.world_to_screen(cmd.pos[0] + 0.5, cmd.pos[1] + 0.5)
                 if (csx - event.x) ** 2 + (csy - event.y) ** 2 <= 10 ** 2:
                     self.selected_commander = cmd
                     self._show_commander(cmd)
@@ -2012,8 +2821,7 @@ class MapView(tk.Frame):
             # settlement markers take priority over region selection
             for sid in self.zoom_faction.meta.get("settlements", []):
                 st = wd.settlements[sid]
-                sx = (st.pos[0] + 0.5 - vx0) * scale
-                sy = (st.pos[1] + 0.5 - vy0) * scale
+                sx, sy = self.world_to_screen(st.pos[0] + 0.5, st.pos[1] + 0.5)
                 hit_r = self._marker_radius(_SETTLE_STYLE[st.kind]["base"]) + 4
                 if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= hit_r ** 2:
                     self.selected_settlement = st
@@ -2056,8 +2864,7 @@ class MapView(tk.Frame):
             for v in wd.villages:
                 if v.faction_idx != zf:
                     continue
-                sx = (v.pos[0] + 0.5 - vx0) * scale
-                sy = (v.pos[1] + 0.5 - vy0) * scale
+                sx, sy = self.world_to_screen(v.pos[0] + 0.5, v.pos[1] + 0.5)
                 hit_r = self._marker_radius(_VILLAGE_STYLE["base"]) + 4
                 if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= hit_r ** 2:
                     self.selected_village = v
@@ -2066,8 +2873,7 @@ class MapView(tk.Frame):
                     return
             for sid in self.zoom_faction.meta.get("settlements", []):
                 st = wd.settlements[sid]
-                sx = (st.pos[0] + 0.5 - vx0) * scale
-                sy = (st.pos[1] + 0.5 - vy0) * scale
+                sx, sy = self.world_to_screen(st.pos[0] + 0.5, st.pos[1] + 0.5)
                 hit_r = self._marker_radius(_SETTLE_STYLE[st.kind]["base"]) + 4
                 if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= hit_r ** 2:
                     self.selected_settlement = st
@@ -2086,11 +2892,9 @@ class MapView(tk.Frame):
         Move button + left-click flow, not a replacement for it."""
         if self._animating or self.selected_commander is None:
             return
-        vx0, vy0, scale = self._place
-        gx = int(vx0 + event.x / scale)
-        gy = int(vy0 + event.y / scale)
+        gx, gy = self.screen_to_world(event.x, event.y)
         wd = self.world
-        if not (0 <= gx < wd.w and 0 <= gy < wd.h):
+        if not (0 <= gy < wd.h):
             return
         cmd = self.selected_commander
         self.commander_move_mode = None   # in case Move was separately armed
@@ -2171,6 +2975,71 @@ class MapView(tk.Frame):
             rh = rw / aspect
         return (cx - rw / 2, cy - rh / 2, cx + rw / 2, cy + rh / 2)
 
+    def world_to_screen(self, gx, gy):
+        """World cell coords -> canvas pixel coords, wrap-aware on x: the
+        camera (self.view/self._place) is free-scrolling and never itself
+        clamped or wrapped (it's just an ever-increasing/decreasing real
+        line -- see _on_drag/_on_wheel), so a world x that's always stored
+        canonically in [0, world.w) (every entity position in the game is)
+        needs to be shifted by the right multiple of world.w to land at
+        its correct on-screen position relative to wherever the camera
+        currently is. Picks whichever wrapped representative of gx is
+        CLOSEST to the camera's current center, so an entity near the seam
+        draws at the correct near-edge screen position instead of
+        potentially far off-screen. The single shared conversion every
+        _draw_* method and every click handler should use -- replaces the
+        old local `screen()` closure and the half-dozen places that used
+        to hand-roll this same math inline."""
+        vx0, vy0, scale = self._place
+        view_w = self.canvas.winfo_width() / scale
+        center = vx0 + view_w / 2
+        width = self.world.w
+        k = round((center - gx) / width)
+        wrapped_gx = gx + k * width
+        return ((wrapped_gx - vx0) * scale, (gy - vy0) * scale)
+
+    def screen_to_world(self, sx, sy):
+        """Inverse of world_to_screen: canvas pixel coords -> world cell
+        coords, wrapping the resulting x back into [0, world.w) so a click
+        near the seam resolves to the correct wrapped world cell instead
+        of a raw negative or >=width value nothing else in the game would
+        recognize."""
+        vx0, vy0, scale = self._place
+        gx = vx0 + sx / scale
+        gy = vy0 + sy / scale
+        return (wrap.wrap_x(int(math.floor(gx)), self.world.w), int(math.floor(gy)))
+
+    @staticmethod
+    def _wrapped_x_segments(vx0, vx1, width):
+        """[(world_x0, world_x1, screen_offset), ...] covering the
+        continuous viewport range [vx0, vx1), each piece wrapped into
+        [0, width) -- almost always a single segment, exactly 2 when the
+        viewport straddles the seam, and more only in the (rare, allowed)
+        case of zooming out wider than the world itself.
+
+        screen_offset is how far (unscaled world-units) the left edge of
+        this segment's first *integer* world cell (world_x0) sits from vx0
+        -- multiply by the render scale to get the screen pixel x to paste
+        the base-image crop at. Crucially it anchors on floor(x), NOT the
+        fractional continuous start x: the base image is cropped on integer
+        cell boundaries (render()'s crop((bx0, ...)) with bx0 = floor), so
+        its screen anchor has to be the screen position of that same
+        integer cell -- exactly what world_to_screen() gives every overlay.
+        Anchoring on the fractional x instead silently snapped the terrain
+        to the cell grid while overlays kept their sub-cell offset, so the
+        two slid against each other by up to a full cell mid-pan (the
+        "symbols/roads lag/jitter behind the terrain" drag bug)."""
+        segments = []
+        x = vx0
+        guard = 0
+        while x < vx1 - 1e-9 and guard < 100:
+            guard += 1
+            local_x0 = wrap.wrap_x(int(math.floor(x)), width)
+            seg_len = min(width - local_x0, vx1 - x)
+            segments.append((local_x0, local_x0 + seg_len, math.floor(x) - vx0))
+            x += seg_len
+        return segments
+
     def render(self):
         c = self.canvas
         c.delete("all")
@@ -2186,49 +3055,57 @@ class MapView(tk.Frame):
         scale = cw / (vx1 - vx0)
         self._place = (vx0, vy0, scale)
 
-        # crop the visible grid region and scale it to the canvas (nearest)
-        bx0, by0 = max(0, int(math.floor(vx0))), max(0, int(math.floor(vy0)))
-        bx1, by1 = min(wd.w, int(math.ceil(vx1))), min(wd.h, int(math.ceil(vy1)))
-        if bx1 > bx0 and by1 > by0:
-            crop = self._base_img.crop((bx0, by0, bx1, by1))
-            if fog_active:
-                fog_crop = self._fog_overlay_img.crop((bx0, by0, bx1, by1))
-                if fog_crop.getbbox() is not None:   # skip if fully revealed here
-                    dark = Image.new("RGB", crop.size, _FOG_HIDDEN_RGB)
-                    crop = Image.composite(dark, crop, fog_crop)
-            tw = max(1, round((bx1 - bx0) * scale))
-            th = max(1, round((by1 - by0) * scale))
-            self._img = ImageTk.PhotoImage(crop.resize((tw, th), Image.NEAREST))
-            c.create_image((bx0 - vx0) * scale, (by0 - vy0) * scale,
-                           anchor="nw", image=self._img)
+        # Crop the visible grid region and scale it to the canvas (nearest).
+        # The camera is free-scrolling and never itself wrapped (self.view
+        # can range arbitrarily far past [0, world.w) -- see _on_drag/
+        # _on_wheel), so the viewport's x-range is split into however many
+        # wrap-wrapped segments it actually spans (almost always 1, or 2
+        # right at the seam; more only if zoomed out wider than the world
+        # itself) and each is blitted at its own screen offset -- this is
+        # the "draw a second copy near the opposite edge" this map needed
+        # to actually scroll seamlessly through the seam.
+        by0 = max(0, int(math.floor(vy0)))
+        by1 = min(wd.h, int(math.ceil(vy1)))
+        self._img_refs = []   # keep every PhotoImage alive for this frame (Tkinter drops unreferenced ones)
+        if by1 > by0:
+            for wx0, wx1, screen_dx in self._wrapped_x_segments(vx0, vx1, wd.w):
+                bx0 = max(0, int(math.floor(wx0)))
+                bx1 = min(wd.w, int(math.ceil(wx1)))
+                if bx1 <= bx0:
+                    continue
+                crop = self._base_img.crop((bx0, by0, bx1, by1))
+                if fog_active:
+                    fog_crop = self._fog_overlay_img.crop((bx0, by0, bx1, by1))
+                    if fog_crop.getbbox() is not None:   # skip if fully revealed here
+                        dark = Image.new("RGB", crop.size, _FOG_HIDDEN_RGB)
+                        crop = Image.composite(dark, crop, fog_crop)
+                tw = max(1, round((bx1 - bx0) * scale))
+                th = max(1, round((by1 - by0) * scale))
+                img = ImageTk.PhotoImage(crop.resize((tw, th), Image.NEAREST))
+                self._img_refs.append(img)
+                screen_x = (screen_dx + (bx0 - wx0)) * scale
+                c.create_image(screen_x, (by0 - vy0) * scale, anchor="nw", image=img)
 
-        def screen(gx, gy):
-            return ((gx - vx0) * scale, (gy - vy0) * scale)
+        screen = self.world_to_screen
 
         # Rivers are baked into the terrain raster itself (_precompute_colors,
         # same as lake_cells) rather than drawn here as a separate vector
         # overlay — see that method for why. No per-frame river drawing
         # needed at all.
 
-        # Relationship links (world view, selected faction only).
-        if self.zoom_faction is None and self.selected:
-            ax, ay = screen(self.selected.center[0] * wd.w,
-                            self.selected.center[1] * wd.h)
-            for rel in wd.world_map.relationships_of(self.selected.id):
-                if not self._is_known(rel["other"]):
-                    continue
-                bx, by = screen(rel["other"].center[0] * wd.w,
-                                rel["other"].center[1] * wd.h)
-                width = 1 if rel["stance"] == Stance.NEUTRAL else 2
-                c.create_line(ax, ay, bx, by,
-                              fill=theme.STANCE_COLOR.get(rel["stance"], theme.MUTED),
-                              width=width)
-
         self._draw_trade_routes(c, screen)
         self._draw_trade_route_construction(c, screen)
         self._draw_trade_caravans(c, screen)
         self._draw_roads(c, screen)
-        self._draw_terrain_symbols(c, screen, bx0, by0, bx1, by1)
+        # One call per wrapped x-segment (see the base-image blit above) --
+        # a naive single bx0..bx1 range spanning a seam-straddling viewport
+        # would walk straight through out-of-bounds x values in the gap
+        # between segments.
+        for wx0, wx1, _ in self._wrapped_x_segments(vx0, vx1, wd.w):
+            sbx0 = max(0, int(math.floor(wx0)))
+            sbx1 = min(wd.w, int(math.ceil(wx1)))
+            if sbx1 > sbx0:
+                self._draw_terrain_symbols(c, screen, sbx0, by0, sbx1, by1)
         self._draw_construction(c, screen)
         self._draw_settlements(c, screen)
         self._draw_villages(c, screen)
@@ -2440,27 +3317,74 @@ class MapView(tk.Frame):
                               font=("Segoe UI", 7))
                 c.create_text(x, y + r + 7, text=st.name, fill="#e8e8e8",
                               font=("Segoe UI", 7))
+            self._draw_alert_badge(c, x, y, r, st)
+
+    def _draw_alert_badge(self, c, x, y, r, node):
+        """A small warning triangle at a marker's upper-right, for any of
+        the player's own settlements/villages with an active alert (see
+        _refresh_alerts/_alert_node_ids) -- red for a critical problem
+        (population actively being lost), amber for a mere warning. Not
+        shown for anyone else's territory -- another faction's internal
+        struggles aren't the player's to track."""
+        severity = self._alert_node_ids.get(id(node))
+        if severity is None:
+            return
+        color = theme.BAD if severity == "critical" else self._ALERT_WARN_COLOR
+        bx, by = x + r * 0.75, y - r * 0.75
+        br = max(4, r * 0.55)
+        c.create_polygon(bx, by - br, bx + br, by + br, bx - br, by + br,
+                         fill=color, outline="#1a0d0d", width=1)
+        c.create_text(bx, by + br * 0.35, text="!", fill="#1a0d0d",
+                      font=("Segoe UI", max(6, int(br)), "bold"))
+
+    def _fog_clip_runs(self, cells):
+        """Split an ordered path into maximal contiguous runs where at
+        least one endpoint of each step is revealed -- same "OR" rule
+        _draw_roads already applies per segment, generalized to a whole
+        polyline so a long trade route (or anything else drawn as a path)
+        only actually renders the portion the player has found, not the
+        whole thing just because one end happens to be visible. Yields
+        the original `cells` unchanged, as one run, when fog isn't active
+        at all (no player faction / sandbox world)."""
+        if not self._fog_is_active():
+            yield cells
+            return
+        run = []
+        for i in range(len(cells) - 1):
+            a, b = cells[i], cells[i + 1]
+            if self._cell_revealed(*a) or self._cell_revealed(*b):
+                if not run:
+                    run.append(a)
+                run.append(b)
+            else:
+                if len(run) >= 2:
+                    yield run
+                run = []
+        if len(run) >= 2:
+            yield run
 
     def _draw_trade_routes(self, c, screen):
         """Long-haul trade routes: land roads (solid gold, terrain-following)
         and sea lanes (dotted pale-blue), shown at every zoom level since they
-        span the whole world rather than one region."""
+        span the whole world rather than one region -- but only the stretch
+        of a route the player has actually discovered (see _fog_clip_runs);
+        a route between two OTHER factions shouldn't be legible in full just
+        because you happened to reveal one end of it once."""
         width = max(1.0, self._place[2] * 0.22)
         for r in self.world.trade_routes:
             cells = r["cells"]
             if len(cells) < 2:
                 continue
-            pts = []
-            for gx, gy in cells:
-                pts.extend(screen(gx + 0.5, gy + 0.5))
             if r["kind"] == "sea":
-                c.create_line(*pts, fill=_TRADE_SEA_COLOR, width=max(1.0, width * 0.7),
-                              capstyle="round", joinstyle="round", dash=(1, 4),
-                              smooth=True)
+                color, w, dash = _TRADE_SEA_COLOR, max(1.0, width * 0.7), (1, 4)
             else:
-                c.create_line(*pts, fill=_TRADE_LAND_COLOR, width=width,
-                              capstyle="round", joinstyle="round", dash=(7, 4),
-                              smooth=True)
+                color, w, dash = _TRADE_LAND_COLOR, width, (7, 4)
+            for run in self._fog_clip_runs(cells):
+                pts = []
+                for gx, gy in run:
+                    pts.extend(screen(gx + 0.5, gy + 0.5))
+                c.create_line(*pts, fill=color, width=w, capstyle="round",
+                              joinstyle="round", dash=dash, smooth=True)
 
     def _draw_trade_caravans(self, c, screen):
         """Moving markers for active trade caravans (land) and ships (sea) —
@@ -2468,29 +3392,61 @@ class MapView(tk.Frame):
         with the *entire route it's currently on* redrawn in a bright color
         on top of the dim static line, so an active trade route is obvious
         at a glance and not just its small marker. No animation between
-        turns; position only changes when render() runs again after End Turn."""
+        turns; position only changes when render() runs again after End Turn.
+
+        Both the route highlight and the marker itself respect fog of war
+        the same as the static route line does (_draw_trade_routes) --
+        only the discovered stretch of the highlight draws, and the
+        marker itself is skipped entirely while the caravan's own current
+        cell hasn't been revealed, so a caravan belonging to (or crossing)
+        territory you haven't found isn't a giveaway."""
         width = max(1.0, self._place[2] * 0.22)
 
         # Highlight every route a caravan is currently traveling, before
         # drawing any markers on top of them.
+        player_idx = self.world.player_faction_idx
         for caravan in self.world.trade_caravans:
-            pts = []
-            for gx, gy in caravan.path:
-                pts.extend(screen(gx + 0.5, gy + 0.5))
-            if len(pts) < 4:
-                continue
+            # Only YOUR active routes light up brightly; a neighbor's caravan
+            # crossing your view gets a dim, thin highlight so it doesn't read
+            # as your own trade (see the caravan style definitions).
+            mine = player_idx is not None and player_idx in (caravan.seller_idx,
+                                                             caravan.buyer_idx)
             if caravan.kind == "sea":
-                c.create_line(*pts, fill=_ACTIVE_ROUTE_SEA_COLOR,
-                              width=max(1.0, width * 0.85), capstyle="round",
-                              joinstyle="round", dash=(2, 3), smooth=True)
+                color, w, dash = _ACTIVE_ROUTE_SEA_COLOR, max(1.0, width * 0.85), (2, 3)
+            elif caravan.kind == "river":
+                color, w, dash = _RIVER_CARAVAN_STYLE["glow"], width, (5, 3)
             else:
-                c.create_line(*pts, fill=_ACTIVE_ROUTE_LAND_COLOR,
-                              width=width * 1.3, capstyle="round",
-                              joinstyle="round", dash=(9, 3), smooth=True)
+                color, w, dash = _ACTIVE_ROUTE_LAND_COLOR, width * 1.3, (9, 3)
+            if not mine:
+                color = {"sea": _FOREIGN_SEA_CARAVAN_STYLE,
+                         "river": _FOREIGN_RIVER_CARAVAN_STYLE}.get(
+                             caravan.kind, _FOREIGN_CARAVAN_STYLE)["glow"]
+                w = max(1.0, w * 0.5)
+            for run in self._fog_clip_runs(caravan.path):
+                pts = []
+                for gx, gy in run:
+                    pts.extend(screen(gx + 0.5, gy + 0.5))
+                if len(pts) < 4:
+                    continue
+                c.create_line(*pts, fill=color, width=w, capstyle="round",
+                              joinstyle="round", dash=dash, smooth=True)
 
+        player_idx = self.world.player_faction_idx
         for caravan in self.world.trade_caravans:
+            if not self._cell_revealed(*caravan.pos):
+                continue
             x, y = screen(*[v + 0.5 for v in caravan.pos])
-            style = _SEA_CARAVAN_STYLE if caravan.kind == "sea" else _CARAVAN_STYLE
+            # Your own trade vs. somebody else's passing through -- see the
+            # style definitions. Roughly half the caravans crossing your view
+            # at any time belong to other factions.
+            mine = player_idx is not None and player_idx in (caravan.seller_idx,
+                                                             caravan.buyer_idx)
+            if caravan.kind == "sea":
+                style = _SEA_CARAVAN_STYLE if mine else _FOREIGN_SEA_CARAVAN_STYLE
+            elif caravan.kind == "river":
+                style = _RIVER_CARAVAN_STYLE if mine else _FOREIGN_RIVER_CARAVAN_STYLE
+            else:
+                style = _CARAVAN_STYLE if mine else _FOREIGN_CARAVAN_STYLE
             r = style["r"]
             # glow: a couple of soft, oversized rings behind the solid
             # marker (canvas shapes are opaque, so the "glow" is faked with
@@ -2510,18 +3466,20 @@ class MapView(tk.Frame):
         """Two growing dashed segments — one from each capital — for every
         land trade route currently under construction, meeting in the
         middle as both sides finish (see app/world/trade.py's
-        TradeRouteProject.built_segments)."""
+        TradeRouteProject.built_segments) -- fog-clipped the same as the
+        finished route it becomes (_draw_trade_routes)."""
         wd = self.world
         width = max(1.0, self._place[2] * 0.18)
         for proj in wd.trade_route_projects:
             for seg in proj.built_segments:
                 if len(seg) < 2:
                     continue
-                pts = []
-                for gx, gy in seg:
-                    pts.extend(screen(gx + 0.5, gy + 0.5))
-                c.create_line(*pts, fill=_TRADE_ROUTE_CONSTRUCTION_COLOR, width=width,
-                              capstyle="round", joinstyle="round", dash=(3, 5), smooth=True)
+                for run in self._fog_clip_runs(seg):
+                    pts = []
+                    for gx, gy in run:
+                        pts.extend(screen(gx + 0.5, gy + 0.5))
+                    c.create_line(*pts, fill=_TRADE_ROUTE_CONSTRUCTION_COLOR, width=width,
+                                  capstyle="round", joinstyle="round", dash=(3, 5), smooth=True)
 
     def _draw_construction(self, c, screen):
         """A growing dashed road (only the portion actually built so far —
@@ -2654,20 +3612,20 @@ class MapView(tk.Frame):
                               font=("Segoe UI", 6))
                 c.create_text(x, y + r + 6, text=v.name, fill="#e8e8e8",
                               font=("Segoe UI", 6))
+            self._draw_alert_badge(c, x, y, r, v)
 
     def _draw_labels(self, c, screen):
         wd = self.world
         if self.zoom_region is not None:
             return   # village view: region/faction name labels aren't useful here
         if self.zoom_faction is not None:
-            items = []
-            for cid in self.zoom_faction.meta.get("regions", []):
-                region = wd.regions[cid]
-                cx, cy = int(region.center[0] * wd.w), int(region.center[1] * wd.h)
-                if self._cell_revealed(cx, cy):
-                    items.append((region.name, region.center))
-        else:
-            items = [(f.name, f.center) for f in wd.factions if self._is_known(f)]
+            # Realm view used to label every single region. With a developed
+            # realm that's dozens of names stacked over the terrain, and it
+            # buried the settlements and roads underneath -- the region's name
+            # is still one click away in its own panel. Only nation names are
+            # sparse enough to be worth drawing over the map.
+            return
+        items = [(f.name, f.center) for f in wd.factions if self._is_known(f)]
         for name, center in items:
             lx, ly = screen(center[0] * wd.w, center[1] * wd.h)
             c.create_text(lx + 1, ly + 1, text=name, fill="#000000", font=_LABEL_FONT)

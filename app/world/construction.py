@@ -17,7 +17,9 @@ from app.world.worldgen import (OCEAN, Settlement,
                                 SETTLEMENT_TAX_INCOME, _roll_population, _path_dijkstra,
                                 _elev_cost, _SEA_COAST_REACH)
 from app.world.lexicon import make_settlement_namer
-from app.world.resources import seed_prosperity, _SETTLEMENT_STORAGE_RESOURCES
+from app.world.resources import (seed_prosperity, _SETTLEMENT_STORAGE_RESOURCES,
+                                 settlement_storage_capacity)
+from app.world import wrap
 
 # Cost/time to build each settlement kind. City is the crown jewel (biggest
 # population range, POPULATION_RANGE in worldgen.py) so it's the steepest;
@@ -293,19 +295,16 @@ def _path_between(world, origin, dest_pos, faction_idx=None):
     for road pathing specifically, not every caller of this function."""
     if origin == dest_pos:
         return [origin]
-    ox, oy = origin
-    dx, dy = dest_pos
-    x0, x1 = sorted((ox, dx))
+    oy, dy = origin[1], dest_pos[1]
     y0, y1 = sorted((oy, dy))
-    bx0 = max(0, x0 - _BBOX_PAD)
     by0 = max(0, y0 - _BBOX_PAD)
-    bx1 = min(world.w, x1 + _BBOX_PAD + 1)
     by1 = min(world.h, y1 + _BBOX_PAD + 1)
-    land_cellset = {(x, y) for y in range(by0, by1) for x in range(bx0, bx1)
+    xs = wrap.bbox_span_wrap(origin[0], dest_pos[0], world.w, _BBOX_PAD)
+    land_cellset = {(x, y) for y in range(by0, by1) for x in xs
                      if world.owner[y][x] != OCEAN}
     path = _path_dijkstra(land_cellset,
                           lambda c: _elev_cost(world, world.base_cost, c, faction_idx),
-                          origin, dest_pos)
+                          origin, dest_pos, world.w)
     return path or [origin, dest_pos]   # fallback straight segment if pathfinding fails
 
 
@@ -315,19 +314,37 @@ def _find_road_path(world, faction_idx, dest_pos):
     candidates = [st.pos for st in world.settlements if st.faction_idx == faction_idx]
     if not candidates:
         return [dest_pos]
-    dx, dy = dest_pos
-    origin = min(candidates, key=lambda p: (p[0] - dx) ** 2 + (p[1] - dy) ** 2)
+    origin = min(candidates, key=lambda p: wrap.dist2_wrap(p, dest_pos, world.w))
     return _path_between(world, origin, dest_pos, faction_idx=faction_idx)
 
 
+def _faction_nodes(nation, world):
+    """Every Settlement AND Village this faction owns -- "our country's
+    whole pool of resources" the player actually expects to draw on when
+    building something, not just whatever happens to already be sitting
+    in a Settlement specifically. A Village can hold real stock too (see
+    this session's Regional Markets widening), and there's no reason a
+    stockpile of Logs sitting in a border village shouldn't count toward
+    a City's construction cost just because it hasn't been physically
+    hauled to the City yet -- the same "hauled in from wherever it's
+    stockpiled" abstraction _pay_cost below already applies across
+    multiple settlements."""
+    fac_idx = world.factions.index(nation)
+    nodes = [world.settlements[sid] for sid in nation.meta.get("settlements", [])]
+    nodes += [v for v in world.villages if v.faction_idx == fac_idx]
+    return nodes
+
+
 def _faction_settlement_stock(nation, resource, world):
-    """Sum of `resource` across every settlement this faction owns -- same
-    aggregate-economy view trade.py's _faction_settlement_total and
-    resources.py's _recompute_military already need for the same reason
+    """Sum of `resource` across every settlement AND village this faction
+    owns -- same aggregate-economy view trade.py's _faction_settlement_total
+    and resources.py's _recompute_military already need for the same reason
     (Phase 12: Logs/Stone/Iron are settlement-storage resources now, no
-    longer one national number)."""
-    return sum(getattr(world.settlements[sid], "resources", {}).get(resource, 0)
-              for sid in nation.meta.get("settlements", []))
+    longer one national number). Kept this name (not just settlements
+    despite it) since it's the established call site everywhere else in
+    the codebase already uses."""
+    return sum(getattr(node, "resources", {}).get(resource, 0)
+              for node in _faction_nodes(nation, world))
 
 
 def can_afford(nation, cost, world):
@@ -350,28 +367,28 @@ def can_afford(nation, cost, world):
 def _pay_cost(nation, cost, world):
     """Deduct `cost` from `nation`, the spending half of can_afford -- a
     settlement-storage resource (Gold included, as of the Currency
-    overhaul) spread across whichever of the faction's settlements
-    actually have it (largest stockpile first, the realistic "hauled in
-    from wherever it's stockpiled" reading -- the same aggregate-economy
-    assumption trade.py's sellable_surplus already makes), anything else
-    from the old shared pool. Caller must have already confirmed
+    overhaul) spread across whichever of the faction's Settlements AND
+    Villages actually have it (largest stockpile first, the realistic
+    "hauled in from wherever it's stockpiled" reading -- the same
+    aggregate-economy assumption trade.py's sellable_surplus already
+    makes, see _faction_nodes above for why Villages count too), anything
+    else from the old shared pool. Caller must have already confirmed
     can_afford."""
     for resource, amount in cost.items():
         if resource in _SETTLEMENT_STORAGE_RESOURCES:
             remaining = amount
-            sids = nation.meta.get("settlements", [])
-            ordered = sorted((world.settlements[sid] for sid in sids),
-                             key=lambda st: getattr(st, "resources", {}).get(resource, 0),
+            ordered = sorted(_faction_nodes(nation, world),
+                             key=lambda node: getattr(node, "resources", {}).get(resource, 0),
                              reverse=True)
-            for st in ordered:
+            for node in ordered:
                 if remaining <= 0:
                     break
-                if not hasattr(st, "resources"):
-                    st.resources = {}
-                have = st.resources.get(resource, 0)
+                if not hasattr(node, "resources"):
+                    node.resources = {}
+                have = node.resources.get(resource, 0)
                 take = min(have, remaining)
                 if take:
-                    st.resources[resource] = have - take
+                    node.resources[resource] = have - take
                     remaining -= take
         else:
             res = nation.stats.setdefault("resources", {})
@@ -420,11 +437,11 @@ def _finish_settlement(world, project):
     species = faction.meta.get("species", "Humans")
     namer = make_settlement_namer(random)
     tax_income = round(random.uniform(*SETTLEMENT_TAX_INCOME[kind]))
-    population, adults, children = _roll_population(random, kind)
+    population, adults, children, max_population = _roll_population(random, kind)
     prosperity = seed_prosperity()
     st = Settlement(len(world.settlements), kind, namer(kind, species),
                     project.pos, project.faction_idx, project.region_id, tax_income,
-                    population, adults, children, prosperity)
+                    population, adults, children, prosperity, max_population)
     world.settlements.append(st)
     faction.meta.setdefault("settlements", []).append(st.id)
     if 0 <= project.region_id < len(world.regions):
@@ -472,6 +489,33 @@ def advance_projects(world):
         world.road_projects.remove(road)
 
 
+# --- AI construction/expansion pacing ----------------------------------------
+def _ai_has_active_construction(world, fac_idx):
+    """Whether this AI faction currently has ANY construction or expansion
+    project in flight -- a settlement, a Granary/Warehouse/Shipyard, or a
+    wildland claim. Every AI decision loop (run_settlement_ai,
+    run_storage_ai, expansion.run_expansion_ai) checks this first and
+    skips the faction entirely if it's already busy, capping every AI
+    faction at ONE such project at a time regardless of how wealthy it
+    is. That's the actual safeguard against a well-funded faction chain-
+    building across many regions at once and overrunning the map far
+    faster than a player (or a poorer AI) ever could -- growth is paced
+    by build TIME (15-40 turns per project) instead of by treasury size,
+    the same "deliberately simple" philosophy the rest of this AI already
+    uses rather than a more elaborate scoring/budget system."""
+    if any(p.faction_idx == fac_idx for p in world.settlement_projects):
+        return True
+    if any(p.faction_idx == fac_idx for p in world.granary_projects):
+        return True
+    if any(p.faction_idx == fac_idx for p in world.warehouse_projects):
+        return True
+    if any(p.faction_idx == fac_idx for p in world.shipyard_projects):
+        return True
+    if any(p.faction_idx == fac_idx for p in world.claim_projects):
+        return True
+    return False
+
+
 # --- AI settlement construction ----------------------------------------------
 def _region_settlement_pos(world, region):
     """A free cell in `region` to build on: not a river, not already a
@@ -490,18 +534,23 @@ def _region_settlement_pos(world, region):
 
 def run_settlement_ai(world):
     """Every AI faction's equivalent of the player clicking "Build City"/
-    "Build Town": claiming wildland only ever yields villages now (see
-    expansion.settle_newly_claimed_region), so a faction has to actually
-    construct its City/Town settlements the same way the player does.
-    One new project per faction per turn at most (skip if it's already
-    building something), targeting a region it owns that has no
-    settlements in it yet — prefers a City if it can afford one, else a
-    Town. Deliberately simple: no site scoring, no catching up a faction
-    that's fallen behind faster than one project at a time."""
+    "Build Town"/"Build Castle": claiming wildland only ever yields
+    villages now (see expansion.settle_newly_claimed_region), so a
+    faction has to actually construct its own settlements the same way
+    the player does -- and the player can build any of the three kinds
+    anywhere in their own territory, so AI gets the same menu. Skips a
+    faction entirely if it already has any construction/expansion project
+    in flight (see _ai_has_active_construction) -- the actual anti-
+    overbuild safeguard, not just "no second settlement project" -- and
+    targets a region it owns that has no settlements in it yet, reaching
+    for the priciest/most-capable kind it can currently afford (City,
+    then Castle, then Town). Deliberately simple: no site scoring, no
+    catching up a faction that's fallen behind faster than one project at
+    a time."""
     for fac_idx, nation in enumerate(world.factions):
         if fac_idx == world.player_faction_idx:
             continue
-        if any(p.faction_idx == fac_idx for p in world.settlement_projects):
+        if _ai_has_active_construction(world, fac_idx):
             continue
         empty_regions = [r for r in world.regions
                          if r.faction_idx == fac_idx and not getattr(r, "meta_settlements", [])]
@@ -511,7 +560,59 @@ def run_settlement_ai(world):
         pos = _region_settlement_pos(world, region)
         if pos is None:
             continue
-        for kind in ("city", "town"):
+        for kind in ("city", "castle", "town"):
             if can_afford(nation, SETTLEMENT_BUILD_COST[kind], world):
                 start_settlement(world, nation, pos, kind)
                 break
+
+
+# --- AI storage construction ---------------------------------------------
+STORAGE_AI_PRESSURE_THRESHOLD = 0.8   # trigger a Granary/Warehouse once a
+                                      # settlement's own storage is at
+                                      # least this full -- a real reason,
+                                      # not blind busywork: the same
+                                      # "storage is under real pressure"
+                                      # signal the player's own storage
+                                      # progress bar/overflow-spoilage
+                                      # penalty already make visible
+
+
+def run_storage_ai(world):
+    """Every AI faction's equivalent of the player clicking "Build
+    Granary"/"Build Warehouse": triggered by real storage pressure, not
+    an unconditional habit -- only fires when at least one of the
+    faction's settlements has filled STORAGE_AI_PRESSURE_THRESHOLD or
+    more of its own storage capacity (see resources.
+    settlement_storage_capacity), the same overflow risk the player
+    already sees reflected in that settlement's storage bar. Skips a
+    faction entirely if it already has any construction/expansion project
+    in flight (see _ai_has_active_construction). Targets whichever
+    settlement is under the most pressure, prefers a Granary (the bigger
+    of the two bonuses), falls back to a Warehouse if it already has one.
+    Deliberately simple: one settlement, one building, per faction per
+    turn at most, same philosophy as run_settlement_ai."""
+    for fac_idx, nation in enumerate(world.factions):
+        if fac_idx == world.player_faction_idx:
+            continue
+        if _ai_has_active_construction(world, fac_idx):
+            continue
+        sids = nation.meta.get("settlements", [])
+        if not sids:
+            continue
+        pressured = []
+        for sid in sids:
+            st = world.settlements[sid]
+            cap = settlement_storage_capacity(st)
+            if cap <= 0:
+                continue
+            stock = sum(getattr(st, "resources", {}).values())
+            if stock / cap >= STORAGE_AI_PRESSURE_THRESHOLD:
+                pressured.append((stock / cap, st))
+        if not pressured:
+            continue
+        pressured.sort(key=lambda t: -t[0])
+        st = pressured[0][1]
+        if can_build_granary(world, st) and can_afford(nation, GRANARY_COST, world):
+            start_granary(world, nation, st)
+        elif can_build_warehouse(world, st) and can_afford(nation, WAREHOUSE_COST, world):
+            start_warehouse(world, nation, st)

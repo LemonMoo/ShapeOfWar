@@ -15,13 +15,67 @@ case, so the map renders exactly as it did before fog of war existed.
 import math
 from collections import deque
 
+from app.world import wrap
+
 VISION_MIN = 6      # reveal radius (world cells) at owned_frac == 0
 VISION_MAX = 40     # reveal radius at owned_frac == FULL_VISION_THRESHOLD
 FULL_VISION_THRESHOLD = 0.75   # owned_frac at/above which the whole map is revealed
 
+CARAVAN_VISION_RADIUS = 7   # much smaller than a scouting Commander's (see
+                            # COMMANDER_VISION_RADIUS below) -- a caravan/ship
+                            # isn't scouting, it's just passing through, but
+                            # its crew still sees more than the single cell
+                            # it's standing on right now
+
+ROUTE_REVEAL_RADIUS = 3    # corridor width (flat square, not a BFS -- a road/
+                           # trade route can run hundreds of cells long, so a
+                           # cheap flat window per cell instead of a full
+                           # terrain-aware BFS per cell) around every cell a
+                           # player-owned road or trade route actually runs
+                           # over, so it reads as a real, lived-in corridor
+                           # instead of a razor-thin one-cell-wide slit
+
 # Byte-translate table: fog stores 0 (hidden) / 1 (revealed) per cell; a
 # render-time mask needs 255 (hidden) / 0 (revealed) — index i -> table[i].
 _INVERT_TABLE = bytes([255] + [0] * 255)
+
+
+def _reveal_around(reveal, w, h, cx, cy, radius):
+    """Flat square window (Chebyshev distance, not a BFS) of every cell
+    within `radius` of (cx,cy) -- the corridor a road/trade route reveals
+    around each cell it actually runs over (see ROUTE_REVEAL_RADIUS).
+    Deliberately not terrain-aware/BFS like Commander or Caravan vision:
+    a route can be hundreds of cells long, so this has to stay cheap per
+    cell, and a flat corridor reads just as well for "the road crew knows
+    the surrounding ground" as a properly-shaped one would. x wraps (the
+    map's seam is a real neighbor relationship -- see app/world/wrap.py);
+    y never does, same as every other reveal in this module."""
+    for dy in range(-radius, radius + 1):
+        ny = cy + dy
+        if not (0 <= ny < h):
+            continue
+        for dx in range(-radius, radius + 1):
+            reveal(wrap.wrap_x(cx + dx, w), ny)
+
+
+def _walk_reveal(reveal, w, h, ax, ay, bx, by, radius=0):
+    """Call `reveal` (or _reveal_around, if `radius` > 0) on every integer
+    cell along the wrap-aware shortest line from (ax,ay) to (bx,by) -- same
+    idea as map_view.py's _river_span, just walking cells instead of
+    measuring a fractional span. A road/route segment is stored as just its
+    two endpoints (see world.roads_by_region), so revealing only the
+    endpoints would leave the middle of a long segment dark even though
+    it's a real, built road. Sea trade routes can genuinely cross the seam
+    now (see trade._capital_sea_path/_land_path_between's wrap-aware
+    pathing), so this walks the actual shorter wrap-aware line rather than
+    always the direct one."""
+    for x, y in wrap.walk_line_wrap((ax, ay), (bx, by), w):
+        if not (0 <= y < h):
+            continue
+        if radius > 0:
+            _reveal_around(reveal, w, h, x, y, radius)
+        else:
+            reveal(x, y)
 
 
 def init_fog(world):
@@ -106,8 +160,9 @@ def recompute(world):
             d = dist[(x, y)]
             if d >= max_steps:
                 continue
-            for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-                if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in dist:
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, ny = wrap.wrap_x(x + dx, w), y + dy
+                if 0 <= ny < h and (nx, ny) not in dist:
                     dist[(nx, ny)] = d + 1
                     frontier.append((nx, ny))
                     reveal(nx, ny)
@@ -131,8 +186,61 @@ def recompute(world):
                 d = cdist[(x, y)]
                 if d >= COMMANDER_VISION_RADIUS:
                     continue
-                for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-                    if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in cdist:
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, ny = wrap.wrap_x(x + dx, w), y + dy
+                    if 0 <= ny < h and (nx, ny) not in cdist:
+                        cdist[(nx, ny)] = d + 1
+                        cfrontier.append((nx, ny))
+                        reveal(nx, ny)
+
+        # Roads and trade routes the player owns reveal the ground they
+        # actually run over — a caravan/road crew knows the way, even
+        # through wildland or foreign territory well outside normal
+        # vision range. Cheap to just re-walk every turn (see this
+        # function's own docstring on why re-scanning owned territory
+        # every call is fine): reveal() is a no-op for anything already
+        # revealed, and fog is monotonic besides, so this only actually
+        # does anything the first time a given stretch is built/traveled.
+        for cid in world.factions[player_idx].meta.get("regions", []):
+            for (ax, ay), (bx, by), _tier in world.roads_by_region.get(cid, []):
+                _walk_reveal(reveal, w, h, ax, ay, bx, by, radius=ROUTE_REVEAL_RADIUS)
+        for proj in world.road_projects:
+            if proj.faction_idx != player_idx:
+                continue
+            for x, y in proj.built_cells:
+                _reveal_around(reveal, w, h, x, y, ROUTE_REVEAL_RADIUS)
+        for route in world.trade_routes:
+            if route["a_faction"] != player_idx and route["b_faction"] != player_idx:
+                continue
+            for x, y in route["cells"]:
+                _reveal_around(reveal, w, h, x, y, ROUTE_REVEAL_RADIUS)
+        for proj in world.trade_route_projects:
+            if proj.a_idx != player_idx and proj.b_idx != player_idx:
+                continue
+            for seg in proj.built_segments:
+                for x, y in seg:
+                    _reveal_around(reveal, w, h, x, y, ROUTE_REVEAL_RADIUS)
+
+        # Trade caravans/ships currently in transit: a real radius around
+        # wherever the player's own caravan actually is right now (see
+        # CARAVAN_VISION_RADIUS above) — more than the bare route-path
+        # reveal above gives on its own, same shape as the Commander BFS
+        # just above, just a smaller radius since a caravan isn't scouting.
+        for caravan in world.trade_caravans:
+            if caravan.seller_idx != player_idx and caravan.buyer_idx != player_idx:
+                continue
+            cx, cy = caravan.pos
+            cdist = {(cx, cy): 0}
+            cfrontier = deque([(cx, cy)])
+            reveal(cx, cy)
+            while cfrontier:
+                x, y = cfrontier.popleft()
+                d = cdist[(x, y)]
+                if d >= CARAVAN_VISION_RADIUS:
+                    continue
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, ny = wrap.wrap_x(x + dx, w), y + dy
+                    if 0 <= ny < h and (nx, ny) not in cdist:
                         cdist[(nx, ny)] = d + 1
                         cfrontier.append((nx, ny))
                         reveal(nx, ny)
