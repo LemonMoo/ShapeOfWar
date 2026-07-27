@@ -29,17 +29,23 @@ Human word bank so nothing crashes.
 # 88%, Goblins 14%), because HP/damage dominate this sim while movement speed
 # barely registers.
 #
-# THEY ARE NO LONGER BALANCED, and this comment used to claim otherwise. A
-# re-run of that same tournament measures a 87% spread: Elves 94%, Goblins 77%,
-# Humans 40%, Dwarves 33%, Orcs 6%. Two things drove it apart. Most of the gap
-# predates the cavalry changes below (64% spread even before them, so the old
-# "42% to 58%" claim was already stale). The rest is those changes: ARCHERS
-# dominate this sim, so a species whose Cavalry share becomes Archers (Elves,
-# and half of Goblins') gains a lot, while Orcs -- who turn theirs into
-# Swordsmen -- lose ground as everyone around them gets stronger.
+# THEY ARE NO LONGER BALANCED, and this comment used to claim otherwise (the
+# old "42% to 58%" line was already stale before any recent change: the spread
+# measured 64% even then). Latest tournament run, harness self-checked -- same
+# species on both sides wins 52%, so no positional bias:
 #
-# This is a known, deliberate state: the no-cavalry rosters are a design choice,
-# and rebalancing the compensating multipliers around them is outstanding work.
+#   Orcs 91%, Elves 75%, Goblins 59%, Humans 19%, Dwarves 6%. Spread 84%.
+#
+# The driver is that ARCHERS dominate this sim, and doubling their range (see
+# app/battle/unit_types.py) sharpened it: the more archers a roster fields, the
+# better it does, and CAVALRY is now close to a liability because a horseman
+# spends the whole approach being shot. That is why the two species still
+# fielding cavalry -- Humans and Dwarves -- are now the weak ones, having been
+# mid-table before. Orcs' HP/speed compensation above is measured and
+# deliberate; Humans and Dwarves have had no equivalent pass yet, and cavalry
+# itself probably needs a look (more HP, or a speed edge big enough to cross
+# the new archer envelope) rather than another per-species patch.
+#
 # Re-run the tournament if you touch any of these.
 SPECIES = {
     # Purely economic edge on paper, so it needs *some* melee identity or it
@@ -62,8 +68,17 @@ SPECIES = {
     # that losing cavalry is not itself a cost here (their share becomes more
     # Swordsmen, who are tankier and carry shields) -- the real counterweight is
     # that oversized weapons and a loose line get far less out of a shield.
+    # +15% HP and +20% speed are COMPENSATION, measured not guessed: with no
+    # cavalry and the fewest archers of anyone, orcs have to cross the whole
+    # field on foot under fire, and doubling archer range made that walk twice
+    # as costly. Bigger bodies that close faster is the direct counter, and it
+    # fits what they already are. Sweeps: as they stood they won 44% of their
+    # matchups (0% vs both archer rosters); +15% HP alone took them to 72% but
+    # still lost to Elves 88% of the time; this pair lands them at 84% with an
+    # even split against Elves.
     "Orcs":    {"hue": 95,  "mil": +16, "eco": -8,  "trait": "warband raiders",
                 "unit_damage_mult": 1.18, "swordsman_size_mult": 1.30,
+                "unit_hp_mult": 1.15, "unit_speed_mult": 1.20,
                 "block_chance_mult": 0.72, "no_cavalry": True},
     # Fast and slippery -- a flat 15% of blows miss them entirely -- but frail.
     # No cavalry either: goblins raid on foot. Unlike the Orcs, who pour that

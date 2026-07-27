@@ -20,6 +20,17 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 29,
+        "title": "Longer Bows, Tougher Orcs, Cleaner Map",
+        "items": [
+            "Archers now shoot twice as far -- armies pay a real price for crossing open ground, and Cavalry pays the most",
+            "Orcs get a big compensating buff: +15% HP and +20% movement speed, so the one army with no Cavalry and the fewest Archers can actually close the distance",
+            "Domestic trade shipments are no longer drawn on the map -- foreign caravans still show",
+            "Region names no longer clutter the realm view; the region panel still names them",
+            "Balance note: Orcs and Elves are now the strongest, Humans and Dwarves the weakest. Cavalry-based realms need a follow-up pass",
+        ],
+    },
+    {
         "version": 28,
         "title": "Armies Are Made of People Now",
         "items": [

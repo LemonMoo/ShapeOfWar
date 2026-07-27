@@ -229,10 +229,6 @@ _FOREIGN_RIVER_CARAVAN_STYLE = {"fill": "#6f9c8a", "outline": "#223a33", "r": 4,
 # Domestic shipments (a faction moving goods around inside its own realm).
 # Smaller and quieter than foreign caravans on purpose: they're far more
 # numerous, so they read as background bustle rather than headline events.
-_SHIPMENT_STYLE = {"fill": "#e6d3a3", "outline": "#4a3c1c", "r": 3}
-_RIVER_SHIPMENT_STYLE = {"fill": "#bff5e2", "outline": "#14513f", "r": 3}
-_FOREIGN_SHIPMENT_STYLE = {"fill": "#7a705a", "outline": "#332e22", "r": 2}
-_FOREIGN_RIVER_SHIPMENT_STYLE = {"fill": "#5f8478", "outline": "#1e2f2a", "r": 2}
 # Commander (app/world/commander.py) — a bright orchid diamond, deliberately
 # unlike any settlement/caravan color so the player's own unit never gets
 # confused with anything else on the map.
@@ -3028,7 +3024,6 @@ class MapView(tk.Frame):
 
         self._draw_trade_routes(c, screen)
         self._draw_trade_route_construction(c, screen)
-        self._draw_domestic_shipments(c, screen)
         self._draw_trade_caravans(c, screen)
         self._draw_roads(c, screen)
         # One call per wrapped x-segment (see the base-image blit above) --
@@ -3396,48 +3391,6 @@ class MapView(tk.Frame):
                 c.create_rectangle(x - r, y - r, x + r, y + r,
                                    fill=style["fill"], outline=style["outline"], width=2)
 
-    def _draw_domestic_shipments(self, c, screen):
-        """Goods a faction is moving around inside its own realm -- Regional
-        Markets shipments between its regions, and the free same-region local
-        logistics runs. Neither was drawn at all before, which meant most of
-        the trade actually happening in the game was invisible; only foreign
-        caravans ever showed.
-
-        Drawn smaller and plainer than foreign caravans (see _SHIPMENT_STYLE):
-        there are many times more of these, so they should read as background
-        bustle. River shipments get the barge palette, matching river caravans.
-        Fog is respected exactly as _draw_trade_caravans does, and shipments
-        outside the current view are skipped before any canvas work -- domestic
-        traffic is the most numerous thing on the map, so culling it is what
-        keeps the frame cost flat."""
-        player_idx = self.world.player_faction_idx
-        cw, ch = c.winfo_width(), c.winfo_height()
-        for group in (self.world.regional_shipments, self.world.local_shipments):
-            for ship in group:
-                pos = ship.pos
-                cell = (int(pos[0]), int(pos[1]))
-                if not self._cell_revealed(*cell):
-                    continue
-                x, y = screen(pos[0] + 0.5, pos[1] + 0.5)
-                if x < -20 or y < -20 or x > cw + 20 or y > ch + 20:
-                    continue   # off-screen: skip before touching the canvas
-                mine = player_idx is not None and ship.faction_idx == player_idx
-                river = getattr(ship, "transport", "land") == "river"
-                if river:
-                    style = _RIVER_SHIPMENT_STYLE if mine else _FOREIGN_RIVER_SHIPMENT_STYLE
-                else:
-                    style = _SHIPMENT_STYLE if mine else _FOREIGN_SHIPMENT_STYLE
-                r = style["r"]
-                if river:
-                    # A little hull: pointed bow, flat stern -- reads as a boat
-                    # rather than another cargo box.
-                    c.create_polygon(x - r, y - r * 0.6, x + r * 1.4, y,
-                                     x - r, y + r * 0.6,
-                                     fill=style["fill"], outline=style["outline"])
-                else:
-                    c.create_rectangle(x - r, y - r, x + r, y + r,
-                                       fill=style["fill"], outline=style["outline"])
-
     def _draw_trade_route_construction(self, c, screen):
         """Two growing dashed segments — one from each capital — for every
         land trade route currently under construction, meeting in the
@@ -3595,14 +3548,13 @@ class MapView(tk.Frame):
         if self.zoom_region is not None:
             return   # village view: region/faction name labels aren't useful here
         if self.zoom_faction is not None:
-            items = []
-            for cid in self.zoom_faction.meta.get("regions", []):
-                region = wd.regions[cid]
-                cx, cy = int(region.center[0] * wd.w), int(region.center[1] * wd.h)
-                if self._cell_revealed(cx, cy):
-                    items.append((region.name, region.center))
-        else:
-            items = [(f.name, f.center) for f in wd.factions if self._is_known(f)]
+            # Realm view used to label every single region. With a developed
+            # realm that's dozens of names stacked over the terrain, and it
+            # buried the settlements and roads underneath -- the region's name
+            # is still one click away in its own panel. Only nation names are
+            # sparse enough to be worth drawing over the map.
+            return
+        items = [(f.name, f.center) for f in wd.factions if self._is_known(f)]
         for name, center in items:
             lx, ly = screen(center[0] * wd.w, center[1] * wd.h)
             c.create_text(lx + 1, ly + 1, text=name, fill="#000000", font=_LABEL_FONT)

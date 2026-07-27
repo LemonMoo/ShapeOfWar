@@ -1264,11 +1264,13 @@ def _military_article():
         ),
         (
             "Fair warning: these are NOT currently balanced against each "
-            "other. Massed Archers are strong in this battle simulation, so "
-            "the archer-heavy rosters (Elves especially, then Goblins) beat "
-            "the rest more often than not, and Orcs fare worst. Pick on "
-            "flavour and on the strategic bonuses, not on an assumption that "
-            "the matchups are even."
+            "other. Archers reach a long way and hurt, which means any army "
+            "crossing open ground pays for the walk — and Cavalry pays most "
+            "of all. Right now Orcs and Elves come out ahead, Goblins sit in "
+            "the middle, and the two species still fielding Cavalry (Humans "
+            "and Dwarves) come off worst. Pick on flavour and on the "
+            "strategic bonuses, not on an assumption that the matchups are "
+            "even."
         ),
         "ARMY COMPOSITION",
         (

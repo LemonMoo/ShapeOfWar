@@ -38,9 +38,13 @@ UNIT_TYPES = {
         "ranged": False, "equipment": ["sword"],
         "charge": True, "charge_bonus": 2.0, "melee_floor": 0.5, "charge_ramp": 1.2,
     },
+    # Range doubled from 90. The armies deploy ~900px apart, so archers still
+    # have to advance to shoot rather than opening fire from the spawn line --
+    # but they now get roughly twice as long shooting into an approaching enemy
+    # before it closes, which is a large buff to any archer-heavy roster.
     "archer": {
         "name": "Archer", "shape": "square", "radius": 5,
-        "max_hp": 20, "speed": 30, "range": 90, "damage": 6, "cooldown": 0.9,
+        "max_hp": 20, "speed": 30, "range": 180, "damage": 6, "cooldown": 0.9,
         "ranged": True, "accuracy": 0.8, "equipment": [],
     },
 }
