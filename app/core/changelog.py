@@ -20,6 +20,16 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 31,
+        "title": "Trade Log: Numbers Match Reality",
+        "items": [
+            "The Trade Log's -/+ now shows what your settlement actually moved (Gold and/or barter), not the agreed price",
+            "These could differ whenever a buyer's spending was capped by the gold reserve, or a deal settled partly in barter",
+            "Buyer rows tag every payment item with its sign, so a buyer paying partly in barter no longer reads as '-100g + 50 Iron': every item really did leave your treasury",
+            "Same fix on the seller's + for the matching payment, including the Humans trade bonus on the way home",
+        ],
+    },
+    {
         "version": 30,
         "title": "Species Balance Tightened",
         "items": [
