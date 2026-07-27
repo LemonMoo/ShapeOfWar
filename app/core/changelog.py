@@ -20,6 +20,17 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 32,
+        "title": "Global Trade Goes Gold-Only",
+        "items": [
+            "Foreign trades between two different factions now pay in Gold alone -- never barter, never substitute goods for what the agreed price should be in coin",
+            "If your paying settlement can't fully cover the deal in Gold, only Gold actually paid is recorded -- the seller's paid event reads the real money that arrived, not the agreed round number",
+            "The AI now sizes foreign deals against a buyer's spendable Gold only, so a deal completes on Gold alone or doesn't happen at all (no last-minute barter-surprise)",
+            "Regional Markets (your own settlements trading inside your realm) still mix Gold and barter exactly as before -- this is a global-trade rule, not a regional one",
+            "Factions whose realm has no Mountain land -- so no Gold Ore, so no Gold source -- now struggle to import via foreign trade. Outside threats are still swords; the economy at least now matches how real money used to work",
+        ],
+    },
+    {
         "version": 31,
         "title": "Trade Log: Numbers Match Reality",
         "items": [

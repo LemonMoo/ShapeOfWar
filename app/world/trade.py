@@ -243,7 +243,7 @@ def _settlement_purchasing_power(st, world, season, include_gold=True):
     return (_spendable_gold(st) if include_gold else 0) + barter_value
 
 
-def _collect_payment(payer_st, price, world, season, barter_first=False, allow_gold=True):
+def _collect_payment(payer_st, price, world, season, barter_first=False, allow_gold=True, allow_barter=True):
     """Deduct up to `price` Gold-equivalent value from payer_st, and return
     what was actually taken, as a list of (resource, quantity). Doesn't
     credit anywhere; see _deliver_payment for the other half. Split in two
@@ -277,7 +277,21 @@ def _collect_payment(payer_st, price, world, season, barter_first=False, allow_g
     _spendable_gold -- past GOLD_TRADE_RESERVE, a settlement won't put any
     more toward a trade, foreign or domestic, so it actually keeps enough
     on hand for its own future spending (a wildland claim, say) instead of
-    trading away every coin the moment it has one."""
+    trading away every coin the moment it has one.
+
+    `allow_barter=False` (foreign/global trade -- see advance_caravans)
+    shuts barter OUT of the payment entirely, not just deprioritizes it:
+    global trade between two separate nations is a real-currency
+    transaction, not a barter. The agreed price becomes "whatever Gold
+    the buyer's paying settlement can actually release" rather than
+    "agreed minus barter fill" -- the seller's `paid` event's `payment`
+    field reflects the Gold that actually arrived, not the agreed
+    round number. (Trade deals are sized to `power = _spendable_gold(
+    buyer)` at dispatch time in run_trade_ai, so this should rarely
+    produce anything less than a Gold-only payment; the remaining
+    shortfall capability exists for the dispatch/arrival slot mismatch
+    case -- e.g. a neighborhood spend ate into the buyer's spendable
+    Gold before the caravan arrived.)"""
     if payer_st is None or price <= 0:
         return []
     if not hasattr(payer_st, "resources"):
@@ -298,6 +312,8 @@ def _collect_payment(payer_st, price, world, season, barter_first=False, allow_g
 
     def _pay_barter(amount):
         nonlocal remaining
+        if not allow_barter:
+            return
         barter = _find_barter_good(payer_st, world, season, amount)
         if barter is not None:
             resource, qty = barter
@@ -863,13 +879,14 @@ def advance_caravans(world):
                 res = buyer.stats.setdefault("resources", {})
                 res[c.resource] = res.get(c.resource, 0) + c.quantity
                 _clamp_to_storage(buyer)
-            # Currency overhaul: the buyer's paying settlement covers the
-            # price in Gold if it can, barters real goods for any shortfall
-            # otherwise (see _collect_payment) -- collected now, but only
-            # actually credited to the seller if the return leg completes
-            # (see the "else" branch below), same real risk the goods
-            # themselves already carried the other direction.
-            c.payment = _collect_payment(buyer_st, c.total_price, world, world.season)
+            # Currency overhaul + global-trade-is-gold-only rule: the
+            # buyer's paying settlement covers the price in Gold only --
+            # no barter fallback (see _collect_payment's allow_barter=
+            # False path). Collected now, but only actually credited to
+            # the seller if the return leg completes (see the "else"
+            # branch below), same real risk the goods themselves
+            # already carried the other direction.
+            c.payment = _collect_payment(buyer_st, c.total_price, world, world.season, allow_barter=False)
             events.append({"type": "delivered", "seller_idx": c.seller_idx, "buyer_idx": c.buyer_idx,
                           "resource": c.resource, "quantity": c.quantity, "price": c.total_price,
                           "payment": c.payment})
@@ -954,16 +971,20 @@ def run_trade_ai(world):
                 price = unit_price(resource, seller, buyer, world, seller_st, buyer_st)
                 if price <= 0:
                     continue
-                # Currency overhaul: the buyer's paying settlement caps how
-                # big a deal it can afford -- Gold on hand plus what it
-                # could barter instead (see _settlement_purchasing_power),
-                # not a bottomless national wallet. Falls back to the
-                # capital when this resource isn't settlement-storage
-                # (buyer_st is None) -- see the loop above.
-                power = (_settlement_purchasing_power(buyer_st, world, world.season)
-                        if buyer_st is not None
-                        else _settlement_purchasing_power(_faction_capital_settlement(buyer, world),
-                                                          world, world.season))
+                # Currency overhaul + global-trade-is-gold-only rule: the
+                # buyer's paying settlement caps how big a deal this can be,
+                # but for FOREIGN/global trade only spendable Gold counts --
+                # not the gold-equivalent of what it could barter instead
+                # (see `_settlement_purchasing_power` for the regional-
+                # trade variant that still lets barter substitute). Global
+                # trade between two separate nations is real money, not
+                # direct barter; an undersized deal that fits the buyer's
+                # Gold is fine, an over-sized deal that would only complete
+                # via barter cannot exist. Falls back to the capital when
+                # this resource isn't settlement-storage (buyer_st is
+                # None) -- same as before.
+                buyer_for_gold = buyer_st if buyer_st is not None else _faction_capital_settlement(buyer, world)
+                power = _spendable_gold(buyer_for_gold)
                 qty = int(min(surplus, power // price))
                 if qty < MIN_TRADE_QUANTITY:
                     continue
