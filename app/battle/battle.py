@@ -1,6 +1,7 @@
 """The micro-scale battle simulation (pure logic, no rendering)."""
 import math
 import random
+from collections import Counter
 
 from app.core.events import bus
 from app.battle.unit import Unit
@@ -13,6 +14,15 @@ _ARROW_SPEED = 320  # px/sec — how fast an arrow travels to its target
 
 PLANNING_ZONE_MARGIN = 24   # px kept clear of the midline on each side, so a
                             # dragged unit can never land in/past the enemy's half
+
+# --- scored target selection (see choose_target) ---------------------------
+_RETARGET_INTERVAL = 0.6    # seconds a unit keeps a target before re-evaluating
+_FINISH_WEIGHT = 40.0       # score bonus for a target at 0 HP (prefer finishing
+                            # the wounded); scaled by how hurt it is
+_CROWD_PENALTY = 18.0       # score penalty per ally already targeting an enemy
+                            # (soft anti-dogpile — spread the focus fire out)
+_CAVALRY_ARCHER_BONUS = 30.0  # cavalry lean toward archers: soft, undefended,
+                              # ideal couch targets
 
 
 class Projectile:
@@ -35,13 +45,35 @@ class Projectile:
         return self.t < self.dur      # False -> arrived, drop it
 
 
-class Army:
-    """One side in a battle. ``side`` is 0 or 1."""
+class Effect:
+    """A brief, purely-cosmetic combat flourish at a fixed spot — a shield
+    ``block`` spark or a cavalry ``impact`` burst — that fades over ``dur``
+    seconds. The view reads ``t/dur`` for its animation phase. Damage/logic
+    already happened; this is only feedback."""
+    __slots__ = ("x", "y", "kind", "color", "t", "dur")
 
-    def __init__(self, name, color, side=0):
+    def __init__(self, x, y, kind, color, dur):
+        self.x, self.y = x, y
+        self.kind = kind          # "block" | "impact"
+        self.color = color
+        self.t = 0.0
+        self.dur = dur
+
+    def update(self, dt):
+        self.t += dt
+        return self.t < self.dur      # False -> faded, drop it
+
+
+class Army:
+    """One side in a battle. ``side`` is 0 or 1. ``species`` (may be None for a
+    neutral wildland garrison) decides every soldier's species traits -- see
+    app/world/lexicon.py's SPECIES and Unit.__init__."""
+
+    def __init__(self, name, color, side=0, species=None):
         self.name = name
         self.color = color
         self.side = side
+        self.species = species
         self.units = []
 
     @property
@@ -57,10 +89,21 @@ class Battle:
         self.over = False
         self.winner = None
         self.projectiles = []  # in-flight arrows (cosmetic)
+        self.effects = []      # block sparks / charge impacts (cosmetic)
         self.on_attack = None  # optional hook set by the view for log/effects
+        self._threat = Counter()  # enemy -> # of living units currently targeting
+                                  # it; rebuilt each update() for choose_target
 
     def spawn_projectile(self, sx, sy, tx, ty, color):
         self.projectiles.append(Projectile(sx, sy, tx, ty, color))
+
+    def spawn_effect(self, x, y, kind, color, dur=0.28):
+        self.effects.append(Effect(x, y, kind, color, dur))
+
+    def threat_count(self, enemy):
+        """How many living units already target ``enemy`` (see choose_target's
+        soft anti-dogpile term). Snapshot from the last update() tick."""
+        return self._threat.get(enemy, 0)
 
     def deploy(self, army, composition, side, strength_mult=1.0):
         """Place an army in a grid along one side from a composition dict
@@ -80,7 +123,8 @@ class Battle:
             jitter = lambda: (random.random() - 0.5) * 8
             x = x0 + (col * 16 if side == 0 else -col * 16) + jitter()
             y = self.height / 2 + (row - rows / 2) * 16 + jitter()
-            army.units.append(Unit(type_key, army, x, y, strength_mult))
+            army.units.append(Unit(type_key, army, x, y, strength_mult,
+                                   species=getattr(army, "species", None)))
         self.armies.append(army)
         return army
 
@@ -107,6 +151,32 @@ class Battle:
                     best, best_d = u, d
         return best
 
+    def choose_target(self, unit):
+        """Scored target pick — units still overwhelmingly go for whoever's
+        closest, but with a few refinements over blind nearest-enemy: finish
+        off the wounded, don't all dogpile one soldier, and let cavalry favor
+        soft archer targets. Distance dominates the score (kept in the same
+        pixel scale as the bonuses), so the overall behavior is still ''run at
+        the enemy'' -- just with a bit of judgment. Throttled per-unit via
+        Unit._retarget_cd so this isn't paid every frame."""
+        is_cav = unit.type.get("charge")
+        best, best_score = None, float("-inf")
+        for army in self.armies:
+            if army.side == unit.faction.side:
+                continue
+            for u in army.units:
+                if not u.alive:
+                    continue
+                dist = math.hypot(u.x - unit.x, u.y - unit.y)
+                score = -dist
+                score += _FINISH_WEIGHT * (1.0 - u.hp / u.max_hp)
+                score -= _CROWD_PENALTY * self._threat.get(u, 0)
+                if is_cav and u.type.get("ranged"):
+                    score += _CAVALRY_ARCHER_BONUS
+                if score > best_score:
+                    best, best_score = u, score
+        return best or self.nearest_enemy(unit)
+
     def _resolve_collisions(self):
         """Push overlapping units apart and add a small springy impulse so they
         bounce instead of stacking. Uses a spatial hash to stay ~O(n)."""
@@ -118,7 +188,7 @@ class Battle:
 
         for u in units:
             cx, cy = int(u.x // _CELL), int(u.y // _CELL)
-            ur = u.type["radius"]
+            ur = u.radius
             for gx in (cx - 1, cx, cx + 1):
                 for gy in (cy - 1, cy, cy + 1):
                     for v in grid.get((gx, gy), ()):
@@ -127,7 +197,7 @@ class Battle:
                             continue
                         dx = v.x - u.x
                         dy = v.y - u.y
-                        min_d = ur + v.type["radius"]
+                        min_d = ur + v.radius
                         d2 = dx * dx + dy * dy
                         if d2 >= min_d * min_d:
                             continue
@@ -162,13 +232,20 @@ class Battle:
                 u.y += u.vy * dt
                 u.vx *= _FRICTION
                 u.vy *= _FRICTION
-                r = u.type["radius"]
+                r = u.radius
                 u.x = min(self.width - r, max(r, u.x))
                 u.y = min(self.height - r, max(r, u.y))
 
     def update(self, dt):
         if self.over:
             return
+
+        # Snapshot who's targeting whom, once, before any unit re-picks this
+        # tick -- choose_target reads it for its anti-dogpile term.
+        self._threat = Counter(
+            u.target for army in self.armies for u in army.units
+            if u.alive and u.target is not None and u.target.alive)
+
         for army in self.armies:
             for u in army.units:
                 u.update(dt, self)
@@ -176,6 +253,7 @@ class Battle:
         self._resolve_collisions()
         self._integrate(dt)
         self.projectiles = [p for p in self.projectiles if p.update(dt)]
+        self.effects = [e for e in self.effects if e.update(dt)]
 
         standing = [a for a in self.armies if a.living]
         if len(standing) <= 1:

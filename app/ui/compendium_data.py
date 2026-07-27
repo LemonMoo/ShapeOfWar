@@ -30,8 +30,11 @@ from app.world import construction
 from app.world import commander
 from app.world import expansion
 from app.world import diplomacy
-from app.world.worldgen import POPULATION_RANGE, SETTLEMENT_TAX_INCOME, CHILDREN_FRACTION_RANGE
-from app.world.lexicon import SPECIES
+from app.world import rivers
+from app.world.worldgen import (POPULATION_RANGE, SETTLEMENT_TAX_INCOME,
+                                CHILDREN_FRACTION_RANGE,
+                                STARTING_POPULATION_FRACTION_RANGE)
+from app.world.lexicon import SPECIES, species_trait_summary
 
 RESOURCE_CATEGORIES = ["Crops", "Livestock", "Forestry", "Mining", "Fishing",
                        "Food Products", "Manufactured Goods", "Luxury Goods"]
@@ -292,22 +295,40 @@ def _settlements_article():
         ),
         "SETTLEMENTS (City / Castle / Town)",
         (
-            "Population is rolled once when a settlement is founded and "
-            "never grows on its own — it's a flavor/info stat, split into "
+            "A settlement's real population ceiling (\"max population\") "
+            f"is rolled once when it's founded, split into "
             f"adults and children ({_pct(cf[0])}–{_pct(cf[1])} of the "
-            "total are children):"
+            "total are children) — the ranges below:"
         ),
         "\n".join([
-            f"  City:   {pop['city'][0]:,}–{pop['city'][1]:,} pop, civic wealth {tax['city'][0]}–{tax['city'][1]}/turn",
-            f"  Castle: {pop['castle'][0]:,}–{pop['castle'][1]:,} pop, civic wealth {tax['castle'][0]}–{tax['castle'][1]}/turn",
-            f"  Town:   {pop['town'][0]:,}–{pop['town'][1]:,} pop, civic wealth {tax['town'][0]}–{tax['town'][1]}/turn",
+            f"  City:   {pop['city'][0]:,}–{pop['city'][1]:,} max pop, civic wealth {tax['city'][0]}–{tax['city'][1]}/turn",
+            f"  Castle: {pop['castle'][0]:,}–{pop['castle'][1]:,} max pop, civic wealth {tax['castle'][0]}–{tax['castle'][1]}/turn",
+            f"  Town:   {pop['town'][0]:,}–{pop['town'][1]:,} max pop, civic wealth {tax['town'][0]}–{tax['town'][1]}/turn",
         ]),
         (
-            "(A Castle's population skews toward garrison over civilians, "
-            "hence the lower range despite outbuilding a Town.) Civic "
-            "wealth doesn't generate any actual Gold any more (see "
+            "(A Castle's population ceiling skews toward garrison over "
+            "civilians, hence the lower range despite outbuilding a Town.) "
+            "Civic wealth doesn't generate any actual Gold any more (see "
             "Currency) — it's purely a Prosperity input now, folded into "
             "how big a settlement's target meter is."
+        ),
+        "POPULATION: FLOOR, CEILING, GROWTH",
+        (
+            "A freshly founded settlement or village starts at only "
+            f"roughly {_pct(STARTING_POPULATION_FRACTION_RANGE[0])}–"
+            f"{_pct(STARTING_POPULATION_FRACTION_RANGE[1])} of its own "
+            "max population — it hasn't grown into its full potential "
+            "yet. From there it climbs back toward that ceiling on its "
+            "own, very slowly, closing a small fraction of the remaining "
+            "gap each turn (only while it's not currently in a Food/"
+            "Firewood shortage grace period) — this genuinely takes "
+            "decades of in-game time to meaningfully close, by design; "
+            "expect a settlement to still be well under half its ceiling "
+            "after 10-20 years. A bad enough sustained shortage can still "
+            f"shrink it (see Prosperity), but never below "
+            f"{_pct(R.POPULATION_MIN_FRACTION)} of its own max population "
+            "— a hard-scrabble remnant survives rather than the "
+            "settlement being wiped out entirely."
         ),
         (
             "A Settlement is a consumer and a converter — it eats "
@@ -401,7 +422,11 @@ def _storage_article():
             f"{_pct(R_.MAX_OVERFLOW_LOSS_FRACTION)} of that resource's "
             "stock in a single turn, so even the worst case (badly "
             "overflowing + fast-spoiling) keeps a sliver of grace rather "
-            "than an instant wipeout."
+            "than an instant wipeout. Gold is the one exception — it "
+            "still counts toward the shared space budget, but never "
+            "decays from overflow (or from spoilage at all): it's minted "
+            "currency, not a perishable good, so a granary overflowing "
+            "with grain doesn't cost you coin."
         ),
         "WHAT'S NOT YET REAL STORAGE",
         (
@@ -472,6 +497,20 @@ def _currency_article():
             "as real and production-driven as any other Manufactured "
             "Good — there's no ongoing free income any more."
         ),
+        "A SETTLEMENT KEEPS A BUFFER",
+        (
+            f"A settlement never puts its very last coin toward a trade — "
+            f"it holds back {trade.GOLD_TRADE_RESERVE:,} Gold as a trading "
+            "floor, in both Foreign Trade and Regional Markets, so a run "
+            "of profitable deals doesn't just get spent right back out the "
+            "moment it lands. That buffer is only a trade-spending limit, "
+            "not a hard cap on the settlement's own Gold: it still draws "
+            "on its full stockpile, buffer included, when the faction "
+            "itself decides to spend it — claiming wildland (see "
+            "Expansion) or any other real cost — so the whole point of "
+            "holding it back is that it's actually there when a real "
+            "opportunity comes along, not sitting empty."
+        ),
     ]
     return "\n\n".join(parts)
 
@@ -541,6 +580,29 @@ def _prosperity_article():
             "CURRENT state, not a one-time event: a problem stays listed "
             "for as long as it's actually still happening, whether or "
             "not the player was watching when it started."
+        ),
+        "WHEN A REGION HAS NO FOREST AT ALL",
+        (
+            "Firewood only comes from Forest-biome land (see Mining & "
+            "Forestry) — a settlement whose own region has zero Forest "
+            "cells can never produce any locally, and if that's also its "
+            "faction's ONLY region, Regional Markets has nothing to "
+            "redistribute either (there's no second region to draw from). "
+            "The only real fix is a foreign trade route with a neighbor "
+            "that does have Firewood to spare, or expanding/conquering "
+            "toward forested land — this is exactly the kind of gap Trade "
+            "Routes and territorial expansion exist to solve. A settlement "
+            "short on Firewood still scrounges some on its own (dung, scrub, "
+            f"deadfall — up to {_pct(R.NO_FOREST_SUBSISTENCE_FRACTION)} of any "
+            "shortfall with no forest at all, tapering to nothing by the time "
+            "a region is "
+            f"{_pct(R.FOREST_SELF_SUFFICIENT_SHARE)} forest and grows plenty "
+            "of its own), enough that a forest-poor region isn't a total, "
+            "unrecoverable death spiral, but nowhere near enough to match "
+            "real Forestry access or a proper trade route. A distinct \"no "
+            "local source of Firewood\" alert calls this out specifically, "
+            "separate from the ordinary freezing alert, whenever it's the "
+            "actual cause."
         ),
         (
             "Luxury Goods (Wine, Beer, Jewelry, Furniture, Fine Clothes, "
@@ -638,23 +700,48 @@ def _regional_markets_article():
     parts = [
         "Regional Markets (across Regions, same faction)",
         (
-            "Once a settlement's own region genuinely can't help (Local "
-            "Logistics, above, already had its shot this same turn), it "
-            "can reach any OTHER settlement its own faction owns "
-            "anywhere on the map — a real, Gold-priced market, not free "
-            "redistribution. Same-region pairs are always skipped here; "
-            "that's Local Logistics' job, for free."
+            "Once a settlement or village's own region genuinely can't "
+            "help (Local Logistics, above, already had its shot this "
+            "same turn), it can reach any OTHER settlement OR village its "
+            "own faction owns anywhere on the map — a real, Gold-priced "
+            "market, not free redistribution. Same-region pairs are "
+            "always skipped here; that's Local Logistics' job, for free. "
+            "A Village can be either end of the deal, not just a "
+            "Settlement — a Village sitting on real surplus (the only "
+            "forest for miles, say) can export it just as a Settlement "
+            "can, and a Village with nothing of its own in a region with "
+            "no local source of something at all can still receive it "
+            "from wherever in the faction actually has it, not just "
+            "whatever a same-region Settlement happens to pass along."
         ),
         "PRICE AND PAYMENT",
         (
             "Priced with the same tier/surplus/need formula foreign "
-            "trade uses (see Foreign Trade), paid by the buying "
-            "settlement's own Gold on dispatch and credited to the "
-            "selling settlement's own storage on delivery (see Currency) "
-            "— a settlement genuinely short on Gold barters real goods of "
-            "roughly equivalent value instead, and how big a deal it can "
-            "strike at all is capped by its Gold plus what it could "
-            "barter, not a faction-wide wallet."
+            "trade uses (see Foreign Trade), but settled differently: "
+            "this is the realm trading with itself, so the buying "
+            "settlement pays with real goods first — whatever it can "
+            "best spare, of roughly equivalent value — and only reaches "
+            "into its own Gold for whatever's left once it has nothing "
+            "suitable left to barter with. There's no reason for a "
+            "nation to spend its own currency moving goods between its "
+            "own settlements the way it would with a genuinely separate "
+            "trading partner (see Foreign Trade, which stays Gold-first)."
+        ),
+        (
+            "Gold isn't available here at all, in fact, unless the faction "
+            "owns at least some Mountain-biome land somewhere — the only "
+            "terrain Gold Ore ever spawns on, and the source a Mint (see "
+            "Currency) actually strikes real Gold from, continuously, for "
+            "as long as that access holds. A faction with no Mountain "
+            "land has no ongoing Gold income at all — only its original "
+            "starting pile — so letting it spend that down on internal "
+            "trade would just be a one-way drain to zero, not real "
+            "currency circulating. Regional Markets falls back to pure "
+            "barter for a faction in that position, and how big a deal a "
+            "settlement can strike is capped by its barter capacity alone "
+            "— Gold on hand doesn't widen it. Once the faction claims or "
+            "conquers some Mountain land, Regional Markets picks Gold back "
+            "up automatically, no separate action needed."
         ),
         "THE SHIPMENT ITSELF",
         (
@@ -665,9 +752,22 @@ def _regional_markets_article():
             f"{trade.REGIONAL_TRADE_MIN_QUANTITY}–"
             f"{trade.REGIONAL_TRADE_MAX_QUANTITY} units per trip, up to "
             f"{trade.MAX_ACTIVE_REGIONAL_SHIPMENTS_PER_SETTLEMENT} "
-            "outbound per settlement at once. Land routes only — a "
-            "faction whose settlements are only reachable by sea from "
-            "each other can't regional-trade between them yet."
+            "outbound per settlement at once. Overland or by river (see "
+            "below) — a faction whose settlements are only reachable by "
+            "open SEA from each other can't regional-trade between them yet."
+        ),
+        "BY RIVER",
+        (
+            "Any settlement, town, castle or village within "
+            f"{rivers.RIVER_ADJACENCY_REACH} cells of a river can load boats. "
+            "When BOTH ends of a deal sit on the same connected river system "
+            "— tributaries that merge downstream count as one system — the "
+            "goods go by water instead of by road, and arrive far sooner: as "
+            f"little as {trade.MIN_RIVER_TRANSIT_TURNS} turn, against "
+            f"{trade.MIN_REGIONAL_TRANSIT_TURNS} for the same trip overland. "
+            "Riverside towns are simply better connected to each other than "
+            "their distance suggests, which makes a river frontage worth "
+            "settling for."
         ),
         "RISK",
         (
@@ -744,11 +844,30 @@ def _foreign_trade_article():
             "for you to Accept or Decline yourself; proposing to an AI "
             "is always your own click. A land route then has to be "
             "physically built (growing from both capitals at once, "
-            f"{trade.TRADE_ROUTE_CELLS_PER_TURN} cells/turn per end); a "
-            "sea route opens immediately once agreed, since there's "
-            "nothing to construct across open water. A decline sets a "
+            f"{trade.TRADE_ROUTE_CELLS_PER_TURN} cells/turn per end); river "
+            "and sea routes open immediately once agreed, since there's "
+            "nothing to construct along a waterway. A decline sets a "
             f"{trade.TRADE_ROUTE_DECLINE_COOLDOWN_TURNS}-turn cooldown "
             "before that pair can be asked again."
+        ),
+        "ROUTE KINDS: RIVER, THEN LAND, THEN SEA",
+        (
+            "When a route is agreed, the best available connection is taken. "
+            "A RIVER route is preferred: if a course between the two capitals "
+            "can be found that runs mostly along navigable water (rivers are "
+            "treated as the cheap way to travel rather than an obstacle to "
+            "ford), barges work that corridor — no construction, and the "
+            "fastest transit of the three, reaching inland cities no coast "
+            "touches. Failing that a LAND route is built in the usual way, "
+            "and failing that a SEA route between two coastal realms."
+        ),
+        (
+            "Note the river rule for FOREIGN trade is different from the "
+            "domestic one above: two nations are never near enough for their "
+            "settlements to share one river system, so instead of requiring a "
+            "shared river, a foreign route simply follows whatever waterways "
+            "happen to run the right way — the historical pattern of barge "
+            "traffic working its way up a river valley."
         ),
         "THE DEAL",
         (
@@ -784,7 +903,11 @@ def _foreign_trade_article():
             "active war enemy never holds up at all. Each faction runs "
             f"up to {trade.MAX_ACTIVE_TRADES_PER_FACTION} trades and "
             f"{trade.MAX_ACTIVE_ROUTE_PROJECTS_PER_FACTION} "
-            "route-under-construction at once."
+            "route-under-construction at once. Your own roads, trade "
+            "routes, and caravans/ships all reveal the fog of war they "
+            "actually pass through — a route only shows the stretch "
+            "you've genuinely discovered, not its whole length just "
+            "because one end is on the map."
         ),
     ]
     return "\n\n".join(parts)
@@ -818,9 +941,12 @@ def _diplomacy_article():
         ]),
         "FIRST CONTACT",
         (
-            "Relationships don't exist until contact is made (the player "
-            "discovering a faction through fog of war, or any two "
-            "factions sharing a border). Initial standing is "
+            "Relationships don't exist until contact is made: the player "
+            "discovering a faction through fog of war, any two factions "
+            "sharing a border, or — most commonly — two realms coming "
+            f"within {diplomacy.PROXIMITY_CONTACT_RANGE} cells of each "
+            "other (their nearest settlements), i.e. becoming near enough "
+            "neighbors to know of each other at all. Initial standing is "
             "deterministic, not a dice roll — purely a function of "
             "species affinity:"
         ),
@@ -864,13 +990,23 @@ def _expansion_article():
         ),
         "STARTING A CLAIM",
         (
-            f"Costs {expansion.CLAIM_BASE_COST['Gold']:.0f} Gold plus "
+            f"A normal land-adjacent claim costs "
+            f"{expansion.CLAIM_BASE_COST['Gold']:.0f} Gold plus "
             f"{expansion.CLAIM_COST_PER_CELL['Gold']:.2g} Gold per cell "
             f"of the region's area, and takes "
             f"{expansion.CLAIM_BASE_TURNS} turns plus "
             f"{expansion.CLAIM_TURNS_PER_CELL:.2g} turns per cell (paid "
             "and started immediately; the fight only happens once that "
             "work is done)."
+        ),
+        (
+            f"An amphibious claim — a shore region reachable only across "
+            f"water, with no land border to territory you already hold — "
+            f"costs far more: {expansion.SEA_ONLY_CLAIM_COST['Gold']:.0f} "
+            f"Gold (plus the same per-cell Gold), and its garrison is "
+            f"{_pct(expansion.SEA_ONLY_STRENGTH_MULT)} the size. This is "
+            "deliberate: it stops both you and the AI from cheaply "
+            "leapfrogging across the sea and over-expanding early."
         ),
         "RESOLVING IT",
         (
@@ -1036,6 +1172,20 @@ def _luxury_article():
             "Regional Markets, and Foreign Trade exactly like any other "
             "resource, priced at the Tier-5 rate."
         ),
+        "STAYING SCARCE",
+        (
+            "Deliberately hard to get much of early on: no Luxury Good "
+            "converts from its raw input at all before turn "
+            f"{R.LUXURY_CONVERSION_MIN_TURN} (a full year), and even after "
+            f"that the conversion rate is capped at only "
+            f"{R.LUXURY_CONVERSION_RATE_CAP} units/turn per settlement — "
+            "deliberately below a typical settlement's own Luxury need, so "
+            "a stockpile builds up slowly and stays genuinely scarce for a "
+            "long while rather than quietly catching up to \"enough for "
+            "everyone\" within the first year. Every other processed good "
+            f"converts at up to {R.CONVERSION_RATE_CAP} units/turn by "
+            "comparison."
+        ),
     ]
     return "\n\n".join(parts)
 
@@ -1058,29 +1208,82 @@ def _military_article():
             f"  + a flat per-species modifier: {sp}",
             "  clamped to 15..99 overall.",
         ]),
+        "SPECIES TRAITS",
+        (
+            "Military rating above is the STRATEGIC layer — how big an army a "
+            "faction can field. On top of that, every species fights "
+            "differently soldier-for-soldier. These stack, and each species "
+            "pays for its strength somewhere:"
+        ),
+        "\n".join(
+            f"  {name}: " + ("; ".join(species_trait_summary(name)) or "no modifiers")
+            for name in SPECIES
+        ),
+        (
+            "These are tuned so no species is strictly best — across a "
+            "round-robin of every matchup, win rates sit within a narrow band "
+            "of each other. Orcs are the notable structural case: they field "
+            "no Cavalry at all, and that share becomes extra Swordsmen "
+            "instead, so they bring the same headcount but fight it all on "
+            "foot with no charge."
+        ),
         "ARMY COMPOSITION",
         (
             "A battle army is built straight from military rating: "
-            "roughly 40% Infantry, 25% Archer, 20% Cavalry by headcount "
+            "roughly 40% Swordsmen, 25% Archer, 20% Cavalry by headcount "
             "(the remainder isn't separately represented). All three "
             "unit types:"
         ),
         "\n".join([
-            "  Infantry: melee, high HP, sword+shield",
-            "  Cavalry:  melee, fastest, hits hardest, lowest HP",
+            "  Swordsmen: melee, high HP, sword+shield. Their shield has "
+            "a chance to BLOCK an incoming hit outright (no damage) — but "
+            "only a blow coming from their front; a strike from the flank "
+            "or rear always lands. Facing a soldier is toward whatever "
+            "they're fighting, so surrounding an enemy turns off their "
+            "shield.",
+            "  Cavalry:  mounted — always the fastest on the field — and "
+            "charge specialists. Galloping toward a target builds "
+            "momentum, and the couched impact hit lands for far more than "
+            "their base damage. But that momentum is spent on the hit and "
+            "can't rebuild while they're stuck in a melee, so a bogged-"
+            "down rider actually fights softer than a swordsman. Hit hard, "
+            "pull back, charge again.",
             "  Archer:   ranged (90-cell range vs. ~12-14 melee), fires "
             "arrows, 80% accuracy — a miss still spends the attack, it "
-            "just deals no damage",
+            "just deals no damage. (A shield can still block an arrow that "
+            "comes at a swordsman head-on.)",
+        ]),
+        "TARGETING",
+        (
+            "Units still overwhelmingly go for whoever's closest, but with "
+            "a little judgment: they lean toward finishing off the wounded, "
+            "avoid every soldier piling onto the same target, and cavalry "
+            "favor exposed archers (ideal charge targets). They re-check "
+            "their target periodically rather than tunnel-visioning on one "
+            "enemy to the exclusion of a closer threat."
+        ),
+        "PLANNING PHASE & FORMATIONS",
+        (
+            "Before the fight you position your own army (a strict midline "
+            "gap keeps you out of the enemy's half):"
+        ),
+        "\n".join([
+            "  - Left-drag a unit to move it; left-drag empty ground to "
+            "box-select several.",
+            "  - Keys 1 / 2 / 3 (or the panel buttons) select all your "
+            "Swordsmen / Cavalry / Archers at once.",
+            "  - With a selection, RIGHT-drag a line to form them up along "
+            "it — ghost rally-flags preview each soldier's spot, and they "
+            "snap into ranks when you release.",
+            "  - Space (or \"Deploy Army\") ends planning and starts the "
+            "fight.",
         ]),
         "FIGHTING A BATTLE",
         (
-            "Before the fight, you can drag your own units anywhere "
-            "within your half of the field (a strict midline gap keeps "
-            "you out of the enemy's side); combat itself is real-time "
-            "and automatic once started — units path to the nearest "
-            "living enemy and attack in range. A battle ends the instant "
-            "only one side has anyone left standing (or a true stalemate "
-            "if both sides are wiped at once)."
+            "Combat is real-time and automatic once started — units path "
+            "to a chosen enemy and attack in range. A battle ends the "
+            "instant only one side has anyone left standing (or a true "
+            "stalemate if both sides are wiped at once)."
         ),
         "ATTACKING A RIVAL FACTION",
         (
@@ -1140,6 +1343,22 @@ def _overview_article():
             "its prosperity meter adjusts; construction/expansion/"
             "commander orders advance; and the season clock ticks "
             f"({R.TURNS_PER_SEASON} turns per season)."
+        ),
+        "THE MAP WRAPS",
+        (
+            "The world is a cylinder, not a flat rectangle: the map's "
+            "east and west edges are the same place. Scroll the camera "
+            "far enough in either direction and it keeps going, showing "
+            "the opposite side continuing seamlessly — and it's not just "
+            "cosmetic. A Commander or ship ordered toward the edge will "
+            "actually walk/sail through it and appear on the other side "
+            "if that's genuinely the shorter route, the same way a "
+            "domestic shipment, a foreign trade route, or plain vision "
+            "will. The map's north and south edges are real edges, "
+            "though — only east-west wraps, not top-to-bottom. Landmasses "
+            "themselves never straddle the wrap seam — it's reliably open "
+            "ocean there, the same way any other stretch of open sea "
+            "works for sailing between continents."
         ),
     ]
     return "\n\n".join(parts)

@@ -9,7 +9,6 @@ from app.ui import theme
 from app.core import changelog
 
 _CHANGELOG_PANEL_WIDTH = 320
-_RECENT_ENTRY_COUNT = 2   # how many past entries to keep showing once caught up
 
 
 class MainMenuView(tk.Frame):
@@ -62,6 +61,15 @@ class MainMenuView(tk.Frame):
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True, padx=(14, 0))
         scrollbar.pack(side="right", fill="y")
+        # The Scrollbar alone is draggable but easy to miss -- bind the
+        # mousewheel too, only while actually hovering this canvas (same
+        # bind_all-on-Enter/unbind-on-Leave pattern as the map's RESOURCES
+        # sidebar), so scrolling here doesn't hijack the wheel everywhere
+        # else on the title screen.
+        canvas.bind("<Enter>", lambda e: canvas.bind_all(
+            "<MouseWheel>", lambda ev: canvas.yview_scroll(int(-ev.delta / 120), "units")))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        self._changelog_canvas = canvas
 
         self._changelog_dismiss_btn = tk.Button(
             panel, text="Got it", command=self._dismiss_changelog,
@@ -71,24 +79,33 @@ class MainMenuView(tk.Frame):
         # something unseen to dismiss
 
     def _refresh_changelog_panel(self):
+        """The full version history, oldest entries still just a scroll
+        away instead of vanishing once dismissed -- a real rolling patch-
+        notes log, not a one-shot popup. Unseen entries (newer than the
+        last version the player dismissed) get a "NEW" tag and the
+        brighter title color so they're easy to spot at the top; older,
+        already-seen ones are still right there below, just muted."""
         for w in self._changelog_inner.winfo_children():
             w.destroy()
 
-        unseen = changelog.unseen_entries()
-        entries = unseen or changelog.CHANGELOG_ENTRIES[:_RECENT_ENTRY_COUNT]
+        unseen_versions = {e["version"] for e in changelog.unseen_entries()}
 
-        for entry in entries:
-            tk.Label(self._changelog_inner, text=entry["title"], bg=theme.PANEL,
-                     fg=theme.ACCENT, font=theme.FONT_BOLD, anchor="w",
+        for entry in changelog.CHANGELOG_ENTRIES:
+            is_new = entry["version"] in unseen_versions
+            title_color = theme.ACCENT if is_new else theme.MUTED
+            title_text = entry["title"] + ("   NEW" if is_new else "")
+            tk.Label(self._changelog_inner, text=title_text, bg=theme.PANEL,
+                     fg=title_color, font=theme.FONT_BOLD, anchor="w",
                      justify="left", wraplength=_CHANGELOG_PANEL_WIDTH - 34
                      ).pack(fill="x", pady=(8, 4))
+            item_color = theme.INK if is_new else theme.MUTED
             for item in entry["items"]:
-                tk.Label(self._changelog_inner, text=f"• {item}", bg=theme.PANEL,
-                         fg=theme.INK, font=theme.FONT, anchor="w", justify="left",
+                tk.Label(self._changelog_inner, text=f"- {item}", bg=theme.PANEL,
+                         fg=item_color, font=theme.FONT, anchor="w", justify="left",
                          wraplength=_CHANGELOG_PANEL_WIDTH - 42
                          ).pack(fill="x", pady=2, padx=(8, 8))
 
-        if unseen:
+        if unseen_versions:
             self._changelog_dismiss_btn.pack(side="bottom", fill="x", padx=14, pady=14)
         else:
             self._changelog_dismiss_btn.pack_forget()

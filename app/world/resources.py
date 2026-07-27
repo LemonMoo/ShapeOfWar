@@ -447,12 +447,6 @@ def rarity_abundance(resource):
     return RARITY_ABUNDANCE.get(rarity, 1.0)
 
 
-def raw_resources_for_biome(biome):
-    """Every raw resource whose spawn profile allows `biome` -- the direct
-    answer to "what appears in Mountains/Plains/Forests/Wetlands/etc."."""
-    return [name for name, spec in RESOURCE_SPAWN.items() if biome in spec["biomes"]]
-
-
 # --- Phase 4: buildings -------------------------------------------------
 # One building per resource -- decided literally rather than the "one craft,
 # several related outputs" reading the Blacksmith/Tailor examples first
@@ -861,14 +855,63 @@ _INDUSTRY_SHARES_BY_BIOME = {biome: _biome_land_shares(biome, _INDUSTRY) for bio
 # this is deliberately lower than BASE_CROP_YIELD_PER_CELL to land in a
 # similar ballpark of annual totals despite producing every turn instead
 # of ~1 season out of 4.
-BASE_INDUSTRY_YIELD_PER_CELL = 2.5
+# Raw durable output (Forestry/Mining) is per-resource now, not one flat rate
+# per category. These resources are *durable* (spoil_rate 0) and have almost no
+# consumption sink -- construction is rare, processing converts only a trickle,
+# and trade can't absorb the flood -- so at the old rates they pinned every
+# settlement's storage to its cap within the first ~25 turns and stayed there
+# (structural wood alone was ~77% of everything a faction had stored). These
+# rates are cut hard so storage genuinely fills over time (a real management
+# decision) instead of being maxed from the start.
+#
+# Firewood is the deliberate exception: it's survival-critical (winter heating
+# -> freezing) and forest-poor regions cover their winter need by importing it
+# from forest-rich ones via Regional Markets, so it's kept several times higher
+# than the structural woods to stay abundant enough to redistribute. Its winter
+# need is tiny (~0.003/capita, Winter only), so even at this reduced rate the
+# empire-wide firewood surplus stays large.
+BASE_FORESTRY_YIELD_PER_CELL = 0.6   # structural wood: Logs/Hardwood/Softwood/
+                                      # Resin -- cut ~4x (was 2.5); no survival
+                                      # role, they were the single biggest
+                                      # storage clog in the game
+FIREWOOD_YIELD_PER_CELL = 0.3         # survival fuel, cut ~8x from its old
+                                      # effective 2.5: at this rate its Winter
+                                      # draw-down roughly keeps pace with
+                                      # production, so it stops being a storage
+                                      # clog (was ~164k stored / 128x its need).
+                                      # Forest-poor regions, which under-produce
+                                      # it at this rate, are backstopped by the
+                                      # scaled firewood scrounge (see
+                                      # _firewood_scrounge_fraction) -- measured
+                                      # freezing is unchanged from the old high
+                                      # rate, the scrounge fully covers the cut.
+BASE_MINING_YIELD_PER_CELL = 0.2     # cut a further ~2.5x (was 0.5): still a
+                                      # durable, sink-less pile-up (Sand/Salt/
+                                      # Gems/Stone/ore), none of it survival-
+                                      # critical, so the safe place to keep cutting
+
+_RAW_YIELD_OVERRIDE = {"Firewood": FIREWOOD_YIELD_PER_CELL}
+
+
+def _raw_yield_per_cell(resource):
+    """Per-cell base output for a raw Forestry/Mining resource: a per-resource
+    override (only Firewood, kept high for survival) else the category base."""
+    over = _RAW_YIELD_OVERRIDE.get(resource)
+    if over is not None:
+        return over
+    return (BASE_FORESTRY_YIELD_PER_CELL
+            if RESOURCES[resource]["category"] == "Forestry"
+            else BASE_MINING_YIELD_PER_CELL)
 
 
 def compute_industry_yield(region, season):
     """This region's Forestry/Mining production -- the industrial-output
     counterpart to compute_crop_yield just above, sharing its exact
     formula shape (see that function's docstring), just without any
-    harvest-season gating (see the section note above for why)."""
+    harvest-season gating (see the section note above for why). Per-resource
+    base rates (see _raw_yield_per_cell) -- structural wood and mining are cut
+    hard as durable, sink-less storage-cloggers; Firewood stays high because
+    it's survival-critical."""
     biome_counts = getattr(region, "biome_counts", {})
     climate = getattr(region, "dominant_climate", "temperate")
     fertility_frac = region.stats.get("fertility", 50) / 100.0
@@ -878,7 +921,8 @@ def compute_industry_yield(region, season):
         for resource, share in _INDUSTRY_SHARES_BY_BIOME.get(biome, {}).items():
             fert_w = RESOURCE_SPAWN[resource]["fertility_weight"]
             fertility_mult = 1.0 + fert_w * (fertility_frac - 0.5)
-            amount = (BASE_INDUSTRY_YIELD_PER_CELL * cell_count * share
+            base = _raw_yield_per_cell(resource)
+            amount = (base * cell_count * share
                      * climate_affinity(resource, climate) * fertility_mult)
             amount = round(amount)
             if amount:
@@ -1234,8 +1278,38 @@ def advance_livestock(world):
 # previously a pure flavor stat that "doesn't feed the economy" (see
 # HANDOFF.md); a bad enough shortage now genuinely shrinks a settlement.
 
-CONVERSION_RATE_CAP = 50   # rough placeholder, not balance-tuned: max units
+CONVERSION_RATE_CAP = 30   # rough placeholder, not balance-tuned: max units
                            # of output a single recipe can produce per turn
+                           # (was 50 -- trimmed some, though this was never
+                           # the main source of the economy feeling
+                           # trivially abundant -- see BASE_MINING_YIELD_
+                           # PER_CELL for where most of that actually was)
+LUXURY_CONVERSION_RATE_CAP = 2   # Luxury Goods specifically convert far
+                                 # slower than staple processed goods --
+                                 # explicit request: they "shouldn't be
+                                 # widespread until industries have been
+                                 # running a while." Deliberately BELOW a
+                                 # typical settlement's own Luxury need
+                                 # (settlement_needs' Luxury figure often
+                                 # runs 6-9+ for a real settlement) -- not
+                                 # just slower than the general cap, but
+                                 # genuinely unable to keep pace with
+                                 # demand at first, so it stays scarce
+                                 # rather than quietly catching up to
+                                 # "enough for the whole population" within
+                                 # the first year regardless. Even with a
+                                 # settlement sitting on a big stockpile of
+                                 # Gems/Grapes/Honey, only a trickle becomes
+                                 # an actual Luxury Good each turn, so a real
+                                 # stockpile only builds up gradually over
+                                 # many turns instead of within the first
+                                 # year.
+LUXURY_CONVERSION_MIN_TURN = 100   # a full year (TURNS_PER_SEASON * 4) --
+                                   # no Luxury Good converts AT ALL before
+                                   # this, on top of the trickle-rate cap
+                                   # above, so "industries have been running
+                                   # a while" is a real, hard requirement,
+                                   # not just a slow ramp from turn 1.
 
 
 def advance_production_chains(world):
@@ -1265,10 +1339,16 @@ def advance_production_chains(world):
         for output, options in RECIPES.items():
             if output in _SETTLEMENT_STORAGE_RESOURCES:
                 continue
+            if RESOURCES[output]["luxury"]:
+                if world.turn < LUXURY_CONVERSION_MIN_TURN:
+                    continue
+                cap = LUXURY_CONVERSION_RATE_CAP
+            else:
+                cap = CONVERSION_RATE_CAP
             for option in options:
                 inputs = option["inputs"]
                 available = min(res.get(i, 0) for i in inputs)
-                amount = min(available, CONVERSION_RATE_CAP)
+                amount = min(available, cap)
                 if amount <= 0:
                     continue
                 for i in inputs:
@@ -1313,6 +1393,47 @@ FREEZE_GRACE_TURNS = 8        # same idea as STARVATION_GRACE_TURNS, for an
                               # season is TURNS_PER_SEASON turns long) before
                               # a supply hiccup starts costing population.
 _SHORTAGE_PROSPERITY_PENALTY = {"Food": 8.0, "Firewood": 5.0, "Clothes": 2.0}
+
+# A region with zero Forest-biome cells can never produce Firewood locally
+# (see compute_industry_yield's biome gate) -- and if that region is also
+# the only one its faction owns, Regional Markets (trade.py) has nothing to
+# redistribute either, leaving foreign trade (which requires the player to
+# actually propose/accept a route) as the ONLY path to any real Firewood at
+# all. Without this, a faction stranded that way grinds toward its
+# population floor every single winter forever, with no in-game signal of
+# why. This covers up to half of any deficit via basic scrounging (dung,
+# scrub, deadfall, salvage) when the settlement's own region has no Forest
+# access whatsoever -- real Forestry or trade still clearly beats it, and a
+# region that DOES have forest but is just having a bad supply turn gets no
+# help from this at all.
+NO_FOREST_SUBSISTENCE_FRACTION = 0.5
+# Above this forest share a region produces enough Firewood to fend for itself,
+# so it gets no scrounge backstop at all; below it the backstop scales up
+# (linearly) to the full NO_FOREST_SUBSISTENCE_FRACTION at zero forest. This is
+# what lets Firewood production be cut hard (see FIREWOOD_YIELD_PER_CELL)
+# without newly freezing forest-POOR regions -- not just the forest-ZERO ones
+# the old binary check covered.
+FOREST_SELF_SUFFICIENT_SHARE = 0.20
+
+
+def _region_has_forest(world, node):
+    region = world.regions[node.region_id]
+    return region.biome_counts.get("forest", 0) > 0
+
+
+def _firewood_scrounge_fraction(world, node):
+    """Fraction of a Firewood deficit a region can cover by scrounging (dung,
+    scrub, deadfall) -- full NO_FOREST_SUBSISTENCE_FRACTION with no forest at
+    all, tapering to 0 by FOREST_SELF_SUFFICIENT_SHARE forest cover, above
+    which the region grows plenty and gets no help."""
+    region = world.regions[node.region_id]
+    total = sum(region.biome_counts.values())
+    if total <= 0:
+        return NO_FOREST_SUBSISTENCE_FRACTION
+    forest_share = region.biome_counts.get("forest", 0) / total
+    if forest_share >= FOREST_SELF_SUFFICIENT_SHARE:
+        return 0.0
+    return NO_FOREST_SUBSISTENCE_FRACTION * (1.0 - forest_share / FOREST_SELF_SUFFICIENT_SHARE)
 # Phase 13's mirror image of the shortage penalties above: met luxury
 # demand nudges prosperity UP by this much (scaled by how much of it was
 # actually met, same deficit-fraction shape the penalties use) instead of
@@ -1429,11 +1550,40 @@ def _consume_from_pool(res, resource_names, needed):
     return needed - remaining
 
 
+POPULATION_MIN_FRACTION = 0.05   # a settlement/village can never be pushed
+                                  # below this fraction of its OWN
+                                  # max_population (see worldgen.
+                                  # _roll_population) by starvation/
+                                  # freezing -- "a minimum possible
+                                  # population before it collapses," a
+                                  # hard-scrabble remnant that survives
+                                  # rather than the settlement genuinely
+                                  # being wiped out
+POPULATION_GROWTH_RATE = 0.0001  # fraction of the remaining gap to
+                                  # max_population closed per turn, while
+                                  # NOT currently in a food/firewood
+                                  # shortfall grace period -- deliberately
+                                  # tiny ("very very slowly" per the
+                                  # request): asymptotic, not a flat
+                                  # amount, so growth naturally tapers off
+                                  # approaching the ceiling instead of
+                                  # ever overshooting it. See _grow_
+                                  # population's own fractional-
+                                  # accumulator note for why this doesn't
+                                  # just round down to a permanent zero
+                                  # for a small village.
+
+
 def _apply_population_loss(settlement, loss):
     """Remove `loss` head from a settlement, split proportionally between
     adults/children so population == adults + children stays true (rather
-    than only decrementing one and leaving the identity broken)."""
-    loss = max(0, min(loss, settlement.population))
+    than only decrementing one and leaving the identity broken). Never
+    pushes population below POPULATION_MIN_FRACTION of the settlement's
+    own max_population -- old saves predating that field (None/missing)
+    fall back to the original no-floor behavior."""
+    max_pop = getattr(settlement, "max_population", None)
+    floor = round(max_pop * POPULATION_MIN_FRACTION) if max_pop else 0
+    loss = max(0, min(loss, settlement.population - floor))
     if loss <= 0:
         return
     adult_frac = settlement.adults / settlement.population if settlement.population else 0.0
@@ -1444,7 +1594,39 @@ def _apply_population_loss(settlement, loss):
     settlement.children = max(0, settlement.children - child_loss)
 
 
-def _consume_node_needs(node, season):
+def _grow_population(node):
+    """Slow organic growth toward this node's own max_population ceiling
+    (see worldgen._roll_population/POPULATION_GROWTH_RATE) -- only while
+    it isn't currently in a food/firewood shortfall grace period (see
+    _consume_node_needs, which calls this after updating turns_without_
+    food/turns_without_firewood for the turn). A small village's fair
+    share of the gap (e.g. 0.2 head/turn) would just silently round down
+    to zero forever if computed fresh each turn -- node._pop_growth_accum
+    is a hidden fractional carry so those tiny amounts genuinely
+    accumulate into a real head of population every several turns instead
+    of never growing at all. Old saves predating max_population (None/
+    missing) simply never grow, matching their prior no-growth behavior."""
+    max_pop = getattr(node, "max_population", None)
+    if not max_pop or node.population >= max_pop:
+        return
+    if getattr(node, "turns_without_food", 0) > 0 or getattr(node, "turns_without_firewood", 0) > 0:
+        return
+    accum = getattr(node, "_pop_growth_accum", 0.0)
+    accum += (max_pop - node.population) * POPULATION_GROWTH_RATE
+    gain = int(accum)
+    node._pop_growth_accum = accum - gain
+    if gain <= 0:
+        return
+    gain = min(gain, max_pop - node.population)
+    adult_frac = node.adults / node.population if node.population else 1.0
+    adult_gain = round(gain * adult_frac)
+    child_gain = gain - adult_gain
+    node.population += gain
+    node.adults += adult_gain
+    node.children += child_gain
+
+
+def _consume_node_needs(node, season, world):
     """Draw Food/Firewood/Clothes/Luxury for one population-owning node
     (Settlement or Village -- both share the same population/adults/
     resources shape) from its own storage, applying the same starvation/
@@ -1479,6 +1661,8 @@ def _consume_node_needs(node, season):
         wood_needed = needs["Firewood"]
         wood_had = min(res.get("Firewood", 0), wood_needed)
         res["Firewood"] = res.get("Firewood", 0) - wood_had
+        if wood_had < wood_needed:
+            wood_had += (wood_needed - wood_had) * _firewood_scrounge_fraction(world, node)
         if wood_needed > 0 and wood_had < wood_needed:
             # FREEZE_GRACE_TURNS -- same reasoning as Food's grace period
             # above: a Winter-long cold snap shouldn't be an instant,
@@ -1514,6 +1698,8 @@ def _consume_node_needs(node, season):
         fulfillment = luxury_had / luxury_needed
         node.prosperity = min(PROSPERITY_MAX, node.prosperity
                              + LUXURY_PROSPERITY_BONUS * fulfillment)
+
+    _grow_population(node)
     return value
 
 
@@ -1527,7 +1713,7 @@ def _consume_node_needs(node, season):
 # _consume_node_needs above -- there's no war-casualty/disease drain), so
 # "starving"/"freezing" already cover every population-decline case, not
 # just a Food/Firewood-specific subset of a broader mechanic.
-def node_alerts(node):
+def node_alerts(node, world):
     """{"kind", "severity" ("warning"/"critical"), "message"} for every
     problem currently active at this settlement/village -- "warning"
     while still inside the grace period (no population loss yet, but
@@ -1551,6 +1737,18 @@ def node_alerts(node):
         alerts.append({"kind": "firewood_shortage", "severity": "warning",
                        "message": f"{node.name} has gone without firewood for {twfw} turn"
                                   f"{'s' if twfw != 1 else ''}"})
+    # Distinct from the two alerts above -- explains WHY, when the reason
+    # is structural rather than a passing supply hiccup: this node's own
+    # region has no Forest access at all, so nothing it does locally (or
+    # via Regional Markets, if this is its faction's only region) can ever
+    # close the gap -- only a foreign trade route or claiming/conquering
+    # forested land actually fixes it (see NO_FOREST_SUBSISTENCE_FRACTION,
+    # which only ever softens this, never solves it).
+    if twfw > 0 and not _region_has_forest(world, node):
+        alerts.append({"kind": "no_firewood_source", "severity": "warning",
+                       "message": f"{node.name} has no local source of Firewood — "
+                                  "propose a trade route or expand toward forested "
+                                  "land"})
 
     res = getattr(node, "resources", None)
     if res:
@@ -1570,12 +1768,12 @@ def faction_alerts(world, faction_idx):
     out = []
     for sid in nation.meta.get("settlements", []):
         node = world.settlements[sid]
-        for alert in node_alerts(node):
+        for alert in node_alerts(node, world):
             alert["node"] = node
             out.append(alert)
     for v in world.villages:
         if v.faction_idx == faction_idx:
-            for alert in node_alerts(v):
+            for alert in node_alerts(v, world):
                 alert["node"] = v
                 out.append(alert)
     return out
@@ -1597,11 +1795,11 @@ def advance_settlement_consumption(world):
     consumption_value = defaultdict(float)
     for fac_idx, nation in enumerate(world.factions):
         for sid in nation.meta.get("settlements", []):
-            consumption_value[fac_idx] += _consume_node_needs(world.settlements[sid], world.season)
+            consumption_value[fac_idx] += _consume_node_needs(world.settlements[sid], world.season, world)
     for village in world.villages:
         if village.faction_idx < 0:
             continue
-        consumption_value[village.faction_idx] += _consume_node_needs(village, world.season)
+        consumption_value[village.faction_idx] += _consume_node_needs(village, world.season, world)
     return consumption_value
 
 
@@ -1783,10 +1981,16 @@ def advance_settlement_production_chains(world):
         for output, options in RECIPES.items():
             if output not in _SETTLEMENT_STORAGE_RESOURCES:
                 continue
+            if RESOURCES[output]["luxury"]:
+                if world.turn < LUXURY_CONVERSION_MIN_TURN:
+                    continue
+                cap = LUXURY_CONVERSION_RATE_CAP
+            else:
+                cap = CONVERSION_RATE_CAP
             for option in options:
                 inputs = option["inputs"]
                 available = min(res.get(i, 0) for i in inputs)
-                amount = min(available, CONVERSION_RATE_CAP)
+                amount = min(available, cap)
                 if amount <= 0:
                     continue
                 for i in inputs:
@@ -1816,8 +2020,11 @@ def _apply_settlement_spoilage_and_overflow(node):
         return
     overage_frac = (total - capacity) / total
     for resource in list(res.keys()):
-        if res[resource] <= 0:
-            continue
+        if res[resource] <= 0 or resource == "Gold":
+            continue   # Gold is minted currency, not a perishable good --
+                        # it still occupies vault space (counts toward
+                        # `total` above) but never decays just because the
+                        # granary is overflowing with grain or timber
         base_rate = RESOURCES.get(resource, {}).get("spoil_rate", 0.0)
         overflow_rate = max(OVERFLOW_MIN_RATE, base_rate * OVERFLOW_SPOILAGE_MULTIPLIER)
         # Capped well under 100% -- a genuine grace period needs *some*
@@ -2048,6 +2255,10 @@ class LocalShipment:
         self.dest_kind = dest_kind
         self.dest_id = dest_id
         self.path = [origin_pos, dest_pos]
+        # Both ends are land nodes in the same region (settlement/village) --
+        # land never straddles the east-west seam (see wrap.py / worldgen's
+        # seamlessness), so a plain straight-line distance is already correct
+        # here; there's no wrap case to account for.
         dist = ((origin_pos[0] - dest_pos[0]) ** 2 + (origin_pos[1] - dest_pos[1]) ** 2) ** 0.5
         self.turns_total = max(MIN_LOCAL_TRANSIT_TURNS,
                               min(MAX_LOCAL_TRANSIT_TURNS, round(dist / LOCAL_SHIPMENT_CELLS_PER_TURN)))
@@ -2507,12 +2718,12 @@ def _grow_city_villages(world):
                   if world.region_grid[ny][nx] == region_id]
         local_fert = sum(samples) / len(samples) if samples else world.fertility[y][x]
         farm = round(random.uniform(*_VILLAGE_FARM_RANGE) * (0.5 + 1.2 * local_fert))
-        population, adults, children = _roll_population(random, "village")
+        population, adults, children, max_population = _roll_population(random, "village")
         prosperity = seed_prosperity()
 
         v = Village(len(world.villages), region_id, st.faction_idx,
                    namer("village", species), (x, y), farm,
-                   population, adults, children, prosperity)
+                   population, adults, children, prosperity, max_population)
         world.villages.append(v)
         region.villages.append(v.id)
         world.roads_by_region.setdefault(region_id, []).append((st.pos, v.pos, "dirt"))
@@ -2708,6 +2919,13 @@ def advance_turn(world):
     # Events are stashed on `world` for the UI to turn into player-facing
     # messages (see map_view.py) without resources.py needing to know
     # anything about panels/banners.
+    # Realms discover each other by proximity (not just a shared border), so
+    # diplomacy + foreign trade actually have partners to work with -- run
+    # before the trade passes so a freshly-discovered neighbor can be a trade
+    # candidate the same turn.
+    from app.world import diplomacy
+    diplomacy.run_proximity_contact(world)
+
     from app.world import trade
     trade.advance_trade_route_projects(world)   # land routes under construction
     events = trade.advance_caravans(world)

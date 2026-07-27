@@ -5,10 +5,26 @@ data structure on the World consistent.
 import math
 
 from app.core.events import bus
+from app.world import wrap
 from app.world.worldgen import OCEAN, _bfs_distance
 
 _NEIGH4 = ((1, 0), (-1, 0), (0, 1), (0, -1))
 _NAVAL_COAST_REACH = 3   # same reach as the trade-route coastal test in worldgen.py
+
+
+def mark_cells_dirty(world, cells):
+    """Flag `cells` as needing their map color redone (see map_view.py's
+    _precompute_colors/_update_dirty_colors) -- anywhere a cell's DISPLAYED
+    color can change: not just transfer_region's ownership flip, but also
+    an UNCLAIMED region's wildland_strength changing (see expansion.py's
+    resolve_claim_loss), since that strength feeds the "danger" tint
+    unclaimed land gets. Accumulated across possibly several changes
+    before the next render, then drained and cleared there."""
+    dirty = getattr(world, "_dirty_color_cells", None)
+    if dirty is None:
+        dirty = set()
+        world._dirty_color_cells = dirty
+    dirty.update(cells)
 
 
 def _recompute_settle_proximity(world, region):
@@ -23,8 +39,8 @@ def _recompute_settle_proximity(world, region):
         return
     cx = sum(x for x, y in region.cells) / len(region.cells)
     cy = sum(y for x, y in region.cells) / len(region.cells)
-    best = min(math.hypot(cx - sx, cy - sy) for sx, sy in
-               (st.pos for st in world.settlements))
+    best = min(wrap.dist_wrap((cx, cy), st.pos, world.w)
+               for st in world.settlements)
     region.settle_proximity = math.exp(-best / 10.0)
 
 
@@ -88,14 +104,10 @@ def naval_reachable_regions(world, attacker_idx, defender_idx):
     used to redo that full-grid BFS on *every single click* of an unclaimed
     region (claimable_frontier calls this), which on a large map was the
     single biggest source of region-click lag by far."""
-    coast_d = getattr(world, "_settle_coast_d", None)
+    coastal_ids = _coastal_region_ids(world)
+    coast_d = world._settle_coast_d   # populated as a side effect of the call above
     if coast_d is None:
-        ocean_cells = [(x, y) for y in range(world.h) for x in range(world.w)
-                      if world.owner[y][x] == OCEAN]
-        if not ocean_cells:
-            return []
-        coast_d = _bfs_distance(world, ocean_cells)
-        world._settle_coast_d = coast_d
+        return []
 
     def is_coastal(pos):
         x, y = pos
@@ -107,8 +119,35 @@ def naval_reachable_regions(world, attacker_idx, defender_idx):
         return []
 
     return [region for region in world.regions
-            if region.faction_idx == defender_idx
-            and any(is_coastal((x, y)) for x, y in region.cells)]
+            if region.faction_idx == defender_idx and region.id in coastal_ids]
+
+
+def _coastal_region_ids(world):
+    """Set of region ids that touch the sea (any cell within
+    _NAVAL_COAST_REACH of open ocean) — cached once on the world. A region's
+    cells and the coast-distance field are both fixed at world-gen and never
+    change afterward, so coastal-ness is turn-invariant; this replaces
+    re-scanning every candidate region's cells on every naval_reachable_
+    regions call (per faction, per turn — it was the single biggest End Turn
+    cost by far). Also ensures world._settle_coast_d is populated."""
+    cached = getattr(world, "_coastal_region_ids", None)
+    if cached is not None:
+        return cached
+
+    coast_d = getattr(world, "_settle_coast_d", None)
+    if coast_d is None:
+        ocean_cells = [(x, y) for y in range(world.h) for x in range(world.w)
+                      if world.owner[y][x] == OCEAN]
+        coast_d = _bfs_distance(world, ocean_cells) if ocean_cells else None
+        world._settle_coast_d = coast_d
+    if coast_d is None:
+        world._coastal_region_ids = set()
+        return world._coastal_region_ids
+
+    ids = {region.id for region in world.regions
+           if any(coast_d[y][x] <= _NAVAL_COAST_REACH for x, y in region.cells)}
+    world._coastal_region_ids = ids
+    return ids
 
 
 def _refresh_borders(world, region):
@@ -176,6 +215,7 @@ def transfer_region(world, region, new_faction_idx):
         world.owner[y][x] = new_faction_idx
     region.faction_idx = new_faction_idx
     world.territory_version = getattr(world, "territory_version", 0) + 1
+    mark_cells_dirty(world, region.cells)
 
     settlement_ids = list(getattr(region, "meta_settlements", []))
     for sid in settlement_ids:

@@ -19,6 +19,7 @@ from app.world.worldgen import (OCEAN, Settlement,
 from app.world.lexicon import make_settlement_namer
 from app.world.resources import (seed_prosperity, _SETTLEMENT_STORAGE_RESOURCES,
                                  settlement_storage_capacity)
+from app.world import wrap
 
 # Cost/time to build each settlement kind. City is the crown jewel (biggest
 # population range, POPULATION_RANGE in worldgen.py) so it's the steepest;
@@ -294,19 +295,16 @@ def _path_between(world, origin, dest_pos, faction_idx=None):
     for road pathing specifically, not every caller of this function."""
     if origin == dest_pos:
         return [origin]
-    ox, oy = origin
-    dx, dy = dest_pos
-    x0, x1 = sorted((ox, dx))
+    oy, dy = origin[1], dest_pos[1]
     y0, y1 = sorted((oy, dy))
-    bx0 = max(0, x0 - _BBOX_PAD)
     by0 = max(0, y0 - _BBOX_PAD)
-    bx1 = min(world.w, x1 + _BBOX_PAD + 1)
     by1 = min(world.h, y1 + _BBOX_PAD + 1)
-    land_cellset = {(x, y) for y in range(by0, by1) for x in range(bx0, bx1)
+    xs = wrap.bbox_span_wrap(origin[0], dest_pos[0], world.w, _BBOX_PAD)
+    land_cellset = {(x, y) for y in range(by0, by1) for x in xs
                      if world.owner[y][x] != OCEAN}
     path = _path_dijkstra(land_cellset,
                           lambda c: _elev_cost(world, world.base_cost, c, faction_idx),
-                          origin, dest_pos)
+                          origin, dest_pos, world.w)
     return path or [origin, dest_pos]   # fallback straight segment if pathfinding fails
 
 
@@ -316,19 +314,37 @@ def _find_road_path(world, faction_idx, dest_pos):
     candidates = [st.pos for st in world.settlements if st.faction_idx == faction_idx]
     if not candidates:
         return [dest_pos]
-    dx, dy = dest_pos
-    origin = min(candidates, key=lambda p: (p[0] - dx) ** 2 + (p[1] - dy) ** 2)
+    origin = min(candidates, key=lambda p: wrap.dist2_wrap(p, dest_pos, world.w))
     return _path_between(world, origin, dest_pos, faction_idx=faction_idx)
 
 
+def _faction_nodes(nation, world):
+    """Every Settlement AND Village this faction owns -- "our country's
+    whole pool of resources" the player actually expects to draw on when
+    building something, not just whatever happens to already be sitting
+    in a Settlement specifically. A Village can hold real stock too (see
+    this session's Regional Markets widening), and there's no reason a
+    stockpile of Logs sitting in a border village shouldn't count toward
+    a City's construction cost just because it hasn't been physically
+    hauled to the City yet -- the same "hauled in from wherever it's
+    stockpiled" abstraction _pay_cost below already applies across
+    multiple settlements."""
+    fac_idx = world.factions.index(nation)
+    nodes = [world.settlements[sid] for sid in nation.meta.get("settlements", [])]
+    nodes += [v for v in world.villages if v.faction_idx == fac_idx]
+    return nodes
+
+
 def _faction_settlement_stock(nation, resource, world):
-    """Sum of `resource` across every settlement this faction owns -- same
-    aggregate-economy view trade.py's _faction_settlement_total and
-    resources.py's _recompute_military already need for the same reason
+    """Sum of `resource` across every settlement AND village this faction
+    owns -- same aggregate-economy view trade.py's _faction_settlement_total
+    and resources.py's _recompute_military already need for the same reason
     (Phase 12: Logs/Stone/Iron are settlement-storage resources now, no
-    longer one national number)."""
-    return sum(getattr(world.settlements[sid], "resources", {}).get(resource, 0)
-              for sid in nation.meta.get("settlements", []))
+    longer one national number). Kept this name (not just settlements
+    despite it) since it's the established call site everywhere else in
+    the codebase already uses."""
+    return sum(getattr(node, "resources", {}).get(resource, 0)
+              for node in _faction_nodes(nation, world))
 
 
 def can_afford(nation, cost, world):
@@ -351,28 +367,28 @@ def can_afford(nation, cost, world):
 def _pay_cost(nation, cost, world):
     """Deduct `cost` from `nation`, the spending half of can_afford -- a
     settlement-storage resource (Gold included, as of the Currency
-    overhaul) spread across whichever of the faction's settlements
-    actually have it (largest stockpile first, the realistic "hauled in
-    from wherever it's stockpiled" reading -- the same aggregate-economy
-    assumption trade.py's sellable_surplus already makes), anything else
-    from the old shared pool. Caller must have already confirmed
+    overhaul) spread across whichever of the faction's Settlements AND
+    Villages actually have it (largest stockpile first, the realistic
+    "hauled in from wherever it's stockpiled" reading -- the same
+    aggregate-economy assumption trade.py's sellable_surplus already
+    makes, see _faction_nodes above for why Villages count too), anything
+    else from the old shared pool. Caller must have already confirmed
     can_afford."""
     for resource, amount in cost.items():
         if resource in _SETTLEMENT_STORAGE_RESOURCES:
             remaining = amount
-            sids = nation.meta.get("settlements", [])
-            ordered = sorted((world.settlements[sid] for sid in sids),
-                             key=lambda st: getattr(st, "resources", {}).get(resource, 0),
+            ordered = sorted(_faction_nodes(nation, world),
+                             key=lambda node: getattr(node, "resources", {}).get(resource, 0),
                              reverse=True)
-            for st in ordered:
+            for node in ordered:
                 if remaining <= 0:
                     break
-                if not hasattr(st, "resources"):
-                    st.resources = {}
-                have = st.resources.get(resource, 0)
+                if not hasattr(node, "resources"):
+                    node.resources = {}
+                have = node.resources.get(resource, 0)
                 take = min(have, remaining)
                 if take:
-                    st.resources[resource] = have - take
+                    node.resources[resource] = have - take
                     remaining -= take
         else:
             res = nation.stats.setdefault("resources", {})
@@ -421,11 +437,11 @@ def _finish_settlement(world, project):
     species = faction.meta.get("species", "Humans")
     namer = make_settlement_namer(random)
     tax_income = round(random.uniform(*SETTLEMENT_TAX_INCOME[kind]))
-    population, adults, children = _roll_population(random, kind)
+    population, adults, children, max_population = _roll_population(random, kind)
     prosperity = seed_prosperity()
     st = Settlement(len(world.settlements), kind, namer(kind, species),
                     project.pos, project.faction_idx, project.region_id, tax_income,
-                    population, adults, children, prosperity)
+                    population, adults, children, prosperity, max_population)
     world.settlements.append(st)
     faction.meta.setdefault("settlements", []).append(st.id)
     if 0 <= project.region_id < len(world.regions):

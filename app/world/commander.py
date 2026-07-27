@@ -25,6 +25,7 @@ from app.world.worldgen import (OCEAN, _path_dijkstra, _elev_cost, _sea_cost,
                                 _nearest_ocean_cell, _SEA_COAST_REACH,
                                 _NEIGH8, _DIAG)
 from app.world.construction import can_afford, _pay_cost
+from app.world import wrap
 
 COMMANDER_CELLS_PER_TURN = 5
 COMMANDER_VISION_RADIUS = 8
@@ -104,35 +105,36 @@ def shipyard_at(world, faction_idx, pos):
     return None
 
 
-def _path_dijkstra_nearest(cellset, cost_fn, start, dest):
+def _path_dijkstra_nearest(cellset, cost_fn, start, dest, width):
     """Like worldgen._path_dijkstra, but never fails: if `dest` isn't in
     `cellset` or isn't reachable from `start`, this returns the path to
-    whichever visited cell ends up closest (straight-line) to `dest`
-    instead. Used for commander movement so an order sent into fog — where
-    the player can't yet know what's actually out there — always just
-    walks/sails as far toward it as the terrain allows and stops at
+    whichever visited cell ends up closest (wrap-aware straight-line) to
+    `dest` instead. Used for commander movement so an order sent into fog —
+    where the player can't yet know what's actually out there — always
+    just walks/sails as far toward it as the terrain allows and stops at
     whatever's blocking it, rather than an explicit 'no route' response
     that would itself leak what's blocking it (water, a separate
-    landmass, ...)."""
+    landmass, ...). `width` is required for the same reason worldgen.
+    _path_dijkstra needs it -- see that function's docstring."""
     import heapq
     if start not in cellset:
         return None
     dist = {start: 0.0}
     parent = {}
     pq = [(0.0, start)]
-    best, best_d2 = start, (start[0] - dest[0]) ** 2 + (start[1] - dest[1]) ** 2
+    best, best_d2 = start, wrap.dist2_wrap(start, dest, width)
     while pq:
         d, cur = heapq.heappop(pq)
         if d > dist.get(cur, 1e18):
             continue
-        d2 = (cur[0] - dest[0]) ** 2 + (cur[1] - dest[1]) ** 2
+        d2 = wrap.dist2_wrap(cur, dest, width)
         if d2 < best_d2:
             best_d2, best = d2, cur
         if cur == dest:
             break
         cx, cy = cur
         for dx, dy in _NEIGH8:
-            nb = (cx + dx, cy + dy)
+            nb = (wrap.wrap_x(cx + dx, width), cy + dy)
             if nb not in cellset:
                 continue
             step = cost_fn(nb) * (_DIAG if dx and dy else 1.0)
@@ -152,16 +154,17 @@ def _bbox_cellset(world, a, b, include_ocean):
     """Every cell in a padded bounding box around two points — the same
     'pad the rectangle between start/dest, not a fixed window' approach
     construction._find_road_path already uses, which is why it scales fine
-    to any distance. include_ocean=False restricts to land only."""
-    x0, x1 = sorted((a[0], b[0]))
+    to any distance. include_ocean=False restricts to land only. Uses
+    wrap.bbox_span_wrap for the x-span so a route between two points near
+    opposite edges of the map can be found through the (shorter) seam
+    crossing instead of only ever considering the direct span."""
     y0, y1 = sorted((a[1], b[1]))
-    bx0 = max(0, x0 - _BBOX_PAD)
     by0 = max(0, y0 - _BBOX_PAD)
-    bx1 = min(world.w, x1 + _BBOX_PAD + 1)
     by1 = min(world.h, y1 + _BBOX_PAD + 1)
+    xs = wrap.bbox_span_wrap(a[0], b[0], world.w, _BBOX_PAD)
     if include_ocean:
-        return {(x, y) for y in range(by0, by1) for x in range(bx0, bx1)}
-    return {(x, y) for y in range(by0, by1) for x in range(bx0, bx1)
+        return {(x, y) for y in range(by0, by1) for x in xs}
+    return {(x, y) for y in range(by0, by1) for x in xs
             if world.owner[y][x] != OCEAN}
 
 
@@ -171,13 +174,11 @@ _SEA_COAST_REACH_PAD = _SEA_COAST_REACH + 2   # a shipyard can sit a few cells i
 
 
 def _ocean_cellset(world, a, b):
-    x0, x1 = sorted((a[0], b[0]))
     y0, y1 = sorted((a[1], b[1]))
-    bx0 = max(0, x0 - _BBOX_PAD)
     by0 = max(0, y0 - _BBOX_PAD)
-    bx1 = min(world.w, x1 + _BBOX_PAD + 1)
     by1 = min(world.h, y1 + _BBOX_PAD + 1)
-    return {(x, y) for y in range(by0, by1) for x in range(bx0, bx1)
+    xs = wrap.bbox_span_wrap(a[0], b[0], world.w, _BBOX_PAD)
+    return {(x, y) for y in range(by0, by1) for x in xs
             if world.owner[y][x] == OCEAN}
 
 
@@ -188,12 +189,12 @@ def _shore_neighbor(world, ocean_cell, toward):
     x, y = ocean_cell
     best, best_d2 = None, None
     for dx, dy in _NEIGH8:
-        nx, ny = x + dx, y + dy
-        if not (0 <= nx < world.w and 0 <= ny < world.h):
+        nx, ny = wrap.wrap_x(x + dx, world.w), y + dy
+        if not (0 <= ny < world.h):
             continue
         if world.owner[ny][nx] == OCEAN:
             continue
-        d2 = (nx - toward[0]) ** 2 + (ny - toward[1]) ** 2
+        d2 = wrap.dist2_wrap((nx, ny), toward, world.w)
         if best_d2 is None or d2 < best_d2:
             best_d2, best = d2, (nx, ny)
     return best
@@ -220,7 +221,7 @@ def _to_sea_leg(world, pos, max_r):
     if pos not in land_cellset or shore not in land_cellset:
         return None, None
     land_path = _path_dijkstra(land_cellset, lambda c: _elev_cost(world, world.base_cost, c),
-                               pos, shore)
+                               pos, shore, world.w)
     if land_path is None:
         return None, None
     return land_path, sea_cell
@@ -261,20 +262,20 @@ def _ship_path(world, start, dest):
 
     if world.owner[dy][dx] == OCEAN:
         sea_cellset = _ocean_cellset(world, sea_start, dest)
-        sea_path = (_path_dijkstra(sea_cellset, sea_cost, sea_start, dest)
+        sea_path = (_path_dijkstra(sea_cellset, sea_cost, sea_start, dest, world.w)
                    if dest in sea_cellset else None)
         if sea_path is None:
-            sea_path = _path_dijkstra_nearest(sea_cellset, sea_cost, sea_start, dest)
+            sea_path = _path_dijkstra_nearest(sea_cellset, sea_cost, sea_start, dest, world.w)
         return _join_paths(start_land, sea_path)
 
     dest_land, sea_end = _to_sea_leg(world, dest, _SHIP_LANDING_SEARCH_R)
     sea_target = sea_end if sea_end is not None else dest
     sea_cellset = _ocean_cellset(world, sea_start, sea_target)
-    sea_path = (_path_dijkstra(sea_cellset, sea_cost, sea_start, sea_target)
+    sea_path = (_path_dijkstra(sea_cellset, sea_cost, sea_start, sea_target, world.w)
                if sea_target in sea_cellset else None)
     reached_landing = sea_path is not None
     if sea_path is None:
-        sea_path = _path_dijkstra_nearest(sea_cellset, sea_cost, sea_start, sea_target)
+        sea_path = _path_dijkstra_nearest(sea_cellset, sea_cost, sea_start, sea_target, world.w)
 
     path = _join_paths(start_land, sea_path)
     if reached_landing and sea_end is not None:
@@ -313,11 +314,11 @@ def set_move_order(world, commander, dest):
     else:
         cellset = _bbox_cellset(world, commander.pos, dest, False)
         path = (_path_dijkstra(cellset, lambda c: _elev_cost(world, world.base_cost, c),
-                               commander.pos, dest)
+                               commander.pos, dest, world.w)
                 if dest in cellset else None)
         if path is None:
             path = _path_dijkstra_nearest(cellset, lambda c: _elev_cost(world, world.base_cost, c),
-                                          commander.pos, dest)
+                                          commander.pos, dest, world.w)
     if path is None:
         # Only possible if the commander's own current tile has no
         # traversable neighbor at all in this mode -- describes what's
@@ -412,7 +413,7 @@ def dismantle_ship(world, commander):
     if sids:
         cx, cy = commander.pos
         st = min((world.settlements[sid] for sid in sids),
-                key=lambda s: (s.pos[0] - cx) ** 2 + (s.pos[1] - cy) ** 2)
+                key=lambda s: wrap.dist2_wrap(s.pos, (cx, cy), world.w))
         if not hasattr(st, "resources"):
             st.resources = {}
         st.resources["Logs"] = st.resources.get("Logs", 0) + refund

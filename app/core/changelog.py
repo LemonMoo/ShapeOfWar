@@ -15,105 +15,235 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 
 # Each entry: {"version": int, "title": str, "items": [str, ...]}.
 # Bump CHANGELOG_VERSION and add a new entry at the top whenever a
-# noteworthy batch of changes ships -- keep it player-facing (what changed
-# for someone playing the game), not a commit log.
+# noteworthy batch of changes ships. Patch-notes style: terse, dashed,
+# what-changed-and-by-how-much -- not a prose explanation of the mechanic
+# (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
+    {
+        "version": 25,
+        "title": "River Trade",
+        "items": [
+            "Rivers are now trade routes, not just scenery -- any settlement, town, castle or village within 3 cells of one can ship goods by boat",
+            "Two of your own settlements on the same river trade in a single turn instead of three -- river frontage is now worth settling for",
+            "Foreign trade routes follow river corridors where the water runs the right way, opening instantly (nothing to build) and reaching inland cities no coast touches",
+            "Route preference is now river, then land, then sea",
+            "Domestic shipments are drawn on the map for the first time -- previously only foreign caravans were visible, so most of the trade actually happening was invisible",
+            "River boats have their own look, distinct from overland wagons and sea ships",
+        ],
+    },
+    {
+        "version": 24,
+        "title": "Tell Your Caravans Apart",
+        "items": [
+            "Your own trade caravans now stand out; other nations' caravans crossing your view are drawn small and muted instead of looking identical to yours",
+            "Same for the glowing route highlight -- only your own active trade routes light up brightly",
+        ],
+    },
+    {
+        "version": 23,
+        "title": "Species Now Fight Differently",
+        "items": [
+            "Every species now has real battlefield traits, each with a matching weakness -- pick one and it genuinely changes how your armies play",
+            "Humans: +25% shield block and +15% Gold from foreign sales -- disciplined traders",
+            "Dwarves: +20% troop HP, but they march and swing slower",
+            "Elves: +15% attack and movement speed, but lighter armour (-10% HP)",
+            "Orcs: +18% damage and visibly bigger Swordsmen, but no Cavalry at all and far less use of a shield",
+            "Goblins: +15% movement speed and a 15% chance to dodge any hit outright, but frail (-15% HP)",
+            "The New Game screen now spells out what each species does before you commit",
+        ],
+    },
+    {
+        "version": 22,
+        "title": "Foreign Trade & Diplomacy Come Alive",
+        "items": [
+            "Factions now discover each other once they're near enough neighbors, instead of only when their borders literally touch -- which almost never happened, leaving foreign trade and diplomacy dormant",
+            "As a result foreign trade actually happens now: the Trade Log's Global tab fills in, and trade routes, alliances, and rivalries form between neighboring realms",
+        ],
+    },
+    {
+        "version": 21,
+        "title": "Storage & Economy Rebalance",
+        "items": [
+            "Raw materials no longer flood storage to the brim from turn one -- structural wood (Logs/Hardwood/Softwood/Resin) cut to about a quarter, mining (Sand/Salt/Gems/Stone/ore) cut further; storage now fills gradually and is a real management decision",
+            "Firewood is no longer wildly overproduced -- it was piling up ~128x faster than it's ever burned; cut hard so it doesn't clog storage",
+            "Winter is still safe: forest-poor regions now scrounge more of their own firewood, so the lower production doesn't cause new freezing (verified across many game-years)",
+        ],
+    },
+    {
+        "version": 20,
+        "title": "Much Faster End Turns",
+        "items": [
+            "Big speedup to End Turn on large, late-game worlds -- the AI's sea-invasion check was re-scanning the whole coastline every turn; it's now computed once and cached (~20x faster turn processing)",
+            "Trimmed some unused internal code",
+        ],
+    },
+    {
+        "version": 19,
+        "title": "Map Cleanup, Smoother Turns & Amphibious Claims",
+        "items": [
+            "Removed the relationship lines between your realm and others -- they were just visual clutter",
+            "Ending turns very fast no longer makes the side panels flicker, flash, or vanish (End Turn is now gently rate-limited)",
+            "Claiming a shore region you don't border by land (reachable only by sea) now costs ~1000 Gold and faces a bigger garrison -- curbs runaway early expansion for you and the AI alike",
+        ],
+    },
+    {
+        "version": 18,
+        "title": "Combat Overhaul: Shields, Charges & Formations",
+        "items": [
+            "Swordsmen can now block frontal attacks with their shield -- flank and rear hits still land, so surrounding an enemy matters",
+            "Cavalry are always the fastest on the field and hit hard with a couched charge, but fight softer once bogged down in a melee -- charge, pull back, charge again",
+            "Planning phase: keys 1/2/3 (or buttons) select all Swordsmen/Cavalry/Archers; right-drag a line to form the selection up with rally-flag previews; Space deploys",
+            "Troops pick targets with a bit more thought -- finishing the wounded, not all dogpiling one soldier, cavalry favoring archers",
+        ],
+    },
+    {
+        "version": 17,
+        "title": "Map Panning Jitter Fixed",
+        "items": [
+            "Fixed map symbols, roads, and labels jittering against the terrain while panning",
+        ],
+    },
+    {
+        "version": 16,
+        "title": "Gold No Longer Decays",
+        "items": [
+            "Gold no longer decays in storage -- it's currency, not a perishable good",
+        ],
+    },
+    {
+        "version": 15,
+        "title": "Smoother Map Dragging",
+        "items": [
+            "Rapid map dragging no longer piles up redraws -- panning stays smooth and responsive",
+        ],
+    },
+    {
+        "version": 13,
+        "title": "Trade Log: Tabs and Grouped Purchases",
+        "items": [
+            "Added Domestic/Global tabs to the Trade Log",
+            "Purchases by the same buyer now collapse into one expandable row",
+        ],
+    },
+    {
+        "version": 12,
+        "title": "Settlements Now Keep a Gold Buffer",
+        "items": [
+            "Settlements now hold back a 200 Gold buffer before spending on trade",
+            "That buffer is trade-only -- it's still fully spendable on their own claims and construction",
+        ],
+    },
+    {
+        "version": 11,
+        "title": "The World Wraps",
+        "items": [
+            "The map now wraps east-west -- scroll past one edge and continue onto the other",
+            "Movement, pathfinding, and vision all cross the seam when it's the shorter route",
+            "North/south edges don't wrap; the seam is always open ocean",
+        ],
+    },
+    {
+        "version": 10,
+        "title": "Population Has Real Limits Now",
+        "items": [
+            "Added a population cap per settlement/village, with slow growth toward it",
+            "Added a population floor -- starvation/freezing can shrink but never wipe out a settlement",
+            "Regions with no Forest now scrounge up to 50% of their Firewood need",
+            "Added a 'no local Firewood source' alert",
+            "Regional Markets pay in goods first, Gold only for the rest -- and only if the faction owns Mountain land",
+        ],
+    },
+    {
+        "version": 9,
+        "title": "Real Resource Totals & Economy Rebalance",
+        "items": [
+            "RESOURCES sidebar now totals every settlement and village",
+            "Villages now count toward what you can afford to build",
+            "Mining output cut significantly (Food/Firewood untouched)",
+            "Luxury Goods no longer convert before turn 100, and only trickle in after",
+            "Added keyboard shortcuts: E = End Turn, V = cycle map view",
+        ],
+    },
+    {
+        "version": 8,
+        "title": "Trade Route Diplomacy & Fixes",
+        "items": [
+            "Fixed the Trade Log panel rendering at zero height and disappearing",
+            "Trade routes and shipments now route around third-party territory",
+            "Roads, trade routes, caravans, and ships reveal more fog of war",
+        ],
+    },
+    {
+        "version": 7,
+        "title": "Villages Can Now Trade Between Regions",
+        "items": [
+            "Villages can now send and receive cross-region trade shipments",
+            "Trade routes stay hidden under undiscovered fog until found",
+            "Roads/trade routes reveal fog as built; caravans/ships reveal a radius around themselves",
+        ],
+    },
+    {
+        "version": 6,
+        "title": "End Turn Hitching Fixed",
+        "items": [
+            "Fixed End Turn hitching from recoloring the whole map on any ownership change",
+            "Now only recolors the regions that actually changed",
+        ],
+    },
     {
         "version": 5,
         "title": "Alerts: Know When Something's Wrong",
         "items": [
-            "New Alerts panel (top-left of the map): every settlement or "
-            "village currently short on Food or Firewood, actually losing "
-            "population to starvation/freezing, or overflowing its "
-            "storage now shows up automatically -- click one to jump "
-            "straight to it. A matching warning badge also appears "
-            "directly on that settlement/village's own map marker.",
-            "No more needing to babysit every settlement's numbers turn "
-            "after turn to notice something's going wrong.",
+            "Added an Alerts panel (top-left) for shortages, starvation/freezing, and storage overflow",
+            "Click an alert to jump to the settlement/village; matching badge on its map marker",
         ],
     },
     {
         "version": 4,
         "title": "Fishing, Smarter AI & Trade Diplomacy",
         "items": [
-            "New Fishing industry: settlements/villages near open ocean, a "
-            "river, or a lake now catch Fish for free every turn (bigger "
-            "water = more fish, and it never runs out), smoked into Smoked "
-            "Fish for storage.",
-            "Trade routes now require a real decision: an AI proposing a "
-            "route to you shows up as a pending proposal you can Accept or "
-            "Decline, alongside what they have that you don't -- it never "
-            "auto-forms behind your back, and a route is never even "
-            "offered if there's no possible path between your capitals.",
-            "Enemy factions now behave like real rivals: claiming wildland, "
-            "building settlements (including Castles) and storage when "
-            "they actually need it, and trading with each other and you -- "
-            "capped at one active project at a time so a wealthy AI can't "
-            "steamroll the map.",
-            "Starvation and freezing no longer set in immediately -- a "
-            "settlement gets a real grace period without Food or Firewood "
-            "before population actually starts to suffer, plus several "
-            "food-supply and storage fixes so villages stop starving in "
-            "fresh territory.",
-            "Prosperity now takes roughly a year of sustained good "
-            "conditions to approach full strength, instead of maxing out "
-            "in the first 20-40 turns.",
-            "New villages a growing city spins off now also build roads to "
-            "nearby villages in the same region, not just back to the city.",
-            "Starting Gold raised substantially, so you can actually fund "
-            "early construction or a first trade partnership.",
-            "New Trade Log panel (lower-left, resizable) tracks every "
-            "turn's foreign and domestic trade income/cost, not just a "
-            "single flashed message.",
-            "Roads, trade routes, and every other overland path now avoid "
-            "mountainous terrain much more strongly, and a route is never "
-            "blocked by a river alone -- only a genuine lack of any land "
-            "or sea connection at all stops one from forming.",
-            "Fixed an occasional freeze/skip on End Turn caused by AI "
-            "trade-route activity.",
+            "Added Fishing: free Fish near water, smoked into Smoked Fish for storage",
+            "Trade route proposals now require Accept/Decline",
+            "AI factions now claim wildland, build, and trade (1 project at a time)",
+            "Added a grace period before starvation/freezing sets in",
+            "Prosperity now takes ~1 year of good conditions to max out",
+            "City-grown villages build roads to nearby villages too",
+            "Starting Gold raised",
+            "Added a resizable Trade Log panel (lower-left)",
+            "Roads/trade routes avoid mountains more strongly; a river alone no longer blocks a route",
+            "Fixed an occasional End Turn freeze from AI trade activity",
         ],
     },
     {
         "version": 3,
         "title": "Roads, Spawns & Live Stats",
         "items": [
-            "Roads now avoid crossing rivers/lakes unless there's genuinely "
-            "no reasonable way around, and strongly prefer staying on your "
-            "own territory instead of routing through someone else's land.",
-            "New settlements always start with real farmland somewhere "
-            "nearby, instead of possibly landing in the middle of a "
-            "mountain range or desert.",
-            "Selecting a settlement, village, or commander now stays "
-            "selected across End Turn, with its stats updating live turn "
-            "by turn instead of going stale until you re-click it.",
+            "Roads now avoid rivers/lakes and foreign territory where possible",
+            "New settlements always spawn with farmland nearby",
+            "Settlement/village/commander selection persists across End Turn with live stats",
         ],
     },
     {
         "version": 2,
         "title": "Currency, Economy Cleanup & the Calendar",
         "items": [
-            "Gold is a real, tangible resource now: mined as Gold Ore and "
-            "struck into coin at a Mint, stored and spent at your own "
-            "settlements like any other good -- no more automatic per-turn "
-            "tax income.",
-            "A settlement short on Gold can barter real goods of "
-            "equivalent value instead, for both domestic and foreign trade.",
-            "Fish, Silks, Spices, and Steel -- the last of the old "
-            "placeholder resources -- are fully retired.",
-            "Seasons are now 25 turns each (100 turns/year), with a "
-            "persistent year counter and a year-end summary of your "
-            "faction's biggest gains and losses.",
-            "Fixed a mid-zoom performance cliff on the world map.",
+            "Gold is now mined as Gold Ore and struck into coin -- no more per-turn tax income",
+            "Settlements short on Gold can barter goods of equal value instead",
+            "Removed placeholder resources: Fish, Silks, Spices, Steel",
+            "Seasons are now 25 turns each (100 turns/year)",
+            "Added a year counter and year-end summary",
+            "Fixed a mid-zoom performance cliff",
         ],
     },
     {
         "version": 1,
         "title": "Welcome to Shapes of War",
         "items": [
-            "Progressive territory expansion, fog of war, commanders and "
-            "ships, diplomacy-gated trade, settlement/village population "
-            "and prosperity, and a full in-game Compendium explaining how "
-            "it all works (press F1 any time).",
+            "Initial release: progressive territory expansion, fog of war",
+            "Commanders and ships",
+            "Diplomacy-gated trade",
+            "Settlement/village population and prosperity",
+            "In-game Compendium explaining how it all works (press F1 any time)",
         ],
     },
 ]
