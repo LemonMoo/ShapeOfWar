@@ -1263,14 +1263,13 @@ def _military_article():
             "between Swordsmen and Archers."
         ),
         (
-            "Fair warning: these are NOT currently balanced against each "
-            "other. Archers reach a long way and hurt, which means any army "
-            "crossing open ground pays for the walk — and Cavalry pays most "
-            "of all. Right now Orcs and Elves come out ahead, Goblins sit in "
-            "the middle, and the two species still fielding Cavalry (Humans "
-            "and Dwarves) come off worst. Pick on flavour and on the "
-            "strategic bonuses, not on an assumption that the matchups are "
-            "even."
+            "Fair warning: these are NOT fully balanced against each other. "
+            "Two forces pull against one another — Archers reach a long way, "
+            "so crossing open ground is costly, but a Cavalry charge that "
+            "does connect is devastating. Right now Elves and Dwarves come "
+            "out ahead, Humans sit in the middle, and Orcs and Goblins come "
+            "off worst. Pick on flavour and on the strategic bonuses, not on "
+            "an assumption that the matchups are even."
         ),
         "ARMY COMPOSITION",
         (
@@ -1286,14 +1285,20 @@ def _military_article():
             "or rear always lands. Facing a soldier is toward whatever "
             "they're fighting, so surrounding an enemy turns off their "
             "shield.",
-            "  Cavalry:  mounted — always the fastest on the field — and "
-            "charge specialists. Galloping toward a target builds "
-            "momentum, and the couched impact hit lands for far more than "
-            "their base damage. But that momentum is spent on the hit and "
-            "can't rebuild while they're stuck in a melee, so a bogged-"
-            "down rider actually fights softer than a swordsman. Hit hard, "
-            "pull back, charge again.",
-            "  Archer:   ranged (90-cell range vs. ~12-14 melee), fires "
+            "  Cavalry:  mounted, far and away the fastest thing on the "
+            "field, and built entirely around the charge. Galloping toward "
+            "a target builds momentum, and the couched impact lands for "
+            "several times their base damage — AND ploughs into everyone "
+            "around whoever they hit, splashing a share of that damage "
+            "across the whole knot of soldiers. A charge into a packed "
+            "frontline is the single biggest thing that happens in a "
+            "battle. The splash scales with momentum, so a rider who "
+            "trotted into contact barely jostles anyone; only a real "
+            "gallop scatters a line. Shields and dodges still work against "
+            "it. That momentum is spent on impact and can't rebuild while "
+            "they're stuck in a melee, so a bogged-down rider fights "
+            "softer than a swordsman. Hit hard, pull back, charge again.",
+            "  Archer:   ranged (180-cell range vs. ~12-14 melee), fires "
             "arrows, 80% accuracy — a miss still spends the attack, it "
             "just deals no damage. (A shield can still block an arrow that "
             "comes at a swordsman head-on.)",

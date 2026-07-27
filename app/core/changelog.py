@@ -25,9 +25,12 @@ CHANGELOG_ENTRIES = [
         "items": [
             "Archers now shoot twice as far -- armies pay a real price for crossing open ground, and Cavalry pays the most",
             "Orcs get a big compensating buff: +15% HP and +20% movement speed, so the one army with no Cavalry and the fewest Archers can actually close the distance",
+            "Cavalry rebuilt around the charge: much faster (speed 72 to 110), a full-momentum couched hit now lands for 3.5x its base damage, and momentum rebuilds quicker so a rider who pulls back and comes again is dangerous sooner",
+            "Charges now hit a WHOLE FRONTLINE, not one soldier -- the impact splashes damage into everyone around whoever they struck, scaled by how hard they were galloping. Slamming a packed line is now the single biggest thing that happens in a battle, with a shockwave to match",
+            "Bogged-down riders still fight softer than a swordsman, and shields and dodges still work against the splash -- charge, pull back, charge again",
             "Domestic trade shipments are no longer drawn on the map -- foreign caravans still show",
             "Region names no longer clutter the realm view; the region panel still names them",
-            "Balance note: Orcs and Elves are now the strongest, Humans and Dwarves the weakest. Cavalry-based realms need a follow-up pass",
+            "Balance note: the charge rework pulled the Cavalry realms off the bottom (Dwarves and Humans were the weakest, now upper and mid). Elves are strongest, Goblins now the weakest and due a pass",
         ],
     },
     {

@@ -32,11 +32,29 @@ UNIT_TYPES = {
         "ranged": False, "equipment": ["sword", "shield"],
         "block_chance": 0.35, "block_arc_deg": 150,
     },
+    # Rebuilt around the charge after archer range doubled: a horseman spends
+    # the whole approach being shot at, so the gallop has to be fast enough to
+    # cross that envelope and the impact has to be worth having crossed it.
+    # Speed 72 -> 110, charge_bonus 2.0 -> 3.0 (a full-momentum couched hit is
+    # now 3.5x its base damage, not 2.5x), and charge_ramp 1.2 -> 1.0 so a rider
+    # that pulls back and comes again is dangerous sooner. melee_floor stays
+    # low: bogged down in a scrum they are still the worst unit on the field.
+    #
+    # The AOE numbers below are swept, not chosen. A first pass at radius 30 /
+    # share 0.60 was simply dominant -- it took the two cavalry species from the
+    # bottom of the roster to 94% and 78% and pushed Goblins to 3%. These values
+    # measured the most even spread of everything tried while keeping the charge
+    # unmistakably the biggest single event on the field.
     "cavalry": {
         "name": "Cavalry", "shape": "triangle", "radius": 6,
-        "max_hp": 26, "speed": 72, "range": 12, "damage": 10, "cooldown": 0.5,
+        "max_hp": 26, "speed": 110, "range": 12, "damage": 10, "cooldown": 0.5,
         "ranged": False, "equipment": ["sword"],
-        "charge": True, "charge_bonus": 2.0, "melee_floor": 0.5, "charge_ramp": 1.2,
+        "charge": True, "charge_bonus": 3.0, "melee_floor": 0.5, "charge_ramp": 1.0,
+        # A couched impact doesn't just hit one soldier -- it ploughs into
+        # whatever frontline it reaches. Everyone else within this radius of the
+        # struck target takes `charge_aoe_share` of the impact damage. Scales
+        # with momentum, so only a real gallop scatters a line.
+        "charge_aoe_radius": 22, "charge_aoe_share": 0.35,
     },
     # Range doubled from 90. The armies deploy ~900px apart, so archers still
     # have to advance to shoot rather than opening fire from the spawn line --

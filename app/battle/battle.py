@@ -50,14 +50,18 @@ class Effect:
     ``block`` spark or a cavalry ``impact`` burst — that fades over ``dur``
     seconds. The view reads ``t/dur`` for its animation phase. Damage/logic
     already happened; this is only feedback."""
-    __slots__ = ("x", "y", "kind", "color", "t", "dur")
+    __slots__ = ("x", "y", "kind", "color", "t", "dur", "size")
 
-    def __init__(self, x, y, kind, color, dur):
+    def __init__(self, x, y, kind, color, dur, size=0.0):
         self.x, self.y = x, y
-        self.kind = kind          # "block" | "impact"
+        self.kind = kind          # "block" | "dodge" | "impact" | "shock"
         self.color = color
         self.t = 0.0
         self.dur = dur
+        # Only "shock" uses this: the real AOE radius of the charge that spawned
+        # it, so the drawn ring matches the ground actually hit rather than
+        # being a fixed decorative size.
+        self.size = size
 
     def update(self, dt):
         self.t += dt
@@ -97,8 +101,8 @@ class Battle:
     def spawn_projectile(self, sx, sy, tx, ty, color):
         self.projectiles.append(Projectile(sx, sy, tx, ty, color))
 
-    def spawn_effect(self, x, y, kind, color, dur=0.28):
-        self.effects.append(Effect(x, y, kind, color, dur))
+    def spawn_effect(self, x, y, kind, color, dur=0.28, size=0.0):
+        self.effects.append(Effect(x, y, kind, color, dur, size))
 
     def threat_count(self, enemy):
         """How many living units already target ``enemy`` (see choose_target's

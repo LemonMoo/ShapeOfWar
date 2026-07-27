@@ -34,19 +34,20 @@ Human word bank so nothing crashes.
 # measured 64% even then). Latest tournament run, harness self-checked -- same
 # species on both sides wins 52%, so no positional bias:
 #
-#   Orcs 91%, Elves 75%, Goblins 59%, Humans 19%, Dwarves 6%. Spread 84%.
+#   Elves 83%, Dwarves 73%, Humans 55%, Orcs 30%, Goblins 10%. Spread 73%.
 #
-# The driver is that ARCHERS dominate this sim, and doubling their range (see
-# app/battle/unit_types.py) sharpened it: the more archers a roster fields, the
-# better it does, and CAVALRY is now close to a liability because a horseman
-# spends the whole approach being shot. That is why the two species still
-# fielding cavalry -- Humans and Dwarves -- are now the weak ones, having been
-# mid-table before. Orcs' HP/speed compensation above is measured and
-# deliberate; Humans and Dwarves have had no equivalent pass yet, and cavalry
-# itself probably needs a look (more HP, or a speed edge big enough to cross
-# the new archer envelope) rather than another per-species patch.
+# Two forces now pull against each other. Long archer range punishes any army
+# crossing open ground, which favours archer-heavy rosters; but the reworked
+# cavalry charge -- faster, harder, and splashing damage across whatever line
+# it hits (see app/battle/unit_types.py) -- pays a roster back for keeping
+# horse. Between them the cavalry species climbed off the floor they were on
+# before that rework (Humans 19% -> 55%, Dwarves 6% -> 73%) and the spread came
+# in from 84% to 73%, but it is still wide, and it swings hard on these knobs:
+# a first pass at the charge AOE overshot so far that Humans hit 94% and
+# Goblins 3%.
 #
-# Re-run the tournament if you touch any of these.
+# Goblins are now the weakest and have had no compensating pass; they are the
+# obvious next candidate. Re-run the tournament if you touch any of these.
 SPECIES = {
     # Purely economic edge on paper, so it needs *some* melee identity or it
     # loses every fight by default: disciplined drilled ranks get more out of a

@@ -465,6 +465,22 @@ class BattleView(tk.Frame):
                 off = 10 * f
                 c.create_line(e.x - off, e.y - off * 0.4, e.x + off, e.y + off * 0.4,
                               fill=e.color, width=max(1, int(2 * (1 - f))))
+            elif e.kind == "shock":
+                # The charge's AOE going off: a heavy ring racing out to the
+                # real radius that was damaged (Effect.size), with a second
+                # ring chasing it, so a cavalry charge slamming a line reads as
+                # one big shared event rather than a scatter of single hits.
+                r = e.size * (0.35 + 0.65 * f)
+                width = max(1, int(4 * (1 - f)))
+                c.create_oval(e.x - r, e.y - r, e.x + r, e.y + r,
+                              outline=e.color, width=width)
+                r2 = r * 0.6
+                c.create_oval(e.x - r2, e.y - r2, e.x + r2, e.y + r2,
+                              outline=e.color, width=max(1, width - 1))
+                for ang in (0.0, 1.05, 2.09, 3.14, 4.19, 5.24):
+                    c.create_line(e.x + math.cos(ang) * r2, e.y + math.sin(ang) * r2,
+                                  e.x + math.cos(ang) * r, e.y + math.sin(ang) * r,
+                                  fill=e.color, width=width)
             else:  # "impact" — a couched charge landing
                 r = 7 + 12 * f
                 c.create_oval(e.x - r, e.y - r, e.x + r, e.y + r,

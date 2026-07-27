@@ -144,10 +144,12 @@ class Unit:
             # the cooldown ticks) but deals no damage.
             outcome = "miss"
             if random.random() < self.type.get("accuracy", 1.0):
+                momentum = self.charge
                 outcome = self.target.take_hit(self, dmg, battle)
-                if charging and outcome == "hit" and self.charge >= _IMPACT_CHARGE_MIN:
+                if charging and outcome == "hit" and momentum >= _IMPACT_CHARGE_MIN:
                     battle.spawn_effect(self.target.x, self.target.y, "impact",
                                         self.faction.color)
+                    self._charge_splash(battle, dmg, momentum)
             if charging:
                 self.charge = 0.0   # impact spent -- must back off and re-accelerate
             if self.type.get("ranged"):
@@ -156,3 +158,34 @@ class Unit:
                                         self.faction.color)
             if battle.on_attack:
                 battle.on_attack(self, self.target, outcome)
+
+    def _charge_splash(self, battle, impact_dmg, momentum):
+        """A couched impact ploughs into the whole frontline it reaches, not
+        just the one soldier it struck: every OTHER enemy within
+        ``charge_aoe_radius`` of that soldier takes ``charge_aoe_share`` of the
+        impact damage, scaled by how much momentum the rider actually carried
+        in. Riders who trotted into contact barely jostle anyone; a full
+        gallop scatters a line.
+
+        Splash goes through take_hit like any other blow, so shields still
+        block it from the front and Goblins can still dodge it -- a charge is
+        devastating, not unanswerable. Only ever called on a real impact (see
+        _IMPACT_CHARGE_MIN), which the attack cooldown already rate-limits, so
+        this never runs per-frame per-rider."""
+        radius = self.type.get("charge_aoe_radius", 0.0)
+        if radius <= 0 or self.target is None:
+            return
+        splash = impact_dmg * self.type.get("charge_aoe_share", 0.5) * momentum
+        if splash <= 0:
+            return
+        cx, cy, r2 = self.target.x, self.target.y, radius * radius
+        for army in battle.armies:
+            if army is self.faction:
+                continue          # riders don't trample their own line
+            for other in army.units:
+                if not other.alive or other is self.target:
+                    continue
+                if (other.x - cx) ** 2 + (other.y - cy) ** 2 <= r2:
+                    other.take_hit(self, splash, battle)
+        battle.spawn_effect(cx, cy, "shock", self.faction.color,
+                            dur=0.36, size=radius)
