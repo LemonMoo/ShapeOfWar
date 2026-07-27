@@ -22,23 +22,37 @@ Human word bank so nothing crashes.
 # and Humans trade the lot for a purely economic edge. `mil`/`eco` above are
 # the STRATEGIC layer (faction stats); these are the TACTICAL one (individual
 # soldiers in a battle), and they stack.
-# The multipliers below are TUNED NUMBERS, not guesses: they came out of a
-# round-robin tournament (every species vs every other, both sides played) run
+# The multipliers below started as TUNED NUMBERS, not guesses: they came out of
+# a round-robin tournament (every species vs every other, both sides played) run
 # against this exact battle sim. The first, intuitive pass -- +30% damage for
 # Orcs, +30% HP for Dwarves and so on -- produced a 74% win-rate spread (Orcs
 # 88%, Goblins 14%), because HP/damage dominate this sim while movement speed
-# barely registers. These values hold every species between roughly 42% and 58%.
-# Re-run that tournament if you change any of them.
+# barely registers.
+#
+# THEY ARE NO LONGER BALANCED, and this comment used to claim otherwise. A
+# re-run of that same tournament measures a 87% spread: Elves 94%, Goblins 77%,
+# Humans 40%, Dwarves 33%, Orcs 6%. Two things drove it apart. Most of the gap
+# predates the cavalry changes below (64% spread even before them, so the old
+# "42% to 58%" claim was already stale). The rest is those changes: ARCHERS
+# dominate this sim, so a species whose Cavalry share becomes Archers (Elves,
+# and half of Goblins') gains a lot, while Orcs -- who turn theirs into
+# Swordsmen -- lose ground as everyone around them gets stronger.
+#
+# This is a known, deliberate state: the no-cavalry rosters are a design choice,
+# and rebalancing the compensating multipliers around them is outstanding work.
+# Re-run the tournament if you touch any of these.
 SPECIES = {
     # Purely economic edge on paper, so it needs *some* melee identity or it
     # loses every fight by default: disciplined drilled ranks get more out of a
     # shield than anyone else.
     "Humans":  {"hue": 45,  "mil": +2,  "eco": +6,  "trait": "adaptable realm-builders",
                 "trade_gold_bonus": 0.15, "block_chance_mult": 1.25},
-    # Quick and deadly, but lightly armoured.
+    # Quick and deadly, but lightly armoured. No cavalry -- elves fight as
+    # archers, and their whole Cavalry share becomes more of them.
     "Elves":   {"hue": 160, "mil": -8,  "eco": +14, "trait": "ancient forest sages",
                 "unit_cooldown_mult": 0.85, "unit_speed_mult": 1.15,
-                "unit_hp_mult": 0.90},
+                "unit_hp_mult": 0.90, "no_cavalry": True,
+                "cavalry_becomes": "archers"},
     # Stout and hard to kill, but methodical -- they march AND swing slower.
     # (Slow feet alone were no drawback at all; the slower swing is the real one.)
     "Dwarves": {"hue": 30,  "mil": +10, "eco": +10, "trait": "mountain-forged smiths",
@@ -52,9 +66,13 @@ SPECIES = {
                 "unit_damage_mult": 1.18, "swordsman_size_mult": 1.30,
                 "block_chance_mult": 0.72, "no_cavalry": True},
     # Fast and slippery -- a flat 15% of blows miss them entirely -- but frail.
+    # No cavalry either: goblins raid on foot. Unlike the Orcs, who pour that
+    # share entirely into more Swordsmen, goblins split it evenly between
+    # Swordsmen and Archers -- skirmishers, not a shield wall.
     "Goblins": {"hue": 75,  "mil": -4,  "eco": -6,  "trait": "cunning scavengers",
                 "unit_speed_mult": 1.15, "unit_hp_mult": 0.85,
-                "dodge_chance": 0.15},
+                "dodge_chance": 0.15, "no_cavalry": True,
+                "cavalry_becomes": "split"},
 }
 
 # Every species trait, with the "no modifier" value each defaults to. Anything
@@ -70,6 +88,10 @@ _SPECIES_TRAIT_DEFAULTS = {
     "block_chance_mult": 1.0,   # scales the shield's frontal block chance
     "dodge_chance": 0.0,        # chance (0..1) to evade an incoming hit entirely
     "no_cavalry": False,        # True = this species fields no Cavalry at all
+    "cavalry_becomes": "swordsmen",   # where a no_cavalry species' Cavalry share goes:
+                                       # "swordsmen" (all of it), "archers" (all of it),
+                                       # or "split" (evenly between the two). Either way
+                                       # the species brings the same headcount to the field
     "trade_gold_bonus": 0.0,    # extra fraction of Gold received on a foreign sale
 }
 
@@ -111,7 +133,10 @@ def species_trait_summary(species):
         out.append(f"{round(t['dodge_chance'] * 100)}% chance to dodge any hit")
     pct(t["swordsman_size_mult"], "larger Swordsmen")
     if t["no_cavalry"]:
-        out.append("fields no Cavalry (that share becomes Swordsmen)")
+        becomes = {"split": "that share splits evenly into Swordsmen and Archers",
+                   "archers": "that share becomes Archers"}.get(
+                       t["cavalry_becomes"], "that share becomes Swordsmen")
+        out.append(f"fields no Cavalry ({becomes})")
     if t["trade_gold_bonus"]:
         out.append(f"+{round(t['trade_gold_bonus'] * 100)}% Gold from foreign sales")
     return out

@@ -254,12 +254,24 @@ class App(tk.Tk):
         army = Army(nation.name, nation.color, side, species=species)
         power = nation.stats["military"]
 
-        foot_share, cav_share = 0.4, 0.2
-        if species_traits(species)["no_cavalry"]:
-            foot_share, cav_share = foot_share + cav_share, 0.0
+        traits = species_traits(species)
+        foot_share, archer_share, cav_share = 0.4, 0.25, 0.2
+        if traits["no_cavalry"]:
+            # Same headcount either way -- only where it lands differs. Orcs
+            # pour it all into Swordsmen (a heavier foot line); Goblins split
+            # it, coming out as skirmishers rather than a shield wall.
+            mode = traits["cavalry_becomes"]
+            if mode == "split":
+                foot_share += cav_share / 2
+                archer_share += cav_share / 2
+            elif mode == "archers":
+                archer_share += cav_share
+            else:
+                foot_share += cav_share
+            cav_share = 0.0
         composition = {
             "infantry": round(power * foot_share),
-            "archer": round(power * 0.25),
+            "archer": round(power * archer_share),
         }
         if cav_share:
             composition["cavalry"] = round(power * cav_share)

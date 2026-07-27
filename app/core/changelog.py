@@ -20,6 +20,21 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 28,
+        "title": "Armies Are Made of People Now",
+        "items": [
+            "Military strength is now how many people you can arm: 8% of your adult population across every settlement and village, armed one-for-one by your Weapons, with Shields adding up to +25%",
+            "It no longer rewards owning empty land -- the old formula was mostly territory and Iron, and its Iron term maxed out almost immediately, so your rating barely moved all game",
+            "Unarmed levies still march but count for far less, so a Weaponsmith and Shieldwright are now worth real strength",
+            "Armies on the battlefield scale with that rating, so a developed realm fields hundreds of soldiers instead of a few dozen",
+            "Taking wildland now goes from a real gamble early to near-certain once you're established -- garrisons never grow, so build up and equip first",
+            "Battles with very large armies drop the per-soldier sword/shield glyphs to stay smooth",
+            "Elves now field no Cavalry -- their whole mounted share becomes Archers",
+            "Goblins now field no Cavalry either -- theirs splits evenly into Swordsmen and Archers",
+            "Heads up: with three species now fielding no Cavalry, the matchups are NOT evenly balanced -- archer-heavy rosters (Elves, Goblins) currently win more than the rest. See the Compendium",
+        ],
+    },
+    {
         "version": 27,
         "title": "Trade Log: Global Tab Fixed",
         "items": [

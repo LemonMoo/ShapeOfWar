@@ -19,6 +19,12 @@ _FRAME_MS = 16              # ~60 fps
 _DT = 1 / 60                # fixed simulation step (seconds)
 _SPEEDS = [1, 2, 4, 8]      # sim sub-steps per frame (battle speed multiplier)
 _CLICK_SLOP = 4             # px of movement still counted as a click, not a drag
+_EQUIPMENT_DETAIL_MAX_UNITS = 160   # above this many living soldiers, stop drawing
+                                     # per-soldier sword/shield glyphs -- see render().
+                                     # Set from measurement, not taste: the glyphs cost
+                                     # ~0.13ms per soldier, so 160 is about where a
+                                     # fully-detailed frame still fits in the 16.7ms
+                                     # 60fps budget
 
 
 class BattleView(tk.Frame):
@@ -411,6 +417,9 @@ class BattleView(tk.Frame):
         if self.on_continue:
             self.on_continue()
 
+    def _living_unit_count(self):
+        return sum(1 for army in self.battle.armies for u in army.units if u.alive)
+
     def _draw_equipment(self, c, u):
         """Sword ('t') in the right hand, shield ('o') in the left, oriented to
         whichever way the unit is facing (toward its target)."""
@@ -484,12 +493,22 @@ class BattleView(tk.Frame):
             c.create_text(10, 8, text="PLANNING PHASE — drag your units into position",
                          fill=theme.ACCENT, font=("Segoe UI", 11, "bold"), anchor="nw")
 
+        # Level of detail: the per-soldier sword/shield glyphs are two extra
+        # canvas items each, one of them ROTATED text, and they measure at
+        # ~70-80% of the entire frame cost. Armies now scale with a realm's
+        # population (see resources._recompute_military), so a developed one
+        # fields hundreds of soldiers -- at which point each is a few pixels
+        # across and the glyphs are illegible anyway. Drop them past the
+        # threshold and the same frame costs ~5x less; below it nothing
+        # changes and every soldier still shows its kit.
+        show_equipment = self._living_unit_count() <= _EQUIPMENT_DETAIL_MAX_UNITS
         for army in self.battle.armies:
             for u in army.units:
                 if u.alive:
                     draw_shape(c, u.type["shape"], u.x, u.y,
                                u.radius, army.color)
-                    self._draw_equipment(c, u)
+                    if show_equipment:
+                        self._draw_equipment(c, u)
                     if u in self.selected_units:
                         r = u.radius
                         c.create_oval(u.x - r - 3, u.y - r - 3, u.x + r + 3, u.y + r + 3,

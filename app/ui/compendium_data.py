@@ -1019,6 +1019,19 @@ def _expansion_article():
             "deliberate: it stops both you and the AI from cheaply "
             "leapfrogging across the sea and over-expanding early."
         ),
+        "ODDS",
+        (
+            "Your success chance compares your military rating against the "
+            "garrison's, but a strength ADVANTAGE tells much harder than a "
+            "straight ratio would — being twice as strong is worth far more "
+            "than twice the odds. The practical effect is that wildland goes "
+            "from a genuine gamble to a formality as you develop: an early, "
+            "unarmed realm is around a coin-flip against a typical garrison, "
+            "while an established one with the population and the Weapons and "
+            "Shields to arm it wins upwards of 95% of the time. Wildland "
+            "garrisons never grow — so the way to expand safely is to grow "
+            "and equip first, not to throw a militia at it early."
+        ),
         "RESOLVING IT",
         (
             "For the player, a completed claim triggers an interactive "
@@ -1202,23 +1215,35 @@ def _luxury_article():
 
 
 def _military_article():
-    sp = ", ".join(f"{name} {spec.get('mil', 0):+d}" for name, spec in
+    sp = ", ".join(f"{name} {spec.get('mil', 0):+d}%" for name, spec in
                    sorted(SPECIES.items(), key=lambda kv: -kv[1].get("mil", 0)))
     parts = [
         "Military & Combat",
         "MILITARY RATING",
-        "A single number per faction, recomputed whenever stockpiles change:",
+        (
+            "How many people you can put in the field and arm — not how much "
+            "land you own. Recomputed every turn from three things you build "
+            "up yourself: population, Weapons, Shields."
+        ),
         "\n".join([
-            "  30 (base)",
-            "  + up to 20, scaled by territory (owned cells / 40, capped)",
-            "  + up to 25, scaled by settlement-storage Iron (summed "
-            "across every settlement the faction owns, stock / 40, capped)",
-            "  + up to 20, scaled by the national Steel stockpile "
-            "(stock / 30, capped — see Storage & Spoilage for how Steel "
-            "is kept)",
-            f"  + a flat per-species modifier: {sp}",
-            "  clamped to 15..99 overall.",
+            f"  Your levy is {_pct(R.MOBILIZATION_RATE)} of the ADULT "
+            "population across every settlement AND village you hold. The "
+            "rest are busy farming, mining and hauling.",
+            "  Weapons arm that levy one for one. A soldier you have no "
+            "weapon for still marches, but as militia — worth only "
+            f"{_pct(R.MILITIA_WEIGHT)} of an armed soldier.",
+            f"  Shields add up to +{_pct(R.SHIELD_BONUS)}, scaled by how much "
+            "of your ARMED strength they cover.",
+            f"  Then a per-species modifier: {sp}.",
         ]),
+        (
+            "Two consequences worth planning around. Weapons and Shields "
+            "beyond what your levy can carry are wasted — arming 400 soldiers "
+            "takes 400 Weapons and no more, so population is the ceiling on "
+            "everything. And a realm that never builds a Weaponsmith or "
+            "Shieldwright stays weak no matter how large it grows, because a "
+            "militia mob is a fraction of an equipped army."
+        ),
         "SPECIES TRAITS",
         (
             "Military rating above is the STRATEGIC layer — how big an army a "
@@ -1231,12 +1256,19 @@ def _military_article():
             for name in SPECIES
         ),
         (
-            "These are tuned so no species is strictly best — across a "
-            "round-robin of every matchup, win rates sit within a narrow band "
-            "of each other. Orcs are the notable structural case: they field "
-            "no Cavalry at all, and that share becomes extra Swordsmen "
-            "instead, so they bring the same headcount but fight it all on "
-            "foot with no charge."
+            "Three species field no Cavalry at all, and each puts that share "
+            "somewhere different — same headcount, very different army. Orcs "
+            "turn it into extra Swordsmen (a heavier foot line, no charge). "
+            "Elves turn all of it into Archers. Goblins split it evenly "
+            "between Swordsmen and Archers."
+        ),
+        (
+            "Fair warning: these are NOT currently balanced against each "
+            "other. Massed Archers are strong in this battle simulation, so "
+            "the archer-heavy rosters (Elves especially, then Goblins) beat "
+            "the rest more often than not, and Orcs fare worst. Pick on "
+            "flavour and on the strategic bonuses, not on an assumption that "
+            "the matchups are even."
         ),
         "ARMY COMPOSITION",
         (

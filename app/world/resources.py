@@ -2548,29 +2548,78 @@ def _clamp_to_storage(nation):
 
 
 # --- military, derived from war-relevant stockpiles -------------------------
-def _recompute_military(nation, world):
-    """No food/water shortage penalty any more -- Grain/Fresh Water are
-    retired (see the module docstring), and nothing replaced their role
-    here; a settlement running out of Food under Phase 8 already has its
-    own real consequence (starvation, see advance_settlement_consumption)
-    without also needing to separately dock the whole faction's military.
+MOBILIZATION_RATE = 0.08   # share of a realm's ADULTS it can put in the field without
+                            # collapsing the economy that feeds them -- the rest are
+                            # busy farming, mining and hauling. 8% of a 5,000-adult
+                            # realm is a 400-strong army, which is what makes
+                            # population the real backbone of military power
+MILITIA_WEIGHT = 0.30      # a levied adult with no weapon to give them still shows up,
+                            # but counts for far less than a properly armed soldier.
+                            # NOT zero: most realms never build a Weaponsmith at all
+                            # (measured: several factions still had 0 Weapons at turn
+                            # 600), and a hard equipment gate would freeze them out of
+                            # expanding entirely rather than merely making them bad at it
+SHIELD_BONUS = 0.25        # fully shielding your armed soldiers is worth +25% -- a real
+                            # bonus, but secondary to arming them in the first place
+_MILITARY_FLOOR = 10       # even a broken rump state musters something
+_MILITARY_CEILING = 1200   # sanity bound only, not a balance lever: military feeds
+                            # battlefield unit counts 1:1 (see app/ui/app.py's
+                            # _army_for), and past roughly this the battle canvas
+                            # stops holding 30 FPS however cheap each unit is
 
-    Iron takes a `world` param as of Phase 12: it's a settlement-storage
-    resource now (see _SETTLEMENT_STORAGE_RESOURCES), so there's no more
-    one national Iron number to read off nation.stats["resources"] --
-    summed across every settlement this faction owns instead, same
-    aggregate-economy view trade.py's _faction_settlement_total already
-    needed for the same reason. There used to be a second bonus term here
-    reading Steel off the old national pool -- removed along with Steel
-    itself (see the legacy-resource removal note above compute_region_yield)
-    rather than left reading a resource that no longer exists."""
+
+def _faction_nodes(nation, world, fac_idx=None):
+    """Every Settlement AND Village a faction holds. Villages carry real
+    population and real storage (they receive shipments, see LocalShipment),
+    so anything totalling up a realm's people or goods has to count them --
+    same reasoning as trade._faction_regional_nodes."""
+    nodes = [world.settlements[sid] for sid in nation.meta.get("settlements", [])]
+    if fac_idx is None:
+        try:
+            fac_idx = world.factions.index(nation)
+        except ValueError:
+            return nodes
+    nodes += [v for v in world.villages if v.faction_idx == fac_idx]
+    return nodes
+
+
+def _recompute_military(nation, world, fac_idx=None):
+    """Military strength = how many people you can arm, not how much land
+    you happen to own.
+
+    A realm levies MOBILIZATION_RATE of its adult population across every
+    settlement and village it holds. Weapons arm that levy one-for-one;
+    anyone left over still marches, but as militia (MILITIA_WEIGHT), and
+    Shields add a bonus over whatever fraction of the ARMED troops they
+    cover. So the three things that move this number are exactly the three
+    things a player can actually build up: people, Weapons, Shields.
+
+    This replaces a formula built on territory and Iron stock, which had two
+    problems: it rewarded owning empty land rather than developing it, and
+    its Iron term saturated almost immediately (measured: factions sitting
+    on 40,000+ Iron got the same +25 as one with 1,000), leaving the whole
+    rating nearly static from the early game onward.
+
+    Species `mil` applies as a multiplier rather than the flat +/- it used to
+    be -- a flat +16 was decisive against the old ~50 baseline and rounding
+    error against a levy of several hundred."""
     species = SPECIES.get(nation.meta.get("species"), {})
-    cells = nation.meta.get("cells", 0)
-    iron_stock = sum(getattr(world.settlements[sid], "resources", {}).get("Iron", 0)
-                     for sid in nation.meta.get("settlements", []))
-    iron_bonus = min(25, iron_stock / 40)
-    military = 30 + min(20, cells / 40) + iron_bonus + species.get("mil", 0)
-    nation.stats["military"] = max(15, min(99, int(military)))
+    nodes = _faction_nodes(nation, world, fac_idx)
+
+    adults = sum(getattr(n, "adults", 0) for n in nodes)
+    weapons = sum(getattr(n, "resources", {}).get("Weapons", 0) for n in nodes)
+    shields = sum(getattr(n, "resources", {}).get("Shields", 0) for n in nodes)
+
+    levy = adults * MOBILIZATION_RATE
+    armed = min(levy, weapons)
+    militia = levy - armed
+    strength = armed + militia * MILITIA_WEIGHT
+    if armed > 0:
+        strength *= 1.0 + SHIELD_BONUS * min(armed, shields) / armed
+    strength *= 1.0 + species.get("mil", 0) / 100.0
+
+    nation.stats["military"] = max(_MILITARY_FLOOR,
+                                   min(_MILITARY_CEILING, int(strength)))
 
 
 # --- prosperity: a meter/bar per settlement, driven by the value of goods
@@ -2980,7 +3029,7 @@ def advance_turn(world):
             res[resource] = int(res.get(resource, 0) + amount)
         production_value[fac_idx] += _resource_bundle_value(fac_production)
         _clamp_to_storage(nation)
-        _recompute_military(nation, world)
+        _recompute_military(nation, world, fac_idx)
 
     advance_local_shipments(world)          # deliver anything in transit before it's needed
     _produce_fishing(world)                 # Fish lands directly at water-adjacent nodes

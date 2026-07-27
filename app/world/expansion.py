@@ -44,6 +44,18 @@ SEA_ONLY_STRENGTH_MULT = 1.5      # its garrison is stronger (more soldiers) too
 # actual combat.
 WILDLAND_COMBAT_STRENGTH_MULT = 0.9
 
+# How sharply a strength ADVANTAGE converts into a win. A plain
+# mil/(mil+strength) ratio is very forgiving of being outnumbered: it takes a
+# ~32x advantage to reach 97% odds, which no realm ever reaches. Raising both
+# sides to this power makes concentrated force tell the way it does in
+# practice -- being twice as strong is worth much more than twice the odds --
+# so a developed realm genuinely rolls over wildland (97%+ once it has the
+# population and the Weapons/Shields to arm it, see resources.
+# _recompute_military) while an early, unarmed one still faces a real fight
+# (~35%) against exactly the same garrison. Tuned against measured
+# early/mid/late military ratings from real games, not picked by feel.
+CLAIM_ODDS_EXPONENT = 1.75
+
 
 def is_sea_only_claim(world, faction_idx, region):
     """True when `region` is claimable only across water — naval-reachable
@@ -74,10 +86,13 @@ def claim_odds(nation, region, sea_only=False):
     WILDLAND_COMBAT_STRENGTH_MULT, same as its soldiers are in an
     interactive battle, and bumped by SEA_ONLY_STRENGTH_MULT for an
     amphibious claim (its garrison is bigger)."""
-    mil = nation.stats.get("military", 0)
+    mil = max(0, nation.stats.get("military", 0))
     strength = region.wildland_strength * (SEA_ONLY_STRENGTH_MULT if sea_only else 1.0)
     effective_strength = max(1, strength * WILDLAND_COMBAT_STRENGTH_MULT)
-    return mil / (mil + effective_strength)
+    if mil <= 0:
+        return 0.0
+    k = CLAIM_ODDS_EXPONENT
+    return mil ** k / (mil ** k + effective_strength ** k)
 
 
 def claimable_frontier(world, faction_idx):
