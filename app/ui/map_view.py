@@ -712,6 +712,7 @@ class MapView(tk.Frame):
         self._trade_log_tab = "domestic"
         self._trade_log_entries = []   # structured events, newest last -- see _log_trade_events
         self._trade_log_expanded = set()   # {(turn, tab, group_label), ...} currently expanded
+        self._trade_log_scroll_pending = False   # see _scroll_trade_log_to_end
 
         self.trade_log_frame = tk.Frame(self.canvas, bg="#0d1017",
                                         highlightbackground=theme.LINE,
@@ -925,6 +926,7 @@ class MapView(tk.Frame):
         if not entries:
             tk.Label(frame, text="No trades yet.", bg="#0d1017", fg=theme.MUTED,
                      font=("Segoe UI", 8), anchor="w").pack(fill="x", padx=4, pady=4)
+            self._scroll_trade_log_to_end()
             return
 
         # Group consecutive cost entries by (turn, group label); everything
@@ -978,7 +980,34 @@ class MapView(tk.Frame):
                              font=("Segoe UI", 8), anchor="w", justify="left"
                              ).pack(fill="x", padx=4)
 
-        self._trade_log_canvas.yview_moveto(1.0)
+        self._scroll_trade_log_to_end()
+
+    def _scroll_trade_log_to_end(self):
+        """Scroll the row list to the newest entry -- deferred to idle, which
+        is the whole point.
+
+        The rows frame recomputes the canvas's scrollregion from its
+        <Configure> event, and that fires on idle, AFTER this refresh
+        returns. Scrolling inline therefore moved to the bottom of the
+        PREVIOUS tab's scrollregion: switching from a busy Domestic tab
+        (hundreds of rows) to a quiet Global one (a handful) left the canvas
+        parked hundreds of pixels below the new, much shorter content, and
+        the panel read as completely empty -- not even the "No trades yet."
+        placeholder was on screen. Waiting for idle means the scrollregion
+        matches the rows that actually exist before we move."""
+        canvas = self._trade_log_canvas
+        if self._trade_log_scroll_pending:
+            return
+        self._trade_log_scroll_pending = True
+
+        def do_scroll():
+            self._trade_log_scroll_pending = False
+            if not canvas.winfo_exists():
+                return
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.yview_moveto(1.0)
+
+        self.after_idle(do_scroll)
 
     def _toggle_trade_log_group(self, key):
         if key in self._trade_log_expanded:

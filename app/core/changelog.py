@@ -20,6 +20,15 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 27,
+        "title": "Trade Log: Global Tab Fixed",
+        "items": [
+            "The Trade Log's Global tab showed a blank panel even when your foreign trades were being recorded -- switching from the busy Domestic tab left the list scrolled far past the handful of foreign entries",
+            "Your foreign trade was being logged correctly the whole time; it was just scrolled out of sight",
+            "Same fix applies the other way round, and the 'No trades yet.' placeholder is now actually visible when a tab really is empty",
+        ],
+    },
+    {
         "version": 26,
         "title": "Trade Follows the Roads",
         "items": [
