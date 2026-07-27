@@ -792,17 +792,65 @@ class MapView(tk.Frame):
                       fg="#0d1017" if active else theme.MUTED,
                       activebackground=theme.ACCENT if active else "#1b2029")
 
-    def _payment_desc(self, payment, value):
-        """Render a domestic trade payment (a [(resource, qty), ...] list,
-        real Gold and/or a barter good -- see trade._collect_payment's
-        barter_first path) as trade-log text, e.g. "40 Wheat" or
-        "40 Wheat + 12g" for a partial barter. Falls back to a plain
-        gold-equivalent figure if `payment` is missing (old saves/events
-        from before this field existed) or empty."""
+    def _payment_desc(self, payment, value, sign=0):
+        """Render a trade payment (a [(resource, qty), ...] list, real
+        Gold and/or a barter good -- see trade._collect_payment's
+        barter_first path) as trade-log text, e.g. "40 Wheat" or "40
+        Wheat + 12g" for an unsigned partial barter (sign=0); "-1,000g
+        + -50 Iron" for a buyer mix (sign=-1, EVERY item is a cost --
+        not just the first one visually tagged) so an Iron in a buyer
+        row doesn't read as a gain; "+115g" or "+1,000g + 50 Iron" for a
+        seller mix (sign=1, every item is incoming).
+
+        The sign lives on EVERY entry rather than just on the
+        outer " - " prefix because for a multi-item buyer payment
+        (a real, post-Currency-overhaul case -- reserved Gold at the
+        trade-spending floor short of the full price is now partially
+        made up with barter goods), prefixing only the joined string
+        reads as "-1,000g + 50 Iron" where the Iron item visually looks
+        like it's added to the row instead of it also leaving the
+        buyer -- same shape flatters the trade log into
+        mis-representing the settlement's actual delta. Falls back to a
+        plain signed gold-equivalent figure if `payment` is missing
+        (old saves/events from before this field existed) or empty."""
         if not payment:
+            if sign < 0:
+                return f"-{value:,}g"
+            if sign > 0:
+                return f"+{value:,}g"
             return f"{value:,}g"
-        return " + ".join(f"{qty:,}g" if resource == "Gold" else f"{qty:,} {resource}"
+        prefix = "-" if sign < 0 else ("+" if sign > 0 else "")
+        return " + ".join(f"{prefix}{qty:,}g" if resource == "Gold"
+                          else f"{prefix}{qty:,} {resource}"
                           for resource, qty in payment)
+
+    def _actual_payment_value(self, ev):
+        """Gold-equivalent value of an event's REAL payment list -- the
+        actual (resource, qty) tuple list trade._collect_payment returned
+        (filled in at event creation by advance_caravans /
+        run_regional_trade / advance_regional_shipments), which may be
+        Gold only, a mix of Gold and barter goods, or empty -- possibly
+        reflecting a settlement that ran short on Gold this turn and
+        had _find_barter_good substitute real goods for part of the
+        payment.
+
+        Falls back to ev['price'] for any legacy event predating the
+        payment field (eg. saves written before Currency overhaul, or
+        artificially-recorded informational events with no payment).
+
+        This is what the trade log should sum/display, not ev['price']:
+        agreed price is what the two sides SETTLED on, not what actually
+        left one settlement's resources this turn, and these two numbers
+        diverge whenever the buyer's paying settlement was capped by the
+        _spendable_gold floor, paid partly in barter, or had to
+        undersize the deal for purchasing-power reasons -- the case where
+        the trade log was previously showing numbers that didn't match
+        the resources tab (see also the screened trade-log/inventory
+        discrepancy)."""
+        payment = ev.get("payment")
+        if payment:
+            return sum((resources.resource_value(r, q) for r, q in payment), 0)
+        return ev.get("price", 0)
 
     def _log_trade_events(self):
         """Called once per End Turn: append every financial trade event
@@ -833,21 +881,39 @@ class MapView(tk.Frame):
             other_idx = ev["buyer_idx"] if is_seller else ev["seller_idx"]
             other_name = self.world.factions[other_idx].name
             if etype == "delivered" and is_buyer:
+                # Use the real (resource, qty) list _collect_payment returned
+                # -- what actually left buyer_st.resources this turn, not the
+                # agreed price, which can differ when the buyer was capped by
+                # _spendable_gold or paid partly in barter (see
+                # trade._collect_payment's allow_gold/barter_first paths).
+                # sign=-1: both Gold AND any barter items in the payment
+                # leave the buyer (see _payment_desc docstring on why this
+                # matters for multi-item rows).
                 new_entries.append({"turn": turn, "tab": "foreign", "kind": "cost",
-                                    "group": "You", "value": ev["price"],
+                                    "group": "You",
+                                    "value": self._actual_payment_value(ev),
                                     "text": f"Bought {ev['quantity']} {ev['resource']} "
-                                            f"from {other_name} — -{ev['price']:,}g"})
+                                            f"from {other_name} — "
+                                            f"{self._payment_desc(ev.get('payment'), ev['price'], sign=-1)}"})
             elif etype == "paid" and is_seller:
                 # bonus_gold: a species trade bonus (Humans) on top of the
                 # agreed price -- called out so the perk is visible, not just
-                # silently better numbers.
+                # silently better numbers. The displayed amount is the
+                # ACTUAL boosted payment delivered to seller_st, which is
+                # what ev['payment'] already contains (post-_with_gold_bonus)
+                # -- not "price + bonus_gold", which only matches cleanly
+                # for a pure-Gold payment and silently mis-reports the
+                # seller-side delta for any barter mix the buyer paid in.
+                # sign=1: every item in the boosted payment is incoming
+                # (the seller really did get all of them).
                 bonus = ev.get("bonus_gold", 0)
-                total = ev["price"] + bonus
                 suffix = f" (incl. +{bonus:,}g trade bonus)" if bonus else ""
                 new_entries.append({"turn": turn, "tab": "foreign", "kind": "income",
                                     "group": None,
+                                    "value": self._actual_payment_value(ev),
                                     "text": f"Sold {ev['quantity']} {ev['resource']} "
-                                            f"to {other_name} — +{total:,}g{suffix}"})
+                                            f"to {other_name} — "
+                                            f"{self._payment_desc(ev.get('payment'), ev['price'], sign=1)}{suffix}"})
             elif etype == "lost":
                 # A "lost" event can fire on either leg: outbound (no payment
                 # yet — only the goods were in transit) or return (payment was
@@ -873,22 +939,27 @@ class MapView(tk.Frame):
             # regional-market sale) -- only log ones with a real price,
             # so a free internal restock doesn't show up as "paid +0g".
             if etype == "regional_dispatched" and ev["price"] > 0:
+                # sign=-1: same mix-payment sign rule as the foreign
+                # delivered buyer row above (see _payment_desc).
                 new_entries.append({"turn": turn, "tab": "domestic", "kind": "cost",
-                                    "group": ev["dest_name"], "value": ev["price"],
+                                    "group": ev["dest_name"],
+                                    "value": self._actual_payment_value(ev),
                                     "text": f"buys {ev['quantity']} {ev['resource']} "
                                             f"from {ev['origin_name']} — "
-                                            f"-{self._payment_desc(ev.get('payment'), ev['price'])}"})
+                                            f"{self._payment_desc(ev.get('payment'), ev['price'], sign=-1)}"})
             elif etype == "regional_delivered" and ev["price"] > 0:
                 # Mirror of the foreign-trade "Sold X to Y" wording just
                 # above: the seller (origin) RECEIVES payment, so the entry
                 # reports a +gain, not a +pay. An earlier draft phrased this
                 # as "{origin} paid +Ng", which flipped the direction of
                 # the money flow and read opposite of what actually happened.
+                # sign=1: every item in the payment is incoming to seller_st.
                 new_entries.append({"turn": turn, "tab": "domestic", "kind": "income",
                                     "group": None,
+                                    "value": self._actual_payment_value(ev),
                                     "text": f"{ev['origin_name']} sold "
                                             f"{ev['quantity']} {ev['resource']} to {ev['dest_name']} "
-                                            f"— +{self._payment_desc(ev.get('payment'), ev['price'])}"})
+                                    f"— {self._payment_desc(ev.get('payment'), ev['price'], sign=1)}"})
             elif etype == "regional_lost":
                 new_entries.append({"turn": turn, "tab": "domestic", "kind": "muted",
                                     "group": None,
