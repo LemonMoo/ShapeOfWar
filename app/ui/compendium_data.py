@@ -1263,13 +1263,11 @@ def _military_article():
             "between Swordsmen and Archers."
         ),
         (
-            "These are close to balanced now, with one exception. Two forces "
-            "pull against each other and roughly cancel: Archers reach a long "
-            "way, so crossing open ground is costly, but a Cavalry charge "
-            "that does connect is devastating. Humans, Dwarves, Orcs and "
-            "Elves all land within a few points of each other. Goblins are "
-            "the outlier — hard to hit and quick to swing, they currently "
-            "come out ahead of the rest."
+            "These are about as evenly matched as they have ever been. Two "
+            "forces pull against each other and roughly cancel: Archers reach "
+            "a long way, so crossing open ground is costly, but a Cavalry "
+            "charge that does connect is devastating. No species is a clearly "
+            "wrong pick — choose on flavour and on the strategic bonuses."
         ),
         "ARMY COMPOSITION",
         (

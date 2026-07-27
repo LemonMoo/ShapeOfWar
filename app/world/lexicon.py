@@ -34,24 +34,24 @@ Human word bank so nothing crashes.
 # measured 64% even then). Latest tournament run, harness self-checked -- same
 # species on both sides wins 52%, so no positional bias:
 #
-#   Humans 48%, Dwarves 45%, Orcs 41%, Elves 38%, Goblins 79%. Spread 41%.
-#
-# Four of the five now sit inside eleven points of each other, which is the
-# closest this roster has ever measured; Goblins are the one outlier, having
-# gone from weakest (10%) to strongest in a single pass. Two forces pull
-# against each other and roughly cancel: long archer range punishes any army
-# crossing open ground, while the reworked cavalry charge -- faster, harder,
-# splashing damage across whatever line it hits -- pays a roster back for
-# keeping horse.
+# the Goblin dodge/cooldown pair below at .18/.97 measured a 25% and a 28%
+# spread across two separate seed batches -- the tightest this roster has ever
+# come. Two forces pull against each other and roughly cancel: long archer
+# range punishes any army crossing open ground, while the reworked cavalry
+# charge -- faster, harder, splashing damage across whatever line it hits --
+# pays a roster back for keeping horse.
 #
 # MEASUREMENT CAVEAT, learned the hard way: individual matchups here are
 # knife-edge and resolve almost deterministically, so a species' win rate can
 # swing 20+ points between seed batches while the overall SPREAD stays stable.
-# Trust the spread, sample plenty of rounds, and don't tune against a single
-# run. Goblin dodge/cooldown at .18/.97 measured a 25-28% spread across two
-# batches but buffs so small (+3% attack speed) they'd read as noise in the
-# UI; .18/.88 was chosen to make the buff actually felt, at the cost of
-# Goblins sitting on top. Re-run the tournament if you touch any of these.
+# Measured directly on this very setting: Goblins came out at 62% in one batch
+# and 38% in the other. Trust the spread, sample plenty of rounds, and never
+# tune against a single run.
+#
+# The alternative considered was .18/.88 -- a far more VISIBLE buff (+12%
+# attack speed rather than +3%), but it measured a 41% spread with Goblins
+# alone on 79%. Tightest balance was chosen over the bigger-feeling number.
+# Re-run the tournament if you touch any of these.
 SPECIES = {
     # Purely economic edge on paper, so it needs *some* melee identity or it
     # loses every fight by default: disciplined drilled ranks get more out of a
@@ -94,7 +94,7 @@ SPECIES = {
     # species after the cavalry rework.
     "Goblins": {"hue": 75,  "mil": -4,  "eco": -6,  "trait": "cunning scavengers",
                 "unit_speed_mult": 1.15, "unit_hp_mult": 0.85,
-                "unit_cooldown_mult": 0.88,
+                "unit_cooldown_mult": 0.97,
                 "dodge_chance": 0.18, "no_cavalry": True,
                 "cavalry_becomes": "split"},
 }

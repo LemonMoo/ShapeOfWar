@@ -20,6 +20,14 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 30,
+        "title": "Species Balance Tightened",
+        "items": [
+            "Goblins' attack-speed bonus dialled back from ~12% to ~3% -- at 12% they were beating every other species handily; their 18% dodge is unchanged",
+            "That single change brings the whole roster to its closest matchup spread yet -- no species is now a clearly wrong pick",
+        ],
+    },
+    {
         "version": 29,
         "title": "Longer Bows, Tougher Orcs, Cleaner Map",
         "items": [
