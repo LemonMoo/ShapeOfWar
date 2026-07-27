@@ -33,7 +33,8 @@ from app.world import diplomacy
 from app.world import rivers
 from app.world.worldgen import (POPULATION_RANGE, SETTLEMENT_TAX_INCOME,
                                 CHILDREN_FRACTION_RANGE,
-                                STARTING_POPULATION_FRACTION_RANGE)
+                                STARTING_POPULATION_FRACTION_RANGE,
+                                ROAD_TRAVEL_SPEEDUP)
 from app.world.lexicon import SPECIES, species_trait_summary
 
 RESOURCE_CATEGORIES = ["Crops", "Livestock", "Forestry", "Mining", "Fishing",
@@ -676,7 +677,9 @@ def _local_logistics_article():
         ),
         "THE SHIPMENT ITSELF",
         (
-            "A straight-line path between the two positions, taking "
+            "A real path over the ground, following the region's roads "
+            "wherever they go the right way — not a line drawn straight "
+            "across the wilderness. Taking "
             f"{R.MIN_LOCAL_TRANSIT_TURNS}–{R.MAX_LOCAL_TRANSIT_TURNS} "
             "turns depending on distance, "
             f"{R.LOCAL_SHIPMENT_MIN_QUANTITY}–"
@@ -755,6 +758,14 @@ def _regional_markets_article():
             "outbound per settlement at once. Overland or by river (see "
             "below) — a faction whose settlements are only reachable by "
             "open SEA from each other can't regional-trade between them yet."
+        ),
+        (
+            "An overland haul follows the road network wherever it runs the "
+            "right way, and moves "
+            f"{ROAD_TRAVEL_SPEEDUP:g}x faster along it than across "
+            "open country — so a road you built for one reason quietly speeds "
+            "up every shipment that can use it, and a region left unconnected "
+            "trades slowly. Foreign caravans use your roads the same way."
         ),
         "BY RIVER",
         (

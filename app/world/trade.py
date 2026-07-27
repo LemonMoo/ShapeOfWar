@@ -38,8 +38,8 @@ import random
 
 from app.world.world_map import Stance
 from app.world.worldgen import (OCEAN, UNCLAIMED, _path_dijkstra, _nearest_ocean_cell,
-                                _elev_cost, _sea_cost, _bfs_distance,
-                                _SEA_COAST_REACH)
+                                _elev_cost, _sea_cost, _bfs_distance, road_cells,
+                                path_transit_cells, _SEA_COAST_REACH)
 from app.world.resources import (RESOURCES, BASE_VALUE_BY_TIER, RESOURCE_SPAWN,
                                  _storage_cap, _clamp_to_storage,
                                  settlement_needs, _FOOD_SOURCES, _LUXURY_GOODS,
@@ -532,7 +532,11 @@ def _land_path_between(world, a_pos, b_pos, pad=_TRADE_BBOX_PAD, friendly_idxs=N
     any THIRD faction's territory (see worldgen._elev_cost) -- a real
     preference, not a wall, so a route only actually crosses foreign land
     when there's genuinely no reasonable way around it, same as every
-    other terrain toll here."""
+    other terrain toll here.
+
+    Every caller here is moving GOODS, not building anything, so all of
+    them get the road discount: a wagon train uses the road network where
+    one exists rather than striking off across the wilderness beside it."""
     ay, by = a_pos[1], b_pos[1]
     y0, y1 = sorted((ay, by))
     by0 = max(0, y0 - pad)
@@ -542,9 +546,11 @@ def _land_path_between(world, a_pos, b_pos, pad=_TRADE_BBOX_PAD, friendly_idxs=N
                      if world.owner[y][x] != OCEAN}
     if a_pos not in land_cellset or b_pos not in land_cellset:
         return None
+    roads = road_cells(world)
     return _path_dijkstra(land_cellset,
                           lambda c: _elev_cost(world, world.base_cost, c,
-                                               friendly_idxs=friendly_idxs),
+                                               friendly_idxs=friendly_idxs,
+                                               roads=roads),
                           a_pos, b_pos, world.w)
 
 
@@ -1480,7 +1486,7 @@ class RegionalShipment:
 
     def __init__(self, faction_idx, resource, quantity, price, path,
                 origin_id, dest_id, origin_kind="settlement", dest_kind="settlement",
-                transport="land"):
+                transport="land", transit_cells=None):
         self.id = RegionalShipment._next_id
         RegionalShipment._next_id += 1
         self.faction_idx = faction_idx
@@ -1502,9 +1508,15 @@ class RegionalShipment:
         cells_per_turn = (RIVER_SHIPMENT_CELLS_PER_TURN if river
                           else REGIONAL_SHIPMENT_CELLS_PER_TURN)
         floor = MIN_RIVER_TRANSIT_TURNS if river else MIN_REGIONAL_TRANSIT_TURNS
+        # `transit_cells` is the path's length DISCOUNTED for the stretches
+        # that run along a road (worldgen.path_transit_cells) -- the caller
+        # computes it because it needs the world to know where the roads are.
+        # Falls back to the raw cell count, which is what a pre-roads pickle
+        # and any caller that doesn't care will get.
+        length = len(path) if transit_cells is None else transit_cells
         self.turns_total = max(floor,
                               min(MAX_REGIONAL_TRANSIT_TURNS,
-                                  round(len(path) / cells_per_turn)))
+                                  round(length / cells_per_turn)))
         self.turn_progress = 0
         # Currency overhaul: what the destination settlement actually paid
         # at dispatch (Gold and/or a barter good, see _collect_payment) --
@@ -1630,7 +1642,8 @@ def run_regional_trade(world):
                     total_price = round(qty * price)
                     shipment = RegionalShipment(fac_idx, resource, qty, price, path,
                                                 node.id, other.id, kind, other_kind,
-                                                transport=transport)
+                                                transport=transport,
+                                                transit_cells=path_transit_cells(world, path))
                     shipment.payment = _collect_payment(other, total_price, world, season,
                                                         barter_first=True, allow_gold=has_gold)
                     world.regional_shipments.append(shipment)
@@ -1793,7 +1806,8 @@ def run_sell_to_city(world):
                 st.resources[resource] = max(0, st.resources.get(resource, 0) - qty)
                 world.regional_shipments.append(RegionalShipment(
                     fac_idx, resource, qty, 0.0, path, st.id, city.id,
-                    transport=transport))
+                    transport=transport,
+                    transit_cells=path_transit_cells(world, path)))
                 events.append({"type": "sold_to_city", "faction_idx": fac_idx,
                               "resource": resource, "quantity": qty,
                               "origin_name": st.name, "dest_name": city.name})

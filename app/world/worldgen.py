@@ -1072,6 +1072,20 @@ _ROAD_FOREIGN_TERRITORY_PEN = 20.0   # building a road across land you don't own
                                      # param) -- not blocked, so a faction boxed
                                      # into an awkward shape by its neighbors can
                                      # still always connect its own settlements
+_ROAD_TRAVEL_MULT = 0.3   # a cell an existing road already runs through costs this
+                          # fraction of what the same terrain costs off-road -- roads
+                          # exist precisely so traffic doesn't have to fight the
+                          # ground, and this is what makes goods actually follow the
+                          # network instead of striking off across open wilderness.
+                          # Applied LAST, so it discounts the tolls above too: a road
+                          # crossing a river has a bridge on it, which is exactly why
+                          # a route should prefer to cross there rather than ford
+                          # somewhere random
+ROAD_TRAVEL_SPEEDUP = 1.6   # ...and once on a road, goods move this much faster per
+                            # turn. Without this, road-following would perversely make
+                            # deliveries SLOWER: transit time is derived from path
+                            # length in cells, and a road that bends around a ridge is
+                            # longer than the straight line it replaced
 _SEA_COAST_REACH = 3      # cells from open water a settlement still counts as a port
 _DIAG = 2 ** 0.5
 
@@ -1122,7 +1136,51 @@ def _path_dijkstra(cellset, cost_fn, start, goal, width):
     return path
 
 
-def _elev_cost(world, base_cost, cell, faction_idx=None, friendly_idxs=None):
+def road_cells(world):
+    """Every cell any road in the world runs through, as a set — the thing
+    that makes `_elev_cost`'s road discount a cheap set lookup instead of a
+    walk over every segment in the world per cell evaluated.
+
+    Roads are stored as endpoint segments per region (see
+    world.roads_by_region), so they have to be rasterized to get cells;
+    same straight-segment walk resources._nearby_road_cells does, just
+    world-wide and without a radius. Segments never straddle the east-west
+    seam (roads only connect nodes within/between adjacent land regions,
+    and land is never seamless-wrapped), so plain interpolation is correct.
+
+    Cached on the world, but unlike the other static-geography caches here
+    the road network genuinely does grow during play (construction.py
+    finishes a road project, a city grows a village and links it up), so
+    the cache is keyed on the total segment count — a cheap sum over
+    regions, not cells — and rebuilds itself whenever that changes. That
+    keeps every road-adding site from having to remember to invalidate."""
+    signature = sum(len(segs) for segs in world.roads_by_region.values())
+    cached = getattr(world, "_road_cells_cache", None)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    cells = set()
+    for segs in world.roads_by_region.values():
+        for (ax, ay), (bx, by), _tier in segs:
+            dx, dy = bx - ax, by - ay
+            steps = max(abs(dx), abs(dy), 1)
+            for i in range(steps + 1):
+                cells.add((round(ax + dx * i / steps), round(ay + dy * i / steps)))
+    world._road_cells_cache = (signature, cells)
+    return cells
+
+
+def path_transit_cells(world, path):
+    """Effective length of `path` for transit-time purposes: stretches that
+    run along an existing road count for less than open-country cells, by
+    ROAD_TRAVEL_SPEEDUP. See that constant for why deriving transit time
+    from the raw cell count would otherwise punish routes for using the
+    road network at all."""
+    roads = road_cells(world)
+    on_road = sum(1 for cell in path if cell in roads)
+    return len(path) - on_road * (1.0 - 1.0 / ROAD_TRAVEL_SPEEDUP)
+
+
+def _elev_cost(world, base_cost, cell, faction_idx=None, friendly_idxs=None, roads=None):
     """Land-routing cost: base terrain noise plus a steep penalty for high
     elevation and a toll for crossing a river/lake — shared by every land
     pathfinder in the game (castle-connecting roads in construction.py,
@@ -1145,7 +1203,15 @@ def _elev_cost(world, base_cost, cell, faction_idx=None, friendly_idxs=None):
     existing river/mountain tolls above -- a trade route or a commander's
     own movement can still cross it, unlike being flatly forbidden. Left
     at its all-None default for every caller where "whose land is this"
-    shouldn't matter at all (a scout can walk anywhere)."""
+    shouldn't matter at all (a scout can walk anywhere).
+
+    `roads`, when given (the set from road_cells), makes cells an existing
+    road already runs through much cheaper, so traffic follows the network
+    rather than striking off cross-country. Opt-in per caller rather than
+    always-on: goods and travellers should use the roads, but road
+    CONSTRUCTION itself must keep pathing on raw terrain, or every new road
+    would snap onto whatever was built first instead of taking its own
+    honest line."""
     x, y = cell
     cost = base_cost[y][x]
     over = world.height[y][x] - _ROAD_ELEV_START
@@ -1163,6 +1229,8 @@ def _elev_cost(world, base_cost, cell, faction_idx=None, friendly_idxs=None):
         owner = world.owner[y][x]
         if owner >= 0 and owner != faction_idx:
             cost += _ROAD_FOREIGN_TERRITORY_PEN
+    if roads is not None and cell in roads:
+        cost *= _ROAD_TRAVEL_MULT
     return cost
 
 

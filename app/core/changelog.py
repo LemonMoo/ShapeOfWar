@@ -20,6 +20,16 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 26,
+        "title": "Trade Follows the Roads",
+        "items": [
+            "Goods now travel on your road network instead of trailing across open wilderness -- roads were decoration for trade until now",
+            "Same-region shipments follow a real route over the ground; they used to be drawn as a dead-straight line whatever was in the way",
+            "Foreign caravans and cross-region shipments hug the roads too, and cross rivers at the bridges the roads already use",
+            "Hauling along a road is 1.6x faster than open country, so a road built for any reason speeds up every shipment that can use it",
+        ],
+    },
+    {
         "version": 25,
         "title": "River Trade",
         "items": [

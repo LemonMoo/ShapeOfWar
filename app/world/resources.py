@@ -27,7 +27,8 @@ import random
 from collections import defaultdict
 
 from app.world.lexicon import SPECIES
-from app.world.worldgen import OCEAN
+from app.world.worldgen import (OCEAN, _path_dijkstra, _elev_cost, road_cells,
+                                path_transit_cells)
 
 # --- the resource registry --------------------------------------------------
 # category + tier (1 raw agricultural/pastoral .. 4 manufactured), per the
@@ -2117,6 +2118,65 @@ LOCAL_SHIPMENT_MAX_QUANTITY = 60   # raised from 30 -- a Harvest-season
                                    # (see VILLAGE_STORAGE_BASE)
 LOCAL_SHIPMENT_CELLS_PER_TURN = 8
 MIN_LOCAL_TRANSIT_TURNS, MAX_LOCAL_TRANSIT_TURNS = 1, 5
+_LOCAL_PATH_BBOX_PAD = 8    # cells of slack around the two endpoints for the local
+                             # path search -- enough room to bow out to a nearby road
+                             # or around a lake without turning a short intra-region
+                             # hop into a map-wide Dijkstra
+LOCAL_PATH_BUDGET_PER_TURN = 2   # brand-new (uncached) local path searches per turn,
+                                  # same reasoning and same shape as trade's
+                                  # REGIONAL_PATH_BUDGET_PER_TURN: node pairs are
+                                  # cached forever once solved, but new Villages keep
+                                  # appearing all game, so the uncached pool never
+                                  # fully closes and an unbounded burst would hitch
+
+
+def _local_path(world, region, a_node, b_node):
+    """Terrain- and road-aware path between two nodes in the same region,
+    for a LocalShipment to actually follow. Roads get the usual discount
+    (worldgen._elev_cost's `roads`), which within a region means shipments
+    ride the very road network the region built to connect these nodes,
+    instead of cutting cross-country between them.
+
+    Cached forever per node pair -- settlements and villages never move --
+    keyed by (kind, id) on both sides, since settlement ids and village ids
+    are independent, overlapping id spaces (same care as trade's
+    _get_regional_path_cache).
+
+    Returns None when there's no path, or when this turn's search budget is
+    already spent; the caller falls back to a straight line for that
+    dispatch and tries again for the pair next time (deliberately NOT
+    caching the fallback, which would make one busy turn permanently
+    saddle a pair with a bad path)."""
+    cache = getattr(world, "_local_path_cache", None)
+    if cache is None:
+        cache = {}
+        world._local_path_cache = cache
+    key = frozenset(((a_node[0], a_node[1].id), (b_node[0], b_node[1].id)))
+    if key in cache:
+        return cache[key]
+    budget = getattr(world, "_local_path_budget", LOCAL_PATH_BUDGET_PER_TURN)
+    if budget <= 0:
+        return None
+    world._local_path_budget = budget - 1
+
+    a_pos, b_pos = a_node[1].pos, b_node[1].pos
+    pad = _LOCAL_PATH_BBOX_PAD
+    x0, x1 = sorted((a_pos[0], b_pos[0]))
+    y0, y1 = sorted((a_pos[1], b_pos[1]))
+    # No wrap handling: both ends are land nodes in one region, and land never
+    # straddles the east-west seam (see wrap.py / worldgen's seamlessness).
+    cellset = {(x, y)
+               for y in range(max(0, y0 - pad), min(world.h, y1 + pad + 1))
+               for x in range(max(0, x0 - pad), min(world.w, x1 + pad + 1))
+               if world.owner[y][x] != OCEAN}
+    roads = road_cells(world)
+    path = _path_dijkstra(cellset,
+                          lambda c: _elev_cost(world, world.base_cost, c,
+                                               faction_idx=region.faction_idx,
+                                               roads=roads),
+                          a_pos, b_pos, world.w)
+    cache[key] = path
+    return path
 
 # Every input any settlement-storage recipe actually consumes (Wheat,
 # Flour, Milk, Wool, Cotton, Cloth -- see RECIPES) -- the "a settlement
@@ -2239,14 +2299,19 @@ class LocalShipment:
     behind "nothing is teleported" (see the module docstring above). No
     price/payment involved (this is internal redistribution, not a trade
     deal) -- otherwise the same "takes real turns along a real path" shape
-    as trade.TradeCaravan. The path is a straight line between the two
-    positions rather than the region's actual winding road, a deliberate
-    simplification (see the module docstring's note on transport scope) --
-    good enough for transit-time and map-rendering purposes without
-    needing a full graph walk over the region's road segments."""
+    as trade.TradeCaravan.
+
+    `path`, when the caller can supply one (_local_path), is the real
+    terrain- and road-aware route, so a wagon is drawn following the
+    region's roads rather than trailing across open wilderness. It falls
+    back to a straight two-point line when no path exists or the turn's
+    pathfinding budget is spent -- geometrically wrong but never wrong
+    enough to break anything, since nothing about delivery depends on the
+    cells in between."""
 
     def __init__(self, faction_idx, resource, quantity,
-                origin_kind, origin_id, dest_kind, dest_id, origin_pos, dest_pos):
+                origin_kind, origin_id, dest_kind, dest_id, origin_pos, dest_pos,
+                path=None, transit_cells=None):
         self.faction_idx = faction_idx
         self.resource = resource
         self.quantity = quantity
@@ -2254,23 +2319,35 @@ class LocalShipment:
         self.origin_id = origin_id
         self.dest_kind = dest_kind
         self.dest_id = dest_id
-        self.path = [origin_pos, dest_pos]
-        # Both ends are land nodes in the same region (settlement/village) --
-        # land never straddles the east-west seam (see wrap.py / worldgen's
-        # seamlessness), so a plain straight-line distance is already correct
-        # here; there's no wrap case to account for.
-        dist = ((origin_pos[0] - dest_pos[0]) ** 2 + (origin_pos[1] - dest_pos[1]) ** 2) ** 0.5
+        self.path = path if path else [origin_pos, dest_pos]
+        if transit_cells is not None:
+            dist = transit_cells
+        else:
+            # Straight-line fallback. Both ends are land nodes in the same
+            # region -- land never straddles the east-west seam (see wrap.py /
+            # worldgen's seamlessness), so plain distance is already correct.
+            dist = ((origin_pos[0] - dest_pos[0]) ** 2
+                    + (origin_pos[1] - dest_pos[1]) ** 2) ** 0.5
         self.turns_total = max(MIN_LOCAL_TRANSIT_TURNS,
                               min(MAX_LOCAL_TRANSIT_TURNS, round(dist / LOCAL_SHIPMENT_CELLS_PER_TURN)))
         self.turn_progress = 0
 
     @property
     def pos(self):
-        """Interpolated position along the straight path -- for map
-        rendering, same convention as trade.TradeCaravan.pos."""
+        """Position along the path -- for map rendering, same convention as
+        trade.TradeCaravan.pos, except interpolated BETWEEN path cells
+        rather than snapped to one. Local hops are short: a real path is
+        often only a handful of cells, and the straight-line fallback is
+        just two, so snapping to the nearest cell would make a wagon jump
+        in visible lurches instead of rolling."""
         frac = min(1.0, self.turn_progress / self.turns_total)
-        (x0, y0), (x1, y1) = self.path
-        return (x0 + (x1 - x0) * frac, y0 + (y1 - y0) * frac)
+        span = frac * (len(self.path) - 1)
+        idx = min(int(span), len(self.path) - 2) if len(self.path) > 1 else 0
+        if len(self.path) < 2:
+            return self.path[0]
+        (x0, y0), (x1, y1) = self.path[idx], self.path[idx + 1]
+        t = span - idx
+        return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
 
 
 def _active_outgoing_shipments(world, kind, node_id):
@@ -2293,6 +2370,7 @@ def run_local_logistics(world):
     greedy-first-match style as trade.run_trade_ai. Fully automatic --
     no player or AI decision involved, matching how the rest of this
     economy already works."""
+    world._local_path_budget = LOCAL_PATH_BUDGET_PER_TURN
     for region in world.regions:
         if region.faction_idx < 0:
             continue
@@ -2320,9 +2398,11 @@ def run_local_logistics(world):
                     if not hasattr(node, "resources"):
                         node.resources = {}
                     node.resources[resource] = node.resources.get(resource, 0) - qty
+                    path = _local_path(world, region, (kind, node), (other_kind, other))
                     world.local_shipments.append(LocalShipment(
                         region.faction_idx, resource, qty, kind, node.id,
-                        other_kind, other.id, node.pos, other.pos))
+                        other_kind, other.id, node.pos, other.pos, path=path,
+                        transit_cells=path_transit_cells(world, path) if path else None))
                     dispatched = True
                     break
                 if dispatched:
