@@ -34,20 +34,24 @@ Human word bank so nothing crashes.
 # measured 64% even then). Latest tournament run, harness self-checked -- same
 # species on both sides wins 52%, so no positional bias:
 #
-#   Elves 83%, Dwarves 73%, Humans 55%, Orcs 30%, Goblins 10%. Spread 73%.
+#   Humans 48%, Dwarves 45%, Orcs 41%, Elves 38%, Goblins 79%. Spread 41%.
 #
-# Two forces now pull against each other. Long archer range punishes any army
-# crossing open ground, which favours archer-heavy rosters; but the reworked
-# cavalry charge -- faster, harder, and splashing damage across whatever line
-# it hits (see app/battle/unit_types.py) -- pays a roster back for keeping
-# horse. Between them the cavalry species climbed off the floor they were on
-# before that rework (Humans 19% -> 55%, Dwarves 6% -> 73%) and the spread came
-# in from 84% to 73%, but it is still wide, and it swings hard on these knobs:
-# a first pass at the charge AOE overshot so far that Humans hit 94% and
-# Goblins 3%.
+# Four of the five now sit inside eleven points of each other, which is the
+# closest this roster has ever measured; Goblins are the one outlier, having
+# gone from weakest (10%) to strongest in a single pass. Two forces pull
+# against each other and roughly cancel: long archer range punishes any army
+# crossing open ground, while the reworked cavalry charge -- faster, harder,
+# splashing damage across whatever line it hits -- pays a roster back for
+# keeping horse.
 #
-# Goblins are now the weakest and have had no compensating pass; they are the
-# obvious next candidate. Re-run the tournament if you touch any of these.
+# MEASUREMENT CAVEAT, learned the hard way: individual matchups here are
+# knife-edge and resolve almost deterministically, so a species' win rate can
+# swing 20+ points between seed batches while the overall SPREAD stays stable.
+# Trust the spread, sample plenty of rounds, and don't tune against a single
+# run. Goblin dodge/cooldown at .18/.97 measured a 25-28% spread across two
+# batches but buffs so small (+3% attack speed) they'd read as noise in the
+# UI; .18/.88 was chosen to make the buff actually felt, at the cost of
+# Goblins sitting on top. Re-run the tournament if you touch any of these.
 SPECIES = {
     # Purely economic edge on paper, so it needs *some* melee identity or it
     # loses every fight by default: disciplined drilled ranks get more out of a
@@ -79,15 +83,19 @@ SPECIES = {
     # even split against Elves.
     "Orcs":    {"hue": 95,  "mil": +16, "eco": -8,  "trait": "warband raiders",
                 "unit_damage_mult": 1.18, "swordsman_size_mult": 1.30,
-                "unit_hp_mult": 1.15, "unit_speed_mult": 1.20,
+                "unit_hp_mult": 1.22, "unit_speed_mult": 1.20,
                 "block_chance_mult": 0.72, "no_cavalry": True},
-    # Fast and slippery -- a flat 15% of blows miss them entirely -- but frail.
-    # No cavalry either: goblins raid on foot. Unlike the Orcs, who pour that
-    # share entirely into more Swordsmen, goblins split it evenly between
-    # Swordsmen and Archers -- skirmishers, not a shield wall.
+    # Fast and slippery -- a quarter of all blows miss them entirely -- and
+    # they swing quicker than anyone, but they are the frailest thing on the
+    # field. No cavalry either: goblins raid on foot. Unlike the Orcs, who pour
+    # that share entirely into more Swordsmen, goblins split it evenly between
+    # Swordsmen and Archers -- skirmishers, not a shield wall. The dodge and
+    # attack-speed numbers are compensation for having measured as the weakest
+    # species after the cavalry rework.
     "Goblins": {"hue": 75,  "mil": -4,  "eco": -6,  "trait": "cunning scavengers",
                 "unit_speed_mult": 1.15, "unit_hp_mult": 0.85,
-                "dodge_chance": 0.15, "no_cavalry": True,
+                "unit_cooldown_mult": 0.88,
+                "dodge_chance": 0.18, "no_cavalry": True,
                 "cavalry_becomes": "split"},
 }
 

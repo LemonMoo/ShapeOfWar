@@ -30,7 +30,9 @@ CHANGELOG_ENTRIES = [
             "Bogged-down riders still fight softer than a swordsman, and shields and dodges still work against the splash -- charge, pull back, charge again",
             "Domestic trade shipments are no longer drawn on the map -- foreign caravans still show",
             "Region names no longer clutter the realm view; the region panel still names them",
-            "Balance note: the charge rework pulled the Cavalry realms off the bottom (Dwarves and Humans were the weakest, now upper and mid). Elves are strongest, Goblins now the weakest and due a pass",
+            "Goblins are harder to pin down: dodge raised to 18% and they now swing ~12% faster",
+            "Orcs get a bit more meat on them: troop HP up from +15% to +22%",
+            "Balance: species are much closer than they were -- Humans, Dwarves, Orcs and Elves now land within a few points of each other. Goblins are the current outlier on top",
         ],
     },
     {
