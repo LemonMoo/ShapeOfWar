@@ -89,7 +89,13 @@ def save_game(world, save_id, created_at=None):
 
 def load_game(save_id):
     with open(_world_path(save_id), "rb") as f:
-        return pickle.load(f)
+        world = pickle.load(f)
+    # Schema migrations for worlds saved by older builds. Imported here rather
+    # than at module scope: resources.py imports this module for _app_root, so
+    # a top-level import would be circular.
+    from app.world.resources import migrate_legacy_overflow
+    migrate_legacy_overflow(world)
+    return world
 
 
 def delete_save(save_id):

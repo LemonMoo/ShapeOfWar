@@ -3982,6 +3982,91 @@ def _close_gold_ledger(world):
     world._gold_turn = defaultdict(dict)
 
 
+# --- one-time migration: legacy overflow ------------------------------------
+# Worlds created before storage was typed (Phase 3) accumulated stock under a
+# single unbounded shared pool, and some nodes carry a genuinely enormous
+# hoard: measured on a real save, one city held 1,472,676 space of household
+# goods against a 3,300 capacity, and 1,278,435 durable against 3,200.
+#
+# Left alone that DOES drain -- overflow decay clears it in roughly 80 turns --
+# but for all of those turns the city's production is throttled to a standstill
+# and every storage meter reads solid red, which looks like a broken save
+# rather than a transition. Worse, all of it is simply destroyed.
+#
+# So on first load of such a world the excess is spilled into whatever spare
+# capacity the rest of that faction actually has -- the goods are real and
+# somewhere else can hold them -- and only what genuinely has nowhere to go is
+# dropped. Runs once per world, guarded by a flag on the world itself.
+LEGACY_OVERFLOW_FACTOR = 1.5   # only a hoard this far past capacity counts as
+                               # legacy. A settled realm normally runs a few
+                               # percent over on its durable pool -- that is the
+                               # overflow rule working as designed, not damage,
+                               # and this must not "tidy" it away
+
+
+def migrate_legacy_overflow(world):
+    """Redistribute pre-typed-pool overflow into the realm's spare capacity,
+    discarding only what nothing can hold. Idempotent and self-guarding."""
+    if getattr(world, "_overflow_migrated", False):
+        return {}
+    world._overflow_migrated = True
+    moved = {"moved": 0, "dropped": 0}
+
+    nodes_by_faction = {}
+    for node in list(world.settlements) + list(world.villages):
+        if node.faction_idx < 0:
+            continue
+        nodes_by_faction.setdefault(node.faction_idx, []).append(node)
+
+    for nodes in nodes_by_faction.values():
+        for pool in STORAGE_POOLS:
+            donors, receivers = [], []
+            for node in nodes:
+                cap = node_pool_capacity(node, pool)
+                if not cap:
+                    continue
+                stock = node_pool_stock(node, pool)
+                if stock > cap * LEGACY_OVERFLOW_FACTOR:
+                    donors.append(node)
+                elif stock < cap:
+                    receivers.append([node, cap - stock])
+            if not donors:
+                continue
+            for donor in donors:
+                res = getattr(donor, "resources", None) or {}
+                excess = node_pool_stock(donor, pool) - node_pool_capacity(donor, pool)
+                # Shed the bulkiest goods first: they free the most room per
+                # unit moved, so fewer units have to be destroyed.
+                names = sorted((r for r, a in res.items()
+                                if a > 0 and storage_class(r) == pool),
+                               key=lambda r: -resource_bulk(r))
+                for name in names:
+                    if excess <= 0:
+                        break
+                    bulk = resource_bulk(name) or 1.0
+                    shed_units = min(res[name], int(excess / bulk) + 1)
+                    if shed_units <= 0:
+                        continue
+                    res[name] -= shed_units
+                    excess -= shed_units * bulk
+                    left = shed_units
+                    for entry in receivers:
+                        if left <= 0:
+                            break
+                        node, room = entry
+                        take = min(left, int(room / bulk))
+                        if take <= 0:
+                            continue
+                        if not hasattr(node, "resources"):
+                            node.resources = {}
+                        node.resources[name] = node.resources.get(name, 0) + take
+                        entry[1] = room - take * bulk
+                        left -= take
+                        moved["moved"] += take
+                    moved["dropped"] += left
+    return moved
+
+
 def advance_turn(world):
     """The turn loop: cycle the season, recompute every region's yield for
     it (including Crops, see compute_region_yield -- production lands at

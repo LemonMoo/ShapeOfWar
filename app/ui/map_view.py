@@ -2853,71 +2853,157 @@ class MapView(tk.Frame):
         self.render()
 
     def _show_settlement(self, st):
+        """Settlement panel, in the same folding-card idiom as the village one
+        (see _card / _show_village).
+
+        Settlements differ from villages in three ways worth showing rather
+        than hiding: they run the conversion recipes (a village has no mill,
+        loom or forge), they can build a Shipyard, and they keep no herd.
+        Everything else -- summary, storage meters, what is actually held,
+        build actions -- reads identically, so moving between a city and one
+        of its villages never means relearning the panel."""
         wd = self.world
         self.selected_village = None   # a settlement and a village are never both selected
-        if self.zoom_region is not None:
-            self.title_lbl.config(text=st.kind.capitalize())
+        self.title_lbl.config(text=st.name)
         region = (wd.regions[st.region_id].name
                   if 0 <= st.region_id < len(wd.regions) else "?")
-        needs = resources.settlement_needs(st, wd.season)
-        lines = [st.name, f"{st.kind.capitalize()} in {region}, "
-                 f"{wd.factions[st.faction_idx].name}",
-                 f"Needs: {_format_resources(needs)} per turn"]
-        population = getattr(st, "population", None)
-        if population is not None:
-            max_pop = getattr(st, "max_population", None)
-            cap_text = f" of {max_pop:,} max" if max_pop else ""
-            lines.append(f"Population: {population:,}{cap_text} "
-                         f"({st.adults:,} adults, {st.children:,} children)")
-        # What's actually sitting in THIS settlement's own storage right
-        # now -- distinct from "Needs" (a per-turn requirement) and, for a
-        # Village, from "Grows per year" (a projection) -- the one place a
-        # player can check ground truth instead of guessing why a
-        # settlement that "has food" is still going hungry (a raw Crop
-        # counts toward Food; a raw resource needing conversion first,
-        # like Fish -> Smoked Fish, does not, until it's actually been
-        # converted).
-        lines.append(f"Currently stored: {_format_resources(getattr(st, 'resources', {}))}")
-        if getattr(st, "has_shipyard", False):
-            lines.append("Has a Shipyard — commanders here launch free, fast ships.")
-        lines.append("Storage:")
-        lines.extend(self._storage_pool_lines(st))
-        self.info.config(fg=theme.INK, text="\n".join(lines))
+        self.info.config(
+            fg=theme.MUTED,
+            text=f"{st.kind.capitalize()} in {region}\n"
+                 f"{wd.factions[st.faction_idx].name}")
 
         prosperity = getattr(st, "prosperity", None)
         if prosperity is not None:
             self._show_prosperity_bar(prosperity)
         else:
             self._hide_prosperity_bar()
-        stored = resources.node_space_used(st)
-        capacity = resources.settlement_storage_capacity(st)
-        self._show_storage_bar(stored, capacity)
+        # Same reasoning as the village panel: space is typed, so one aggregate
+        # total is a number that means nothing. STORAGE shows the real pools.
+        self._hide_storage_bar()
 
         for w in self.actions.winfo_children():
             w.destroy()
         player = self._player_faction()
-        if player is None or st.faction_idx != wd.factions.index(player):
-            return
-        project = next((p for p in wd.shipyard_projects if p.settlement_id == st.id), None)
+        own = player is not None and st.faction_idx == wd.factions.index(player)
+
+        body = self._card("SUMMARY")
+        if body is not None:
+            population = getattr(st, "population", None)
+            if population is not None:
+                max_pop = getattr(st, "max_population", None)
+                self._kv(body, "Population",
+                         f"{population:,}" + (f" / {max_pop:,}" if max_pop else ""))
+                self._kv(body, "Adults \u00b7 children",
+                         f"{st.adults:,} \u00b7 {st.children:,}")
+            self._kv(body, "Needs per turn",
+                     _format_resources(resources.settlement_needs(st, wd.season)))
+            built = [b.replace("_", " ").title() for b in self._buildable_at(st)
+                     if resources.storage_tier(st, b)]
+            if getattr(st, "has_shipyard", False):
+                built.append("Shipyard")
+            if built:
+                self._kv(body, "Built", " \u00b7 ".join(built))
+
+        if own:
+            options = sum(1 for b in self._buildable_at(st)
+                          if construction.storage_next_tier(wd, st, b) is not None)
+            if construction.can_build_shipyard(wd, st):
+                options += 1
+            body = self._card("BUILD", f"{options} available", key="build",
+                              default_open=False)
+            if body is not None:
+                self._build_settlement_actions(st, player, body)
+
+        making = self._settlement_conversions(st)
+        body = self._card("INDUSTRY", f"{len(making)} running", key="production",
+                          default_open=False)
+        if body is not None:
+            if making:
+                for output, source, rate in making:
+                    self._kv(body, f"{source} \u2192 {output}", f"{rate:,}/turn")
+            else:
+                tk.Label(body, text="Nothing converting \u2014 this settlement is "
+                                    "waiting on inputs.",
+                         bg=theme.PANEL, fg=theme.MUTED, font=("Segoe UI", 8),
+                         justify="left", anchor="w",
+                         wraplength=_RIGHT_PANEL_W - 46).pack(fill="x")
+
+        stock = {r: a for r, a in (getattr(st, "resources", {}) or {}).items() if a}
+        body = self._card("STORAGE", f"{len(stock)} kinds held", key="storage")
+        if body is not None:
+            for pool in resources.STORAGE_POOLS:
+                cap = resources.node_pool_capacity(st, pool)
+                if not cap:
+                    continue
+                building = resources.STORAGE_BUILDING_BY_POOL[pool]
+                tier = resources.storage_tier(st, building)
+                label = f"{building.title()}{f' T{tier}' if tier else ''}"
+                self._bar_row(body, label, resources.node_pool_stock(st, pool), cap)
+
+        body = self._card("HELD", f"{len(stock)} kinds", key="held",
+                          default_open=False)
+        if body is not None:
+            for res_name, amount in sorted(stock.items(), key=lambda kv: -kv[1]):
+                self._kv(body, res_name, f"{amount:,}")
+
+    def _settlement_conversions(self, st):
+        """[(output, input, units/turn), ...] this settlement can actually run
+        right now -- the recipes it has the inputs for, at the rate they would
+        convert. Villages cannot convert at all, so this is the one card that
+        is genuinely settlement-only, and it answers a question the old panel
+        could not: why a city sitting on Wheat still has no Bread."""
+        res = getattr(st, "resources", None) or {}
+        out = []
+        for output, options in resources.RECIPES.items():
+            if output not in resources._SETTLEMENT_STORAGE_RESOURCES:
+                continue
+            cap = (resources.LUXURY_CONVERSION_RATE_CAP
+                   if resources.RESOURCES[output]["luxury"]
+                   else resources.CONVERSION_RATE_CAP)
+            for option in options:
+                inputs = option["inputs"]
+                rate = min(min(res.get(i, 0) for i in inputs), cap)
+                if rate > 0:
+                    out.append((output, " + ".join(inputs), rate))
+                    break
+        # A Preserving House runs its own, separate curing step on top.
+        if resources.storage_tier(st, resources.PRESERVING_HOUSE):
+            cure_cap = int(resources.CONVERSION_RATE_CAP
+                           * resources.preserving_cap_multiplier(st))
+            for output, source in resources.PRESERVATION_RECIPES.items():
+                have = res.get(source, 0)
+                if have > 0:
+                    out.append((output, source, min(have, cure_cap)))
+        return out
+
+    def _build_settlement_actions(self, st, player, parent):
+        """Shipyard plus the storage/preserving buildings, in one card."""
+        wd = self.world
+        project = next((p for p in wd.shipyard_projects
+                        if p.settlement_id == st.id), None)
         if project is not None:
             elapsed = project.total_turns - project.turns_left
-            tk.Label(self.actions, text=f"Shipyard under construction: "
-                     f"{elapsed}/{project.total_turns} turns",
-                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+            tk.Label(parent,
+                     text=f"Shipyard under construction: "
+                          f"{elapsed}/{project.total_turns} turns",
+                     bg=theme.PANEL, fg=theme.MUTED, font=("Segoe UI", 8),
+                     justify="left", wraplength=_RIGHT_PANEL_W - 46
+                     ).pack(anchor="w", pady=(0, 6))
         elif construction.can_build_shipyard(wd, st):
             afford = construction.can_afford(player, construction.SHIPYARD_COST, wd)
-            tk.Label(self.actions,
-                     text=f"Cost: {_format_resources(construction.SHIPYARD_COST)}\n"
-                          f"Build time: {construction.SHIPYARD_BUILD_TURNS} turns",
-                     bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
-            tk.Button(self.actions, text="Build Shipyard",
+            tk.Label(parent,
+                     text="Build Shipyard\n"
+                          f"Cost: {_format_resources(construction.SHIPYARD_COST)}\n"
+                          f"Build time: {construction.SHIPYARD_BUILD_TURNS} turns\n"
+                          "Commanders here launch free, faster ships",
+                     bg=theme.PANEL, fg=theme.INK if afford else theme.BAD,
+                     font=("Segoe UI", 8), justify="left",
+                     wraplength=_RIGHT_PANEL_W - 46).pack(anchor="w", pady=(6, 2))
+            tk.Button(parent, text="Build Shipyard",
                       command=lambda s=st: self._do_build_shipyard(s),
                       bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                       relief="flat", font=theme.FONT).pack(fill="x", pady=2)
-
-        self._build_storage_actions(st, player)
+        self._build_storage_actions(st, player, parent)
 
     def _do_build_shipyard(self, st):
         player = self._player_faction()

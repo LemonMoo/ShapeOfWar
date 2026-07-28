@@ -20,6 +20,19 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 34,
+        "title": "Towns & Cities Get the New Panel",
+        "items": [
+            "Town and City panels now use the same folding cards as Villages — Summary, Build, Industry, Storage, Held — instead of the old wall of text",
+            "New INDUSTRY card shows what a settlement is actually converting right now and at what rate, so 'why is my city sitting on Wheat with no Bread?' has an answer on screen",
+            "The Shipyard moved into the Build card alongside everything else you can build there",
+            "Storage shows the four typed pools as meters, replacing an aggregate total that stopped meaning anything once space became typed",
+            "FIXED: worlds saved before storage was typed carried enormous stockpiles from the old shared pool — one city held 1.47 million space against a 3,300 capacity. Those nodes were throttled to zero production for ~80 turns while it drained",
+            "On first load, that legacy overflow is now spilled into whatever spare capacity the realm actually has, and only what nothing can hold is discarded. Measured on a real save: population loss over 60 turns fell from -4,731 to -1,960, starving settlements from 196 to 128, and storage alerts from 405 to 55",
+            "Normal overflow is deliberately left alone — a settled realm running a few percent over on timber is the overflow rule working, not damage",
+        ],
+    },
+    {
         "version": 33,
         "title": "Interface Overhaul, Herds & Honest Numbers",
         "items": [
