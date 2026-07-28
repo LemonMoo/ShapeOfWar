@@ -254,13 +254,29 @@ class Battle:
                             ang = random.random() * math.tau
                             nx, ny = math.cos(ang), math.sin(ang)
                             overlap = min_d
-                        # hard separation (split the overlap)
+                        # Hard separation (split the overlap). Kept an even
+                        # split deliberately: anchoring the engaged rank and
+                        # taking the whole overlap out of the moving unit was
+                        # tried and measured WORSE -- displacing an advancing
+                        # unit by the full overlap just made it rebound and
+                        # come again, and front-rank travel after contact rose
+                        # from 150px to 336px.
                         push = overlap * 0.5
                         u.x -= nx * push
                         u.y -= ny * push
                         v.x += nx * push
                         v.y += ny * push
-                        # springy impulse
+                        # Springy impulse -- but ONLY if someone is actually
+                        # closing. Driven by overlap alone it never stopped: a
+                        # packed melee overlaps on every single tick, so the
+                        # two lines kept shoving each other around the field
+                        # instead of standing and fighting. Gating on
+                        # `advancing` keeps the impact of a charge hitting a
+                        # line (the mover carries real momentum) while a
+                        # locked-in melee gets only the hard separation above,
+                        # which un-stacks units without driving them anywhere.
+                        if not (u.advancing or v.advancing):
+                            continue
                         imp = overlap * _BOUNCE
                         u.vx -= nx * imp
                         u.vy -= ny * imp

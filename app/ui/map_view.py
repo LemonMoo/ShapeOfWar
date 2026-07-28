@@ -232,7 +232,9 @@ _FOREIGN_RIVER_CARAVAN_STYLE = {"fill": "#6f9c8a", "outline": "#223a33", "r": 4,
 # numerous, so they read as background bustle rather than headline events.
 # Commander (app/world/commander.py) — a bright orchid diamond, deliberately
 # unlike any settlement/caravan color so the player's own unit never gets
-# confused with anything else on the map.
+# confused with anything else on the map. THE PLAYER'S ONLY: rival commanders
+# are drawn in their own realm's colour instead (see _draw_commanders), so the
+# marker identifies whose army it is.
 _COMMANDER_STYLE = {"fill": "#e685ff", "outline": "#4a1a5c", "r": 7}
 _SHIP_STYLE = {"fill": "#c9a86a", "outline": "#5c3f1a", "r": 6}
 # Above this many villages in a region, skip name labels (village view) so it
@@ -4312,19 +4314,45 @@ class MapView(tk.Frame):
         marker, shown at every zoom level since it's a single mobile unit
         rather than something tied to one region, plus a thin dashed
         preview of its queued path (if any) so a move order is visible at a
-        glance."""
+        glance.
+
+        Each commander wears its own realm's colour, so a marker on the map
+        says WHOSE army that is at a glance rather than every faction's
+        commander sharing one hue. The player's own keeps the distinct orchid
+        it has always had — it's the one you give orders to, and it should
+        never be mistaken for a rival's.
+
+        Foreign commanders are fog-gated per cell, exactly like settlement
+        markers: a rival marching through territory you cannot see must not
+        be visible, and neither must the dashed preview of where he is headed
+        (which would otherwise leak his destination through unexplored ground).
+        """
         wd = self.world
-        style = _COMMANDER_STYLE
-        r = style["r"]
+        r = _COMMANDER_STYLE["r"]
         for cmd in wd.commanders:
+            mine = cmd.faction_idx == wd.player_faction_idx
+            # Own commander: fixed orchid. Rival: his realm's colour, on a dark
+            # outline so pale faction colours still read against the terrain.
+            if mine:
+                fill, outline = _COMMANDER_STYLE["fill"], _COMMANDER_STYLE["outline"]
+            else:
+                if not self._cell_revealed(*cmd.pos):
+                    continue
+                fill = wd.factions[cmd.faction_idx].color
+                outline = "#11151b"
+
             if cmd.path is not None:
                 remaining_path = cmd.path[cmd.path_index:]
                 if len(remaining_path) >= 2:
                     pts = []
                     for gx, gy in remaining_path:
+                        # A foreign march is only traced across ground you have
+                        # actually explored.
+                        if not mine and not self._cell_revealed(gx, gy):
+                            break
                         pts.extend(screen(gx + 0.5, gy + 0.5))
-                    if self._visible_pts(pts):
-                        c.create_line(*pts, fill=style["fill"], width=1.5,
+                    if len(pts) >= 4 and self._visible_pts(pts):
+                        c.create_line(*pts, fill=fill, width=1.5,
                                       dash=(3, 3), capstyle="round", smooth=True)
 
             x, y = screen(cmd.pos[0] + 0.5, cmd.pos[1] + 0.5)
@@ -4334,7 +4362,7 @@ class MapView(tk.Frame):
                 c.create_oval(x - r - 3, y - r - 3, x + r + 3, y + r + 3,
                               outline="#ffffff", width=2)
             c.create_polygon(x, y - r, x + r, y, x, y + r, x - r, y,
-                             fill=style["fill"], outline=style["outline"], width=1.5)
+                             fill=fill, outline=outline, width=1.5)
 
     def _marker_radius(self, base_world_size):
         """Screen-pixel radius for a settlement/village marker: `base_world_size`

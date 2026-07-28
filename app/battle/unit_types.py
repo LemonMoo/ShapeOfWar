@@ -68,10 +68,10 @@ UNIT_TYPES = {
     # Sized and statted to be "very hard to take down" without deciding fights
     # by himself: ~9x a Swordsman's HP and ~3x its damage means several
     # soldiers focusing him for a sustained stretch will still bring him down,
-    # but no single unit trades with him. He is also the one unit drawn as a
-    # spiked star at triple radius -- see shapes._star for why that silhouette.
+    # but no single unit trades with him. He is drawn as an oversized circle
+    # with a contrasting inner disc -- see battle_view._draw_commander.
     "commander": {
-        "name": "Commander", "shape": "star", "radius": 15,
+        "name": "Commander", "shape": "circle", "radius": 15,
         "max_hp": 270, "speed": 30, "range": 18, "damage": 24, "cooldown": 0.7,
         "ranged": False, "equipment": ["sword", "shield"],
         "block_chance": 0.45, "block_arc_deg": 180,

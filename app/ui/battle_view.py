@@ -421,20 +421,17 @@ class BattleView(tk.Frame):
         return sum(1 for army in self.battle.armies for u in army.units if u.alive)
 
     def _draw_commander(self, c, u, army):
-        """The Commander, drawn to be unmistakable at any zoom or army size.
+        """The Commander: an oversized disc in the army's colour with a
+        contrasting inner disc, plus a health bar no other unit gets.
 
-        Four cues stack, because a battlefield can hold hundreds of soldiers
-        and any single cue gets lost: a spiked star silhouette nothing else on
-        the field uses, triple radius, a bright contrasting ring, and a health
-        bar (no other unit has one) so you can see how the fight for him is
-        going without counting pixels.
+        Triple radius and the bullseye centre carry the identification on their
+        own -- the separate halo ring this used to draw sat outside the body and
+        mostly read as clutter once a melee closed around him.
         """
         r = u.radius
-        # Halo first, so the star sits on top of it.
-        c.create_oval(u.x - r - 6, u.y - r - 6, u.x + r + 6, u.y + r + 6,
-                      outline=army.color, width=2)
         draw_shape(c, u.type["shape"], u.x, u.y, r, army.color)
-        c.create_oval(u.x - r * 0.32, u.y - r * 0.32, u.x + r * 0.32, u.y + r * 0.32,
+        ir = r * 0.5
+        c.create_oval(u.x - ir, u.y - ir, u.x + ir, u.y + ir,
                       fill="#ffffff", outline="")
         # Health bar -- unique to the commander, because he is the only unit
         # whose individual health is worth tracking.

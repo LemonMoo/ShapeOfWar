@@ -106,6 +106,10 @@ class Unit:
         self.vy = 0.0
         self.facing = (1.0, 0.0)  # unit-vector toward target; default east
         self.charge = 0.0        # cavalry momentum 0..1 (see update); 0 for others
+        self.advancing = False   # closing on a target this tick, i.e. not yet
+                                 # locked in melee -- gates collision knockback
+                                 # so lines stand and fight (see
+                                 # Battle._resolve_collisions)
         self._retarget_cd = random.random() * 0.6   # jittered so units don't all
                                                      # re-evaluate on the same tick
 
@@ -179,6 +183,10 @@ class Unit:
             return
         self._cd = max(0.0, self._cd - dt)
         self._retarget_cd -= dt
+        # Cleared every tick and re-raised only in the advance branch below, so
+        # a unit standing in range -- whether swinging or waiting on its
+        # cooldown -- counts as stationary and stops shoving.
+        self.advancing = False
 
         # Scored re-target on a throttle (or immediately if the current target
         # is gone) -- see Battle.choose_target.
@@ -194,6 +202,7 @@ class Unit:
         self.facing = (dx / dist, dy / dist)
 
         if dist > self.attack_range:
+            self.advancing = True
             move = self.speed * dt
             self.x += dx / dist * move
             self.y += dy / dist * move
