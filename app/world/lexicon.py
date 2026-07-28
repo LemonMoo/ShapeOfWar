@@ -60,15 +60,23 @@ SPECIES = {
                 "trade_gold_bonus": 0.15, "block_chance_mult": 1.25},
     # Quick and deadly, but lightly armoured. No cavalry -- elves fight as
     # archers, and their whole Cavalry share becomes more of them.
+    # Attack speed cut 0.85 -> 0.90: an all-archer roster that never has to
+    # close was measuring as the clear outlier (92% of its matchups), and the
+    # fast draw is where that came from, not their evasion -- elves have no
+    # dodge at all.
     "Elves":   {"hue": 160, "mil": -8,  "eco": +14, "trait": "ancient forest sages",
-                "unit_cooldown_mult": 0.85, "unit_speed_mult": 1.15,
+                "unit_cooldown_mult": 0.90, "unit_speed_mult": 1.15,
                 "unit_hp_mult": 0.90, "no_cavalry": True,
                 "cavalry_becomes": "archers"},
     # Stout and hard to kill, but methodical -- they march AND swing slower.
     # (Slow feet alone were no drawback at all; the slower swing is the real one.)
+    # Dwarves charge behind the shield instead of dropping it: everyone else
+    # trades guard for speed (orders.STANCE_CHARGE's block_mult), but a dwarven
+    # line comes on with shields up and arrows glance off it. This is the one
+    # species that can cross open ground under fire without paying for it.
     "Dwarves": {"hue": 30,  "mil": +10, "eco": +10, "trait": "mountain-forged smiths",
                 "unit_hp_mult": 1.20, "unit_speed_mult": 0.92,
-                "unit_cooldown_mult": 1.08},
+                "unit_cooldown_mult": 1.08, "charge_shields_up": True},
     # Biggest, hardest-hitting bodies on the field and no cavalry at all. Note
     # that losing cavalry is not itself a cost here (their share becomes more
     # Swordsmen, who are tankier and carry shields) -- the real counterweight is
@@ -92,11 +100,29 @@ SPECIES = {
     # Swordsmen and Archers -- skirmishers, not a shield wall. The dodge and
     # attack-speed numbers are compensation for having measured as the weakest
     # species after the cavalry rework.
+    # Dodge 0.18 -> 0.15 measured as far too harsh for how frail they are (25%
+    # of matchups down to 8%, and to 0% once Elves were slowed), so it sits at
+    # 0.17 -- most of the nerf, none of the collapse. The quicker swing and the
+    # Assassin are the compensation.
     "Goblins": {"hue": 75,  "mil": -4,  "eco": -6,  "trait": "cunning scavengers",
                 "unit_speed_mult": 1.15, "unit_hp_mult": 0.85,
-                "unit_cooldown_mult": 0.97,
-                "dodge_chance": 0.18, "no_cavalry": True,
-                "cavalry_becomes": "split"},
+                "unit_cooldown_mult": 0.94,
+                "dodge_chance": 0.17, "no_cavalry": True,
+                "cavalry_becomes": "split", "special_unit": "assassin",
+                # Funded from three places: a little off the bows, a little off
+                # the line, and a little for free. Paying for it ENTIRELY out of
+                # the Archer share was measured and it was ruinous -- it turned
+                # goblin ranged output into frail bodies and took them from 88%
+                # of their matchups to 0%. Splitting the cost across both arms
+                # and topping it up with a species bonus keeps the Assassin a
+                # goblin advantage instead of a goblin tax.
+                # Kept small on measurement, not taste: Goblin win rate falls
+                # monotonically with the number of Assassins fielded (83% with
+                # none, 54% at nine, 21% at thirteen, 8% at seventeen), so the
+                # roster takes the fewest that still make them a real presence.
+                "special_share_of_archers": 0.05,
+                "special_share_of_swordsmen": 0.05,
+                "special_bonus_share": 0.03},
 }
 
 # Every species trait, with the "no modifier" value each defaults to. Anything
@@ -117,6 +143,16 @@ _SPECIES_TRAIT_DEFAULTS = {
                                        # or "split" (evenly between the two). Either way
                                        # the species brings the same headcount to the field
     "trade_gold_bonus": 0.0,    # extra fraction of Gold received on a foreign sale
+    "charge_shields_up": False, # True = charging does NOT drop this species'
+                                # guard (see Unit.effective_block), so it can
+                                # advance under arrows behind its shields
+    "special_unit": None,       # a unit type only this species fields, taken
+                                # out of its Archer share (see App._army_for)
+    "special_share_of_archers": 0.0,    # fraction of the Archer share it takes
+    "special_share_of_swordsmen": 0.0,  # ...and of the Swordsman share
+    "special_bonus_share": 0.0,         # plus this fraction of military power
+                                        # granted outright -- a species buff, not
+                                        # paid for by anything
 }
 
 

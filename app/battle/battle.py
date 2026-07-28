@@ -4,6 +4,7 @@ import random
 from collections import Counter
 
 from app.core.events import bus
+from app.battle import order_ai, orders
 from app.battle.unit import Unit
 
 # Collision tuning.
@@ -99,6 +100,12 @@ class Battle:
         self.on_attack = None  # optional hook set by the view for log/effects
         self._threat = Counter()  # enemy -> # of living units currently targeting
                                   # it; rebuilt each update() for choose_target
+        # Which side the player is giving orders to. Every OTHER side is driven
+        # by the order AI (app/battle/order_ai.py). Left None outside a real
+        # player battle -- in a headless sim or the balance tournament both
+        # sides should be ordered by the same AI, or the numbers mean nothing.
+        self.player_side = None
+        self._order_ai_cd = 0.0
 
     def spawn_projectile(self, sx, sy, tx, ty, color):
         self.projectiles.append(Projectile(sx, sy, tx, ty, color))
@@ -170,6 +177,39 @@ class Battle:
                     best, best_d = u, d
         return best
 
+    # Cell size for the density scan below. Roughly the reach of a charge's
+    # splash, so "the densest bin" really does mean "where one impact hits the
+    # most people".
+    _DENSITY_CELL = 55
+
+    def densest_enemy(self, unit):
+        """The enemy standing in the thickest knot of enemies -- what a
+        regrouping rider picks for its next run (see Unit._update_cycle_charge).
+
+        Bins enemies on a coarse grid and takes the fullest bin rather than
+        clustering properly: a squadron re-picks this every few seconds across
+        hundreds of units, and an approximate answer that costs one pass is
+        worth far more here than an exact one that costs several."""
+        bins = {}
+        for army in self.armies:
+            if army.side == unit.faction.side:
+                continue
+            for u in army.units:
+                if u.alive:
+                    bins.setdefault((int(u.x // self._DENSITY_CELL),
+                                     int(u.y // self._DENSITY_CELL)), []).append(u)
+        if not bins:
+            return None
+        # Fullest bin, breaking ties toward the one nearest the rider so it
+        # doesn't cross the whole field past a target just as good.
+        best = max(bins.values(),
+                   key=lambda group: (len(group),
+                                      -min(math.hypot(u.x - unit.x, u.y - unit.y)
+                                           for u in group)))
+        cx = sum(u.x for u in best) / len(best)
+        cy = sum(u.y for u in best) / len(best)
+        return min(best, key=lambda u: (u.x - cx) ** 2 + (u.y - cy) ** 2)
+
     def choose_target(self, unit):
         """Scored target pick — units still overwhelmingly go for whoever's
         closest, but with a few refinements over blind nearest-enemy: finish
@@ -179,6 +219,32 @@ class Battle:
         the enemy'' -- just with a bit of judgment. Throttled per-unit via
         Unit._retarget_cd so this isn't paid every frame."""
         is_cav = unit.type.get("charge")
+        # An Assassin hunts bowmen and nothing else. Deliberately scoped to the
+        # WHOLE battlefield rather than "no archer nearby": they are meant to
+        # run past a shield line to get at what is behind it, so a nearby wall
+        # of swordsmen must not count as having run out of targets. Only once
+        # the last enemy archer anywhere is dead do they turn on the line.
+        if unit.type.get("hunts_ranged"):
+            prey = [u for army in self.armies if army.side != unit.faction.side
+                    for u in army.units if u.alive and u._ranged]
+            if prey:
+                return min(prey, key=lambda u: (
+                    math.hypot(u.x - unit.x, u.y - unit.y)
+                    + _CROWD_PENALTY * self._threat.get(u, 0)))
+        # A unit holding its ground will not walk to a target, so picking the
+        # "best" enemy across the field would leave it facing someone it can
+        # never reach while an enemy in its face went unanswered. Restrict it
+        # to what it can actually hit, and only fall through to the ordinary
+        # scoring when nothing is in reach (so it still faces the threat).
+        if unit.holds_position:
+            reach = unit.attack_range
+            in_reach = [u for army in self.armies if army.side != unit.faction.side
+                        for u in army.units if u.alive
+                        and math.hypot(u.x - unit.x, u.y - unit.y) <= reach]
+            if in_reach:
+                return min(in_reach, key=lambda u: (u.hp / u.max_hp,
+                                                    math.hypot(u.x - unit.x,
+                                                               u.y - unit.y)))
         best, best_score = None, float("-inf")
         for army in self.armies:
             if army.side == unit.faction.side:
@@ -195,6 +261,85 @@ class Battle:
                 if score > best_score:
                     best, best_score = u, score
         return best or self.nearest_enemy(unit)
+
+    # --- orders ---------------------------------------------------------------
+    def issue_stance(self, units, stance):
+        """Give `units` a stance, skipping any that can't carry it (an archer
+        has no business in a shield wall). Returns how many actually took it,
+        so the UI can report "12 swordsmen form a shield wall" honestly rather
+        than echoing the click.
+
+        Forming the wall is done here rather than per-unit because a wall is a
+        property of the GROUP -- every unit needs a slot in one shared line, and
+        no unit can work that out on its own."""
+        taking = [u for u in units if u.alive and orders.can_take_stance(u, stance)]
+        for u in taking:
+            u.stance = stance
+            if stance != orders.STANCE_SHIELD_WALL:
+                u.wall_slot = None
+            if stance != orders.STANCE_CYCLE_CHARGE:
+                u._cycle_state = "run"
+                u._cycle_rally = None
+        if stance == orders.STANCE_SHIELD_WALL and taking:
+            self.form_shield_wall(taking)
+        return len(taking)
+
+    def issue_fire_discipline(self, units, fire_at_will):
+        """Hold fire / fire at will. Only means anything to ranged units, so
+        the count returned is of archers, not of whatever was selected."""
+        ranged = [u for u in units if u.alive and u._ranged]
+        for u in ranged:
+            u.fire_at_will = fire_at_will
+            if fire_at_will is False:
+                u.volley = 0.0    # start the draw from cold
+        return len(ranged)
+
+    def form_shield_wall(self, units):
+        """Lay out a line of slots facing the enemy and assign one per unit.
+
+        The line runs PERPENDICULAR to the direction of the enemy, centred on
+        the group's own position, so ordering a wall dresses the troops roughly
+        where they already stand rather than marching them somewhere else --
+        a wall that first walks 200px to form up would be broken before it
+        existed."""
+        alive = [u for u in units if u.alive]
+        if not alive:
+            return
+        cx = sum(u.x for u in alive) / len(alive)
+        cy = sum(u.y for u in alive) / len(alive)
+
+        # Facing: toward the enemy centre of mass, falling back to straight
+        # across the field if there is no enemy left to face.
+        ex, ey, n = 0.0, 0.0, 0
+        for army in self.armies:
+            if army.side == alive[0].faction.side:
+                continue
+            for u in army.units:
+                if u.alive:
+                    ex += u.x; ey += u.y; n += 1
+        if n:
+            fx, fy = ex / n - cx, ey / n - cy
+            mag = math.hypot(fx, fy) or 1e-6
+            fx, fy = fx / mag, fy / mag
+        else:
+            fx, fy = (1.0, 0.0) if alive[0].faction.side == 0 else (-1.0, 0.0)
+        px, py = -fy, fx          # along the line
+
+        # Sort along the line axis first so units take the slot nearest where
+        # they already are -- otherwise the assignment crosses everyone over
+        # each other and the formation tangles itself forming up.
+        alive.sort(key=lambda u: (u.x - cx) * px + (u.y - cy) * py)
+        per_rank = min(orders.WALL_MAX_RANK, len(alive))
+        for i, u in enumerate(alive):
+            rank, col = divmod(i, per_rank)
+            span = min(per_rank, len(alive) - rank * per_rank)
+            offset = (col - (span - 1) / 2.0) * orders.WALL_SPACING
+            back = rank * orders.WALL_RANK_GAP
+            sx = cx + px * offset - fx * back
+            sy = cy + py * offset - fy * back
+            r = u.radius
+            u.wall_slot = (min(self.width - r, max(r, sx)),
+                           min(self.height - r, max(r, sy)))
 
     # --- morale ---------------------------------------------------------------
     # A commander falling does not end the battle -- his soldiers keep fighting,
@@ -237,8 +382,10 @@ class Battle:
             for gx in (cx - 1, cx, cx + 1):
                 for gy in (cy - 1, cy, cy + 1):
                     for v in grid.get((gx, gy), ()):
-                        # each unordered pair once
-                        if id(v) <= id(u):
+                        # each unordered pair once -- by stable uid, never by
+                        # id(), which is an address and varies per run (see
+                        # Unit._next_uid)
+                        if v.uid <= u.uid:
                             continue
                         dx = v.x - u.x
                         dy = v.y - u.y
@@ -261,11 +408,14 @@ class Battle:
                         # unit by the full overlap just made it rebound and
                         # come again, and front-rank travel after contact rose
                         # from 150px to 336px.
-                        push = overlap * 0.5
-                        u.x -= nx * push
-                        u.y -= ny * push
-                        v.x += nx * push
-                        v.y += ny * push
+                        # Split by mass, not evenly: the lighter unit gives way.
+                        # See Unit.mass for why -- an even split let a ring of
+                        # soldiers walk their own Commander into a wall.
+                        u_share = v.mass / (u.mass + v.mass)
+                        u.x -= nx * overlap * u_share
+                        u.y -= ny * overlap * u_share
+                        v.x += nx * overlap * (1.0 - u_share)
+                        v.y += ny * overlap * (1.0 - u_share)
                         # Springy impulse -- but ONLY if someone is actually
                         # closing. Driven by overlap alone it never stopped: a
                         # packed melee overlaps on every single tick, so the
@@ -278,10 +428,21 @@ class Battle:
                         if not (u.advancing or v.advancing):
                             continue
                         imp = overlap * _BOUNCE
-                        u.vx -= nx * imp
-                        u.vy -= ny * imp
-                        v.vx += nx * imp
-                        v.vy += ny * imp
+                        u.vx -= nx * imp * u_share
+                        u.vy -= ny * imp * u_share
+                        v.vx += nx * imp * (1.0 - u_share)
+                        v.vy += ny * imp * (1.0 - u_share)
+
+    def _run_order_ai(self, dt):
+        """Let every AI-controlled army re-decide its orders, on a throttle."""
+        self._order_ai_cd -= dt
+        if self._order_ai_cd > 0.0:
+            return
+        self._order_ai_cd = order_ai.DECIDE_INTERVAL
+        for army in self.armies:
+            if army.side == self.player_side:
+                continue
+            order_ai.decide_for_army(self, army)
 
     def _integrate(self, dt):
         """Apply bounce velocity, damp it, and keep units on the field."""
@@ -306,6 +467,8 @@ class Battle:
         self._threat = Counter(
             u.target for army in self.armies for u in army.units
             if u.alive and u.target is not None and u.target.alive)
+
+        self._run_order_ai(dt)
 
         for army in self.armies:
             for u in army.units:

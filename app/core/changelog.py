@@ -20,6 +20,25 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 38,
+        "title": "Battlefield Orders",
+        "items": [
+            "You can now give orders DURING a battle, not just before it. Select troops (drag a box, or 1/2/3/4) and command them; Space pauses the fight so you can look at the field and give several at once",
+            "HOLD HERE — stand your ground braced. A braced line takes only 42% of a cavalry charge's impact and its splash, which makes it the clearest counter in the game to being ridden down",
+            "CHARGE — +30% speed and +15% damage, but your guard drops: you cannot run at someone and shield properly",
+            "SHIELD WALL (Swordsmen) — dresses a real line facing the enemy, shields up. The bonus only counts CONTIGUOUS neighbours, so a wall that gets broken up stops protecting, and since shields only ever block frontally, walking around a wall still beats it",
+            "CHARGE & REGROUP (Cavalry) — riders hit, pull out instead of bogging down, then pick the thickest enemy formation on the field and come again",
+            "HOLD FIRE / FIRE AT WILL (Archers) — holding draws a volley worth up to +150% on release. It only builds while a target is actually in range, so it costs you shots rather than being a free opening",
+            "Enemy armies use the same orders you do — they brace against your cavalry, cycle their own horse, and time their volleys",
+            "DWARVES charge with shields raised. Everyone else drops their guard to run; a dwarven line does not, and you can see arrows visibly glance off it as it comes on",
+            "GOBLINS get the ASSASSIN: twin daggers, fastest thing on foot, and it hunts ARCHERS specifically — it will run past a shield line and refuses to touch swordsmen until the last enemy archer on the field is dead. Its opening blow on each victim hits for 3.5x",
+            "Goblin dodge partly restored (0.15 to 0.17) after the last cut proved far too harsh, and they swing a little faster. Assassins are slipperier still at 0.22",
+            "Elves' attack speed reduced — an all-archer roster that never has to close was winning 92% of its matchups",
+            "FIXED: commanders were being shoved around the battlefield by the crowd and pinned against walls. Collisions now account for mass (a commander weighs nine soldiers), and he holds behind his own line instead of walking into the enemy, which is what the game always claimed he did",
+            "FIXED: battles were not reproducible — the collision solver ordered units by memory address, so the same fight could resolve differently each run",
+        ],
+    },
+    {
         "version": 37,
         "title": "Lines Stand and Fight",
         "items": [

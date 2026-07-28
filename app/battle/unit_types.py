@@ -81,6 +81,42 @@ UNIT_TYPES = {
         "max_hp": 20, "speed": 30, "range": 180, "damage": 6, "cooldown": 0.9,
         "ranged": True, "accuracy": 0.8, "equipment": [],
     },
+    # --- The Assassin (Goblins only) ----------------------------------------
+    # A counter-archer, not a duellist. Twin daggers means a very fast, very
+    # small hit -- damage 4 on a 0.22s cooldown is ~18 dps against an archer's
+    # 20 HP, so one gets in among bowmen and takes them apart, while the same
+    # 4 damage against a 30 HP shielded swordsman (who blocks and hits back for
+    # 8) is a losing trade. That asymmetry is the point: they are lethal at the
+    # job they are for and nearly useless at anything else, which is what makes
+    # `hunts_ranged` a strength rather than a restriction.
+    #
+    # Fastest thing on foot (speed 46) with no shield and 14 HP -- caught in the
+    # open by anything that can hit back, they die immediately.
+    "assassin": {
+        "name": "Assassin", "shape": "diamond", "radius": 4,
+        "max_hp": 14, "speed": 46, "range": 12, "damage": 4, "cooldown": 0.22,
+        "ranged": False, "equipment": ["daggers"],
+        # Slipperier than any goblin soldier -- pitched just above the 0.18 the
+        # whole species carried before its dodge was cut. Evasion, not armour,
+        # is what keeps a 14 HP knife-fighter alive long enough to reach the
+        # bowmen. Taken as a MAX against the species trait (see Unit.__init__),
+        # so it is a floor for the type rather than a replacement for it.
+        "dodge_chance": 0.22,
+        # First strike: the opening blow on each victim lands for this much.
+        # Awarded once per DISTINCT target (tracked by uid, see Unit._struck),
+        # never once per engagement -- otherwise a unit could flick its target
+        # away and back on the retarget throttle and farm the bonus forever.
+        # 4 damage becomes 14, which is most of an archer's 20 HP: an Assassin
+        # that reaches the bowmen opens by gutting one, then has to finish the
+        # rest at its ordinary rate. That is the whole fantasy of the unit, and
+        # it is why simply giving it more HP and damage did not work -- its
+        # value should be in the first moment it arrives, not in a slugging
+        # match it was never built to win.
+        "first_strike": 3.5,
+        # Ignores everything but enemy ranged units until none are left alive
+        # anywhere on the field -- see Battle.choose_target.
+        "hunts_ranged": True,
+    },
 }
 
 # --- Species commanders -------------------------------------------------------
@@ -104,6 +140,17 @@ UNIT_TYPES = {
 # point of use rather than written onto units, so it can never double-apply and
 # needs no cleanup when the commander dies (see Unit._aura).
 COMMANDER_AURA_RADIUS = 130
+
+# A commander will not push past his own troops: he only advances while at
+# least this many of his soldiers stand between him and what he is fighting.
+#
+# Without it he walks into the enemy line like any other unit, and once there a
+# crowd of enemies simply carries him along -- measured on a losing side, an
+# outnumbered commander was transported from x=114 to x=879 and pinned against
+# the far edge for 1,346 ticks before dying. Screening him is also what the
+# deploy comment has always claimed happens ("cutting to the enemy's commander
+# means going through their army first"); it just was not actually enforced.
+COMMANDER_SCREEN_MIN = 4
 
 COMMANDER_BY_SPECIES = {
     # The Marshal: least dangerous commander alive, the best force multiplier
@@ -142,8 +189,8 @@ COMMANDER_BY_SPECIES = {
     # not dying and by making everyone around him just as hard to pin down.
     "Goblins": {
         "title": "Chieftain",
-        "stats": {"max_hp": 200, "damage": 14, "speed": 42, "dodge_chance": 0.34},
-        "aura": {"dodge_add": 0.05, "cooldown_mult": 0.98},
+        "stats": {"max_hp": 200, "damage": 14, "speed": 42, "dodge_chance": 0.32},
+        "aura": {"dodge_add": 0.045, "cooldown_mult": 0.98},
     },
 }
 

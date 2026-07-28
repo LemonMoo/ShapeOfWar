@@ -13,6 +13,7 @@ import math
 import tkinter as tk
 
 from app.ui import theme
+from app.battle import orders
 from app.battle.shapes import draw_shape
 
 _FRAME_MS = 16              # ~60 fps
@@ -105,16 +106,97 @@ class BattleView(tk.Frame):
                  font=("Segoe UI", 9)).pack(side="left", padx=(0, 4))
         for label, key, hot in (("Swordsmen", "infantry", "1"),
                                 ("Cavalry", "cavalry", "2"),
-                                ("Archers", "archer", "3")):
+                                ("Archers", "archer", "3"),
+                                ("Assassins", "assassin", "4")):
             tk.Button(self.select_frame, text=f"{label} ({hot})",
                       command=lambda k=key: self._select_type(k),
                       bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                       relief="flat", font=("Segoe UI", 8)).pack(side="left", padx=1)
 
+        # --- orders (app/battle/orders.py) ---------------------------------
+        # Available during the fight, not just planning: an order you cannot
+        # give once the lines meet is not much of an order.
+        self.orders_frame = tk.Frame(p, bg=theme.PANEL)
+        self.orders_frame.pack(fill="x", padx=14, pady=(8, 0))
+        tk.Label(self.orders_frame, text="ORDERS", bg=theme.PANEL, fg=theme.MUTED,
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        self.order_hint = tk.Label(self.orders_frame, text="", bg=theme.PANEL,
+                                   fg=theme.MUTED, font=("Segoe UI", 8),
+                                   justify="left", wraplength=270, anchor="w")
+        self.order_hint.pack(anchor="w", pady=(0, 3))
+
+        self._order_buttons = {}
+        for label, hot, kind, value in (
+                ("Hold Here", "H", "stance", orders.STANCE_HOLD),
+                ("Charge", "C", "stance", orders.STANCE_CHARGE),
+                ("Advance", "A", "stance", orders.STANCE_ADVANCE),
+                ("Shield Wall", "S", "stance", orders.STANCE_SHIELD_WALL),
+                ("Charge & Regroup", "R", "stance", orders.STANCE_CYCLE_CHARGE),
+                ("Fire at Will", "F", "fire", True),
+                ("Hold Fire", "X", "fire", False)):
+            btn = tk.Button(self.orders_frame, text=f"{label}  ({hot})",
+                            command=lambda k=kind, v=value: self._issue_order(k, v),
+                            bg="#232a36", fg=theme.INK,
+                            activebackground=theme.ACCENT, relief="flat",
+                            font=("Segoe UI", 8), anchor="w")
+            btn.pack(fill="x", pady=1)
+            self._order_buttons[(kind, value)] = btn
+
         self.log = tk.Label(p, text="", bg=theme.PANEL, fg=theme.MUTED,
                             font=("Consolas", 8), justify="left",
                             wraplength=270, anchor="nw")
         self.log.pack(anchor="w", padx=14, pady=8, fill="both")
+
+    # --- issuing orders ----------------------------------------------------
+    def _issue_order(self, kind, value):
+        """Apply an order to the current selection. Reports what ACTUALLY took
+        it, not what was clicked -- selecting a mixed group and pressing Shield
+        Wall should say '12 Swordsmen form a shield wall', not silently do
+        nothing to the archers in the box."""
+        if not self.battle or self.battle.over:
+            return
+        units = [u for u in self.selected_units if u.alive]
+        if not units:
+            self.order_hint.config(text="Select units first — drag a box over "
+                                        "your troops, or press 1/2/3.")
+            return
+        if kind == "stance":
+            n = self.battle.issue_stance(units, value)
+            if n:
+                self._add_log(f"» {n} ordered: {orders.STANCE_LABEL[value]}")
+            else:
+                self._add_log(f"» Nobody selected can {orders.STANCE_LABEL[value]}")
+        else:
+            n = self.battle.issue_fire_discipline(units, value)
+            if n:
+                self._add_log(f"» {n} archers: "
+                              f"{'fire at will' if value else 'hold fire'}")
+            else:
+                self._add_log("» No archers selected")
+        self._refresh_order_buttons()
+        self.render()
+
+    def _refresh_order_buttons(self):
+        """Grey out orders the current selection cannot carry out, so the panel
+        teaches which arm does what instead of failing silently on click."""
+        if not hasattr(self, "_order_buttons"):
+            return
+        units = [u for u in self.selected_units if u.alive]
+        types = {u.type_key for u in units}
+        has_ranged = any(u._ranged for u in units)
+        for (kind, value), btn in self._order_buttons.items():
+            if kind == "fire":
+                ok = has_ranged
+            else:
+                ok = any(value in orders.allowed_stances(t) for t in types)
+            btn.config(state="normal" if ok else "disabled",
+                       fg=theme.INK if ok else "#4a5260")
+        if not units:
+            self.order_hint.config(text="No units selected.")
+        else:
+            stances = {orders.STANCE_LABEL.get(u.stance, u.stance) for u in units}
+            self.order_hint.config(
+                text=f"{len(units)} selected — {', '.join(sorted(stances))}")
 
     # --- battle wiring -----------------------------------------------------
     def set_battle(self, battle, subtitle=""):
@@ -124,6 +206,9 @@ class BattleView(tk.Frame):
         self._log_lines = [subtitle] if subtitle else []
         self._render_log()
         battle.on_attack = self._on_attack
+        # The player orders army 0; every other side is driven by the order AI
+        # (app/battle/order_ai.py) so both armies fight with the same toolkit.
+        battle.player_side = 0
         counts = " vs ".join(f"{a.name} ({len(a.units)})" for a in battle.armies)
         self.info.config(fg=theme.INK, text=counts)
 
@@ -150,11 +235,27 @@ class BattleView(tk.Frame):
         self._marquee = None
         self._formation_line = None
         self._formation_slots = []
-        self._unbind_planning_keys()
-        self.plan_hint.config(text="")
+        # Keys stay bound through the fight -- selection and order hotkeys are
+        # exactly what the live phase needs. They come off when the battle ends
+        # (_arm_continue), so the battle-over screen isn't taking order presses.
+        self.plan_hint.config(text="Select troops (drag a box, or 1/2/3) and "
+                                   "give orders. Space pauses so you can think.")
+        self._refresh_order_buttons()
         self._update_toggle_label()
 
-    # --- planning-phase key bindings (per-type select + Space deploy) -------
+    # --- key bindings: per-type select, order hotkeys, Space ---------------
+    # Bound for the whole battle, not just planning: orders are given during
+    # the fight, so the selection keys have to keep working then too.
+    _ORDER_KEYS = {
+        "h": ("stance", orders.STANCE_HOLD),
+        "c": ("stance", orders.STANCE_CHARGE),
+        "a": ("stance", orders.STANCE_ADVANCE),
+        "s": ("stance", orders.STANCE_SHIELD_WALL),
+        "r": ("stance", orders.STANCE_CYCLE_CHARGE),
+        "f": ("fire", True),
+        "x": ("fire", False),
+    }
+
     def _bind_planning_keys(self):
         if self._planning_keys_bound:
             return
@@ -162,26 +263,36 @@ class BattleView(tk.Frame):
         self.bind_all("<Key-1>", lambda e: self._select_type("infantry"), add="+")
         self.bind_all("<Key-2>", lambda e: self._select_type("cavalry"), add="+")
         self.bind_all("<Key-3>", lambda e: self._select_type("archer"), add="+")
+        self.bind_all("<Key-4>", lambda e: self._select_type("assassin"), add="+")
         self.bind_all("<space>", self._on_space_deploy, add="+")
+        for key, (kind, value) in self._ORDER_KEYS.items():
+            self.bind_all(f"<Key-{key}>",
+                          lambda e, k=kind, v=value: self._issue_order(k, v),
+                          add="+")
 
     def _unbind_planning_keys(self):
         if not self._planning_keys_bound:
             return
         self._planning_keys_bound = False
-        for seq in ("<Key-1>", "<Key-2>", "<Key-3>", "<space>"):
+        for seq in ("<Key-1>", "<Key-2>", "<Key-3>", "<Key-4>", "<space>"):
             self.unbind_all(seq)
+        for key in self._ORDER_KEYS:
+            self.unbind_all(f"<Key-{key}>")
 
     def _on_space_deploy(self, event):
-        if self.planning:
-            self.toggle()   # "Deploy Army" — end planning + start in one press
+        # Planning: deploy. Live: tactical pause -- Space is how you stop the
+        # fight to look at it and give several orders at once.
+        if self.planning or (self.battle and not self.battle.over):
+            self.toggle()
 
     def _select_type(self, type_key):
         """Select every living army-0 unit of ``type_key`` (the 1/2/3 hotkeys
         and the panel buttons both land here)."""
-        if not self.planning:
+        if not self._can_select():
             return
         self.selected_units = {u for u in self._plannable_units()
                                if u.type_key == type_key}
+        self._refresh_order_buttons()
         self.render()
 
     def _update_toggle_label(self):
@@ -278,7 +389,11 @@ class BattleView(tk.Frame):
         return best
 
     def _on_press(self, event):
-        if not self.planning:
+        # Selection works during the fight too, not just in planning -- orders
+        # are given to whatever is selected, so being unable to select mid-battle
+        # would make the whole order system unreachable once the fight started.
+        # Only DRAGGING units to a new position stays planning-only.
+        if not self._can_select():
             return
         x, y = event.x, event.y
         self._drag_start = (x, y)
@@ -287,14 +402,20 @@ class BattleView(tk.Frame):
         if hit is not None:
             if hit not in self.selected_units:
                 self.selected_units = {hit}
-            self._drag_mode = "move"
+            self._drag_mode = "move" if self.planning else "marquee"
+            if self._drag_mode == "marquee":
+                self._marquee = (x, y, x, y)
         else:
             self._drag_mode = "marquee"
             self._marquee = (x, y, x, y)
+        self._refresh_order_buttons()
         self.render()
 
+    def _can_select(self):
+        return self.battle is not None and not self.battle.over
+
     def _on_drag(self, event):
-        if not self.planning or self._drag_mode is None:
+        if not self._can_select() or self._drag_mode is None:
             return
         x, y = event.x, event.y
         if self._drag_mode == "move":
@@ -312,7 +433,7 @@ class BattleView(tk.Frame):
         self.render()
 
     def _on_release(self, event):
-        if not self.planning:
+        if not self._can_select():
             return
         if self._drag_mode == "marquee" and self._marquee is not None:
             x0, y0, x1, y1 = self._marquee
@@ -326,6 +447,7 @@ class BattleView(tk.Frame):
         self._drag_mode = None
         self._drag_start = None
         self._marquee = None
+        self._refresh_order_buttons()
         self.render()
 
     # --- formation tool: right-drag a line, snap the selection into ranks ---
@@ -400,6 +522,10 @@ class BattleView(tk.Frame):
         if self._continue_armed:
             return
         self._continue_armed = True
+        # Orders are over -- drop the hotkeys before binding the dismiss-any-key
+        # handler, or a stray "h" would both try to issue an order and dismiss.
+        self._unbind_planning_keys()
+        self.selected_units = set()
         # bind_all so *any* click or keypress anywhere in the app dismisses
         # the battle-over screen — not just clicks on this canvas.
         self.bind_all("<Button-1>", self._on_continue, add="+")
@@ -419,6 +545,30 @@ class BattleView(tk.Frame):
 
     def _living_unit_count(self):
         return sum(1 for army in self.battle.armies for u in army.units if u.alive)
+
+    # A unit under a non-default order gets a small coloured tick above it, so
+    # you can see at a glance which parts of your line are braced, walled or
+    # running -- and read the enemy's intent the same way. One canvas item, and
+    # only for units actually carrying an order, so a default-stance army costs
+    # nothing extra to draw.
+    _ORDER_CUE = {
+        orders.STANCE_HOLD: "#7fd6ff",
+        orders.STANCE_CHARGE: "#ff9b57",
+        orders.STANCE_SHIELD_WALL: "#9fe0a8",
+        orders.STANCE_CYCLE_CHARGE: "#ffd166",
+    }
+
+    def _draw_order_cue(self, c, u):
+        colour = self._ORDER_CUE.get(u.stance)
+        if colour is not None:
+            y = u.y - u.radius - 4
+            c.create_line(u.x - 3, y, u.x + 3, y, fill=colour, width=2)
+        # Archers drawing a held volley show it filling up -- the whole point of
+        # holding fire is knowing when the volley is worth releasing.
+        if u._ranged and not u.fire_at_will and u.volley > 0:
+            y = u.y - u.radius - 8
+            c.create_line(u.x - 4, y, u.x - 4 + 8 * u.volley, y,
+                          fill="#e8c46a", width=2)
 
     def _draw_commander(self, c, u, army):
         """The Commander: an oversized disc in the army's colour with a
@@ -473,6 +623,17 @@ class BattleView(tk.Frame):
         if "shield" in eq:                    # 'o' is symmetric — no rotation needed
             c.create_text(u.x + lhx * (r + 4), u.y + lhy * (r + 4), text="o",
                           fill="#a9d4ff", font=("Consolas", 8, "bold"))
+        if "daggers" in eq:
+            # Two short blades, one per hand, angled slightly outward — small
+            # and paired so an Assassin never reads as a swordsman even at the
+            # sizes a real battle draws at.
+            fwd = r * 0.55
+            angle = math.degrees(math.atan2(fx, fy))
+            for hx, hy in ((rhx, rhy), (lhx, lhy)):
+                c.create_text(u.x + fx * fwd + hx * (r * 0.8),
+                              u.y + fy * fwd + hy * (r * 0.8), text="i",
+                              fill="#e6d2a8", font=("Consolas", 7, "bold"),
+                              angle=angle)
 
     def _draw_effects(self, c):
         """Block sparks (a quick light-blue ring where a shield deflected a
@@ -557,6 +718,7 @@ class BattleView(tk.Frame):
                         r = u.radius
                         c.create_oval(u.x - r - 3, u.y - r - 3, u.x + r + 3, u.y + r + 3,
                                      outline="#ffffff", width=2)
+                    self._draw_order_cue(c, u)
 
         if self._marquee is not None:
             x0, y0, x1, y1 = self._marquee

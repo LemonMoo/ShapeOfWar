@@ -324,6 +324,22 @@ class App(tk.Tk):
         }
         if cav_share:
             composition["cavalry"] = round(power * cav_share)
+        # A species with a special unit (Goblins' Assassin) funds it from three
+        # places: a small cut of its Archers, a small cut of its Swordsmen, and
+        # a bonus granted outright. The bonus is the point -- it makes the unit
+        # a species ADVANTAGE rather than a reshuffle, and splitting the rest
+        # across both arms stops it gutting either one (paying for it purely
+        # out of Archers was measured at 88% -> 0% of matchups won).
+        special = traits["special_unit"]
+        if special:
+            from_bows = round(composition["archer"] * traits["special_share_of_archers"])
+            from_line = round(composition["infantry"] * traits["special_share_of_swordsmen"])
+            bonus = round(power * traits["special_bonus_share"])
+            composition["archer"] -= from_bows
+            composition["infantry"] -= from_line
+            total = from_bows + from_line + bonus
+            if total:
+                composition[special] = total
         return army, composition
 
     def stage_battle(self, attacker, defender, region=None, claim_project=None,
