@@ -20,6 +20,18 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 37,
+        "title": "Lines Stand and Fight",
+        "items": [
+            "Melee no longer degenerates into two lines shoving each other around the field. The collision impulse was driven by overlap alone, and a packed melee overlaps every single tick, so the pushing never stopped",
+            "Knockback now applies only while a unit is still closing: a charge hitting a line lands with full force, but once soldiers are locked in and trading blows they hold their ground",
+            "Fights resolve about 26% faster as a result (58.5s to 44.2s across eight test battles) — units spend the fight killing each other rather than being pushed apart",
+            "Commanders are drawn as an oversized disc with a contrasting centre instead of a spiked star inside a halo ring; the ring sat outside the body and mostly read as clutter once a melee closed around him",
+            "FIXED: enemy commanders were visible through fog of war — on a test save 12 of 13 rivals could be seen marching across ground the player had never explored. Their queued-path preview leaked their destination too, and is now hidden the same way",
+            "Rival commanders are drawn in their own realm's colour, so a marker tells you whose army it is at a glance. Your own keeps its distinct orchid",
+        ],
+    },
+    {
         "version": 36,
         "title": "Commanders Lead Armies — and Claiming Land Pays For Itself",
         "items": [
