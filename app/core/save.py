@@ -95,6 +95,9 @@ def load_game(save_id):
     # a top-level import would be circular.
     from app.world.resources import migrate_legacy_overflow
     migrate_legacy_overflow(world)
+    # Saves predating "every faction has a commander" have only the player's.
+    from app.world.commander import ensure_faction_commanders
+    ensure_faction_commanders(world)
     return world
 
 

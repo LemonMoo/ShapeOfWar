@@ -105,6 +105,17 @@ def _pct(x):
     return f"{v:.0f}%" if abs(v - round(v)) < 0.05 else f"{v:.1f}%"
 
 
+def _cost_phrase(cost):
+    """'25 Gold, 30 Logs and 20 Stone' — reads as prose, and stays correct
+    when the claim tables in expansion.py are retuned."""
+    parts = [f"{a:g} {r}" for r, a in cost.items() if a]
+    if not parts:
+        return "nothing"
+    if len(parts) == 1:
+        return parts[0]
+    return ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
 def _spoil_desc(rate):
     if rate <= 0:
         return "never spoils"
@@ -1129,23 +1140,58 @@ def _expansion_article():
         ),
         "STARTING A CLAIM",
         (
+            "A claim is an expedition, not a purchase: most of what it "
+            "costs is the timber and stone the crew consumes raising "
+            "palisades and the first buildings on unsettled ground. Gold "
+            "is only a small part of the bill."
+        ),
+        (
             f"A normal land-adjacent claim costs "
-            f"{expansion.CLAIM_BASE_COST['Gold']:.0f} Gold plus "
-            f"{expansion.CLAIM_COST_PER_CELL['Gold']:.2g} Gold per cell "
-            f"of the region's area, and takes "
-            f"{expansion.CLAIM_BASE_TURNS} turns plus "
-            f"{expansion.CLAIM_TURNS_PER_CELL:.2g} turns per cell (paid "
-            "and started immediately; the fight only happens once that "
-            "work is done)."
+            f"{_cost_phrase(expansion.CLAIM_BASE_COST)}, plus "
+            f"{_cost_phrase(expansion.CLAIM_COST_PER_CELL)} per cell of "
+            f"the region's area. It takes {expansion.CLAIM_BASE_TURNS} "
+            f"turns plus {expansion.CLAIM_TURNS_PER_CELL:.2g} turns per "
+            "cell (paid and started immediately; the fight only happens "
+            "once that work is done)."
         ),
         (
             f"An amphibious claim — a shore region reachable only across "
             f"water, with no land border to territory you already hold — "
-            f"costs far more: {expansion.SEA_ONLY_CLAIM_COST['Gold']:.0f} "
-            f"Gold (plus the same per-cell Gold), and its garrison is "
+            f"costs far more: {_cost_phrase(expansion.SEA_ONLY_CLAIM_COST)} "
+            f"(plus the same per-cell rate), and its garrison is "
             f"{_pct(expansion.SEA_ONLY_STRENGTH_MULT)} the size. This is "
             "deliberate: it stops both you and the AI from cheaply "
-            "leapfrogging across the sea and over-expanding early."
+            "leapfrogging across the sea and over-expanding early. Note "
+            "that spoils do NOT cover an amphibious claim — it is a "
+            "genuine investment, not a way to make money across the sea."
+        ),
+        (
+            "Because that bill is mostly materials, every region — desert, "
+            "steppe, bare rock — scrapes together a small amount of Logs "
+            "and Stone each turn no matter what its land is like. It is "
+            "deliberately meagre, and a region with real forest or a "
+            "quarry is far above it and gains nothing. It exists so that a "
+            "realm founded on barren ground can still, slowly, fund its "
+            "way outward instead of being sealed in by geography."
+        ),
+        "SPOILS",
+        (
+            "Winning the fight seizes what the garrison was sitting on, "
+            "not just the ground. Expect roughly "
+            f"{expansion.CLAIM_SPOILS_YIELD_TURNS} turns' worth of "
+            "whatever that region produces, delivered straight into its "
+            "new villages, so rich land is worth more than a bog."
+        ),
+        (
+            f"The Gold taken is {expansion.CLAIM_SPOILS_GOLD_MULT:.2g}× "
+            f"what you paid for the claim, plus "
+            f"{expansion.CLAIM_SPOILS_GOLD_PER_STRENGTH:.2g} per point of "
+            "garrison strength. A land claim you win therefore returns "
+            "MORE Gold than it cost. That is intentional: early expansion "
+            "is meant to be how a young realm generates coin and gets its "
+            "economy moving, rather than every kingdom simply starting "
+            "with a heap of it. The margin per claim is small — it "
+            "compounds over a campaign instead of arriving all at once."
         ),
         "ODDS",
         (

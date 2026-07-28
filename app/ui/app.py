@@ -350,7 +350,8 @@ class App(tk.Tk):
             frontier = bordering_regions(self.world, attacker_idx, defender_idx)
             region = random.choice(frontier) if frontier else None
         self._battle_context = {"attacker": attacker, "defender": defender,
-                                "region": region, "claim_project": claim_project}
+                                "region": region, "claim_project": claim_project,
+                                "armies": (a_army, d_army)}
 
         msg = (f"{attacker.name} marches on {region.name}, held by {defender.name}."
                if region else f"{attacker.name} marches on {defender.name}.")
@@ -399,6 +400,7 @@ class App(tk.Tk):
         to take a beat, not mid-fight."""
         winner = payload.get("winner")
         ctx, self._battle_context = getattr(self, "_battle_context", None), None
+        self._resolve_commander_losses(ctx)
         self._battle_outcome = None
         conquest = ""
         if ctx and ctx["region"]:
@@ -406,13 +408,27 @@ class App(tk.Tk):
             claim_project = ctx.get("claim_project")
             if winner and winner.side == 0:
                 attacker_idx = self.world.factions.index(attacker)
+                spoils = None
                 if claim_project is not None:
                     from app.world import expansion
-                    expansion.resolve_claim_win(self.world, region, attacker_idx)
+                    spoils = expansion.resolve_claim_win(self.world, region,
+                                                         attacker_idx)
                 else:
                     from app.world.territory import transfer_region
                     transfer_region(self.world, region, attacker_idx)
                 conquest = f" {attacker.name} seizes {region.name}!"
+                # Spoils are the whole point of the rebalance -- say what was
+                # taken, or the player just sees an empty region arrive.
+                if spoils:
+                    gold = spoils.get("Gold", 0)
+                    goods = sum(v for k, v in spoils.items() if k != "Gold")
+                    bits = []
+                    if gold:
+                        bits.append(f"{gold:,} Gold")
+                    if goods:
+                        bits.append(f"{goods:,} units of stores")
+                    if bits:
+                        conquest += f" Spoils: {' and '.join(bits)}."
                 self._battle_outcome = {"result": "success", "region": region,
                                         "attacker": attacker, "defender": defender}
             else:
@@ -428,6 +444,29 @@ class App(tk.Tk):
             text=(f"{winner.name} won the last battle{conquest}" if winner
                   else "Last battle: stalemate"))
 
+    def _resolve_commander_losses(self, ctx):
+        """Carry a commander's death on the battlefield back to the world.
+
+        Army.commander_lost is latched the moment he falls (see
+        Battle._check_morale), so this reads the same flag the morale penalty
+        used rather than re-deriving anything. A wildland garrison has no
+        faction and so no world commander to lose -- only real nations do.
+        """
+        self._commander_losses = []
+        if not ctx:
+            return
+        from app.world import commander as commander_mod
+        armies = ctx.get("armies") or ()
+        for army, nation in zip(armies, (ctx.get("attacker"), ctx.get("defender"))):
+            if nation is None or not getattr(army, "commander_lost", False):
+                continue
+            try:
+                fac_idx = self.world.factions.index(nation)
+            except ValueError:
+                continue        # _WildlandDefender -- not a real faction
+            if commander_mod.kill_commander(self.world, fac_idx):
+                self._commander_losses.append((fac_idx, nation.name))
+
     def _return_from_battle(self):
         """Called once the player dismisses the battle-over screen (click or
         keypress) — back to the map, blinking the contested region's border
@@ -439,11 +478,29 @@ class App(tk.Tk):
         self._battle_outcome = None
         eliminated = getattr(self, "_pending_elimination", None)
         self._pending_elimination = None
+        losses = getattr(self, "_commander_losses", None) or []
+        self._commander_losses = []
         if outcome is not None:
             self.map_view.refresh()
         self.show_screen("map")
         if outcome is None:
             return
+        # A commander falling outranks the battle result as news: it decides
+        # whether the realm can fight at all for the next dozen turns.
+        player = (self.world.factions[self.world.player_faction_idx]
+                  if self.world.player_faction_idx is not None else None)
+        for fac_idx, name in losses:
+            if player is not None and fac_idx == self.world.player_faction_idx:
+                from app.world import commander as commander_mod
+                turns = commander_mod.COMMANDER_RESPAWN_TURNS
+                self.map_view.show_bottom_message(
+                    f"Your commander has fallen. A successor takes the field in "
+                    f"{turns} turns \u2014 until then your realm cannot march.",
+                    ms=7000)
+            else:
+                self.map_view.show_bottom_message(
+                    f"{name}'s commander has fallen.", ms=5000)
+
         region, attacker, defender = outcome["region"], outcome["attacker"], outcome["defender"]
         if outcome["result"] == "success":
             self.map_view.flash_region(region, "success")

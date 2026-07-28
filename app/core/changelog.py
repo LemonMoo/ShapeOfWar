@@ -20,6 +20,31 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 36,
+        "title": "Commanders Lead Armies — and Claiming Land Pays For Itself",
+        "items": [
+            "COMMANDERS: your army is tied to your commander. You cannot attack a rival or claim wildland unless your commander is standing in one of your regions bordering the target — no more armies materialising anywhere on the map",
+            "The panel tells you exactly why an attack is refused and where to march to fix it, rather than silently offering no targets",
+            "Every faction has one, AI included, and the AI now marches its commander toward what it intends to take",
+            "Commanders are real units on the battlefield now, not just vision: a large 8-pointed star, far tougher than a line soldier, and they project an aura that buffs every friendly unit around them",
+            "Each species fields its own commander with its own profile — Human Marshal (all-round buff), Elven Warden (ranged, extends your archers' reach), Dwarven Thane (enormous HP, soaks damage for the line), Orcish Warchief (heaviest hitter, cleaves through groups), Goblin Chieftain (fast, evasive)",
+            "Losing your commander in battle breaks your army's morale on the spot — damage and speed both drop for the rest of the fight",
+            "A fallen commander is really gone: the realm cannot attack or claim at all until a successor takes the field 12 turns later at your capital",
+            "Species commanders were tuned across a full battle tournament — win-rate spread between species narrowed from about 45 points to about 17",
+
+            "Claiming wildland is no longer a pure Gold check. A claim is an expedition: it now costs 25 Gold, 30 Logs and 12 Stone plus a small per-cell rate, so most of the bill is the timber and stone the crew actually consumes",
+            "Gold for a typical region drops from about 199 to 44 — instrumenting the expansion AI showed 90% of its attempts failing on affordability alone, against 0.2% blocked by anything else",
+            "NEW: winning the fight now seizes SPOILS. You take roughly 10 turns of whatever that region produces, delivered straight into its new villages, so rich land is worth more than a bog",
+            "Spoils Gold is 1.8x what you paid, plus a bounty per point of garrison strength — so a land claim you win returns MORE Gold than it cost. Measured across all 400 wildland regions on a test map: every one is net-positive, median +54 Gold",
+            "This is meant to be how a young realm generates coin and gets its economy moving, instead of every kingdom simply starting with a heap of it. The margin per claim is small and compounds over a campaign",
+            "Amphibious claims are deliberately excluded from the profit — spoils are pinned to the land price, so crossing the sea still runs about 222 Gold in the red and stays a real commitment rather than a way to farm coin",
+            "The claim panel now previews the spoils and the net Gold before you commit, and the post-battle message reports what was seized",
+            "On a late-game test map, factions able to afford a frontier claim went from 2 of 14 to 8 of 14",
+            "Every region now scrapes together a trickle of Logs and Stone regardless of biome, so a desert or steppe realm can still slowly fund its way outward instead of being sealed in by geography — 64% of regions were producing no Stone at all, which is why cutting the price hadn't helped them",
+            "It's a floor, not a bonus: a region with real forest or a quarry is far above it and gains nothing, so it can't re-inflate the timber hoards that storage throttling exists to contain",
+        ],
+    },
+    {
         "version": 35,
         "title": "In-Game Treasury, and a Bad Fix Undone",
         "items": [

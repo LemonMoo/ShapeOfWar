@@ -2189,6 +2189,23 @@ class MapView(tk.Frame):
                  f"Population {self._total_population(nation):,}\n"
                  f"{self._settle_counts(nation)}\n"
                  f"{n_regions} regions.{zoom_hint}")
+        # Commander status: it decides whether this realm can attack or claim
+        # at all, so it belongs on the realm's own panel rather than only
+        # surfacing as a refusal when you try something.
+        if own:
+            fac_idx = self.world.factions.index(nation)
+            waiting = commander.commander_respawn_turns(self.world, fac_idx)
+            if waiting:
+                lines_extra = ("\n\nNo commander — a successor takes the field "
+                               f"in {waiting} turn{'s' if waiting != 1 else ''}. "
+                               "Your realm cannot attack or claim until then.")
+            elif commander.faction_commanders(self.world, fac_idx):
+                lines_extra = ""
+            else:
+                lines_extra = "\n\nNo commander. Your realm cannot attack or claim."
+            if lines_extra:
+                self.info.config(fg=theme.WARN,
+                                 text=self.info.cget("text") + lines_extra)
         # The realm panel used to print s['resources'] here -- the national
         # pool, which holds nothing any more now goods live per-node. It read
         # "RESOURCES: None yet." while the sidebar beside it listed thirty
@@ -2567,6 +2584,20 @@ class MapView(tk.Frame):
                  f"Build time: {expansion.claim_turns(region)} turns",
                  bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
                  justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+        # The claim is meant to pay for itself in coin -- show that up front, or
+        # the cost reads as pure expenditure and nobody expands early.
+        spoils = expansion.claim_spoils(self.world, region)
+        if spoils:
+            net = expansion.claim_net_gold(self.world, region)
+            goods = sum(v for k, v in spoils.items() if k != "Gold")
+            line = f"Spoils if won: {spoils.get('Gold', 0):,} Gold"
+            if goods:
+                line += f" + {goods:,} units of stores"
+            if not sea_only and net > 0:
+                line += f"\n(net {net:+,} Gold on the claim)"
+            tk.Label(self.actions, text=line, bg=theme.PANEL, fg=theme.GOOD,
+                     font=theme.FONT, justify="left",
+                     wraplength=260).pack(anchor="w", pady=(0, 6))
         tk.Button(self.actions, text="Claim Territory",
                   command=lambda cnty=region: self._do_claim(cnty),
                   bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
@@ -3420,6 +3451,21 @@ class MapView(tk.Frame):
                                   "port to attack across right now.")
             return
 
+        # Only offer ground the army can actually reach. Showing targets
+        # that would then be refused makes the rule feel arbitrary; showing
+        # only reachable ones makes "move the commander first" self-evident.
+        reachable = [r for r in frontier
+                     if commander.commander_can_reach(self.world, player_idx, r)]
+        if not reachable:
+            where = "a coastal landing" if naval else "the frontier"
+            self.info.config(
+                fg=theme.WARN,
+                text=f"{enemy.name}\nYour army cannot reach them. March your "
+                     f"commander to one of your own regions on {where} with "
+                     f"{enemy.name}, then attack.")
+            return
+        frontier = reachable
+
         self.attack_mode = enemy
         self._attack_enemy = enemy
         self._attack_frontier = frontier
@@ -3457,6 +3503,15 @@ class MapView(tk.Frame):
     def _launch_attack(self, region):
         enemy = self._attack_enemy
         player = self._player_faction()
+        # The army marches with the commander: no commander on the frontier,
+        # no attack (see commander.commander_can_reach). Checked here rather
+        # than only when the target list is built, so a commander that walked
+        # away mid-selection can't slip an attack through.
+        blocked = commander.commander_block_reason(
+            self.world, self.world.factions.index(player), region)
+        if blocked:
+            self.show_bottom_message(blocked, ms=6000)
+            return
         self.attack_mode = None
         self._attack_enemy = None
         self._attack_frontier = []

@@ -1001,6 +1001,13 @@ def _raw_yield_per_cell(resource):
             else BASE_MINING_YIELD_PER_CELL)
 
 
+# The trickle every region manages regardless of biome -- see the note at the
+# bottom of compute_industry_yield. Sized so a barren region takes roughly a
+# dozen-plus turns to fund its share of a claim: enough to expand eventually,
+# never enough to build an economy on.
+BASELINE_INDUSTRY_FLOOR = {"Logs": 3, "Stone": 3}
+
+
 def compute_industry_yield(region, season):
     """This region's Forestry/Mining production -- the industrial-output
     counterpart to compute_crop_yield just above, sharing its exact
@@ -1024,6 +1031,24 @@ def compute_industry_yield(region, season):
             amount = round(amount)
             if amount:
                 result[resource] = result.get(resource, 0) + amount
+
+    # Every region scrapes together SOME timber and stone, whatever its biome:
+    # scrub and deadwood, and rock prised out of the ground. Without this a
+    # desert or steppe realm produces literally zero of both, and since claiming
+    # wildland is now paid mostly in Logs and Stone (see expansion.CLAIM_BASE_COST)
+    # such a realm could never expand at all -- a permanent dead end decided at
+    # worldgen. On a late-game test map Stone was the single binding constraint
+    # on 4 of 14 realms, and halving its price changed nothing, because their
+    # problem was never price: it was that the number was zero.
+    #
+    # Deliberately a FLOOR rather than a bonus. A region already working real
+    # forest or a quarry is far above it and gets nothing, so this cannot
+    # re-inflate the Logs hoard that storage throttling exists to contain -- it
+    # only lifts regions that would otherwise produce none, and slowly.
+    if getattr(region, "biome_counts", None):
+        for resource, floor in BASELINE_INDUSTRY_FLOOR.items():
+            if result.get(resource, 0) < floor:
+                result[resource] = floor
     return result
 
 
@@ -4221,6 +4246,7 @@ def advance_turn(world):
     # (app/world/expansion.py).
     from app.world import expansion
     expansion.advance_claims(world)
+    expansion.run_commander_ai(world)   # walk AI commanders to the frontier
     expansion.run_expansion_ai(world)
     expansion.ensure_interregion_roads(world)
     _record_gold(world, "expansion", _gold_mark)
@@ -4231,6 +4257,8 @@ def advance_turn(world):
     # movement is reflected in this turn's fog reveal, not one turn late.
     from app.world import commander
     commander.advance_commanders(world)
+    # Successors take the field (see kill_commander); stashed for the UI.
+    world.commander_successions = commander.advance_commander_succession(world)
 
     # Fog of war: reveal whatever's now in range as territory changes hands
     # (app/world/vision.py).

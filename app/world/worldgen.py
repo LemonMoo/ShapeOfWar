@@ -1830,10 +1830,11 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     #     this is what lets an island start ever explore beyond its own
     #     shore). Before fog init so the very first reveal already accounts
     #     for it.
-    if world.player_faction_idx is not None:
-        from app.world.commander import spawn_commander
-        player = world.factions[world.player_faction_idx]
-        spawn_commander(world, world.player_faction_idx, player.meta["capital"])
+    # EVERY faction fields one, not just the player: the army marches with its
+    # commander now (see commander.commander_can_reach), so a realm without one
+    # could never attack or claim anything at all.
+    from app.world.commander import ensure_faction_commanders
+    ensure_faction_commanders(world)
 
     # 15. fog of war: reveal the player's starting foothold (and whatever's
     #     already in range of it) — see app/world/vision.py

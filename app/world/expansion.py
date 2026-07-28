@@ -19,8 +19,19 @@ from app.world.lexicon import make_settlement_namer
 from app.world.construction import (can_afford, _pay_cost, RoadProject, _path_between,
                                     _ai_has_active_construction)
 
-CLAIM_BASE_COST = {"Gold": 80}
-CLAIM_COST_PER_CELL = {"Gold": 0.6}
+# Claiming is an expedition, not a purchase. It used to be paid in Gold alone
+# (80 flat + 0.6/cell, so ~170 for a typical region), which made expansion a
+# pure treasury check -- and a punishing one: instrumenting the expansion AI
+# showed 90% of all its attempts failing on affordability, against 0.2% blocked
+# by anything else. Gold is now a small fraction of that, and most of the cost
+# is the timber and stone an expedition actually consumes putting up palisades,
+# bridges and the first buildings on ground nobody has settled before.
+# Stone is kept genuinely minimal. At a first pass it was the single binding
+# constraint on 4 of 14 realms in a late-game save (Logs never blocked anyone),
+# which is not what "a minimal amount of stone" should mean -- quarrying is far
+# rarer across the map than logging, so the same nominal price bites much harder.
+CLAIM_BASE_COST = {"Gold": 25, "Logs": 30, "Stone": 12}
+CLAIM_COST_PER_CELL = {"Gold": 0.1, "Logs": 0.12, "Stone": 0.04}
 CLAIM_BASE_TURNS = 4
 CLAIM_TURNS_PER_CELL = 0.03
 CLAIM_FAIL_COOLDOWN_TURNS = 5
@@ -32,7 +43,9 @@ CLAIM_FAIL_STRENGTH_BUMP = 1.15   # a region "digs in" after repelling a claim
 # defended than a normal land-adjacent claim, so neither the player nor the AI
 # can cheaply leapfrog across the sea and over-expand beyond their real reach
 # in the early game.
-SEA_ONLY_CLAIM_COST = {"Gold": 1000}
+# Rebalanced on the same principle, but deliberately still steep: an amphibious
+# claim has to be a real commitment, not a way to leapfrog the map early.
+SEA_ONLY_CLAIM_COST = {"Gold": 300, "Logs": 220, "Stone": 90}
 SEA_ONLY_STRENGTH_MULT = 1.5      # its garrison is stronger (more soldiers) too
 
 # Wildland garrisons fight 10% below their nominal strength rating — applied
@@ -146,6 +159,11 @@ def start_claim(world, faction_idx, region):
                 "attempt — try again later.")
     if any(p.region_id == region.id for p in world.claim_projects):
         return "A claim is already underway there."
+    # The army marches with the commander -- see commander.commander_can_reach.
+    from app.world import commander as commander_mod
+    blocked = commander_mod.commander_block_reason(world, faction_idx, region)
+    if blocked:
+        return blocked
 
     nation = world.factions[faction_idx]
     sea_only = is_sea_only_claim(world, faction_idx, region)
@@ -291,12 +309,78 @@ def ensure_interregion_roads(world):
             world.road_projects.append(RoadProject(region.faction_idx, path, tier="dirt"))
 
 
+# --- Spoils of the claim ------------------------------------------------------
+# Taking wildland used to give nothing but the ground itself: you paid, you
+# fought, and the region arrived empty. What a garrison had actually been
+# sitting on -- its stores, and the worked goods of whoever lived there before
+# -- now comes with it.
+#
+# Scaled off the region's OWN output rather than a flat bundle, so seizing rich
+# land is worth more than seizing a bog, and off wildland_strength for the Gold,
+# because a garrison tough enough to need a real army was guarding something.
+# Gold spoils are pinned to what the claim actually COST rather than floating
+# free, so taking wildland is reliably profitable in coin instead of sometimes
+# being a net loss (at the first pass it returned 38 Gold against a 45 Gold
+# price). That profit is the point: it gives an early realm a way to GENERATE
+# gold by expanding, rather than every kingdom simply starting with a pile of
+# it. The margin is deliberately modest and per-claim -- it compounds over a
+# campaign instead of arriving all at once.
+#
+# Pinned to the LAND cost specifically, so an amphibious claim (far pricier --
+# see SEA_ONLY_CLAIM_COST) stays a real commitment rather than a way to farm
+# coin across the sea.
+CLAIM_SPOILS_YIELD_TURNS = 10    # stores roughly this many turns of local output
+CLAIM_SPOILS_GOLD_MULT = 1.8     # Gold returned, as a multiple of the Gold paid
+CLAIM_SPOILS_GOLD_PER_STRENGTH = 0.25   # plus a bounty for a tough garrison
+
+
+def claim_spoils(world, region):
+    """{resource: amount} seized when `region` is taken -- a preview the UI can
+    show before committing, and the exact bundle resolve_claim_win grants."""
+    from app.world import resources as res_mod
+    spoils = {}
+    for resource, amount in res_mod.compute_region_yield(region, world.season).items():
+        take = round(amount * CLAIM_SPOILS_YIELD_TURNS)
+        if take > 0:
+            spoils[resource] = take
+    paid = claim_cost(region).get("Gold", 0)
+    gold = round(paid * CLAIM_SPOILS_GOLD_MULT
+                 + region.wildland_strength * CLAIM_SPOILS_GOLD_PER_STRENGTH)
+    if gold > 0:
+        spoils["Gold"] = spoils.get("Gold", 0) + gold
+    return spoils
+
+
+def claim_net_gold(world, region):
+    """Gold left over after paying for the claim -- what the UI should promise,
+    since 'spoils 100' means little without 'cost 45' beside it."""
+    return claim_spoils(world, region).get("Gold", 0) - claim_cost(region).get("Gold", 0)
+
+
+def _grant_claim_spoils(world, region):
+    """Deliver the spoils into the region's own new villages. Routed through
+    the ordinary production path so it lands where everything else does and
+    respects storage the same way -- but unthrottled, because these goods
+    physically exist and are being carried in, not produced on the spot."""
+    from app.world import resources as res_mod
+    spoils = claim_spoils(world, region)
+    bound = {r: a for r, a in spoils.items()
+             if r in res_mod._SETTLEMENT_STORAGE_RESOURCES}
+    if bound:
+        res_mod._route_farm_production(world, region, bound, throttle=False)
+    return spoils
+
+
 def resolve_claim_win(world, region, faction_idx):
     """A garrison battle (or, for AI, the instant formula) was won: transfer
     the region and populate it fresh. Shared by advance_claims' AI path and
     app.py's player-battle-outcome handling."""
+    strength = region.wildland_strength   # consumed by the transfer below
     territory.transfer_region(world, region, faction_idx)
     settle_newly_claimed_region(world, region)
+    # Villages have to exist first -- they are what receives the spoils.
+    region.wildland_strength = strength
+    return _grant_claim_spoils(world, region)
 
 
 def resolve_claim_loss(world, region):
@@ -339,6 +423,64 @@ def advance_claims(world):
             resolve_claim_loss(world, region)
 
 
+# --- AI commander movement ---------------------------------------------------
+# Commander presence gates claiming as well as war (see commander_can_reach),
+# and an AI commander that never leaves its capital would freeze that faction's
+# expansion permanently -- claiming wildland is the only way AI realms grow.
+# So the AI walks its commander to wherever it next wants to take ground.
+#
+# Deliberately minimal, matching the rest of this AI: no scoring, no planning
+# horizon. If the commander is idle and cannot authorise anything, send it
+# toward the nearest frontier region it could claim from. That is enough to
+# keep expansion moving without pretending to be a general.
+def run_commander_ai(world):
+    from app.world import commander as commander_mod
+    for fac_idx, nation in enumerate(world.factions):
+        if fac_idx == world.player_faction_idx or is_eliminated(nation):
+            continue
+        cmds = commander_mod.faction_commanders(world, fac_idx)
+        if not cmds:
+            continue
+        cmd = cmds[0]
+        if cmd.path is not None:            # already marching somewhere
+            continue
+        frontier = claimable_frontier(world, fac_idx)
+        if not frontier:
+            continue
+        # Stay put only while there is something here worth doing -- ground
+        # this faction can both REACH and AFFORD. Testing reachability alone
+        # pinned commanders in place forever: measured, on 99.7% of turns they
+        # could reach some frontier region so they never moved, while 90% of
+        # expansion attempts failed on cost. A commander parked beside land its
+        # realm cannot pay for should go and find land it can.
+        useful = [r for r in frontier
+                  if commander_mod.commander_can_reach(world, fac_idx, r)
+                  and can_afford(nation,
+                                 claim_cost(r, is_sea_only_claim(world, fac_idx, r)),
+                                 world)]
+        if useful:
+            continue
+        # Head for the staging ground of the closest target: one of our OWN
+        # regions bordering it, which is where the gate actually wants us.
+        # Head for the cheapest handful -- claim cost scales with region size,
+        # and marching to something unaffordable just relocates the problem.
+        best = None
+        targets = sorted(frontier, key=lambda r: sum(
+            claim_cost(r, is_sea_only_claim(world, fac_idx, r)).values()))[:6]
+        for region in targets:
+            for cid in _adjacent_region_ids(world, region):
+                staging = world.regions[cid]
+                if staging.faction_idx != fac_idx or not staging.cells:
+                    continue
+                target = min(staging.cells,
+                             key=lambda c: wrap.dist_wrap(cmd.pos, c, world.w))
+                dist = wrap.dist_wrap(cmd.pos, target, world.w)
+                if best is None or dist < best[0]:
+                    best = (dist, target)
+        if best is not None and best[1] != cmd.pos:
+            commander_mod.set_move_order(world, cmd, best[1])
+
+
 def run_expansion_ai(world):
     """Every AI faction's equivalent of the player clicking "Claim
     Territory": each turn, a faction with no construction/expansion
@@ -358,7 +500,31 @@ def run_expansion_ai(world):
         frontier = claimable_frontier(world, fac_idx)
         if not frontier:
             continue
-        region = random.choice(frontier)
-        sea_only = is_sea_only_claim(world, fac_idx, region)
-        if can_afford(nation, claim_cost(region, sea_only), world):
-            start_claim(world, fac_idx, region)
+        # Only consider ground the commander can actually authorise. The pick
+        # used to be uniformly random across the whole frontier, which once
+        # claims became commander-gated meant the AI almost always chose a
+        # region its commander was nowhere near: measured, 19 of 20 attempts
+        # were refused and AI expansion collapsed from +20 regions per 200
+        # turns to +3. Choosing from what the army can actually reach costs
+        # nothing in simplicity and restores it.
+        from app.world import commander as commander_mod
+        reachable = [r for r in frontier
+                     if commander_mod.commander_can_reach(world, fac_idx, r)]
+        if not reachable:
+            continue        # run_commander_ai will march someone toward it
+        # Choose among what it can actually pay for, not blindly at random.
+        # Claim cost scales with region size, and the old uniform pick spent
+        # most turns proposing a region the faction could not afford --
+        # measured, 90% of all expansion-AI turns ended in "cannot afford"
+        # while only 0.2% were blocked by the commander. Narrowing the pool to
+        # commander-reachable ground made that worse by removing the cheap
+        # outliers a random draw used to stumble into, so affordability is now
+        # part of the choice rather than a post-hoc test.
+        affordable = [r for r in reachable
+                      if can_afford(nation,
+                                    claim_cost(r, is_sea_only_claim(world, fac_idx, r)),
+                                    world)]
+        if not affordable:
+            continue
+        region = random.choice(affordable)
+        start_claim(world, fac_idx, region)

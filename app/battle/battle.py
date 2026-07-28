@@ -79,6 +79,8 @@ class Army:
         self.side = side
         self.species = species
         self.units = []
+        self.commander = None        # set by Battle.deploy
+        self.commander_lost = False  # latched once he falls -- see morale
 
     @property
     def living(self):
@@ -109,7 +111,7 @@ class Battle:
         soft anti-dogpile term). Snapshot from the last update() tick."""
         return self._threat.get(enemy, 0)
 
-    def deploy(self, army, composition, side, strength_mult=1.0):
+    def deploy(self, army, composition, side, strength_mult=1.0, with_commander=True):
         """Place an army in a grid along one side from a composition dict
         ``{unit_type: count}``. ``strength_mult`` scales every spawned
         unit's combat power (see Unit) — used for a wildland garrison's
@@ -129,6 +131,19 @@ class Battle:
             y = self.height / 2 + (row - rows / 2) * 16 + jitter()
             army.units.append(Unit(type_key, army, x, y, strength_mult,
                                    species=getattr(army, "species", None)))
+
+        if with_commander:
+            # Behind his own formation, not in front of it: he reaches the
+            # fight after the lines meet, and cutting to the enemy's commander
+            # means going through their army first -- which is what makes
+            # killing one an achievement rather than an opening move. Added on
+            # top of the composition, never taken out of it.
+            back = x0 - 40 if side == 0 else x0 + 40
+            cmd = Unit("commander", army, back, self.height / 2, strength_mult,
+                       species=getattr(army, "species", None))
+            cmd.is_commander = True
+            army.units.append(cmd)
+            army.commander = cmd
         self.armies.append(army)
         return army
 
@@ -180,6 +195,32 @@ class Battle:
                 if score > best_score:
                     best, best_score = u, score
         return best or self.nearest_enemy(unit)
+
+    # --- morale ---------------------------------------------------------------
+    # A commander falling does not end the battle -- his soldiers keep fighting,
+    # just far worse. Chosen over an instant rout because a rout makes every
+    # engagement a single decapitation race and throws away the army balance the
+    # species roster was tuned around; a lasting penalty still makes killing him
+    # the most valuable thing on the field without making it the only thing.
+    MORALE_DAMAGE_MULT = 0.70   # leaderless soldiers hit softer
+    MORALE_SPEED_MULT = 0.85    # ...and press forward less willingly
+
+    def _check_morale(self):
+        """Latch the morale penalty onto an army the moment its commander dies.
+
+        Applied once to each surviving soldier rather than re-checked every
+        tick: update() runs many times a second across hundreds of units, and
+        this only ever needs to happen on the single frame he falls."""
+        for army in self.armies:
+            cmd = getattr(army, "commander", None)
+            if cmd is None or army.commander_lost or cmd.alive:
+                continue
+            army.commander_lost = True
+            for u in army.units:
+                if u.alive and u is not cmd:
+                    u.damage *= self.MORALE_DAMAGE_MULT
+                    u.speed *= self.MORALE_SPEED_MULT
+            bus.emit("battle:commander_lost", {"army": army})
 
     def _resolve_collisions(self):
         """Push overlapping units apart and add a small springy impulse so they
@@ -254,6 +295,7 @@ class Battle:
             for u in army.units:
                 u.update(dt, self)
 
+        self._check_morale()
         self._resolve_collisions()
         self._integrate(dt)
         self.projectiles = [p for p in self.projectiles if p.update(dt)]

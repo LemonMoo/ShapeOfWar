@@ -80,6 +80,160 @@ def spawn_commander(world, faction_idx, pos):
     return cmd
 
 
+# --- Commanders as the army: presence gating ---------------------------------
+# A realm's army marches with its commander. You cannot attack a region, or
+# claim wildland, unless your commander is standing in one of your OWN regions
+# bordering the target -- the host masses on the frontier and crosses from
+# there. That is what turns the commander from a scout into the thing every
+# campaign is planned around: taking ground somewhere new means walking them
+# there first.
+#
+# Deliberately "adjacent, on your side of the line" rather than "inside the
+# target": marching an unescorted commander through hostile land to start a
+# fight is backwards, and it would make every war begin with a suicide walk.
+def faction_commanders(world, faction_idx):
+    return [c for c in world.commanders if c.faction_idx == faction_idx]
+
+
+def commander_at_region(world, faction_idx, region):
+    """The faction's commander standing inside `region`, if any."""
+    for cmd in faction_commanders(world, faction_idx):
+        x, y = cmd.pos
+        if 0 <= y < world.h and 0 <= x < world.w:
+            if world.region_grid[y][x] == region.id:
+                return cmd
+    return None
+
+
+def commander_can_reach(world, faction_idx, region):
+    """The commander that authorises acting on `region`, or None.
+
+    Valid when the commander stands in the target itself (already yours, or
+    being defended) or in any region this faction owns that shares a border
+    with it."""
+    from app.world.worldgen import _adjacent_region_ids
+    here = commander_at_region(world, faction_idx, region)
+    if here is not None:
+        return here
+    neighbours = set(_adjacent_region_ids(world, region))
+    for cmd in faction_commanders(world, faction_idx):
+        x, y = cmd.pos
+        if not (0 <= y < world.h and 0 <= x < world.w):
+            continue
+        cid = world.region_grid[y][x]
+        if cid in neighbours and world.regions[cid].faction_idx == faction_idx:
+            return cmd
+    return None
+
+
+def commander_block_reason(world, faction_idx, region):
+    """Player-facing explanation when the commander gate refuses, or None when
+    the action is allowed."""
+    if commander_can_reach(world, faction_idx, region):
+        return None
+    if not faction_commanders(world, faction_idx):
+        turns = commander_respawn_turns(world, faction_idx)
+        if turns:
+            return (f"Your commander has fallen. A successor takes the field in "
+                    f"{turns} turn{'s' if turns != 1 else ''} — until then there "
+                    "is no army to march.")
+        return ("Your realm has no commander. Without one there is no army to "
+                "march.")
+    return ("Your commander is too far away. Move them into one of your "
+            f"regions bordering {region.name} before committing the army.")
+
+
+def ensure_faction_commanders(world):
+    """Every faction fields a commander, spawned at its capital.
+
+    Only the player ever had one -- it existed purely to scout. Now that the
+    army marches with it, a faction without one could never attack or claim
+    anything, so every realm needs one for the rule to be symmetric. Runs on
+    load as well as at world-gen, so existing saves pick theirs up."""
+    spawned = 0
+    for idx, nation in enumerate(world.factions):
+        from app.world.nation import is_eliminated
+        if is_eliminated(nation) or faction_commanders(world, idx):
+            continue
+        # A realm mid-succession is deliberately without one -- backfilling
+        # here would silently undo the cost of losing a commander in battle.
+        if commander_respawn_turns(world, idx):
+            continue
+        pos = nation.meta.get("capital")
+        if pos is None:
+            sids = nation.meta.get("settlements") or []
+            if sids:
+                pos = world.settlements[sids[0]].pos
+        if pos is None:
+            continue
+        spawn_commander(world, idx, pos)
+        spawned += 1
+    return spawned
+
+
+# --- Death and succession -----------------------------------------------------
+# A commander who falls in battle is gone from the map, and with him the realm's
+# ability to take ground: no commander, no army to march (see
+# commander_block_reason). A successor takes the field at the capital after
+# COMMANDER_RESPAWN_TURNS, so losing one is a real setback with a real recovery
+# rather than an unrecoverable end to the game.
+#
+# The interval is deliberately long enough to be felt -- roughly half a season --
+# because the alternative is that losing a battle costs nothing but the troops,
+# and the commander may as well not have been on the field.
+COMMANDER_RESPAWN_TURNS = 12
+
+
+def _respawn_table(world):
+    table = getattr(world, "commander_respawn", None)
+    if table is None:
+        table = world.commander_respawn = {}
+    return table
+
+
+def kill_commander(world, faction_idx):
+    """The faction's commander has fallen: remove them and start the succession
+    countdown. Returns True only if one was actually lost, so callers never
+    announce a death that did not happen."""
+    cmds = faction_commanders(world, faction_idx)
+    if not cmds:
+        return False
+    lost = cmds[0]
+    world.commanders = [c for c in world.commanders if c is not lost]
+    _respawn_table(world)[faction_idx] = COMMANDER_RESPAWN_TURNS
+    return True
+
+
+def commander_respawn_turns(world, faction_idx):
+    """Turns until a successor takes the field, or 0 if one already has."""
+    return _respawn_table(world).get(faction_idx, 0)
+
+
+def advance_commander_succession(world):
+    """Tick every pending succession; a successor appears at the capital when
+    the countdown runs out. Returns [(faction_idx, commander), ...] for those
+    who took the field this turn, so the UI can announce them."""
+    table = _respawn_table(world)
+    arrived = []
+    for fac_idx in list(table):
+        table[fac_idx] -= 1
+        if table[fac_idx] > 0:
+            continue
+        del table[fac_idx]
+        from app.world.nation import is_eliminated
+        nation = world.factions[fac_idx]
+        if is_eliminated(nation) or faction_commanders(world, fac_idx):
+            continue
+        pos = nation.meta.get("capital")
+        if pos is None:
+            sids = nation.meta.get("settlements") or []
+            if not sids:
+                continue          # nowhere left to raise one -- realm is finished
+            pos = world.settlements[sids[0]].pos
+        arrived.append((fac_idx, spawn_commander(world, fac_idx, pos)))
+    return arrived
+
+
 def find_ship_at(world, faction_idx, pos):
     """The same-faction Ship sitting exactly at `pos`, if any. Only
     meaningful for a beached ship (a Ship currently being sailed keeps

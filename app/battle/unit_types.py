@@ -60,9 +60,98 @@ UNIT_TYPES = {
     # have to advance to shoot rather than opening fire from the spawn line --
     # but they now get roughly twice as long shooting into an approaching enemy
     # before it closes, which is a large buff to any archer-heavy roster.
+    # --- The Commander ------------------------------------------------------
+    # Not part of an army's composition: exactly one is added per side on top
+    # of it (see Battle.deploy), so fielding him never costs you a soldier and
+    # small armies don't end up proportionally more commander than army.
+    #
+    # Sized and statted to be "very hard to take down" without deciding fights
+    # by himself: ~9x a Swordsman's HP and ~3x its damage means several
+    # soldiers focusing him for a sustained stretch will still bring him down,
+    # but no single unit trades with him. He is also the one unit drawn as a
+    # spiked star at triple radius -- see shapes._star for why that silhouette.
+    "commander": {
+        "name": "Commander", "shape": "star", "radius": 15,
+        "max_hp": 270, "speed": 30, "range": 18, "damage": 24, "cooldown": 0.7,
+        "ranged": False, "equipment": ["sword", "shield"],
+        "block_chance": 0.45, "block_arc_deg": 180,
+    },
     "archer": {
         "name": "Archer", "shape": "square", "radius": 5,
         "max_hp": 20, "speed": 30, "range": 180, "damage": 6, "cooldown": 0.9,
         "ranged": True, "accuracy": 0.8, "equipment": [],
     },
 }
+
+# --- Species commanders -------------------------------------------------------
+# Every commander inherits its species' soldier multipliers (Unit reads them),
+# and measurement showed that alone is a balance problem: it AMPLIFIES the
+# raw-stat species and does nothing for the utility ones. A tournament with
+# commanders added widened the roster spread by ~7 points across two seed
+# batches, entirely at the expense of Humans (23-28% -> 16-20%) while Orcs
+# stayed at ~80%, because an Orcish commander gets +22% HP and +18% damage on a
+# 270 HP body while the Human bonus (block chance) is worth almost nothing on a
+# single unit.
+#
+# So these profiles are corrective, not just flavourful. Each species'
+# commander is the concentrated form of that species' identity, and the ones
+# whose armies are already strong get commanders that add little raw power,
+# while the ones that need help get commanders whose value is what they do for
+# everyone around them.
+#
+# `stats` override the base commander entry in UNIT_TYPES. `aura` is applied to
+# living friendly soldiers within `aura_radius` px -- read on demand at the
+# point of use rather than written onto units, so it can never double-apply and
+# needs no cleanup when the commander dies (see Unit._aura).
+COMMANDER_AURA_RADIUS = 130
+
+COMMANDER_BY_SPECIES = {
+    # The Marshal: least dangerous commander alive, the best force multiplier
+    # in the game. Humans' whole identity is the drilled line, and they measured
+    # worst by a wide margin -- this is where that gets answered.
+    "Humans": {
+        "title": "Marshal",
+        "stats": {"max_hp": 250, "damage": 18},
+        "aura": {"damage_mult": 1.15, "cooldown_mult": 0.90, "block_add": 0.10},
+    },
+    # The Warden: fights at range and extends his archers' reach. Frailest
+    # commander on the field -- caught in melee he dies like any other elf.
+    "Elves": {
+        "title": "Warden",
+        "stats": {"max_hp": 190, "damage": 11, "range": 150, "ranged": True,
+                  "accuracy": 0.9, "speed": 34, "block_chance": 0.0},
+        "aura": {"range_mult": 1.05, "cooldown_mult": 0.95},
+    },
+    # The Thane: the anchor. Enormous and immovable; his line takes less
+    # punishment while he stands, but he cannot chase a fight that moves.
+    "Dwarves": {
+        "title": "Thane",
+        "stats": {"max_hp": 470, "damage": 26, "speed": 28, "block_chance": 0.58},
+        "aura": {"damage_taken_mult": 0.76},
+    },
+    # The Warchief: pure offence, no aura at all. Orcs already measure ~80%, so
+    # their commander deliberately gains nothing for the army and instead
+    # trades his own life -- a heavy cleaving arc, and no protection for anyone.
+    "Orcs": {
+        "title": "Warchief",
+        "stats": {"max_hp": 300, "damage": 30, "block_chance": 0.15},
+        "cleave": {"radius": 34, "share": 0.55},
+        "aura": {"damage_mult": 1.10},
+    },
+    # The Chieftain: never meant to be hit. Lowest damage of the five; wins by
+    # not dying and by making everyone around him just as hard to pin down.
+    "Goblins": {
+        "title": "Chieftain",
+        "stats": {"max_hp": 200, "damage": 14, "speed": 42, "dodge_chance": 0.34},
+        "aura": {"dodge_add": 0.05, "cooldown_mult": 0.98},
+    },
+}
+
+_NO_AURA = {}
+
+
+def commander_profile(species):
+    """The species' commander profile, or a plain baseline for an unknown
+    species (a wildland garrison has none)."""
+    return COMMANDER_BY_SPECIES.get(species, {"title": "Commander",
+                                              "stats": {}, "aura": _NO_AURA})
