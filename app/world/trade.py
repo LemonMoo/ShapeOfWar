@@ -45,9 +45,12 @@ from app.world.resources import (RESOURCES, BASE_VALUE_BY_TIER, RESOURCE_SPAWN,
                                  settlement_needs, _FOOD_SOURCES, _LUXURY_GOODS,
                                  _SETTLEMENT_STORAGE_RESOURCES,
                                  settlement_storage_capacity, _node_storage_capacity,
+                                 node_space_used,
                                  _node_surplus, _node_wants,
                                  _LOCAL_SHIPMENT_PRIORITY, resource_value)
 from app.world.diplomacy import TRADE_STANDING_THRESHOLD
+from app.world.nation import is_eliminated
+from app.world import resources
 from app.world import wrap
 from app.world import rivers
 
@@ -380,9 +383,101 @@ def _nation_resource_stock(nation, resource, world):
     national pool for everything else (old-system-only goods with no
     live-registry equivalent yet: Gems/Mithril/Jewelry/Textiles/Silks/
     Spices/Steel/Fish)."""
+    if resource in _LIVESTOCK_RESOURCES:
+        return _faction_herd_total(nation, resource, world)
     if resource in _SETTLEMENT_STORAGE_RESOURCES:
         return _faction_settlement_total(nation, resource, world)
     return nation.stats.get("resources", {}).get(resource, 0)
+
+
+# --- Livestock trading ------------------------------------------------------
+# Animals are the one tradable thing in the game that isn't a stockpiled good:
+# they're living herd held per village (resources.village_herds), so they have
+# no entry in node.resources for the ordinary caravan path to read or write.
+# Rather than build a parallel trade system for them, the three functions the
+# pipeline actually asks about stock -- _nation_resource_stock, sellable_
+# surplus, buyer_need -- learn to look at herds instead, and delivery routes
+# head into a buyer village. Pricing, caravan movement, war risk, raiding and
+# payment then all work on livestock unchanged.
+#
+# This is what lets a faction whose land supports no Cattle buy a breeding
+# herd from one whose pastures are full, which is the whole point: herd
+# capacity is a property of terrain, and terrain is not something you can
+# build your way out of.
+_LIVESTOCK_RESOURCES = {name for name, spec in RESOURCES.items()
+                        if spec["category"] == "Livestock"}
+LIVESTOCK_BREEDING_RESERVE = 0.5   # fraction of a faction's herd never sold --
+                                   # you don't sell the breeding stock
+LIVESTOCK_MIN_TRADE_HEAD = 4       # below this it isn't worth a caravan
+
+
+def min_trade_quantity(resource):
+    """Smallest worthwhile caravan load. Livestock trades in head, not bulk:
+    a whole realm's spare herd is often a couple of dozen animals, so the
+    ordinary MIN_TRADE_QUANTITY of 20 would have silently blocked nearly
+    every livestock deal the AI could have made."""
+    return (LIVESTOCK_MIN_TRADE_HEAD if resource in _LIVESTOCK_RESOURCES
+            else MIN_TRADE_QUANTITY)
+
+
+def _faction_villages(nation, world):
+    idx = world.factions.index(nation)
+    return [v for v in world.villages if v.faction_idx == idx]
+
+
+def _faction_herd_total(nation, animal, world):
+    return sum((getattr(v, "herds", None) or {}).get(animal, 0)
+               for v in _faction_villages(nation, world))
+
+
+def _faction_herd_capacity(nation, animal, world):
+    return sum(resources.village_herd_capacity(world, v, animal)
+               for v in _faction_villages(nation, world))
+
+
+def _take_livestock(nation, animal, head, world):
+    """Remove `head` of `animal` from this faction's villages, largest herd
+    first. Returns how many were actually taken."""
+    taken = 0
+    villages = sorted(_faction_villages(nation, world),
+                      key=lambda v: -(getattr(v, "herds", None) or {}).get(animal, 0))
+    for v in villages:
+        if taken >= head:
+            break
+        herd = getattr(v, "herds", None)
+        if not herd or herd.get(animal, 0) <= 0:
+            continue
+        # Never strip a village below its own breeding core.
+        spare = int(herd[animal] * (1 - LIVESTOCK_BREEDING_RESERVE))
+        move = min(spare, head - taken)
+        if move <= 0:
+            continue
+        herd[animal] -= move
+        taken += move
+    return taken
+
+
+def _give_livestock(nation, animal, head, world):
+    """Add `head` of `animal` to this faction's villages, most headroom
+    first, so imported stock lands where the land can actually carry it."""
+    villages = _faction_villages(nation, world)
+    if not villages:
+        return 0
+    def headroom(v):
+        cap = resources.village_herd_capacity(world, v, animal)
+        return cap - (getattr(v, "herds", None) or {}).get(animal, 0)
+    placed = 0
+    for v in sorted(villages, key=headroom, reverse=True):
+        if placed >= head:
+            break
+        room = headroom(v)
+        if room <= 0:
+            continue
+        herds = resources.ensure_village_herd(world, v)
+        move = min(room, head - placed)
+        herds[animal] = herds.get(animal, 0) + move
+        placed += move
+    return placed
 
 
 def sellable_surplus(nation, resource, world):
@@ -390,12 +485,24 @@ def sellable_surplus(nation, resource, world):
     own safety margin — food reserves are sized off real settlement need
     (Phase 8), not a guess, so a faction physically cannot sell food it
     needs to eat."""
+    if resource in _LIVESTOCK_RESOURCES:
+        # Sell only what's above the breeding core -- a herd sold down past
+        # that can't rebuild, and terrain caps how many you could ever regrow.
+        head = _faction_herd_total(nation, resource, world)
+        spare = int(head * (1 - LIVESTOCK_BREEDING_RESERVE))
+        return spare if spare >= LIVESTOCK_MIN_TRADE_HEAD else 0
     stock = _nation_resource_stock(nation, resource, world)
     return max(0, int(stock - _safety_reserve(nation, resource, world)))
 
 
 def buyer_need(nation, resource, world):
     """0 (stockpile full, no interest) .. 1 (empty, desperate)."""
+    if resource in _LIVESTOCK_RESOURCES:
+        # Judged against what this faction's LAND can carry, not its storage:
+        # a realm with pasture standing empty is the one that wants animals.
+        cap = _faction_herd_capacity(nation, resource, world)
+        head = _faction_herd_total(nation, resource, world)
+        return max(0.0, 1.0 - head / cap) if cap > 0 else 0.0
     stock = _nation_resource_stock(nation, resource, world)
     if resource in _SETTLEMENT_STORAGE_RESOURCES:
         cap = sum(settlement_storage_capacity(st) for st in _faction_settlements(nation, world))
@@ -491,8 +598,14 @@ def eligible_to_trade(world, a_idx, b_idx):
     or a shared border for anyone), relations mustn't be hostile, and
     standing must clear TRADE_STANDING_THRESHOLD. This is the single gate
     both caravan dispatch (run_trade_ai) and route proposals
-    (start_trade_route/run_trade_route_ai) go through."""
+    (start_trade_route/run_trade_route_ai) go through — which is also why
+    the eliminated-faction check lives here rather than in each caller: a
+    conquered nation is still present in world.factions (see
+    app/world/nation.py) and would otherwise keep being offered as a
+    perfectly good trade partner."""
     a, b = world.factions[a_idx], world.factions[b_idx]
+    if is_eliminated(a) or is_eliminated(b):
+        return False
     if frozenset((a.id, b.id)) not in world.world_map.relationships:
         return False
     rel = world.world_map.get_relationship(a.id, b.id)
@@ -799,7 +912,14 @@ def _dispatch_caravan(world, seller_idx, buyer_idx, resource, quantity, price, k
                       seller_settlement=None, buyer_settlement=None):
     seller = world.factions[seller_idx]
     buyer = world.factions[buyer_idx]
-    if resource in _SETTLEMENT_STORAGE_RESOURCES:
+    if resource in _LIVESTOCK_RESOURCES:
+        # The animals leave the seller's pastures now, same as goods leave a
+        # granary -- and if fewer were actually available than the deal
+        # assumed, the caravan carries only what was really driven out.
+        quantity = _take_livestock(seller, resource, quantity, world)
+        if quantity <= 0:
+            return
+    elif resource in _SETTLEMENT_STORAGE_RESOURCES:
         st = seller_settlement or _faction_capital_settlement(seller, world)
         if st is not None:
             if not hasattr(st, "resources"):
@@ -865,7 +985,11 @@ def advance_caravans(world):
                    else _faction_capital_settlement(buyer, world))
 
         if c.leg == "outbound":
-            if c.resource in _SETTLEMENT_STORAGE_RESOURCES:
+            if c.resource in _LIVESTOCK_RESOURCES:
+                # Animals go to pasture, not into a granary -- placed where
+                # the buyer's land actually has room (see _give_livestock).
+                _give_livestock(buyer, c.resource, c.quantity, world)
+            elif c.resource in _SETTLEMENT_STORAGE_RESOURCES:
                 if buyer_st is not None:
                     if not hasattr(buyer_st, "resources"):
                         buyer_st.resources = {}
@@ -944,7 +1068,7 @@ def run_trade_ai(world):
             dispatched = False
             for resource in RESOURCES:
                 surplus = sellable_surplus(seller, resource, world)
-                if surplus < MIN_TRADE_QUANTITY:
+                if surplus < min_trade_quantity(resource):
                     continue
                 if buyer_need(buyer, resource, world) <= 0:
                     continue
@@ -965,7 +1089,7 @@ def run_trade_ai(world):
                         continue
                     st_needs = settlement_needs(seller_st, world.season)
                     surplus = min(surplus, _node_surplus(seller_st, resource, st_needs))
-                    if surplus < MIN_TRADE_QUANTITY:
+                    if surplus < min_trade_quantity(resource):
                         continue
 
                 price = unit_price(resource, seller, buyer, world, seller_st, buyer_st)
@@ -986,7 +1110,7 @@ def run_trade_ai(world):
                 buyer_for_gold = buyer_st if buyer_st is not None else _faction_capital_settlement(buyer, world)
                 power = _spendable_gold(buyer_for_gold)
                 qty = int(min(surplus, power // price))
-                if qty < MIN_TRADE_QUANTITY:
+                if qty < min_trade_quantity(resource):
                     continue
                 route = _route_for_pair(world, f_idx, p_idx)
                 if route is None:
@@ -1814,7 +1938,7 @@ def run_sell_to_city(world):
                 if city is None:
                     continue
                 cap = settlement_storage_capacity(city)
-                stock = sum(getattr(city, "resources", {}).values())
+                stock = node_space_used(city)   # space, not item count (Phase 2)
                 if cap <= 0 or stock >= cap * CITY_STOCKPILE_CEILING_FRACTION:
                     continue
                 qty = min(surplus, SELL_TO_CITY_MAX_QUANTITY)

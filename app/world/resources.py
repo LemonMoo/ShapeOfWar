@@ -42,6 +42,14 @@ RESOURCES = {
     "Potatoes": {"category": "Crops", "tier": 1},
     "Carrots":  {"category": "Crops", "tier": 1},
     "Onions":   {"category": "Crops", "tier": 1},
+    # Hay/fodder. A Crop like any other -- grown, harvested, stored -- but
+    # eaten by animals rather than people (edible: False, like Cotton), and
+    # the thing that decides whether a herd survives Winter (see
+    # FODDER_PER_HEAD_WINTER). Deliberately a Crop rather than a free
+    # pasture yield: that way it competes with food crops for the same
+    # regional land, so "feed the herd or feed the people" is a real
+    # land-use trade-off instead of a resource that appears from nowhere.
+    "Fodder":   {"category": "Crops", "tier": 1},
     "Beans":    {"category": "Crops", "tier": 1},
     "Peas":     {"category": "Crops", "tier": 1},
     "Rice":     {"category": "Crops", "tier": 1},
@@ -95,6 +103,11 @@ RESOURCES = {
     "Eggs":        {"category": "Food Products", "tier": 3},
     "Honey":       {"category": "Food Products", "tier": 3},
     "Smoked Fish": {"category": "Food Products", "tier": 3},
+    # Cured meat. Unlike every other Food Product this one has no entry in
+    # RECIPES: it can ONLY be made in a Preserving House (Phase 5), which
+    # is what gives that building -- and the Salt it burns through -- a
+    # reason to exist beyond raising a conversion cap.
+    "Salted Meat": {"category": "Food Products", "tier": 3},
 
     # Manufactured Goods
     "Planks":   {"category": "Manufactured Goods", "tier": 4},
@@ -199,7 +212,8 @@ _CATEGORY_PROPERTY_DEFAULTS = {
 
 _PROPERTY_OVERRIDES = {
     "Salt":    {"edible": True},     # the one edible Mining resource
-    "Cotton":  {"edible": False},    # the one non-edible Crop -- a fiber, not a food
+    "Cotton":  {"edible": False},    # a fiber, not a food
+    "Fodder":  {"edible": False},    # animal feed, not human food
     "Bricks":  {"renewable": False},  # fired from Clay -- a Mining (non-renewable) input
     "Glass":   {"renewable": False},  # made from Sand -- a Mining (non-renewable) input
     "Tools":   {"renewable": False},  # smithed from Iron/other ore
@@ -217,6 +231,14 @@ _SPOIL_RATE = {
     "Wheat": 0.03, "Barley": 0.03, "Oats": 0.03, "Rye": 0.03,
     "Potatoes": 0.06, "Carrots": 0.07, "Onions": 0.05, "Beans": 0.02, "Peas": 0.02,
     "Rice": 0.03, "Cotton": 0.02,   # dried fiber, at least as durable as a dried grain
+    # Dried hay, stacked in a barn, has to survive from the Summer cut to the
+    # Winter it exists for -- one to two full seasons, i.e. 25-50 turns. At an
+    # ordinary crop's rate that's a 64% loss in transit and the herd starves
+    # holding a barn that was full at harvest; measured, the world went from
+    # 70,330 hay in Autumn to under 5,000 by the time it was needed. Baled hay
+    # genuinely does keep for a year, so it gets the lowest nonzero rate in
+    # the registry.
+    "Fodder": 0.01,
     "Grapes": 0.06,   # perishable fruit -- same ballpark as Potatoes/Carrots
     # Livestock -- a living animal isn't a perishable stockpile good.
     "Cattle": 0.0, "Sheep": 0.0, "Horses": 0.0, "Goats": 0.0, "Chickens": 0.0, "Pigs": 0.0, "Bees": 0.0,
@@ -233,6 +255,7 @@ _SPOIL_RATE = {
     # Honey essentially never spoils.
     "Flour": 0.05, "Bread": 0.35, "Meat": 0.30, "Milk": 0.40,
     "Cheese": 0.05, "Eggs": 0.15, "Honey": 0.0,
+    "Salted Meat": 0.03,   # salt-cured: keeps like Cheese, unlike Meat at 0.30
     # Manufactured Goods -- finished/durable, almost none of them spoil.
     # Wool is a mild exception (raw fiber, only lightly at risk from moths/
     # damp); Paper is the other (damp/mildew risk).
@@ -248,11 +271,68 @@ _SPOIL_RATE = {
     "Fine Clothes": 0.0, "Books": 0.0, "Candles": 0.03,
 }
 
+# --- Phase 2 of the storage rework: bulk ------------------------------------
+# How much storage space ONE unit of a resource takes, relative to a unit of
+# grain (1.0). Until now every unit cost exactly 1 regardless of what it was,
+# which the Phase 9 note defended as avoiding "a second axis of made-up
+# numbers" -- reasonable at the time, but the measurements since have made the
+# case: raw Mining/Forestry goods were 88-90% of everything in storage, and a
+# model where a Log and a Gem occupy identical space has no way to express
+# why that's a problem. Bulk is what makes a barn full of timber *feel*
+# expensive, and it's the first thing that gives the player a reason to
+# prefer refining a good over hoarding its raw input.
+#
+# Values are about volume, not weight -- storage is floor space. So Iron
+# (dense, compact) is cheaper to store per unit than Logs (light, enormous),
+# even though the iron is heavier. Anything genuinely tiny and valuable
+# (Gems, Gold, Jewelry) costs almost nothing, which is what makes a Vault a
+# small building rather than a warehouse for coins.
+#
+# Most of this varies by category, so it's category defaults plus real
+# exceptions -- unlike _SPOIL_RATE, which needs every resource named because
+# it varies too much within a category to have a sensible default.
+_CATEGORY_BULK = {
+    "Crops": 1.0, "Livestock": 1.0, "Forestry": 2.5, "Mining": 1.6,
+    "Fishing": 1.0, "Food Products": 1.0, "Manufactured Goods": 1.2,
+    "Luxury Goods": 0.5,
+}
+_BULK_OVERRIDES = {
+    # Forestry -- raw timber is the bulkiest thing in the game; Resin is sap
+    # in a barrel.
+    "Logs": 3.0, "Hardwood": 2.6, "Softwood": 2.6, "Firewood": 2.0, "Resin": 0.8,
+    # Mining -- quarried stone/clay/sand is bulky, smelted metal is compact,
+    # Gems are a pouch.
+    "Stone": 2.5, "Clay": 2.0, "Sand": 2.0, "Coal": 1.8,
+    "Iron": 1.2, "Copper": 1.2, "Tin": 1.2, "Salt": 0.8, "Gems": 0.1,
+    # Manufactured -- sawn/fired building material stays bulky; finished
+    # metalwork and paper are compact. Gold is minted currency: a chest.
+    "Planks": 2.0, "Bricks": 2.2, "Glass": 1.0, "Wool": 1.6, "Cloth": 1.0,
+    "Clothes": 1.2, "Leather": 1.2, "Tools": 0.8, "Weapons": 0.8,
+    "Shields": 1.2, "Paper": 0.5, "Gold": 0.02,
+    # Food -- roughly grain-like, with cured/concentrated goods packing better
+    # than fresh ones.
+    "Flour": 0.9, "Bread": 1.0, "Meat": 1.0, "Milk": 1.2, "Cheese": 0.8,
+    "Eggs": 1.2, "Honey": 0.6, "Fish": 1.0, "Smoked Fish": 0.8,
+    "Salted Meat": 0.9,
+    "Cotton": 1.8, "Grapes": 1.2,     # raw fiber and fresh fruit are bulky
+    "Fodder": 2.2,   # baled hay is mostly air -- the bulkiest thing a granary holds
+    # Luxury -- small and precious, except Furniture, which is neither.
+    "Jewelry": 0.1, "Furniture": 3.0, "Fine Clothes": 0.8, "Books": 0.5,
+    "Candles": 0.4, "Wine": 1.0, "Beer": 1.2,
+}
+
 for _name, _spec in RESOURCES.items():
     _spec.update(_CATEGORY_PROPERTY_DEFAULTS[_spec["category"]])
     _spec.update(_PROPERTY_OVERRIDES.get(_name, {}))
     _spec["spoil_rate"] = _SPOIL_RATE[_name]
+    _spec["bulk"] = _BULK_OVERRIDES.get(_name, _CATEGORY_BULK[_spec["category"]])
 del _name, _spec
+
+
+def resource_bulk(resource):
+    """Storage space one unit of `resource` occupies (see _CATEGORY_BULK).
+    Unknown resources cost 1.0, the grain reference."""
+    return RESOURCES.get(resource, {}).get("bulk", 1.0)
 
 # Gold-equivalent value per unit, by tier -- the shared "how much is this
 # actually worth" reference used both for trade pricing (app/world/trade.py)
@@ -333,6 +413,21 @@ RESOURCE_SPAWN = {
     "Onions":   {"biomes": {"plains"}, "elevation": (0.0, 0.35),
                 "climate": {"temperate": 1.1, "arid": 0.8, "cold": 0.6, "humid": 0.8},
                 "fertility_weight": 1.0, "rarity": "common"},
+    # Grass/hay: the least demanding crop in the registry -- it grows on
+    # marginal ground a food crop would fail on (low fertility_weight,
+    # tolerant of every climate and the highest elevation ceiling), which
+    # is what lets a cold or poor region still keep animals.
+    # rarity "uncommon" is doing real balance work here, not flavour:
+    # _biome_land_shares splits a biome by rarity alone, so a "common" Fodder
+    # claimed a full staple-grain share of every plain (10.5%, the same as
+    # Wheat) and cut human food production by about a tenth the moment it
+    # existed -- nodes with people starving in them went from 140 to 225.
+    # "uncommon" halves that to ~5.5%: keeping animals still costs you fields
+    # you could have fed people with, which is the intended trade-off, but it
+    # doesn't cost you a staple crop's worth of them.
+    "Fodder":   {"biomes": {"plains"}, "elevation": (0.0, 0.60),
+                "climate": {"temperate": 1.2, "arid": 0.7, "cold": 1.1, "humid": 1.0},
+                "fertility_weight": 0.5, "rarity": "uncommon"},
     "Beans":    {"biomes": {"plains"}, "elevation": (0.0, 0.35),
                 "climate": {"temperate": 1.2, "arid": 0.5, "cold": 0.5, "humid": 1.0},
                 "fertility_weight": 0.9, "rarity": "uncommon"},
@@ -625,20 +720,17 @@ def building_biomes(resource):
 RECIPES = {
     "Flour":   [{"inputs": ["Wheat"]}],                  # Mill
     "Bread":   [{"inputs": ["Flour"]}],                  # Bakery
-    "Meat":    [{"inputs": ["Cattle"], "slaughter": True},
-               {"inputs": ["Sheep"], "slaughter": True},
-               {"inputs": ["Goats"], "slaughter": True},
-               {"inputs": ["Pigs"], "slaughter": True},
-               {"inputs": ["Horses"], "slaughter": True}],   # Butcher -- any Livestock, always slaughtered
-    "Milk":    [{"inputs": ["Cattle"], "byproduct": True},
-               {"inputs": ["Sheep"], "byproduct": True},
-               {"inputs": ["Goats"], "byproduct": True}],   # Dairy -- milked from a live animal, never slaughtered
+    # NOTE: Meat, Milk, Wool, Eggs and Honey are NOT made here. They come off
+    # living herds (LIVESTOCK_DYNAMICS / advance_herds), and their inputs are
+    # animals -- which live in village.herds, not in node.resources, where
+    # every recipe in this table reads its inputs from. Entries for them used
+    # to sit here with "slaughter"/"byproduct" flags and could never once
+    # fire; worse, they read as the real production path and led directly to
+    # a wrong diagnosis that Meat was unproducible when in fact the herd
+    # system had been making it all along. Removed rather than left as a trap.
     "Cheese":  [{"inputs": ["Milk"]}],                   # Creamery
-    "Eggs":    [{"inputs": ["Chickens"]}],               # Henhouse
-    "Honey":   [{"inputs": ["Bees"]}],                   # Apiary
     "Smoked Fish": [{"inputs": ["Fish"]}],               # Smokehouse -- cured for storage, same
                                                           # 1:1 shape as Flour->Bread
-    "Wool":    [{"inputs": ["Sheep"], "byproduct": True}],   # Shearing Shed -- sheared from a live sheep
     "Planks":  [{"inputs": ["Logs"]}],                   # Sawmill
     "Bricks":  [{"inputs": ["Clay"]}],                   # Brickworks
     "Glass":   [{"inputs": ["Sand"]}],                   # Glassworks
@@ -716,6 +808,10 @@ GROWTH_CYCLE = {
     "Potatoes": {"Spring": "Plant", "Summer": "Growing", "Autumn": "Harvest", "Winter": "Dormant"},
     "Carrots":  {"Spring": "Plant", "Summer": "Growing", "Autumn": "Harvest", "Winter": "Dormant"},
     "Onions":   {"Spring": "Plant", "Summer": "Growing", "Autumn": "Harvest", "Winter": "Dormant"},
+    # Cut in Summer, a season EARLIER than the food harvest, so the hay is
+    # already banked when the Autumn cull decision arrives -- you know what
+    # you can feed before you choose how many to keep.
+    "Fodder":   {"Spring": "Plant", "Summer": "Harvest", "Autumn": "Growing", "Winter": "Dormant"},
     "Beans":    {"Spring": "Plant", "Summer": "Growing", "Autumn": "Harvest", "Winter": "Dormant"},
     "Peas":     {"Winter": "Plant", "Spring": "Growing", "Summer": "Harvest", "Autumn": "Dormant"},
     "Rice":     {"Spring": "Plant", "Summer": "Growing", "Autumn": "Harvest", "Winter": "Dormant"},
@@ -1062,7 +1158,12 @@ def _produce_fishing(world):
             continue
         if not hasattr(node, "resources"):
             node.resources = {}
-        node.resources["Fish"] = node.resources.get("Fish", 0) + yield_amt
+        # Same storage feedback as the harvest (see storage_throttle): boats
+        # don't land a catch there's no room to keep.
+        landed = round(yield_amt * storage_throttle(node, "Fish"))
+        if landed <= 0:
+            continue
+        node.resources["Fish"] = node.resources.get("Fish", 0) + landed
 
 
 def village_projected_annual_yield(world, village):
@@ -1094,7 +1195,39 @@ def village_projected_annual_yield(world, village):
     fish = _node_fish_yield(world, village.pos)
     if fish:
         result["Fish"] = result.get("Fish", 0) + fish * YEAR_LENGTH_TURNS
+    # This village's own herd (Milk/Wool/Eggs/Honey off the living animals,
+    # Meat/Leather off the Autumn cull). Not divided by n_targets: the herd
+    # belongs to THIS village, unlike the region-level crop and industry
+    # yields above. Without this the panel's "Grows per year" quietly omitted
+    # everything the animals produce, which for a pastoral village is most of
+    # what it actually makes.
+    for resource, amount in village_projected_herd_yield(world, village).items():
+        result[resource] = result.get(resource, 0) + amount
     return result
+
+
+def village_projected_herd_yield(world, village):
+    """{resource: amount} this village's herd should yield over a full year,
+    at its current head count and policy -- the livestock counterpart of the
+    crop projection above. An estimate, like the rest of that panel: it
+    assumes the herd holds steady and Winter doesn't force an emergency cull."""
+    herds = getattr(village, "herds", None)
+    if not herds:
+        return {}
+    out = defaultdict(int)
+    policy = herd_policy_multiplier(village)
+    yield_mult = herd_building_multiplier(village, "slaughterhouse", "yield")
+    for animal, head in herds.items():
+        spec = LIVESTOCK_DYNAMICS.get(animal)
+        if spec is None or head <= 0:
+            continue
+        culled = round(head * spec["slaughter_rate"] * policy)
+        for resource, product in spec["products"].items():
+            if product["source"] == "population":
+                out[resource] += round(head * product["per_head"])
+            else:
+                out[resource] += round(culled * product["per_head"] * yield_mult)
+    return {r: a for r, a in out.items() if a > 0}
 
 
 # --- Phase 7: livestock -- populations, not crops ---------------------------
@@ -1147,7 +1280,6 @@ _LIVESTOCK_SHARES_BY_BIOME = {biome: _biome_land_shares(biome, _LIVESTOCK) for b
 # example once split among plains' other competing animals (Cattle/Horses/
 # Chickens/Bees) by rarity share.
 BASE_LIVESTOCK_CAPACITY_PER_CELL = 0.5
-STARTING_LIVESTOCK_HEAD = 20
 
 
 def _livestock_capacity(region, animal):
@@ -1167,23 +1299,358 @@ def _livestock_capacity(region, animal):
     return round(total)
 
 
-def _ensure_region_livestock(region):
-    """Lazily seed a starting herd (STARTING_LIVESTOCK_HEAD, capped at
-    capacity) for every Livestock type this region's land can support but
-    isn't tracking yet -- the same getattr-and-backfill treatment every
-    other schema addition in this codebase gets, so an old save (predating
-    `livestock` existing on Region at all) or a region advance_livestock
-    hasn't reached before picks up sane defaults instead of a missing
-    key."""
-    if not hasattr(region, "livestock"):
-        region.livestock = {}
+
+# --- Phase 6 of the storage rework: herds, feed and the autumn cull ---------
+# Livestock used to be region-level state updated once per 100-turn year. That
+# had three problems, all measured:
+#   * The whole year's Meat arrived in ONE turn -- 8,735 head-worth at once --
+#     and at spoil_rate 0.30 about 97% of it rotted within six turns. For
+#     ~90% of every year there was no meat in the world at all.
+#   * Herds sat at region level while every other economic actor (storage,
+#     production, buildings) had moved to the village, so livestock could
+#     never be shown, managed, or tied to anything.
+#   * Nothing constrained a herd but land: animals ate nothing, so there was
+#     no decision anywhere in the system.
+#
+# Herds now live on the Village, run on the SEASON, and eat:
+#   Spring   births
+#   Summer   (Fodder is cut -- see GROWTH_CYCLE)
+#   Autumn   the cull: slaughter for Meat/Leather
+#   Winter   feed from stored Fodder; shortfall culls, then starves
+# Byproducts (Milk/Wool/Eggs/Honey) come off the living herd every season.
+#
+# The result is meat four times a year instead of one indigestible dump, and a
+# real annual question -- keep the herd through Winter on stored hay, or take
+# it now while it's still worth something.
+HERD_SEASONS = ("Spring", "Summer", "Autumn", "Winter")
+
+# --- herd policy: the player's dial on the Autumn cull ----------------------
+# Multiplies each animal's own slaughter_rate. "Grow" banks animals for future
+# years at the cost of meat now (and a bigger Winter feed bill); "Cull" takes
+# the meat now and carries a smaller, cheaper herd through Winter. Set per
+# village, defaulting to Balanced so an untouched realm behaves sensibly.
+HERD_POLICIES = ("Grow", "Balanced", "Cull")
+HERD_POLICY_MULTIPLIER = {"Grow": 0.4, "Balanced": 1.0, "Cull": 1.9}
+DEFAULT_HERD_POLICY = "Balanced"
+
+
+def herd_policy(village):
+    policy = getattr(village, "herd_policy", None)
+    return policy if policy in HERD_POLICY_MULTIPLIER else DEFAULT_HERD_POLICY
+
+
+def set_herd_policy(village, policy):
+    if policy in HERD_POLICY_MULTIPLIER:
+        village.herd_policy = policy
+
+
+def herd_policy_multiplier(village):
+    return HERD_POLICY_MULTIPLIER[herd_policy(village)]
+
+
+# --- herd buildings ---------------------------------------------------------
+# Same tiered project machinery as the storage buildings (Phase 4) -- they set
+# the ceiling and the efficiency, while herd policy sets how hard you harvest
+# against it.
+#   pasture        more head of everything
+#   stable         more Horses, and a stronger cavalry/commander bonus
+#   barn           less Winter Fodder needed, fewer natural deaths
+#   slaughterhouse more Meat and Leather per animal taken
+HERD_BUILDINGS = ("pasture", "stable", "barn", "slaughterhouse")
+HERD_BUILDING_EFFECTS = {
+    "pasture":       {"capacity": [1.0, 1.5, 2.1]},
+    "stable":        {"capacity": [1.0, 1.8, 2.6]},
+    "barn":          {"feed": [1.0, 0.75, 0.55], "death": [1.0, 0.8, 0.65]},
+    "slaughterhouse": {"yield": [1.0, 1.35, 1.7]},
+}
+# Villages reach tier 1 of each; settlements aren't pastures and build none of
+# these -- animals live where the fields are.
+VILLAGE_HERD_MAX_TIER = 1
+
+
+def herd_building_multiplier(village, building, effect):
+    """Multiplier `building` applies to `effect` at this village, 1.0 (or the
+    effect's own neutral value) if it hasn't been built."""
+    table = HERD_BUILDING_EFFECTS.get(building, {}).get(effect)
+    if not table:
+        return 1.0
+    tier = min(storage_tier(village, building), len(table) - 1)
+    return table[tier]
+
+# Fodder eaten per head per Winter, by animal. Roughly proportional to size:
+# a cow eats an order of magnitude more than a chicken.
+FODDER_PER_HEAD_WINTER = {
+    "Cattle": 6.0, "Horses": 5.0, "Sheep": 2.0, "Goats": 1.8,
+    "Pigs": 2.5, "Chickens": 0.3, "Bees": 0.0,   # bees overwinter on their own honey
+}
+
+# Of the animals that can't be fed, this fraction can still be slaughtered for
+# Meat/Leather before the rest are simply lost. Not 1.0: a desperate winter
+# cull is chaotic, and some of the herd is always lost outright rather than
+# neatly butchered.
+WINTER_EMERGENCY_CULL_FRACTION = 0.7
+
+STARTING_VILLAGE_HERD_FRACTION = 0.6   # of village capacity, when seeding fresh
+
+
+def _region_villages(world, region):
+    return [world.villages[vid] for vid in getattr(region, "villages", [])
+            if 0 <= vid < len(world.villages)]
+
+
+def village_herd_capacity(world, village, animal):
+    """Head of `animal` this village can sustain: its share of the region's
+    land-derived carrying capacity (_livestock_capacity, split across the
+    region's villages so they don't each claim the whole pasture), times
+    whatever Pasture/Stable it has built."""
+    region = world.regions[village.region_id]
+    villages = getattr(region, "villages", []) or []
+    share = _livestock_capacity(region, animal) / max(1, len(villages))
+    share *= herd_building_multiplier(village, "pasture", "capacity")
+    if animal == "Horses":
+        share *= herd_building_multiplier(village, "stable", "capacity")
+    return max(0, round(share))
+
+
+def ensure_village_herd(world, village):
+    """This village's {animal: head} dict, created on first access.
+
+    Seeded from the region's old region.livestock pool, split evenly across
+    the region's villages -- so a save written before herds moved to villages
+    keeps the animals it already had instead of losing them or doubling them.
+    The region pool is left in place but is no longer the source of truth."""
+    herds = getattr(village, "herds", None)
+    if herds is not None:
+        return herds
+    herds = {}
+    region = world.regions[village.region_id]
+    legacy = getattr(region, "livestock", None) or {}
+    n = max(1, len(getattr(region, "villages", []) or []))
     for animal in _LIVESTOCK:
-        if animal in region.livestock:
+        capacity = village_herd_capacity(world, village, animal)
+        if capacity <= 0:
             continue
-        capacity = _livestock_capacity(region, animal)
-        if capacity > 0:
-            region.livestock[animal] = min(STARTING_LIVESTOCK_HEAD, capacity)
-    return region.livestock
+        if legacy.get(animal):
+            herds[animal] = min(round(legacy[animal] / n), capacity)
+        else:
+            herds[animal] = round(capacity * STARTING_VILLAGE_HERD_FRACTION)
+    village.herds = herds
+
+    # Seed one Winter's hay along with the herd. Fodder is a brand-new crop:
+    # its first harvest is the following Summer, so a village adopting this
+    # system mid-game would meet Winter with an empty barn and lose the whole
+    # herd through no decision of its own. Measured on a real save: herds
+    # collapsed 16,041 -> 3,438 head in a single winter, leaving almost
+    # nothing but Bees (the one animal that eats no fodder). This is the hay
+    # they are assumed to have already had in the barn, not a subsidy -- from
+    # the next harvest on, the village feeds itself or culls.
+    if not hasattr(village, "resources"):
+        village.resources = {}
+    need = sum(head * FODDER_PER_HEAD_WINTER.get(animal, 1.0)
+               for animal, head in herds.items())
+    if need > 0:
+        village.resources["Fodder"] = max(village.resources.get("Fodder", 0),
+                                          round(need))
+    return herds
+
+
+FODDER_STOCK_BUFFER = 1.25   # hay a village tries to hold, as a multiple of
+                             # its own herd's Winter need -- a little margin,
+                             # not a hoard
+
+
+def village_winter_fodder_need(node):
+    """Fodder this node's herd will eat next Winter, 0 for a node with no
+    animals. Used both by the feeding itself and by local logistics, so hay
+    actually moves to the villages that have mouths to feed."""
+    herds = getattr(node, "herds", None)
+    if not herds:
+        return 0
+    feed_mult = herd_building_multiplier(node, "barn", "feed")
+    return round(sum(head * FODDER_PER_HEAD_WINTER.get(animal, 1.0) * feed_mult
+                     for animal, head in herds.items()))
+
+
+def faction_herd_total(world, fac_idx, animal):
+    """Head of `animal` across every village this faction holds."""
+    return sum((getattr(v, "herds", None) or {}).get(animal, 0)
+               for v in world.villages if v.faction_idx == fac_idx)
+
+
+def faction_horses(world, fac_idx):
+    """Horses a faction can muster -- the cavalry input to _recompute_military
+    and what decides whether its Commanders ride (see app/world/commander.py's
+    MOUNTED_COMMANDER_HORSES)."""
+    return faction_herd_total(world, fac_idx, "Horses")
+
+
+def _seasonal(rate):
+    """An annual rate applied once per season."""
+    return rate / len(HERD_SEASONS)
+
+
+def _is_new_season(turn):
+    """True on the first turn of a season. advance_turn runs every turn, but
+    a herd's year has four events, not a hundred -- without this the births,
+    the cull and the winter feeding each fire TURNS_PER_SEASON times over,
+    which in testing compounded 25 rounds of births and 25 separate winter
+    feedings into a herd collapse from 16,041 head to 70."""
+    return (turn - 1) % TURNS_PER_SEASON == 0
+
+
+def advance_herds(world):
+    """One season of every village's herds, on the season's first turn only.
+    Returns {faction_idx: gold value produced}, the same contract
+    advance_livestock had, so advance_turn can still fold it into
+    prosperity."""
+    value_by_fac = defaultdict(float)
+    if not _is_new_season(world.turn):
+        return value_by_fac
+    season = world.season
+    for village in world.villages:
+        if village.faction_idx < 0:
+            continue
+        herds = ensure_village_herd(world, village)
+        if not herds:
+            continue
+        products = defaultdict(int)
+
+        # --- natural turnover, every season ---------------------------------
+        death_mult = herd_building_multiplier(village, "barn", "death")
+        for animal in list(herds):
+            spec = LIVESTOCK_DYNAMICS.get(animal)
+            if spec is None:
+                continue
+            head = herds[animal]
+            if head <= 0:
+                continue
+            # Byproducts come off the herd as it stood THROUGH the season --
+            # before this season's deaths and before the carrying-capacity
+            # clamp, which is what the original annual code did too. Taking
+            # them from the post-clamp number instead quietly under-counted
+            # every milking and shearing in the game: a herd pushed over its
+            # land ceiling by Spring births was clamped back down first, and
+            # then only the survivors were milked, as though the rest had
+            # never been there. Worth ~5% of the realm's food supply, which
+            # on a food economy this tight was ~70 extra villages going
+            # hungry.
+            for resource, product in spec["products"].items():
+                if product["source"] != "population":
+                    continue
+                amount = round(head * _seasonal(product["per_head"]))
+                if amount:
+                    products[resource] += amount
+
+            if season == "Spring":
+                head += round(head * spec["birth_rate"])
+            head -= round(head * _seasonal(spec["death_rate"]) * death_mult)
+            capacity = village_herd_capacity(world, village, animal)
+            herds[animal] = max(0, min(head, capacity) if capacity else head)
+
+        if season == "Autumn":
+            _autumn_cull(world, village, herds, products)
+        elif season == "Winter":
+            _winter_feed(world, village, herds, products)
+
+        if products:
+            _deliver_herd_products(world, village, products)
+            value_by_fac[village.faction_idx] += _resource_bundle_value(products)
+    return value_by_fac
+
+
+def _slaughter(village, animal, head, products):
+    """Turn `head` of `animal` into Meat/Leather at this village, scaled by
+    any Slaughterhouse it has built."""
+    spec = LIVESTOCK_DYNAMICS.get(animal)
+    if spec is None or head <= 0:
+        return
+    yield_mult = herd_building_multiplier(village, "slaughterhouse", "yield")
+    for resource, product in spec["products"].items():
+        if product["source"] != "slaughter":
+            continue
+        amount = round(head * product["per_head"] * yield_mult)
+        if amount:
+            products[resource] += amount
+
+
+def _autumn_cull(world, village, herds, products):
+    """The planned harvest: slaughter this year's take before Winter, at each
+    animal's own slaughter_rate, adjusted by the village's herd policy."""
+    policy = herd_policy_multiplier(village)
+    for animal in list(herds):
+        spec = LIVESTOCK_DYNAMICS.get(animal)
+        if spec is None or not spec["slaughter_rate"]:
+            continue
+        head = herds[animal]
+        culled = min(head, round(head * spec["slaughter_rate"] * policy))
+        if culled <= 0:
+            continue
+        herds[animal] = head - culled
+        _slaughter(village, animal, culled, products)
+
+
+def _winter_feed(world, village, herds, products):
+    """Feed the herd from this village's stored Fodder. Whatever it can't
+    feed is culled for what Meat/Leather a rushed winter slaughter yields
+    (WINTER_EMERGENCY_CULL_FRACTION), and the remainder is simply lost."""
+    res = getattr(village, "resources", None)
+    if res is None:
+        res = village.resources = {}
+    feed_mult = herd_building_multiplier(village, "barn", "feed")
+    need = {a: FODDER_PER_HEAD_WINTER.get(a, 1.0) * feed_mult for a in herds}
+    total_need = sum(herds[a] * need[a] for a in herds)
+    if total_need <= 0:
+        return
+    available = res.get("Fodder", 0)
+    if available >= total_need:
+        res["Fodder"] = available - round(total_need)
+        village.herd_fed = True
+        return
+
+    # Short. Feed what we can, then cut the herd down to what the hay covers,
+    # taking the cheapest-to-keep animals last so a shortfall costs you the
+    # big eaters first -- which is also what a real farmer would do.
+    village.herd_fed = False
+    res["Fodder"] = 0
+    budget = available
+    order = sorted(herds, key=lambda a: -need.get(a, 0))
+    for animal in order:
+        head = herds[animal]
+        per = need.get(animal, 0)
+        if head <= 0:
+            continue
+        if per <= 0:
+            continue
+        keep = min(head, int(budget / per))
+        budget -= keep * per
+        excess = head - keep
+        if excess <= 0:
+            continue
+        culled = round(excess * WINTER_EMERGENCY_CULL_FRACTION)
+        herds[animal] = keep
+        _slaughter(village, animal, culled, products)   # the rest are lost
+
+
+def _deliver_herd_products(world, village, products):
+    """Route a village's herd output through its REGION, the same path a crop
+    harvest takes, and without the production throttle.
+
+    Both of those are deliberate and both were measured. Delivering straight
+    into the owning village's own store threw away 42% of everything the herds
+    produced -- Leather 94%, Wool 86%, Meat 65% -- because a season's output
+    arrives as one lump at one node, and the throttle is sized for per-turn
+    flow. Splitting it across the region (which is what the old annual path
+    did) puts it where there is actually room.
+
+    The throttle is skipped because it models a decision not to produce, and
+    there is no such decision here: the animals have already been slaughtered
+    and the cows have already been milked. If there is no room, the goods
+    should arrive and then visibly overflow -- which the player can see and
+    answer with a Warehouse -- rather than silently never existing."""
+    if not products:
+        return
+    region = world.regions[village.region_id]
+    _route_farm_production(world, region, products, throttle=False)
 
 
 def current_year(turn):
@@ -1201,49 +1668,13 @@ def _is_new_year(turn):
     return (turn - 1) % YEAR_LENGTH_TURNS == 0
 
 
-def advance_livestock(world):
-    """Called once a year (see _is_new_year) from advance_turn: grow/shrink
-    every claimed region's Livestock populations via births, natural
-    deaths, and slaughter (LIVESTOCK_DYNAMICS), and route that year's
-    Wool/Milk/Meat/Leather/Eggs/Honey straight to the region's own
-    settlement(s) (see _route_farm_production, Phase 9) -- every
-    one of those products lives in settlement storage now, not the
-    national pool. Returns {faction_idx: gold-value produced} (not the raw
-    amounts, which already went straight to storage) purely so
-    advance_turn can still fold it into production_value for the health/
-    prosperity calc -- a no-op {} on every turn but the first of the
-    year, since population genuinely persists on the region between calls
-    rather than being recomputed from scratch like a Crop's stage is."""
-    value_by_fac = defaultdict(float)
-    if not _is_new_year(world.turn):
-        return value_by_fac
-
-    for region in world.regions:
-        if region.faction_idx < 0:
-            continue
-        livestock = _ensure_region_livestock(region)
-        year_products = defaultdict(int)
-
-        for animal in list(livestock.keys()):
-            population = livestock[animal]
-            spec = LIVESTOCK_DYNAMICS[animal]
-            births = round(population * spec["birth_rate"])
-            deaths = round(population * spec["death_rate"])
-            slaughtered = min(round(population * spec["slaughter_rate"]), population)
-            capacity = _livestock_capacity(region, animal)
-            new_population = max(0, population + births - deaths - slaughtered)
-            livestock[animal] = min(new_population, capacity) if capacity else new_population
-
-            for resource, product in spec["products"].items():
-                base = population if product["source"] == "population" else slaughtered
-                amount = round(base * product["per_head"])
-                if amount:
-                    year_products[resource] += amount
-
-        _route_farm_production(world, region, year_products)
-        value_by_fac[region.faction_idx] += _resource_bundle_value(year_products)
-
-    return value_by_fac
+# The old annual, region-level livestock path (advance_livestock and its
+# _ensure_region_livestock seeder) lived here. It was superseded by the
+# per-village seasonal herd system above and is gone: leaving a second,
+# non-functional production path in the file is exactly what caused the
+# RECIPES confusion documented at that table. region.livestock itself is
+# deliberately KEPT on Region -- ensure_village_herd still reads it to migrate
+# saves written before herds moved to villages.
 
 
 # --- Phase 8: consumption ---------------------------------------------------
@@ -1751,12 +2182,58 @@ def node_alerts(node, world):
                                   "propose a trade route or expand toward forested "
                                   "land"})
 
-    res = getattr(node, "resources", None)
-    if res:
-        capacity = _node_storage_capacity(node)
-        if capacity and sum(res.values()) > capacity:
-            alerts.append({"kind": "storage_overflow", "severity": "warning",
-                           "message": f"{node.name}'s storage is full — excess goods are spoiling"})
+    # Herds. Losing animals to a Winter you couldn't feed is one of the most
+    # consequential things that can happen to a village -- it costs the meat,
+    # the milk, the wool and (via faction_horses) the realm's cavalry -- and
+    # it was the only such event in the game with no notification at all.
+    #
+    # Two alerts, because there are two different moments. The Autumn one is
+    # the actionable one: hay is already cut and Winter hasn't arrived, so the
+    # player can still ship fodder in, set the herd to Cull and bank the meat
+    # deliberately, or build a Barn. By the time the herd has actually been
+    # culled, all that's left to do is prevent it happening again.
+    herds = getattr(node, "herds", None)
+    if herds and any(herds.values()):
+        need = village_winter_fodder_need(node)
+        have = (getattr(node, "resources", None) or {}).get("Fodder", 0)
+        if getattr(node, "herd_fed", None) is False:
+            alerts.append({
+                "kind": "herd_culled", "severity": "critical",
+                "message": f"{node.name} could not feed its herd through Winter — "
+                           f"animals were culled or lost. Build a Barn, or lay in "
+                           f"more Fodder before next Winter"})
+        elif need and have < need and world.season in ("Autumn", "Winter"):
+            alerts.append({
+                "kind": "herd_underfed", "severity": "warning",
+                "message": f"{node.name} has {have:,} Fodder for a herd needing "
+                           f"{need:,} this Winter — ship hay in, or cull now and "
+                           f"keep the meat"})
+
+    # One alert per typed pool, naming the building that fixes it -- "storage
+    # is full" was unactionable when it could mean either the grain or the
+    # timber, which need entirely different answers.
+    if getattr(node, "resources", None):
+        for pool in STORAGE_POOLS:
+            capacity = node_pool_capacity(node, pool)
+            if not capacity:
+                continue
+            stock = node_pool_stock(node, pool)
+            building = STORAGE_BUILDING_BY_POOL[pool].capitalize()
+            if stock > capacity:
+                alerts.append({
+                    "kind": "storage_overflow", "severity": "warning", "pool": pool,
+                    "message": f"{node.name}'s {building.lower()} is full — "
+                               f"{pool} production has stopped and goods are "
+                               f"spoiling; build or upgrade its {building}"})
+            elif stock > capacity * STORAGE_THROTTLE_START:
+                # The point of throttling is that the player can see it coming
+                # and act while there's still something to save -- which needs
+                # saying BEFORE the node is over the line, not only after.
+                alerts.append({
+                    "kind": "storage_nearly_full", "severity": "warning", "pool": pool,
+                    "message": f"{node.name}'s {building.lower()} is "
+                               f"{round(100 * stock / capacity)}% full — {pool} "
+                               f"production is slowing"})
     return alerts
 
 
@@ -1869,27 +2346,182 @@ _SETTLEMENT_STORAGE_RESOURCES = ({name for name, spec in RESOURCES.items()
                                     "Planks", "Bricks", "Glass",
                                     "Tools", "Weapons", "Shields", "Paper", "Gold"})
 
-# Rough placeholders, not balance-tuned (same caveat as every quantity in
-# this file).
-SETTLEMENT_STORAGE_BASE = {"city": 3000, "castle": 2000, "town": 1200}
-_DEFAULT_SETTLEMENT_STORAGE_BASE = 1200
-GRANARY_STORAGE_BONUS = 2000
-WAREHOUSE_STORAGE_BONUS = 1000
-VILLAGE_STORAGE_BASE = 1800   # a village's own storage (Phase 10) -- smaller
-                              # than a Settlement's, and no Granary/Warehouse
-                              # of its own to expand it, but has to be large
-                              # enough to actually bank a harvest: a Crop
-                              # only produces during its own ~TURNS_PER_SEASON
-                              # -turn Harvest window, all at once, then
-                              # nothing again for the rest of the year -- at
-                              # the old 600 cap, a real harvest routinely
-                              # ran 2-2.7x over budget for the entire season,
-                              # so most of it was destroyed by overflow
-                              # spoilage before Local Logistics ever got a
-                              # chance to move it out to the Settlements
-                              # depending on it (raised from 600, which was
-                              # sized before Crops/Food Products were real,
-                              # season-gated production at all)
+# --- Phase 3 of the storage rework: typed pools ------------------------------
+# Storage used to be one shared budget per node, which meant the goods with no
+# consumption sink crowded out the ones people actually eat: measured on a
+# turn-561 world, Mining/Forestry durables were 88-90% of every unit in
+# storage and food was 6%. No capacity number can fix that, because the
+# competition is structural -- a bigger shared barn just holds more timber.
+#
+# So space is now typed. Each node keeps three independent pools, and a good
+# only ever competes with others of its own kind (see storage_class):
+#
+#   household  Crops, Food Products, Fishing, Firewood  -- Granary
+#   durable    Mining, Forestry, Manufactured           -- Warehouse
+#   other      Luxury Goods, Gold                       -- Vault
+#
+# Firewood sits with the household stores rather than with the timber it is
+# cut from, and that placement was forced by measurement, not tidiness: it is
+# survival-critical (it's what stops a settlement freezing), and leaving it in
+# the same pool as structural Logs/Softwood meant the sink-less bulk goods
+# crowded it out exactly the way they used to crowd out food. Firewood held
+# across the map fell 77% and population dropped with it, while starvation
+# stayed flat -- people were freezing, not going hungry. The rule this encodes
+# is that a survival good must never share a pool with a bulk good nothing
+# consumes. This also matches how the Phase 9 note above already describes
+# the "household economy", which listed Firewood alongside the food.
+#
+# Everything downstream is per-pool now: the overflow decay, the Phase 1
+# production throttle, and the storage alerts. A timber glut fills and
+# throttles the warehouse without touching the granary, which is both the
+# sane reading and what stops it starving the map.
+#
+# Villages are deliberately food-weighted -- they are farms, and the harvest
+# is what they exist to bank -- while a city is the most balanced. Totals are
+# in the same ballpark as the single pool each replaces, so this is a
+# reallocation of space rather than a stealth buff.
+STORAGE_POOLS = ("household", "durable", "other", "feed")
+
+# Capacities are in SPACE, not item count, as of Phase 2 -- a unit of Logs
+# eats 3.0 of these and a unit of Gems 0.1 (see _CATEGORY_BULK).
+#
+# Sized off the measured average bulk of what each pool actually holds
+# (household 1.11, durable 2.14, other 0.10). Household is scaled by roughly
+# its full average, since ~1.11 means the old unit-count numbers were already
+# nearly space numbers. Durable is scaled by only ~1.7 against an average of
+# 2.14 -- deliberately NOT fully compensated, because compensating a bulky
+# good's capacity by exactly its bulk cancels out the entire point of having
+# bulk. Raw timber and quarried stone are meant to be genuinely expensive to
+# keep; that pressure is what makes refining them (or building with them)
+# more attractive than hoarding them. The vault is left alone: "other" is
+# almost entirely Gold at bulk 0.02, so its space number was never really an
+# item count to begin with.
+STORAGE_POOL_BASE = {
+    "city":    {"household": 2100, "durable": 2000, "other": 400, "feed": 200},
+    "castle":  {"household": 1300, "durable": 1350, "other": 300, "feed": 200},
+    "town":    {"household":  840, "durable":  750, "other": 150, "feed": 200},
+    "village": {"household": 1450, "durable": 1000, "other": 150, "feed": 700},
+}
+_DEFAULT_POOL_BASE = STORAGE_POOL_BASE["town"]
+
+# Legacy aliases -- old saves and any caller still thinking in one number.
+SETTLEMENT_STORAGE_BASE = {kind: sum(pools.values())
+                           for kind, pools in STORAGE_POOL_BASE.items()
+                           if kind != "village"}
+_DEFAULT_SETTLEMENT_STORAGE_BASE = sum(_DEFAULT_POOL_BASE.values())
+VILLAGE_STORAGE_BASE = sum(STORAGE_POOL_BASE["village"].values())
+# A village's storage has to be big enough to actually bank a harvest: a Crop
+# only produces during its own ~TURNS_PER_SEASON-turn Harvest window, all at
+# once, then nothing again for the rest of the year. Under the old single
+# pool that room was shared with -- and in practice swallowed by -- the
+# durable Mining/Forestry pile, so a real harvest still ran over budget for
+# the whole season and was destroyed before Local Logistics could move it
+# out. The food pool above is dedicated, so it is far more usable harvest
+# room than the larger shared number it replaces, and a village can now
+# extend it further with a Granary of its own (Phase 4).
+
+# --- Phase 4 of the storage rework: tiered storage buildings ------------------
+# Each pool has a building that extends it, and each building has tiers you
+# upgrade through rather than a single flat one-shot bonus. Bonuses are
+# cumulative totals *at* that tier, not increments.
+#
+# Villages can build a Granary now too. They were the worst offenders in the
+# measurements (over capacity 78% of the time) and had no way whatsoever to do
+# anything about it -- a flat cap, no building, forever. Their tiers are
+# smaller and cheaper than a settlement's, but they exist.
+STORAGE_BUILDING_BY_POOL = {"household": "granary", "durable": "warehouse",
+                            "other": "vault", "feed": "barn"}
+STORAGE_POOL_BY_BUILDING = {v: k for k, v in STORAGE_BUILDING_BY_POOL.items()}
+
+# Also space, and scaled on the same basis as STORAGE_POOL_BASE above.
+STORAGE_TIER_BONUS = {
+    "granary":   [0, 1200, 2650, 4800],
+    "warehouse": [0, 1200, 2700, 4900],
+    "vault":     [0, 400, 1000],
+}
+VILLAGE_STORAGE_TIER_BONUS = {
+    "granary":   [0, 650, 1450],
+    "warehouse": [0, 600, 1350],
+    "vault":     [0, 200],
+    # The Barn is both the hay store and the shelter: it holds the feed pool
+    # AND cuts Winter fodder need and natural deaths (HERD_BUILDING_EFFECTS).
+    "barn":      [0, 700],
+}
+
+
+def storage_max_tier(node, building):
+    """Highest tier of `building` this node kind can reach. Covers the
+    Preserving House (Phase 5) as well as the three pool buildings -- it uses
+    the same project/tier machinery but grants conversion throughput rather
+    than capacity, so its tiers come from a different table."""
+    village = not hasattr(node, "kind")
+    if building == PRESERVING_HOUSE:
+        table = VILLAGE_PRESERVING_CAP_MULT if village else PRESERVING_CAP_MULT
+        return len(table) - 1
+    if building in HERD_BUILDINGS:
+        # Herd buildings are village-only: animals live where the fields are,
+        # and a walled city is not a pasture.
+        return VILLAGE_HERD_MAX_TIER if village else 0
+    table = VILLAGE_STORAGE_TIER_BONUS if village else STORAGE_TIER_BONUS
+    return len(table.get(building, [0])) - 1
+
+
+def storage_tier(node, building):
+    """Current tier of `building` at `node`, 0 for none.
+
+    Reads through getattr with a legacy fallback so saves written before
+    tiers existed -- which recorded a plain has_granary/has_warehouse
+    boolean -- load as tier 1 rather than losing the building."""
+    tier = getattr(node, f"{building}_tier", None)
+    if tier is not None:
+        return tier
+    return 1 if getattr(node, f"has_{building}", False) else 0
+
+
+def set_storage_tier(node, building, tier):
+    setattr(node, f"{building}_tier", tier)
+    # Keep the legacy flags true so anything still reading them (old UI, old
+    # saves round-tripping) stays consistent.
+    setattr(node, f"has_{building}", tier > 0)
+
+
+def node_pool_capacity(node, pool):
+    """This node's capacity for one storage pool: its kind's base plus
+    whatever tier of that pool's building it has built."""
+    kind = getattr(node, "kind", "village")
+    base = STORAGE_POOL_BASE.get(kind, _DEFAULT_POOL_BASE).get(pool, 0)
+    building = STORAGE_BUILDING_BY_POOL.get(pool)
+    if building:
+        table = (VILLAGE_STORAGE_TIER_BONUS if kind == "village"
+                 else STORAGE_TIER_BONUS).get(building, [0])
+        tier = min(storage_tier(node, building), len(table) - 1)
+        base += table[tier]
+    return base
+
+
+def node_pool_stock(node, pool):
+    """Space currently occupied in one of `node`'s pools -- units weighted by
+    bulk (Phase 2), not a raw unit count. This is the number every capacity
+    check compares against, so "1,200 / 1,600" is space, not items."""
+    res = getattr(node, "resources", None)
+    if not res:
+        return 0
+    return round(sum(v * resource_bulk(r) for r, v in res.items()
+                     if storage_class(r) == pool))
+
+
+def node_space_used(node):
+    """Total space occupied across every pool -- the bulk-weighted
+    counterpart of sum(node.resources.values()), which counts items."""
+    res = getattr(node, "resources", None)
+    if not res:
+        return 0
+    return round(sum(v * resource_bulk(r) for r, v in res.items()))
+
+
+# Legacy single-number bonuses, kept so old callers/saves still resolve.
+GRANARY_STORAGE_BONUS = STORAGE_TIER_BONUS["granary"][1]
+WAREHOUSE_STORAGE_BONUS = STORAGE_TIER_BONUS["warehouse"][1]
 
 OVERFLOW_SPOILAGE_MULTIPLIER = 5.0   # extra decay speed applied on top of a
                                      # resource's own spoil_rate while over cap
@@ -1898,34 +2530,140 @@ MAX_OVERFLOW_LOSS_FRACTION = 0.75   # even the worst case (badly overflowing,
 OVERFLOW_MIN_RATE = 0.10            # even a spoil_rate-0 good leaks away some
                                      # while overflowing -- no shelter, no floor space
 
+# --- Phase 1 of the storage rework: production responds to storage ----------
+# Until now, capacity was consulted by trade, by the overflow decay, by the
+# storage alert and by the AI's build choice -- but by nothing in production.
+# A node harvested at full rate into a store that was already over capacity,
+# and the overage decay deleted the difference the same turn.
+#
+# That made storage a no-op. The old overflow rule loses rate * (total -
+# capacity) per turn, which is a proportional controller: it settles at
+# capacity + inflow/rate and stays there. At that equilibrium the loss equals
+# the inflow *regardless of what the capacity is*, so building a granary moved
+# the parking level without ever changing how much was destroyed. Measured on
+# a turn-561 world, villages sat at 1.12x capacity and were over the line 78%
+# of the time, and overflow destroyed 4x more goods than actual spoilage.
+#
+# The fix is a feedback loop rather than a bigger number: a node approaching
+# full throttles its own primary production, tapering to a full stop at
+# capacity. Nothing is silently destroyed any more -- it is simply never
+# produced, which is a thing the player can see and act on. Capacity now buys
+# real output instead of a higher parking level, which is what finally makes a
+# Granary worth building.
+#
+# Applies to *primary* production only -- the harvest and the catch
+# (_route_farm_production, _produce_fishing). Deliberately NOT to the
+# conversion recipes (advance_settlement_production_chains): those consume at
+# least as many input units as they produce, so they relieve storage pressure
+# rather than adding to it, and throttling them would make a full node worse
+# by stalling the one process that was draining it.
+STORAGE_THROTTLE_START = 0.85   # fraction full at which output starts tapering
+STORAGE_THROTTLE_FLOOR = 0.0    # multiplier once at/over capacity
+
+# Throttling on a node's TOTAL fullness was tried first and measurably starved
+# the map: durable Mining/Forestry goods are 88-90% of everything in storage
+# (they have spoil_rate 0 and almost no consumption sink), so a barn packed
+# with Softwood shut down the grain harvest and nodes with people starving in
+# them went from 207 to 332 over 60 turns.
+#
+# The rule that actually matches the intent -- stop production that is going to
+# be destroyed anyway -- is per storage CLASS: a node throttles the goods it is
+# already drowning in, not everything it does. Wheat keeps coming in while the
+# timber pile is what's overflowing, which is both the sane economic behaviour
+# and what stops the regression. As of Phase 3 those classes are backed by real
+# typed pools (see STORAGE_POOL_BASE), so class occupancy is now measured
+# against that pool's own capacity rather than the whole node's.
+_STORAGE_CLASS_BY_CATEGORY = {
+    "Crops": "household", "Food Products": "household", "Fishing": "household",
+    "Mining": "durable", "Forestry": "durable", "Manufactured Goods": "durable",
+}
+_DURABLE_EXTRA = {"Planks", "Bricks", "Glass", "Tools", "Weapons", "Shields",
+                  "Paper", "Cloth", "Clothes", "Leather", "Wool"}
+# Explicit overrides that beat the category mapping. Gold is registered under
+# Mining with the ore it's dug from, but as minted currency it belongs in the
+# vault: leaving it in the warehouse pool would let a timber glut block the
+# treasury, and the overflow rule already refuses to decay it.
+_STORAGE_CLASS_OVERRIDE = {
+    # Hay gets its own pool, held in the Barn. It is bulky (2.2) animal
+    # feed, and leaving it in the granary put it in direct competition with
+    # human food for the same shelf -- the third time that exact pattern bit
+    # (Firewood, then Cotton, then this): nodes with people starving in them
+    # went from 140 to 225. Same rule as before, stated once more: a
+    # survival good never shares a pool with a bulk good.
+    "Fodder": "feed",
+    "Gold": "other",
+    "Firewood": "household",
+    # Cotton is registered as a Crop because it's grown, but it is a
+    # non-edible industrial fibre (the registry's own `edible: False`
+    # exception among Crops) and the raw input to the Cloth chain -- exactly
+    # what Wool is, and Wool was already classed durable. Leaving it in the
+    # granary put a bulk-1.8 industrial good in direct competition with food
+    # for the same space: it alone occupied ~279k of household space and
+    # pushed nodes with people starving in them from 140 up to 166.
+    "Cotton": "durable",
+}
+
+
+def storage_class(resource):
+    """Which storage pool a resource occupies and competes within -- "food"
+    (Crops/Food Products/Fishing), "durable" (Mining/Forestry/Manufactured),
+    or "other" (Luxury Goods, Gold)."""
+    override = _STORAGE_CLASS_OVERRIDE.get(resource)
+    if override:
+        return override
+    if resource in _DURABLE_EXTRA:
+        return "durable"
+    category = RESOURCES.get(resource, {}).get("category")
+    return _STORAGE_CLASS_BY_CATEGORY.get(category, "other")
+
+
+def storage_throttle(node, resource=None):
+    """0..1 multiplier on this node's primary production of `resource`, from
+    how full its storage already is *of that resource's class*: full rate up
+    to STORAGE_THROTTLE_START, then a linear taper to STORAGE_THROTTLE_FLOOR
+    at that pool's capacity. Passing resource=None measures whole-node
+    fullness instead (used for reporting). A node with no capacity figure or
+    no storage dict yet is unthrottled."""
+    res = getattr(node, "resources", None)
+    if not res:
+        return 1.0
+    if resource is None:
+        capacity = _node_storage_capacity(node)
+        stock = node_space_used(node)
+    else:
+        pool = storage_class(resource)
+        capacity = node_pool_capacity(node, pool)
+        stock = node_pool_stock(node, pool)
+    if not capacity:
+        return 1.0
+    fill = stock / capacity
+    if fill <= STORAGE_THROTTLE_START:
+        return 1.0
+    if fill >= 1.0:
+        return STORAGE_THROTTLE_FLOOR
+    span = 1.0 - STORAGE_THROTTLE_START
+    return STORAGE_THROTTLE_FLOOR + (1.0 - STORAGE_THROTTLE_FLOOR) * (1.0 - fill) / span
+
 
 def settlement_storage_capacity(settlement):
-    """Total shared-space budget this settlement's storage has -- every
-    resource in _SETTLEMENT_STORAGE_RESOURCES draws from the same pool,
-    not an independent cap per resource. Granary/Warehouse (see
-    construction.py) each add a flat bonus on top of the settlement
-    kind's base."""
-    base = SETTLEMENT_STORAGE_BASE.get(settlement.kind, _DEFAULT_SETTLEMENT_STORAGE_BASE)
-    if getattr(settlement, "has_granary", False):
-        base += GRANARY_STORAGE_BONUS
-    if getattr(settlement, "has_warehouse", False):
-        base += WAREHOUSE_STORAGE_BONUS
-    return base
+    """This settlement's TOTAL storage across every pool.
+
+    Space is typed as of Phase 3 (see STORAGE_POOL_BASE) -- a good only ever
+    competes with others of its own class -- so this total is a reporting and
+    coarse-gating figure, not the number anything is actually capped against.
+    Use node_pool_capacity for that. Kept because trade sizing and the
+    resource bar legitimately want one headline number."""
+    return sum(node_pool_capacity(settlement, p) for p in STORAGE_POOLS)
 
 
 def _node_storage_capacity(node):
-    """Same idea as settlement_storage_capacity, but for whichever kind of
-    storage-owning node this actually is -- a Village (flat
-    VILLAGE_STORAGE_BASE, no Granary/Warehouse) or a Settlement
-    (settlement_storage_capacity). Dispatches on hasattr("kind") rather
-    than isinstance so it works without importing Settlement/Village
-    here."""
-    if hasattr(node, "kind"):
-        return settlement_storage_capacity(node)
-    return VILLAGE_STORAGE_BASE
+    """settlement_storage_capacity for whichever kind of storage-owning node
+    this is -- Village or Settlement. Both have typed pools now; the only
+    difference is their base sizes and how far their buildings tier."""
+    return sum(node_pool_capacity(node, p) for p in STORAGE_POOLS)
 
 
-def _route_farm_production(world, region, resource_amounts):
+def _route_farm_production(world, region, resource_amounts, throttle=True):
     """Send `resource_amounts` (a {resource: amount} dict, already
     filtered to _SETTLEMENT_STORAGE_RESOURCES by the caller) straight to
     the region's own Villages -- the actual farm unit (see the Village
@@ -1940,11 +2678,21 @@ def _route_farm_production(world, region, resource_amounts):
     settlement) falls back to its own settlement(s), then to the
     faction's first settlement, and production is simply lost only if the
     faction has no settlement or village at all yet (a narrow, early-
-    game-only edge case). Doesn't check capacity on the way in --
-    overflow is handled afterward by advance_local_storage's grace-period
-    decay, not by rejecting delivery."""
+    game-only edge case).
+
+    Each target's share is scaled by its own storage_throttle (see that
+    function): a village whose granary is already full simply doesn't bring
+    the harvest in, rather than delivering it into a store that deletes it
+    again the same turn. Throttling is per-target, not per-region, so one
+    full village doesn't hold back its neighbours.
+
+    Returns the {resource: amount} actually delivered across all targets,
+    which is what the caller should value for prosperity -- valuing the
+    computed yield instead would credit a faction for a harvest that was
+    never taken in."""
+    delivered = {}
     if not resource_amounts:
-        return
+        return delivered
     vids = list(getattr(region, "villages", []))
     targets = [("village", vid) for vid in vids]
     if not targets:
@@ -1954,17 +2702,23 @@ def _route_farm_production(world, region, resource_amounts):
         nation = world.factions[region.faction_idx]
         fallback = nation.meta.get("settlements", [])
         if not fallback:
-            return
+            return delivered
         targets = [("settlement", fallback[0])]
     n = len(targets)
     for kind, node_id in targets:
         node = world.villages[node_id] if kind == "village" else world.settlements[node_id]
         if not hasattr(node, "resources"):
             node.resources = {}
+        # Per-resource: a village drowning in Softwood still brings its grain
+        # in. See storage_throttle for why this is per storage class and not
+        # per node total.
         for resource, amount in resource_amounts.items():
-            share = round(amount / n)
+            factor = storage_throttle(node, resource) if throttle else 1.0
+            share = round(amount / n * factor)
             if share:
                 node.resources[resource] = node.resources.get(resource, 0) + share
+                delivered[resource] = delivered.get(resource, 0) + share
+    return delivered
 
 
 def advance_settlement_production_chains(world):
@@ -2000,6 +2754,98 @@ def advance_settlement_production_chains(world):
                 break
 
 
+# --- Phase 5 of the storage rework: preservation ----------------------------
+# Every earlier phase made storage a better-behaved *constraint*. This one is
+# the first that hands the player a way to fight back, rather than a defect
+# being fixed: spoilage stops being an unavoidable tax and becomes a problem
+# with a build-order answer.
+#
+# It targets a measured hole. With overflow largely solved, Fish alone is 39%
+# of all remaining spoilage -- 639k units over 60 turns -- because it spoils at
+# 0.35 and lands directly at whichever node is near water (_produce_fishing),
+# which is usually a Village. Villages have no mill, loom or smokehouse and are
+# excluded from every conversion chain in the game, so a fishing village
+# catches fish and simply watches them rot. Nothing it could build changed that.
+#
+# The Preserving House does three things:
+#   1. Lets a VILLAGE run preservation recipes at all -- the first conversion
+#      of any kind a village has ever been able to do.
+#   2. Raises the conversion cap for those recipes well above
+#      CONVERSION_RATE_CAP, so a node with one can actually keep up with a
+#      catch instead of curing 30 units a turn.
+#   3. Burns Salt doing it. Salt has been an inert Mining resource with no
+#      real demand; this makes it the reagent a food economy runs on, which
+#      is both historically right and the first genuine reason to trade for it.
+#
+# Deliberately additive: the ordinary settlement chain still does Fish ->
+# Smoked Fish and Milk -> Cheese at the base cap with no Salt, exactly as
+# before, so a settlement without the building loses nothing.
+PRESERVATION_RECIPES = {
+    "Smoked Fish": "Fish",     # 0.35 -> 0.05
+    "Cheese": "Milk",          # 0.40 -> 0.05
+    "Salted Meat": "Meat",     # 0.30 -> 0.03; Preserving House only
+}
+# Salt burned per unit cured, per recipe. Not one flat rate: smoke-curing fish
+# and setting cheese use very little, while salt-meat is mostly salt -- it's in
+# the name. A flat rate was tried and made Salt the binding constraint on the
+# one conversion that matters most (Fish is 39% of all spoilage), which is the
+# wrong bottleneck: it capped the big win at ~10% instead of letting Salt be
+# what gates the premium, salt-hungry option.
+SALT_PER_PRESERVED = {"Smoked Fish": 0.04, "Cheese": 0.05, "Salted Meat": 0.35}
+DEFAULT_SALT_PER_PRESERVED = 0.10
+# Conversion-cap multiplier by tier, over CONVERSION_RATE_CAP.
+PRESERVING_CAP_MULT = [0.0, 3.0, 6.0]
+VILLAGE_PRESERVING_CAP_MULT = [0.0, 2.5]
+PRESERVING_HOUSE = "preserving_house"
+
+
+def preserving_cap_multiplier(node):
+    """Conversion-cap multiplier from this node's Preserving House, 0 if it
+    has none."""
+    table = (VILLAGE_PRESERVING_CAP_MULT if not hasattr(node, "kind")
+             else PRESERVING_CAP_MULT)
+    tier = min(storage_tier(node, PRESERVING_HOUSE), len(table) - 1)
+    return table[tier]
+
+
+def _preserve_at_node(node):
+    """Run this node's Preserving House for one turn. Cures perishables into
+    their durable forms, capped by the building's tier, by how much of the
+    perishable is actually on hand, and by Salt -- which is a hard limit, not
+    a discount: no salt, no curing."""
+    res = getattr(node, "resources", None)
+    if not res:
+        return
+    mult = preserving_cap_multiplier(node)
+    if mult <= 0:
+        return
+    cap = int(CONVERSION_RATE_CAP * mult)
+    for output, source in PRESERVATION_RECIPES.items():
+        available = res.get(source, 0)
+        if available <= 0:
+            continue
+        amount = min(available, cap)
+        per_unit = SALT_PER_PRESERVED.get(output, DEFAULT_SALT_PER_PRESERVED)
+        if per_unit > 0:
+            salt = res.get("Salt", 0)
+            amount = min(amount, int(salt / per_unit))
+        if amount <= 0:
+            continue
+        salt_used = round(amount * per_unit)
+        res[source] -= amount
+        if salt_used:
+            res["Salt"] = max(0, res.get("Salt", 0) - salt_used)
+        res[output] = res.get(output, 0) + amount
+
+
+def advance_preservation(world):
+    """Every Preserving House in the world, Settlements and Villages alike.
+    Runs before the ordinary conversion chains so cured goods are already
+    banked when consumption draws on them."""
+    for node in list(world.settlements) + list(world.villages):
+        _preserve_at_node(node)
+
+
 def _apply_settlement_spoilage_and_overflow(node):
     """Spoil this settlement's or village's own storage at each resource's
     real registry spoil_rate, then -- if total stock is over capacity --
@@ -2015,25 +2861,38 @@ def _apply_settlement_spoilage_and_overflow(node):
         if rate:
             res[resource] = int(res[resource] * (1 - rate))
 
-    capacity = _node_storage_capacity(node)
-    total = sum(res.values())
-    if total <= capacity:
-        return
-    overage_frac = (total - capacity) / total
-    for resource in list(res.keys()):
-        if res[resource] <= 0 or resource == "Gold":
-            continue   # Gold is minted currency, not a perishable good --
-                        # it still occupies vault space (counts toward
-                        # `total` above) but never decays just because the
-                        # granary is overflowing with grain or timber
-        base_rate = RESOURCES.get(resource, {}).get("spoil_rate", 0.0)
-        overflow_rate = max(OVERFLOW_MIN_RATE, base_rate * OVERFLOW_SPOILAGE_MULTIPLIER)
-        # Capped well under 100% -- a genuine grace period needs *some*
-        # grace even in the worst case (badly overflowing + a fast-
-        # spoiling good), not a loophole back to an instant full wipeout.
-        loss_frac = min(MAX_OVERFLOW_LOSS_FRACTION, overflow_rate * overage_frac)
-        loss = round(res[resource] * loss_frac)
-        res[resource] = max(0, res[resource] - loss)
+    # Overflow is judged per typed pool as of Phase 3 (see STORAGE_POOL_BASE):
+    # a warehouse packed past its limit rots its own timber, and leaves the
+    # grain in the granary next door alone. Under the old shared budget a
+    # durable glut decayed the food too, which is both wrong and what made
+    # the pile impossible to reason about.
+    by_pool = {}
+    for resource, amount in res.items():
+        if amount > 0:
+            by_pool.setdefault(storage_class(resource), []).append(resource)
+
+    for pool, names in by_pool.items():
+        capacity = node_pool_capacity(node, pool)
+        # Space, not item count (Phase 2) -- a pool packed with Logs runs out
+        # of room at a third the unit count that grain would.
+        total = sum(res[r] * resource_bulk(r) for r in names)
+        if not capacity or total <= capacity:
+            continue
+        overage_frac = (total - capacity) / total
+        for resource in names:
+            if res[resource] <= 0 or resource == "Gold":
+                continue   # Gold is minted currency, not a perishable good --
+                            # it still occupies vault space (counts toward
+                            # `total` above) but never decays just because the
+                            # vault is overflowing
+            base_rate = RESOURCES.get(resource, {}).get("spoil_rate", 0.0)
+            overflow_rate = max(OVERFLOW_MIN_RATE, base_rate * OVERFLOW_SPOILAGE_MULTIPLIER)
+            # Capped well under 100% -- a genuine grace period needs *some*
+            # grace even in the worst case (badly overflowing + a fast-
+            # spoiling good), not a loophole back to an instant full wipeout.
+            loss_frac = min(MAX_OVERFLOW_LOSS_FRACTION, overflow_rate * overage_frac)
+            loss = round(res[resource] * loss_frac)
+            res[resource] = max(0, res[resource] - loss)
 
 
 def advance_settlement_storage(world):
@@ -2254,6 +3113,12 @@ def _node_surplus(node, resource, needs):
     elif resource == "Clothes":
         reserve = max(needs.get("Clothes", 0) * LOCAL_RESERVE_BUFFER_TURNS,
                      LOCAL_HOUSEHOLD_SURPLUS_RESERVE)
+    elif resource == "Fodder":
+        # A village with a herd holds back what that herd will eat this
+        # Winter before calling any of its hay spare -- otherwise it ships
+        # away the feed and then culls the animals for want of it.
+        reserve = max(round(village_winter_fodder_need(node) * FODDER_STOCK_BUFFER),
+                     LOCAL_SURPLUS_RESERVE)
     else:
         reserve = LOCAL_SURPLUS_RESERVE
     return max(0, stock - reserve)
@@ -2288,6 +3153,15 @@ def _node_wants(kind, node, resource, needs):
                and res.get("Firewood", 0) < needs.get("Firewood", 0) * LOCAL_RESERVE_BUFFER_TURNS)
     if resource == "Clothes":
         return res.get("Clothes", 0) < needs.get("Clothes", 0) * LOCAL_RESERVE_BUFFER_TURNS
+    if resource == "Fodder":
+        # Hay is wanted by whoever has animals to feed, which is a demand no
+        # other branch here can express: Fodder isn't edible, isn't a luxury,
+        # and isn't a settlement production input, so it fell through to
+        # "nobody wants this" and logistics never moved a bale of it. Villages
+        # in forest/mountain regions kept herds they structurally could not
+        # feed while plains villages sat on tens of thousands of surplus hay.
+        winter_need = village_winter_fodder_need(node)
+        return winter_need > 0 and res.get("Fodder", 0) < winter_need * FODDER_STOCK_BUFFER
     if kind == "settlement" and resource in _LOCAL_PRODUCTION_INPUTS:
         return res.get(resource, 0) < LOCAL_NEED_THRESHOLD
     return False
@@ -2539,6 +3413,29 @@ def _apply_spoilage(res):
             res[resource] = int(res[resource] * (1 - rate))
 
 
+def _purge_phantom_pool(nation):
+    """Drop any _SETTLEMENT_STORAGE_RESOURCES entry from a faction's national
+    pool.
+
+    Those goods live per-node now (Phase 9 onward) and can_afford/_pay_cost
+    read node storage for them, never the pool -- so anything of that kind
+    sitting here is unspendable by definition. It still got SUMMED into the
+    resources sidebar (see map_view._current_resource_snapshot), so the player
+    was shown stock they could never use: 48,509 phantom units across the
+    factions on a measured save, almost all of it crops and timber banked by
+    transfer_region on past conquests (now fixed at that source too).
+
+    Runs every turn rather than as a one-shot migration: it's a scan of a
+    handful of dict keys, it's idempotent, and doing it this way means any
+    future code path that wrongly banks node goods in the pool self-corrects
+    instead of quietly re-accumulating the same lie."""
+    res = nation.stats.get("resources")
+    if not res:
+        return
+    for resource in [r for r in res if r in _SETTLEMENT_STORAGE_RESOURCES]:
+        del res[resource]
+
+
 def _clamp_to_storage(nation):
     res = nation.stats.get("resources", {})
     for resource in list(res.keys()):
@@ -2559,6 +3456,11 @@ MILITIA_WEIGHT = 0.30      # a levied adult with no weapon to give them still sh
                             # (measured: several factions still had 0 Weapons at turn
                             # 600), and a hard equipment gate would freeze them out of
                             # expanding entirely rather than merely making them bad at it
+CAVALRY_BONUS = 0.50       # fully mounting your armed soldiers is worth +50% -- twice
+                           # a Shield, because a horse is worth more than a shield and
+                           # is far harder to come by: you can smith shields from ore
+                           # you already have, but a horse has to be bred, fed through
+                           # Winter and not culled (see LIVESTOCK_DYNAMICS/HERD_POLICIES)
 SHIELD_BONUS = 0.25        # fully shielding your armed soldiers is worth +25% -- a real
                             # bonus, but secondary to arming them in the first place
 _MILITARY_FLOOR = 10       # even a broken rump state musters something
@@ -2610,12 +3512,22 @@ def _recompute_military(nation, world, fac_idx=None):
     weapons = sum(getattr(n, "resources", {}).get("Weapons", 0) for n in nodes)
     shields = sum(getattr(n, "resources", {}).get("Shields", 0) for n in nodes)
 
+    horses = faction_horses(world, fac_idx) if fac_idx is not None else 0
+
     levy = adults * MOBILIZATION_RATE
     armed = min(levy, weapons)
     militia = levy - armed
     strength = armed + militia * MILITIA_WEIGHT
     if armed > 0:
         strength *= 1.0 + SHIELD_BONUS * min(armed, shields) / armed
+        # Cavalry: exactly the same shape as the Shield term above -- what
+        # fraction of your ARMED troops you can put on a horse. Horses are the
+        # one military input that isn't a stockpiled good: they're living herd
+        # (village.herds), so mounting your army means keeping and feeding one
+        # through Winter rather than smithing more. That makes a Stable, the
+        # Grow herd policy and a full hay barn all read straight through into
+        # military strength.
+        strength *= 1.0 + CAVALRY_BONUS * min(armed, horses) / armed
     strength *= 1.0 + species.get("mil", 0) / 100.0
 
     nation.stats["military"] = max(_MILITARY_FLOOR,
@@ -2985,11 +3897,96 @@ def seed_initial_stockpiles(world):
         _recompute_military(nation, world)
 
 
+# --- The gold ledger --------------------------------------------------------
+# "The gold on the resources tab doesn't align with the trades in the trade
+# log." It genuinely doesn't, and the trade log was never the problem.
+# Measured over 60 turns on a real faction: Gold went 11,460 -> 12,412, and
+# *100% of that* came from minting Gold Ore in the production chains -- a
+# silent, per-turn process that appears in no log anywhere. Over the same 60
+# turns the trade log recorded 3,352 events, most of them domestic transfers
+# that deliberately pay in barter and move no coin at all. So the number moved
+# for a reason the log never mentions, while the log was full of activity that
+# never touched the number.
+#
+# This ledger closes that gap by attributing every gold flow to the phase of
+# the turn that caused it. It works by snapshotting each faction's gold around
+# each phase rather than by instrumenting individual call sites -- which means
+# it cannot silently miss a source the way a hand-maintained list would, and
+# the parts always reconcile exactly to the total change. Adding a new gold
+# sink anywhere in the game needs no ledger change to stay accounted for.
+GOLD_LEDGER_HISTORY_TURNS = 24   # enough to read a trend without bloating saves
+
+
+def faction_gold(world, fac_idx):
+    """Every coin a faction actually holds, across settlements and villages.
+    The same figure the resource bar shows."""
+    total = 0
+    for st in world.settlements:
+        if st.faction_idx == fac_idx:
+            total += (getattr(st, "resources", None) or {}).get("Gold", 0)
+    for v in world.villages:
+        if v.faction_idx == fac_idx:
+            total += (getattr(v, "resources", None) or {}).get("Gold", 0)
+    return total
+
+
+def _gold_snapshot(world):
+    return [faction_gold(world, i) for i in range(len(world.factions))]
+
+
+def _record_gold(world, cause, before):
+    """Attribute each faction's gold change since `before` to `cause`."""
+    ledger = world._gold_turn
+    for i, prev in enumerate(before):
+        delta = faction_gold(world, i) - prev
+        if delta:
+            ledger[i][cause] = ledger[i].get(cause, 0) + delta
+
+
+def gold_in_transit(world, fac_idx):
+    """Gold already collected from a buyer but not yet credited -- it rides
+    home on the caravan's return leg and is lost if that leg is raided (see
+    trade.advance_caravans). This is the money the trade log has already
+    announced as a sale but which hasn't reached the treasury, and it's a
+    large part of why the headline number lags the log."""
+    total = 0
+    for c in getattr(world, "trade_caravans", []):
+        if c.seller_idx != fac_idx or getattr(c, "leg", None) != "return":
+            continue
+        for resource, qty in (getattr(c, "payment", None) or []):
+            if resource == "Gold":
+                total += qty
+    return total
+
+
+def gold_ledger(world, fac_idx):
+    """[{turn, causes...}, ...] most recent last, for the Treasury panel."""
+    return [e for e in getattr(world, "gold_ledger", {}).get(fac_idx, [])]
+
+
+def _close_gold_ledger(world):
+    """Commit this turn's per-faction breakdown to world.gold_ledger, keeping
+    only the recent window (GOLD_LEDGER_HISTORY_TURNS) so saves don't grow
+    without bound."""
+    ledger = getattr(world, "gold_ledger", None)
+    if ledger is None:
+        ledger = world.gold_ledger = {}
+    for fac_idx, causes in getattr(world, "_gold_turn", {}).items():
+        if not causes:
+            continue
+        entry = {"turn": world.turn, **causes}
+        entry["net"] = sum(v for k, v in causes.items())
+        history = ledger.setdefault(fac_idx, [])
+        history.append(entry)
+        del history[:-GOLD_LEDGER_HISTORY_TURNS]
+    world._gold_turn = defaultdict(dict)
+
+
 def advance_turn(world):
     """The turn loop: cycle the season, recompute every region's yield for
     it (including Crops, see compute_region_yield -- production lands at
-    the region's own Villages first, Phase 10), grow/harvest Livestock
-    once a year (advance_livestock), spoil perishables, add production to
+    the region's own Villages first, Phase 10), run every Village's herd
+    for the season (advance_herds), spoil perishables, add production to
     each faction's stockpile, clamp to storage capacity (so nothing piles
     up forever), and recompute military from the new stockpiles -- then
     deliver/convert/redistribute/consume the household economy (see
@@ -3003,6 +4000,11 @@ def advance_turn(world):
     same way the old upkeep value used to."""
     world.turn += 1
     world.season = SEASONS[((world.turn - 1) // TURNS_PER_SEASON) % len(SEASONS)]
+    # Gold ledger for this turn -- see the section above. Every phase below
+    # that can move coin is bracketed by a snapshot, so the breakdown always
+    # adds up to the real change with nothing unaccounted for.
+    world._gold_turn = defaultdict(dict)
+    _gold_mark = _gold_snapshot(world)
 
     production = defaultdict(lambda: defaultdict(int))
     production_value = defaultdict(float)
@@ -3012,17 +4014,23 @@ def advance_turn(world):
                             if r in _SETTLEMENT_STORAGE_RESOURCES}
         faction_bound = {r: a for r, a in region.resources.items()
                          if r not in _SETTLEMENT_STORAGE_RESOURCES}
-        _route_farm_production(world, region, settlement_bound)
-        production_value[region.faction_idx] += _resource_bundle_value(settlement_bound)
+        # Value what was actually taken in, not what the fields could have
+        # yielded -- a village that idled its harvest for want of storage
+        # shouldn't still be credited with the prosperity of bringing it in.
+        delivered = _route_farm_production(world, region, settlement_bound)
+        production_value[region.faction_idx] += _resource_bundle_value(delivered)
         fac_res = production[region.faction_idx]
         for resource, amount in faction_bound.items():
             fac_res[resource] += amount
 
-    for fac_idx, value in advance_livestock(world).items():
+    # Herds run seasonally at the village now (see advance_herds) -- the old
+    # once-a-year region-level path is gone, along with the meat spike it made.
+    for fac_idx, value in advance_herds(world).items():
         production_value[fac_idx] += value
 
     for fac_idx, nation in enumerate(world.factions):
         res = nation.stats.setdefault("resources", {})
+        _purge_phantom_pool(nation)   # see that function: unspendable stock
         _apply_spoilage(res)
         fac_production = production.get(fac_idx, {})
         for resource, amount in fac_production.items():
@@ -3033,8 +4041,11 @@ def advance_turn(world):
 
     advance_local_shipments(world)          # deliver anything in transit before it's needed
     _produce_fishing(world)                 # Fish lands directly at water-adjacent nodes
+    advance_preservation(world)             # cure perishables before they spoil
     advance_production_chains(world)
     advance_settlement_production_chains(world)
+    _record_gold(world, "minted", _gold_mark)   # Gold struck from Gold Ore
+    _gold_mark = _gold_snapshot(world)
     run_local_logistics(world)              # dispatch new shipments from this turn's fresh stock
     advance_settlement_storage(world)
     consumption_value = advance_settlement_consumption(world)
@@ -3061,6 +4072,8 @@ def advance_turn(world):
     events += trade.run_trade_ai(world)
     events += trade.run_trade_route_ai(world)   # AI proposes new routes
     world.trade_events = events
+    _record_gold(world, "foreign trade", _gold_mark)
+    _gold_mark = _gold_snapshot(world)
 
     # Phase 11: domestic cross-region settlement trade -- run after
     # run_local_logistics (above) has already had first crack at covering
@@ -3074,16 +4087,21 @@ def advance_turn(world):
     world.regional_trade_events = (trade.advance_regional_shipments(world)
                                    + trade.run_regional_trade(world)
                                    + trade.run_sell_to_city(world))
+    _record_gold(world, "domestic trade", _gold_mark)
+    _gold_mark = _gold_snapshot(world)
 
     # Player/AI-built settlements + their connecting roads
     # (app/world/construction.py).
     from app.world import construction
     construction.advance_projects(world)
     construction.advance_shipyard_projects(world)
-    construction.advance_granary_projects(world)
-    construction.advance_warehouse_projects(world)
+    construction.advance_granary_projects(world)     # legacy, pre-tier saves
+    construction.advance_warehouse_projects(world)   # legacy, pre-tier saves
+    construction.advance_storage_projects(world)
     construction.run_settlement_ai(world)
     construction.run_storage_ai(world)
+    _record_gold(world, "construction", _gold_mark)
+    _gold_mark = _gold_snapshot(world)
 
     # Progressive expansion: claims-in-progress on UNCLAIMED land
     # (app/world/expansion.py).
@@ -3091,6 +4109,8 @@ def advance_turn(world):
     expansion.advance_claims(world)
     expansion.run_expansion_ai(world)
     expansion.ensure_interregion_roads(world)
+    _record_gold(world, "expansion", _gold_mark)
+    _gold_mark = _gold_snapshot(world)
 
     # Commanders: walk any active move order, count down ship construction
     # (app/world/commander.py) — before vision.recompute so this turn's
@@ -3102,3 +4122,10 @@ def advance_turn(world):
     # (app/world/vision.py).
     from app.world import vision
     vision.recompute(world)
+
+    # Close the ledger. Anything that moved coin outside the bracketed phases
+    # lands in "other" rather than silently vanishing, so the breakdown always
+    # reconciles to the real total change -- if "other" ever grows large,
+    # that's a genuine signal there's a gold flow worth naming.
+    _record_gold(world, "other", _gold_mark)
+    _close_gold_ledger(world)

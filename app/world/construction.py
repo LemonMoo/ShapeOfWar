@@ -20,6 +20,8 @@ from app.world.lexicon import make_settlement_namer
 from app.world.resources import (seed_prosperity, _SETTLEMENT_STORAGE_RESOURCES,
                                  settlement_storage_capacity)
 from app.world import wrap
+from app.world import resources
+from app.world.nation import is_eliminated
 
 # Cost/time to build each settlement kind. City is the crown jewel (biggest
 # population range, POPULATION_RANGE in worldgen.py) so it's the steepest;
@@ -44,14 +46,81 @@ _BBOX_PAD = 20
 SHIPYARD_COST = {"Logs": 600, "Gold": 200}
 SHIPYARD_BUILD_TURNS = 30        # deliberately steep -- "large amount of wood, very long cost"
 
-# Phase 9 storage buildings -- see app/world/resources.py's
-# GRANARY_STORAGE_BONUS/WAREHOUSE_STORAGE_BONUS for what they actually add
-# once built. Steep but not Shipyard-steep: these are meant to be a real,
-# reachable early investment, not a late-game luxury.
-GRANARY_COST = {"Logs": 300, "Stone": 100, "Gold": 150}
-GRANARY_BUILD_TURNS = 15
-WAREHOUSE_COST = {"Logs": 250, "Stone": 200, "Gold": 150}
-WAREHOUSE_BUILD_TURNS = 15
+# --- Storage buildings (Phase 4 of the storage rework) -----------------------
+# Each typed storage pool has a building that extends it, and each building
+# tiers up rather than being a single flat one-shot bonus. See
+# resources.STORAGE_TIER_BONUS for the capacity each tier actually grants.
+#
+# Costs are paid overwhelmingly in Planks/Bricks/Stone/Tools/Logs, and that is
+# the point rather than flavour: those durable Mining/Forestry goods are the
+# ones measured at 88-90% of everything in storage precisely because nothing
+# consumes them. Making them the currency of storage expansion gives the pile
+# its missing sink, and closes the loop -- your surplus timber becomes the
+# buildings that keep your grain.
+#
+# Costs climb steeply per tier so a fully-upgraded network is a real
+# late-game investment, while tier 1 stays a reachable early one.
+STORAGE_BUILD_COSTS = {
+    "granary": [
+        None,
+        {"Logs": 300, "Stone": 100, "Gold": 150},
+        {"Planks": 260, "Bricks": 180, "Stone": 220, "Gold": 420},
+        {"Planks": 620, "Bricks": 520, "Tools": 180, "Gold": 1100},
+    ],
+    "warehouse": [
+        None,
+        {"Logs": 250, "Stone": 200, "Gold": 150},
+        {"Planks": 300, "Bricks": 240, "Stone": 260, "Gold": 450},
+        {"Planks": 700, "Bricks": 600, "Tools": 220, "Gold": 1200},
+    ],
+    "vault": [
+        None,
+        {"Stone": 320, "Iron": 120, "Gold": 300},
+        {"Stone": 700, "Iron": 300, "Tools": 160, "Gold": 900},
+    ],
+    # Preserving House (Phase 5) -- rides the same project/tier machinery as
+    # the three pool buildings, but buys conversion throughput instead of
+    # capacity (see resources.PRESERVING_CAP_MULT). Cheapest of the four at
+    # tier 1 on purpose: a fishing village losing its whole catch to spoilage
+    # should be able to fix that early, not after a full industrial base.
+    # Tier 1 is timber and coin only -- deliberately no Stone. It is a
+    # smokehouse, a wooden shed, and gating the game's only answer to
+    # spoilage behind a quarry meant a faction with no stone-bearing region
+    # could never fix a rotting food supply at all. Measured: AI factions
+    # were eligible to build one 308 times over 30 turns and affording it
+    # zero times, most often for want of Stone they had none of.
+    "preserving_house": [
+        None,
+        {"Logs": 120, "Gold": 60},
+        {"Planks": 220, "Stone": 160, "Tools": 100, "Gold": 450},
+    ],
+    # Herd buildings (village-only -- see resources.HERD_BUILDINGS). Priced
+    # like farm infrastructure rather than industry: timber, a little stone,
+    # modest coin. The Slaughterhouse wants Tools because it is the one that
+    # is actually a workshop.
+    "pasture":        [None, {"Logs": 90, "Gold": 70}],
+    "barn":           [None, {"Logs": 180, "Stone": 60, "Gold": 110}],
+    "stable":         [None, {"Logs": 160, "Stone": 80, "Gold": 140}],
+    "slaughterhouse": [None, {"Logs": 140, "Tools": 40, "Gold": 130}],
+}
+STORAGE_BUILD_TURNS = {"granary": [0, 15, 22, 30],
+                       "warehouse": [0, 15, 22, 30],
+                       "vault": [0, 18, 28],
+                       "preserving_house": [0, 12, 20],
+                       "pasture": [0, 8], "barn": [0, 14],
+                       "stable": [0, 12], "slaughterhouse": [0, 10]}
+
+# A village builds smaller and cheaper than a settlement -- but it can build,
+# which it never could before. Villages were over capacity 78% of the time in
+# the measurements with no lever of any kind available to them.
+VILLAGE_STORAGE_COST_MULT = 0.45
+VILLAGE_STORAGE_TURNS_MULT = 0.7
+
+# Legacy aliases (old saves / callers predating tiers).
+GRANARY_COST = STORAGE_BUILD_COSTS["granary"][1]
+GRANARY_BUILD_TURNS = STORAGE_BUILD_TURNS["granary"][1]
+WAREHOUSE_COST = STORAGE_BUILD_COSTS["warehouse"][1]
+WAREHOUSE_BUILD_TURNS = STORAGE_BUILD_TURNS["warehouse"][1]
 
 
 class RoadProject:
@@ -213,21 +282,141 @@ class WarehouseProject:
         return max(0, math.ceil(self.total_turns - self.progress_turns))
 
 
+class StorageProject:
+    """A storage building being built or upgraded, at a Settlement or a
+    Village. One class for all three buildings and every tier -- what it is
+    building is `building` ("granary"/"warehouse"/"vault") and `to_tier`.
+
+    Targets a node by (kind, id) rather than a bare settlement_id because
+    Villages can build these now too; `node_kind` is "settlement" or
+    "village"."""
+
+    def __init__(self, faction_idx, node_kind, node_id, building, to_tier,
+                 total_turns):
+        self.faction_idx = faction_idx
+        self.node_kind = node_kind
+        self.node_id = node_id
+        self.building = building
+        self.to_tier = to_tier
+        self.total_turns = total_turns
+        self.progress_turns = 0.0
+
+    @property
+    def turns_left(self):
+        return max(0, math.ceil(self.total_turns - self.progress_turns))
+
+    def node(self, world):
+        if self.node_kind == "village":
+            return next((v for v in world.villages if v.id == self.node_id), None)
+        return next((s for s in world.settlements if s.id == self.node_id), None)
+
+
+def _node_kind_of(node):
+    return "settlement" if hasattr(node, "kind") else "village"
+
+
+def _storage_projects(world):
+    """The live StorageProject list, created on demand so worlds pickled
+    before this existed pick it up on load rather than needing a migration."""
+    projects = getattr(world, "storage_projects", None)
+    if projects is None:
+        projects = []
+        world.storage_projects = projects
+    return projects
+
+
+def storage_build_cost(node, building, to_tier):
+    """Resource cost to take `node`'s `building` up to `to_tier`, or None if
+    that tier doesn't exist for this kind of node."""
+    costs = STORAGE_BUILD_COSTS.get(building)
+    if not costs or to_tier <= 0 or to_tier >= len(costs):
+        return None
+    if to_tier > resources.storage_max_tier(node, building):
+        return None
+    cost = costs[to_tier]
+    if _node_kind_of(node) == "village":
+        return {r: max(1, round(a * VILLAGE_STORAGE_COST_MULT))
+                for r, a in cost.items()}
+    return dict(cost)
+
+
+def storage_build_turns(node, building, to_tier):
+    turns = STORAGE_BUILD_TURNS.get(building, [0])
+    t = turns[min(to_tier, len(turns) - 1)]
+    if _node_kind_of(node) == "village":
+        t = max(1, round(t * VILLAGE_STORAGE_TURNS_MULT))
+    return t
+
+
+def storage_next_tier(world, node, building):
+    """The tier a new project at `node` would build toward, or None if it's
+    already maxed for this node kind or has one underway."""
+    if any(p.node_kind == _node_kind_of(node) and p.node_id == node.id
+           and p.building == building for p in _storage_projects(world)):
+        return None
+    current = resources.storage_tier(node, building)
+    if current >= resources.storage_max_tier(node, building):
+        return None
+    return current + 1
+
+
+def can_build_storage(world, node, building):
+    return storage_next_tier(world, node, building) is not None
+
+
+def start_storage_building(world, nation, node, building):
+    """Validate and kick off building (or upgrading) `building` at `node`.
+    Returns a message describing what happened, success or why not."""
+    label = building.replace("_", " ").title()
+    to_tier = storage_next_tier(world, node, building)
+    if to_tier is None:
+        current = resources.storage_tier(node, building)
+        if current >= resources.storage_max_tier(node, building):
+            return f"{node.name}'s {label} is already at its highest tier."
+        return f"Work on {node.name}'s {label} is already underway."
+    cost = storage_build_cost(node, building, to_tier)
+    if cost is None:
+        return f"A {label} can't be built there."
+    if not can_afford(nation, cost, world):
+        return "You don't have enough resources to start construction."
+
+    _pay_cost(nation, cost, world)
+    _storage_projects(world).append(StorageProject(
+        node.faction_idx, _node_kind_of(node), node.id, building, to_tier,
+        storage_build_turns(node, building, to_tier)))
+    verb = "Upgrading" if to_tier > 1 else "Building"
+    return f"{verb} {label} (tier {to_tier}) at {node.name}."
+
+
+def advance_storage_projects(world):
+    """Tick every storage build/upgrade; completed ones set the node's tier."""
+    projects = _storage_projects(world)
+    finished = []
+    for project in projects:
+        project.progress_turns += 1.0
+        if project.progress_turns >= project.total_turns:
+            finished.append(project)
+    for project in finished:
+        node = project.node(world)
+        if node is not None:
+            resources.set_storage_tier(node, project.building, project.to_tier)
+        projects.remove(project)
+
+
+# --- legacy single-tier API, kept so existing callers/saves keep working -----
 def can_build_granary(world, settlement):
-    if getattr(settlement, "has_granary", False):
-        return False
-    return not any(p.settlement_id == settlement.id for p in world.granary_projects)
+    return can_build_storage(world, settlement, "granary")
 
 
 def can_build_warehouse(world, settlement):
-    if getattr(settlement, "has_warehouse", False):
-        return False
-    return not any(p.settlement_id == settlement.id for p in world.warehouse_projects)
+    return can_build_storage(world, settlement, "warehouse")
 
 
 def start_granary(world, nation, settlement):
-    """Validate and kick off building a granary at `settlement`. Returns a
-    message describing what happened (success or why not)."""
+    return start_storage_building(world, nation, settlement, "granary")
+
+
+def _start_granary_legacy(world, nation, settlement):
     if not can_build_granary(world, settlement):
         return "A granary can't be built there."
     if not can_afford(nation, GRANARY_COST, world):
@@ -241,43 +430,36 @@ def start_granary(world, nation, settlement):
 
 
 def start_warehouse(world, nation, settlement):
-    """Validate and kick off building a warehouse at `settlement`. Returns
-    a message describing what happened (success or why not)."""
-    if not can_build_warehouse(world, settlement):
-        return "A warehouse can't be built there."
-    if not can_afford(nation, WAREHOUSE_COST, world):
-        return "You don't have enough resources to start construction."
-
-    _pay_cost(nation, WAREHOUSE_COST, world)
-
-    project = WarehouseProject(settlement.faction_idx, settlement.id)
-    world.warehouse_projects.append(project)
-    return f"Warehouse construction begins — estimated {project.total_turns} turns."
+    return start_storage_building(world, nation, settlement, "warehouse")
 
 
 def advance_granary_projects(world):
+    """Legacy tick, for saves written before StorageProject existed and still
+    carrying GranaryProject entries. Completing one now sets tier 1 rather
+    than a bare boolean, so it lands in the same model as everything else."""
     finished = []
-    for project in world.granary_projects:
+    for project in getattr(world, "granary_projects", []):
         project.progress_turns += 1.0
         if project.progress_turns >= project.total_turns:
             finished.append(project)
     for project in finished:
         st = next((s for s in world.settlements if s.id == project.settlement_id), None)
         if st is not None:
-            st.has_granary = True
+            resources.set_storage_tier(st, "granary", 1)
         world.granary_projects.remove(project)
 
 
 def advance_warehouse_projects(world):
+    """Legacy tick -- see advance_granary_projects."""
     finished = []
-    for project in world.warehouse_projects:
+    for project in getattr(world, "warehouse_projects", []):
         project.progress_turns += 1.0
         if project.progress_turns >= project.total_turns:
             finished.append(project)
     for project in finished:
         st = next((s for s in world.settlements if s.id == project.settlement_id), None)
         if st is not None:
-            st.has_warehouse = True
+            resources.set_storage_tier(st, "warehouse", 1)
         world.warehouse_projects.remove(project)
 
 
@@ -509,6 +691,16 @@ def _ai_has_active_construction(world, fac_idx):
         return True
     if any(p.faction_idx == fac_idx for p in world.warehouse_projects):
         return True
+    # Only SETTLEMENT-scale storage works occupy the single major-build slot.
+    # Village-scale ones (a barn, a pasture, a village granary) are counted
+    # separately -- see _ai_village_project_count. This gate exists to stop a
+    # rich faction chain-building settlements across the map faster than a
+    # player could; a village hay barn is not that, and lumping the two
+    # together meant the AI never built a single village building in a
+    # 110-turn run because the slot was always taken by something bigger.
+    if any(p.faction_idx == fac_idx and p.node_kind == "settlement"
+           for p in _storage_projects(world)):
+        return True
     if any(p.faction_idx == fac_idx for p in world.shipyard_projects):
         return True
     if any(p.faction_idx == fac_idx for p in world.claim_projects):
@@ -548,7 +740,7 @@ def run_settlement_ai(world):
     catching up a faction that's fallen behind faster than one project at
     a time."""
     for fac_idx, nation in enumerate(world.factions):
-        if fac_idx == world.player_faction_idx:
+        if fac_idx == world.player_faction_idx or is_eliminated(nation):
             continue
         if _ai_has_active_construction(world, fac_idx):
             continue
@@ -567,6 +759,14 @@ def run_settlement_ai(world):
 
 
 # --- AI storage construction ---------------------------------------------
+AI_MAX_VILLAGE_PROJECTS = 3   # concurrent village-scale works per AI faction,
+                              # independent of the single major-build slot
+HERD_AI_CAPACITY_THRESHOLD = 0.85   # herd/land ratio at which a Pasture pays
+HERD_AI_SLAUGHTERHOUSE_HEAD = 40    # head before butchering efficiency matters
+HERD_AI_STABLE_HORSES = 12          # horses before a Stable is worth the slot
+PRESERVE_AI_THRESHOLD = 12   # perishable arriving per turn (fish_yield, plus a
+                             # tenth of standing Fish/Milk/Meat) before the AI
+                             # thinks a Preserving House is worth a build slot
 STORAGE_AI_PRESSURE_THRESHOLD = 0.8   # trigger a Granary/Warehouse once a
                                       # settlement's own storage is at
                                       # least this full -- a real reason,
@@ -577,42 +777,148 @@ STORAGE_AI_PRESSURE_THRESHOLD = 0.8   # trigger a Granary/Warehouse once a
                                       # penalty already make visible
 
 
+def _ai_village_project_count(world, fac_idx):
+    return sum(1 for p in _storage_projects(world)
+               if p.faction_idx == fac_idx and p.node_kind == "village")
+
+
+def _herd_building_pressure(world, node):
+    """[(pressure, node, building), ...] for the herd buildings this village
+    has a real reason to want.
+
+    Without this the AI paid the entire cost of the feed system and used none
+    of its mitigations -- it never built a Barn or a Pasture, so herds were
+    culled every Winter for want of hay that a Barn would have stored and
+    sheltered. Each building is triggered by the specific problem it solves,
+    not by generic prosperity."""
+    herds = getattr(node, "herds", None)
+    if not herds or hasattr(node, "kind"):
+        return []          # settlements keep no animals
+    out = []
+    need = resources.village_winter_fodder_need(node)
+    if need <= 0:
+        return out
+
+    # Barn: triggered by actually having FAILED to feed the herd last Winter,
+    # not by storage capacity. Capacity was the first thing tried and built
+    # nothing, because the base feed pool already covers a typical herd -- the
+    # villages losing animals were short of hay itself, not of somewhere to
+    # put it. A Barn cuts the Winter fodder need by a quarter and deaths by a
+    # fifth, which is exactly the right answer to that. Same lesson as the
+    # Preserving House: trigger on the outcome, not on a stock level.
+    if getattr(node, "herd_fed", None) is False:
+        out.append((1.4, node, "barn"))
+    elif resources.node_pool_capacity(node, "feed") < need * resources.FODDER_STOCK_BUFFER:
+        out.append((1.0, node, "barn"))   # can feed them, nowhere to keep the hay
+
+    # Pasture: herd is pressing its land ceiling, so more animals need more
+    # ground before anything else will help.
+    head = sum(herds.values())
+    capacity = sum(resources.village_herd_capacity(world, node, a) for a in herds)
+    if capacity and head / capacity >= HERD_AI_CAPACITY_THRESHOLD:
+        out.append((head / capacity, node, "pasture"))
+
+    # Slaughterhouse: only worth it where there's a real cull to process.
+    if head >= HERD_AI_SLAUGHTERHOUSE_HEAD:
+        out.append((1.0, node, "slaughterhouse"))
+
+    # Stable: horses specifically, which are the animal with a use beyond food.
+    if herds.get("Horses", 0) >= HERD_AI_STABLE_HORSES:
+        out.append((1.0, node, "stable"))
+    return out
+
+
 def run_storage_ai(world):
-    """Every AI faction's equivalent of the player clicking "Build
-    Granary"/"Build Warehouse": triggered by real storage pressure, not
-    an unconditional habit -- only fires when at least one of the
-    faction's settlements has filled STORAGE_AI_PRESSURE_THRESHOLD or
-    more of its own storage capacity (see resources.
-    settlement_storage_capacity), the same overflow risk the player
-    already sees reflected in that settlement's storage bar. Skips a
-    faction entirely if it already has any construction/expansion project
-    in flight (see _ai_has_active_construction). Targets whichever
-    settlement is under the most pressure, prefers a Granary (the bigger
-    of the two bonuses), falls back to a Warehouse if it already has one.
-    Deliberately simple: one settlement, one building, per faction per
-    turn at most, same philosophy as run_settlement_ai."""
+    """Every AI faction's equivalent of the player clicking "Build/Upgrade
+    Granary": triggered by real storage pressure, not an unconditional
+    habit. Skips a faction entirely if it already has any construction or
+    expansion project in flight (see _ai_has_active_construction).
+
+    Pressure is judged per typed pool (Phase 3) rather than on a node's
+    total, and the building it starts is the one for the pool that's
+    actually full -- a settlement drowning in timber gets a Warehouse, not
+    whichever building happened to be cheapest. Villages are candidates too
+    now (Phase 4): they were the most overflowing nodes on the map and had
+    no building of their own until this.
+
+    Deliberately simple: one node, one building, per faction per turn at
+    most, same philosophy as run_settlement_ai."""
     for fac_idx, nation in enumerate(world.factions):
-        if fac_idx == world.player_faction_idx:
+        if fac_idx == world.player_faction_idx or is_eliminated(nation):
             continue
-        if _ai_has_active_construction(world, fac_idx):
+        # A faction busy with a major build can still put up village works,
+        # up to AI_MAX_VILLAGE_PROJECTS at once -- otherwise the whole
+        # village-building layer is unreachable for the AI (see
+        # _ai_has_active_construction).
+        major_busy = _ai_has_active_construction(world, fac_idx)
+        village_slots = AI_MAX_VILLAGE_PROJECTS - _ai_village_project_count(world, fac_idx)
+        if major_busy and village_slots <= 0:
             continue
-        sids = nation.meta.get("settlements", [])
-        if not sids:
+
+        nodes = []
+        if not major_busy:
+            nodes += [world.settlements[sid] for sid in nation.meta.get("settlements", [])]
+        if village_slots > 0:
+            nodes += [v for v in world.villages if v.faction_idx == fac_idx]
+        if not nodes:
             continue
+
         pressured = []
-        for sid in sids:
-            st = world.settlements[sid]
-            cap = settlement_storage_capacity(st)
-            if cap <= 0:
-                continue
-            stock = sum(getattr(st, "resources", {}).values())
-            if stock / cap >= STORAGE_AI_PRESSURE_THRESHOLD:
-                pressured.append((stock / cap, st))
+        for node in nodes:
+            for pool in resources.STORAGE_POOLS:
+                cap = resources.node_pool_capacity(node, pool)
+                if cap <= 0:
+                    continue
+                fill = resources.node_pool_stock(node, pool) / cap
+                if fill >= STORAGE_AI_PRESSURE_THRESHOLD:
+                    pressured.append((fill, node, resources.STORAGE_BUILDING_BY_POOL[pool]))
+            # A Preserving House is driven by spoilage, not fullness -- a
+            # fishing village can be losing its whole catch every turn while
+            # its granary sits half empty, which no capacity check would ever
+            # notice.
+            #
+            # Crucially this scores FLOW, not stock. Scoring stock was tried
+            # first and built exactly zero houses: Fish spoils at 0.35, so it
+            # never survives long enough to pile up: the map was losing 646k
+            # of it over 60 turns while no node ever held more than a few
+            # dozen at once. fish_yield is the honest signal -- it's what
+            # arrives every turn, cached on the node, and it's what's being
+            # thrown away.
+            res = getattr(node, "resources", None) or {}
+            stock = sum(res.get(src, 0) for src in
+                        resources.PRESERVATION_RECIPES.values())
+            score = (getattr(node, "fish_yield", 0) or 0) + stock * 0.1
+            if score >= PRESERVE_AI_THRESHOLD:
+                # Capped so a strong fishing node outranks a merely-full pool
+                # without permanently starving every Granary in the realm of
+                # the faction's one build slot.
+                pressured.append((min(1.5, score / PRESERVE_AI_THRESHOLD), node,
+                                  resources.PRESERVING_HOUSE))
+            pressured.extend(_herd_building_pressure(world, node))
         if not pressured:
             continue
+
+        # Worst pressure first, but fall through to the next candidate if that
+        # one is maxed out or unaffordable -- otherwise a single permanently
+        # full, fully-upgraded node would block the faction from ever
+        # expanding storage anywhere else.
         pressured.sort(key=lambda t: -t[0])
-        st = pressured[0][1]
-        if can_build_granary(world, st) and can_afford(nation, GRANARY_COST, world):
-            start_granary(world, nation, st)
-        elif can_build_warehouse(world, st) and can_afford(nation, WAREHOUSE_COST, world):
-            start_warehouse(world, nation, st)
+        # Don't stack the same building type in every village slot. Without
+        # this the AI simply worked down a queue of the single highest-pressure
+        # type -- 54 Preserving Houses and not one Barn, because there is
+        # always another unbuilt fishing village outranking every herd
+        # problem in the realm. Preferring a type it isn't already building
+        # spreads the three slots across the problems it actually has.
+        in_flight = {p.building for p in _storage_projects(world)
+                     if p.faction_idx == fac_idx}
+        ordered = ([c for c in pressured if c[2] not in in_flight]
+                   + [c for c in pressured if c[2] in in_flight])
+        for _fill, node, building in ordered:
+            to_tier = storage_next_tier(world, node, building)
+            if to_tier is None:
+                continue
+            cost = storage_build_cost(node, building, to_tier)
+            if cost is None or not can_afford(nation, cost, world):
+                continue
+            start_storage_building(world, nation, node, building)
+            break

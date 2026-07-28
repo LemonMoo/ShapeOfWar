@@ -20,6 +20,30 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 33,
+        "title": "Interface Overhaul, Herds & Honest Numbers",
+        "items": [
+            "INTERFACE: the map is now the base layer and fills the window — both side panels fold away to slim edge tabs, so you can give the map the whole screen whenever you want it",
+            "Alerts are grouped by kind with a count instead of eight near-identical paragraphs covering the map — click a group to list the settlements, click a settlement to jump there. 150 alerts now read as 3 lines instead of hiding 142 of them behind '+142 more'",
+            "The resources sidebar groups into Food / Industry / Luxury with a NEEDS ATTENTION block that surfaces survival goods running low — 30 flat rows are now 4 lines that expand on click",
+            "Settlement and village panels are folding cards (Summary / Build / Production / Storage / Herd) with aligned figures and real meters, replacing ~30 lines of run-on prose. End Turn is pinned so build actions can never fall off the bottom",
+            "The Trade Log is a tab you open rather than an empty black box permanently sitting on the map",
+            "LIVESTOCK: herds now belong to Villages, not regions, and run on the season — births in Spring, hay cut in Summer, the cull in Autumn, and Winter fed from stored Fodder",
+            "Fodder is a new Crop with its own Barn storage. A village that can't feed its herd through Winter loses it, so laying in hay is a real decision",
+            "Herd policy per village (Grow / Balanced / Cull) sets how hard you harvest each Autumn, and four new village buildings — Pasture, Barn, Stable, Slaughterhouse — set the ceiling",
+            "Horses finally matter: they add a cavalry bonus to military strength, and a realm with enough of them puts its Commanders on horseback (5 → 8 cells a turn)",
+            "Livestock can be traded — buy breeding stock from a neighbour to restock a herd a hard Winter took",
+            "Meat no longer arrives once a year and rots in six turns; it comes four times a year, and a Preserving House cures it into Salted Meat",
+            "STORAGE: space is typed — Granary (food, firewood), Warehouse (timber, ore, goods), Vault (gold, luxuries), Barn (fodder) — each with its own building and upgrade tiers",
+            "Goods take up space by bulk now: a Log eats 3x what a sack of grain does, and Gems almost nothing",
+            "Production stops when there's nowhere to put it, instead of being silently destroyed on arrival. Storage overflow waste is down about three quarters",
+            "GOLD: a new Treasury panel (click the Gold row) shows where your gold is, how much is actually spendable, how much is riding home on a caravan, and where every coin came from",
+            "The trade log marks rows where no coin moved, so an internal barter transfer stops reading as income you never received",
+            "Fixed: conquering a region banked a phantom copy of its goods in a national pool nothing could spend from — the resources sidebar was overstating what you owned",
+            "Conquering a nation's last region now removes it from the world properly, and losing your own last region ends the game",
+        ],
+    },
+    {
         "version": 32,
         "title": "Global Trade Goes Gold-Only",
         "items": [

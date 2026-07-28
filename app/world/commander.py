@@ -36,6 +36,17 @@ SHIP_COST = {"Logs": 150, "Gold": 100}
 SHIP_BUILD_TURNS = 8
 SHIP_DISMANTLE_REFUND_FRACTION = 0.5   # of SHIP_COST["Logs"], salvaged on dismantle
 SHIPYARD_SPEED_MULT = 1.5              # a shipyard-launched ship's per-turn speed bonus
+
+# Mounted commanders. A realm that keeps enough Horses (see resources.
+# faction_horses -- living herd, bred and fed, not a stockpiled good) puts its
+# Commanders on horseback and they cover more ground overland. Deliberately a
+# threshold rather than a per-horse scale: a commander and their escort need a
+# stable's worth of animals, not a proportional slice of the national herd, and
+# a flat "you either can mount them or you can't" reads far better on the map
+# than a speed that drifts every time a foal is born.
+MOUNTED_COMMANDER_HORSES = 20          # faction-wide horses needed to ride
+MOUNTED_SPEED_MULT = 1.6               # overland speed once mounted
+
 _BBOX_PAD = 20   # matches construction._BBOX_PAD
 
 
@@ -328,8 +339,13 @@ def set_move_order(world, commander, dest):
 
     commander.path = path
     commander.path_index = 0
-    turns = max(1, math.ceil((len(path) - 1) / COMMANDER_CELLS_PER_TURN))
-    return f"The commander sets out — estimated {turns} turns."
+    # ETA has to use the same speed advance_commanders will actually walk at,
+    # or a mounted commander is quoted a foot-march estimate.
+    per_turn = max(1, round(COMMANDER_CELLS_PER_TURN
+                            * commander_speed_mult(world, commander)))
+    turns = max(1, math.ceil((len(path) - 1) / per_turn))
+    mounted = " (mounted)" if is_mounted(world, commander) else ""
+    return f"The commander sets out{mounted} — estimated {turns} turns."
 
 
 def can_build_ship(world, commander):
@@ -427,6 +443,19 @@ def ship_by_id(world, ship_id):
     return next((s for s in world.ships if s.id == ship_id), None)
 
 
+def is_mounted(world, commander):
+    """Whether this commander's realm keeps enough Horses to put them in the
+    saddle (MOUNTED_COMMANDER_HORSES)."""
+    from app.world.resources import faction_horses
+    return faction_horses(world, commander.faction_idx) >= MOUNTED_COMMANDER_HORSES
+
+
+def commander_speed_mult(world, commander):
+    """Overland speed multiplier for this commander -- MOUNTED_SPEED_MULT if
+    mounted, else 1.0."""
+    return MOUNTED_SPEED_MULT if is_mounted(world, commander) else 1.0
+
+
 def advance_commanders(world):
     """Called every turn: walk each commander with an active order a few
     cells further along its path (faster while aboard a shipyard-built
@@ -435,8 +464,12 @@ def advance_commanders(world):
     for cmd in world.commanders:
         if cmd.path is not None:
             ship = ship_by_id(world, cmd.aboard_ship_id) if cmd.aboard_ship_id is not None else None
+            # Mounted only applies on land -- a horse is no help aboard ship,
+            # where the hull's own speed governs.
             cells_this_turn = (round(COMMANDER_CELLS_PER_TURN * ship.speed_mult)
-                              if ship is not None else COMMANDER_CELLS_PER_TURN)
+                              if ship is not None
+                              else round(COMMANDER_CELLS_PER_TURN
+                                         * commander_speed_mult(world, cmd)))
             old_index = cmd.path_index
             new_index = min(len(cmd.path) - 1, old_index + max(1, cells_this_turn))
 

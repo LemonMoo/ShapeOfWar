@@ -52,11 +52,14 @@ CATEGORY_BLURB = {
         "itself off its own harvest, not just once it's been converted."
     ),
     "Livestock": (
-        "Living, breeding animal populations kept at the region level "
-        "(region.livestock: animal → head count), not a stockpiled "
-        "quantity — see the Settlements & Villages and Prosperity "
-        "articles. Grown/shrunk once a year via births, natural deaths, "
-        "and slaughter."
+        "Living, breeding herds kept by each Village (not a stockpiled "
+        "quantity, and not a regional pool) — see the Settlements & "
+        "Villages article. Herds run on the season: births in Spring, "
+        "the cull in Autumn, and Winter fed from stored Fodder. A "
+        "Village that cannot feed its herd through Winter loses it. "
+        "Pasture, Barn, Stable and Slaughterhouse all extend what a "
+        "Village can keep and what it gets from them, and the Cull "
+        "policy sets how hard it harvests each Autumn."
     ),
     "Forestry": "Logged/tapped by Villages in Forest terrain.",
     "Mining": (
@@ -181,7 +184,13 @@ def resource_entry_text(name):
 
     cycle = R.GROWTH_CYCLE.get(name)
     if cycle:
-        stages = ", ".join(f"{s}: {cycle.get(s, '—')}" for s in _GROWTH_STAGE_ORDER)
+        # GROWTH_CYCLE maps SEASON -> stage, so it has to be inverted to list
+        # stages in order. Reading it the other way round -- cycle.get("Plant")
+        # -- silently returned nothing for every crop in the game, so this line
+        # had always rendered as "Plant: —, Growing: —, Harvest: —, Dormant: —".
+        season_for = {stage: season for season, stage in cycle.items()}
+        stages = ", ".join(f"{s}: {season_for.get(s, '—')}"
+                           for s in _GROWTH_STAGE_ORDER)
         lines.append(f"Growth cycle: {stages} (only produces during Harvest)")
 
     lines.extend(_spawn_lines(name))
@@ -370,12 +379,40 @@ def _settlements_article():
             "yield is split evenly across every Village in it, so this is "
             "each Village's own share."
         ),
+        "VILLAGES CAN BUILD NOW",
+        (
+            "A Village is no longer a passive producer. It can put up its "
+            "own Granary, Warehouse, Vault, Barn and Preserving House "
+            "(smaller and cheaper than a Settlement's), plus the four herd "
+            "buildings — Pasture, Barn, Stable and Slaughterhouse — that no "
+            "Settlement can build at all. It also sets its own herd cull "
+            "policy. See Construction and Livestock & Herds."
+        ),
+        "LOSING EVERYTHING",
+        (
+            "A nation that loses its last region is finished: it disappears "
+            "from the map, from diplomacy and from trade. Its part-built "
+            "works and trade routes pass to whoever took that final region; "
+            "its commanders, ships and caravans are gone. If the realm that "
+            "falls is yours, the game ends."
+        ),
+
     ]
     return "\n\n".join(parts)
 
 
 def _storage_article():
     R_ = R
+    pool_rows = []
+    for pool in R_.STORAGE_POOLS:
+        building = R_.STORAGE_BUILDING_BY_POOL[pool].title()
+        base = R_.STORAGE_POOL_BASE
+        pool_rows.append(
+            f"  {building:<10} ({pool}) — city {base['city'][pool]:,} · "
+            f"castle {base['castle'][pool]:,} · town {base['town'][pool]:,} · "
+            f"village {base['village'][pool]:,}")
+    bulky = sorted(R_.RESOURCES, key=lambda n: -R_.resource_bulk(n))[:5]
+    compact = sorted(R_.RESOURCES, key=lambda n: R_.resource_bulk(n))[:5]
     parts = [
         "Storage & Spoilage",
         (
@@ -384,58 +421,76 @@ def _storage_article():
             "while the rest of its faction is fine if nothing has "
             "actually reached its own granary."
         ),
-        "SPACE BUDGET",
+        "FOUR KINDS OF SPACE",
         (
-            "Storage is one shared space budget, not an independent cap "
-            "per resource — a full granary of Bread really does mean "
-            "less room for Wheat. Every stored unit costs a flat 1 space "
-            "regardless of type."
+            "Space is typed. A good only ever competes for room with "
+            "others of its own kind, so a timber glut can fill your "
+            "warehouse without touching the grain in your granary."
         ),
-        "\n".join([
-            f"  City storage:    {R_.SETTLEMENT_STORAGE_BASE['city']:,}",
-            f"  Castle storage:  {R_.SETTLEMENT_STORAGE_BASE['castle']:,}",
-            f"  Town storage:    {R_.SETTLEMENT_STORAGE_BASE['town']:,}",
-            f"  Village storage: {R_.VILLAGE_STORAGE_BASE:,} (flat — no Granary/Warehouse of its own)",
-        ]),
+        "\n".join(pool_rows),
         (
-            f"A Granary adds +{R_.GRANARY_STORAGE_BONUS:,} space; a "
-            f"Warehouse adds +{R_.WAREHOUSE_STORAGE_BONUS:,} (both apply "
-            "to the same shared budget, not a separate one of their own "
-            "— see the Construction article for cost/build time)."
+            "Each pool has its own building, and each building upgrades "
+            "through tiers rather than being a one-off — see Construction "
+            "for costs. Villages build smaller and cheaper versions of all "
+            "of them."
+        ),
+        "BULK — NOT EVERY UNIT IS THE SAME SIZE",
+        (
+            "A unit of grain is the reference, at 1 space. Raw timber and "
+            "quarried stone are enormous; smelted metal, coin and gems are "
+            "compact. This is why a warehouse full of Logs runs out of room "
+            "long before the unit count suggests it should."
+        ),
+        "\n".join(
+            ["  Bulkiest:     " + " · ".join(f"{n} {R_.resource_bulk(n):g}" for n in bulky),
+             "  Most compact: " + " · ".join(f"{n} {R_.resource_bulk(n):g}" for n in compact)]),
+        "PRODUCTION STOPS WHEN THERE'S NO ROOM",
+        (
+            "A node approaching full throttles its own primary production, "
+            f"tapering from full rate at {_pct(R_.STORAGE_THROTTLE_START)} "
+            "of a pool's capacity down to a complete stop once that pool is "
+            "full. Nothing is silently destroyed on arrival any more — it is "
+            "simply never produced, which is something you can see and act "
+            "on. It also means capacity buys real output: a bigger Granary "
+            "is more harvest actually taken in, not just a higher pile."
         ),
         "SPOILAGE",
         (
             "Each resource has its own spoil rate (see its entry under "
-            "Crops/Food Products/etc.), applied to unsold stock every "
-            "turn — from \"never\" (Iron, Tools, Furniture, ...) to "
-            "\"quickly\" (Bread, Milk)."
+            "Crops/Food Products/etc.), applied to stock every turn — from "
+            "\"never\" (Iron, Tools, Furniture, ...) to \"quickly\" "
+            "(Bread, Milk, Fish)."
+        ),
+        "PRESERVATION",
+        (
+            "A Preserving House cures perishables into forms that keep: "
+            "Fish into Smoked Fish, Milk into Cheese, and Meat into Salted "
+            "Meat (which can only be made this way). It burns Salt doing "
+            "it — little for smoked fish and cheese, a great deal for salt "
+            "meat — which is what finally gives Salt a real demand. Villages "
+            "can build one, and for a fishing village it is often the single "
+            "most valuable thing they can build: raw Fish is the most "
+            "perishable good in the game."
         ),
         "OVERFLOW",
         (
-            "Production is never rejected at the door. Once total stock "
-            "exceeds capacity, the overage decays at an accelerated rate "
-            "on top of the resource's normal spoilage — "
-            f"{R_.OVERFLOW_SPOILAGE_MULTIPLIER:.0f}x the base spoil "
-            f"rate, with a floor of {_pct(R_.OVERFLOW_MIN_RATE)}/turn "
-            "even for a resource that never normally spoils (there's "
-            "genuinely no room, whether or not the good itself rots). "
-            "The loss is capped at "
-            f"{_pct(R_.MAX_OVERFLOW_LOSS_FRACTION)} of that resource's "
-            "stock in a single turn, so even the worst case (badly "
-            "overflowing + fast-spoiling) keeps a sliver of grace rather "
-            "than an instant wipeout. Gold is the one exception — it "
-            "still counts toward the shared space budget, but never "
-            "decays from overflow (or from spoilage at all): it's minted "
-            "currency, not a perishable good, so a granary overflowing "
-            "with grain doesn't cost you coin."
+            "Production is never rejected at the door. Once a pool exceeds "
+            "its capacity, the overage decays at an accelerated rate on top "
+            "of the resource's normal spoilage — "
+            f"{R_.OVERFLOW_SPOILAGE_MULTIPLIER:.0f}x the base spoil rate, "
+            f"with a floor of {_pct(R_.OVERFLOW_MIN_RATE)}/turn even for a "
+            "resource that never normally spoils. The loss is capped at "
+            f"{_pct(R_.MAX_OVERFLOW_LOSS_FRACTION)} of that resource's stock "
+            "in a single turn. Gold is the one exception — it occupies vault "
+            "space but never decays: it is minted currency, not a perishable "
+            "good."
         ),
-        "WHAT'S NOT YET REAL STORAGE",
+        "LIVESTOCK IS NOT STORED",
         (
-            "Livestock is the one exception — it's never a stockpiled "
-            "quantity at all, but a living regional population (see "
-            "Settlements & Villages). Every other resource in the game, "
-            "Gold included (see Currency), has a real per-settlement "
-            "stockpile now."
+            "Animals are the one tradable thing that never occupies storage "
+            "at all — they are a living herd held per Village (see "
+            "Settlements & Villages). What they need instead is Fodder in "
+            "the Barn to survive Winter."
         ),
     ]
     return "\n\n".join(parts)
@@ -464,6 +519,38 @@ def _currency_article():
             "(see Construction/the resource categories) — no separate "
             "\"build a Mint\" step, it runs the moment a settlement is "
             "holding both the ore and the recipe applies."
+        ),
+        "WHERE YOUR GOLD COMES FROM",
+        (
+            "Minting is almost always the answer, and it is easy to miss "
+            "because nothing announces it: a settlement holding Gold Ore "
+            "quietly strikes coin every single turn. Trade is usually the "
+            "smaller share, and internal transfers between your own "
+            "settlements mostly pay in barter rather than coin at all — "
+            "which is why a busy Trade Log and a barely-moving Gold figure "
+            "are not a contradiction."
+        ),
+        (
+            "Click the Gold row in the resources sidebar to open the "
+            "Treasury. It shows what you actually hold, how much of it is "
+            "genuinely spendable, how much is riding home on a caravan, "
+            "which settlements are holding it, and a per-cause breakdown of "
+            "every coin gained or spent over recent turns — minting, "
+            "foreign trade, domestic trade, construction and expansion."
+        ),
+        "MONEY IN TRANSIT",
+        (
+            "A foreign sale collects the buyer's Gold when the goods are "
+            "delivered, but that payment only reaches you when the caravan "
+            "completes its journey home — and it is lost with the caravan if "
+            "that return leg is raided. So the Trade Log can announce a sale "
+            "several turns before the coin actually arrives."
+        ),
+        (
+            f"Settlements also hold back {trade.GOLD_TRADE_RESERVE:,} Gold "
+            "each as a trading reserve, and Villages never pay for foreign "
+            "trade at all, so your spendable total is always somewhat below "
+            "your headline total."
         ),
         "WHAT IT'S SPENT ON",
         (
@@ -919,6 +1006,20 @@ def _foreign_trade_article():
             "that settlement's own local situation, not a national "
             "average."
         ),
+        "TRADING LIVESTOCK",
+        (
+            "Animals trade like any other good, but in head rather than "
+            "bulk, and they never touch storage: they leave the seller's "
+            "pastures and arrive in whichever of the buyer's villages has "
+            "room for them. A realm only sells what is above its breeding "
+            f"core (at most {_pct(1 - trade.LIVESTOCK_BREEDING_RESERVE)} of "
+            "the herd), and in smaller batches than ordinary goods "
+            f"({trade.LIVESTOCK_MIN_TRADE_HEAD} head rather than "
+            f"{trade.MIN_TRADE_QUANTITY} units). Demand is judged against "
+            "what a buyer's LAND can carry — so the buyer is the realm with "
+            "empty pasture, usually one whose herd a hard Winter just took. "
+            "See Livestock & Herds."
+        ),
         "THE CARAVAN",
         (
             f"Travels {trade.MIN_TRANSIT_TURNS}–{trade.MAX_TRANSIT_TURNS} "
@@ -1129,17 +1230,95 @@ def _construction_article():
             f"{commander.SHIPYARD_SPEED_MULT}x faster than a normally-"
             "built ship — see Commanders & Ships."
         ),
-        "GRANARY / WAREHOUSE (any settlement)",
-        "\n".join([
-            f"  Granary:   {_cost_line(construction.GRANARY_COST)} — {construction.GRANARY_BUILD_TURNS} turns, +{R.GRANARY_STORAGE_BONUS:,} storage",
-            f"  Warehouse: {_cost_line(construction.WAREHOUSE_COST)} — {construction.WAREHOUSE_BUILD_TURNS} turns, +{R.WAREHOUSE_STORAGE_BONUS:,} storage",
-        ]),
+        "STORAGE BUILDINGS (settlements and villages)",
         (
-            "Both add to the same shared storage budget (see Storage & "
-            "Spoilage), not a separate pool of their own."
+            "Each typed storage pool has its own building, and each one "
+            "upgrades through tiers rather than being a single flat "
+            "one-off — see Storage & Spoilage for what the pools are."
         ),
+        "\n".join(_storage_building_lines()),
+        (
+            "Villages build all of these too, at roughly "
+            f"{_pct(construction.VILLAGE_STORAGE_COST_MULT)} of the cost "
+            f"and {_pct(construction.VILLAGE_STORAGE_TURNS_MULT)} of the "
+            "time, but reach lower tiers than a settlement can."
+        ),
+        "HERD BUILDINGS (villages only)",
+        (
+            "Animals live where the fields are, so these are village-only "
+            "— see Livestock & Herds for what they change."
+        ),
+        "\n".join(_herd_building_lines()),
     ]
     return "\n\n".join(parts)
+
+
+def _storage_building_lines():
+    """Cost/time/effect for every tier of every storage building, read from
+    the live tables so this can't drift out of sync with the game."""
+    out = []
+    for pool in R.STORAGE_POOLS:
+        building = R.STORAGE_BUILDING_BY_POOL[pool]
+        costs = construction.STORAGE_BUILD_COSTS.get(building, [])
+        turns = construction.STORAGE_BUILD_TURNS.get(building, [])
+        # The Barn is village-only (it's a herd building too), so its tiers
+        # and prices come from the village tables, not the settlement ones.
+        village_only = building in R.HERD_BUILDINGS
+        bonus = (R.VILLAGE_STORAGE_TIER_BONUS if village_only
+                 else R.STORAGE_TIER_BONUS).get(building, [0])
+        for tier in range(1, len(costs)):
+            if costs[tier] is None or tier >= len(bonus):
+                continue
+            added = bonus[tier] - bonus[tier - 1]
+            mult = construction.VILLAGE_STORAGE_COST_MULT if village_only else 1.0
+            cost = ", ".join(f"{max(1, round(v * mult)):,} {k}"
+                             for k, v in costs[tier].items())
+            n_turns = turns[tier]
+            if village_only:
+                n_turns = max(1, round(n_turns * construction.VILLAGE_STORAGE_TURNS_MULT))
+            out.append(f"  {building.title()} T{tier}: {cost} — {n_turns} turns, "
+                       f"+{added:,} {pool} space"
+                       + (" (village only)" if village_only else ""))
+    building = R.PRESERVING_HOUSE
+    costs = construction.STORAGE_BUILD_COSTS.get(building, [])
+    turns = construction.STORAGE_BUILD_TURNS.get(building, [])
+    for tier in range(1, len(costs)):
+        if costs[tier] is None:
+            continue
+        cost = ", ".join(f"{v:,} {k}" for k, v in costs[tier].items())
+        rate = int(R.CONVERSION_RATE_CAP * R.PRESERVING_CAP_MULT[tier])
+        out.append(f"  Preserving House T{tier}: {cost} — {turns[tier]} turns, "
+                   f"cures up to {rate:,}/turn")
+    return out
+
+
+def _herd_building_lines():
+    effect_text = {
+        ("pasture", "capacity"): "herd capacity x{v:g}",
+        ("stable", "capacity"): "Horse capacity x{v:g}",
+        ("barn", "feed"): "Winter fodder need x{v:g}",
+        ("barn", "death"): "livestock deaths x{v:g}",
+        ("slaughterhouse", "yield"): "Meat & Leather per head x{v:g}",
+    }
+    out = []
+    for building in R.HERD_BUILDINGS:
+        costs = construction.STORAGE_BUILD_COSTS.get(building, [])
+        turns = construction.STORAGE_BUILD_TURNS.get(building, [])
+        for tier in range(1, len(costs)):
+            if costs[tier] is None:
+                continue
+            # Villages are the only builders, so quote the village price.
+            cost = ", ".join(
+                f"{max(1, round(v * construction.VILLAGE_STORAGE_COST_MULT)):,} {k}"
+                for k, v in costs[tier].items())
+            effects = "; ".join(
+                effect_text[(building, eff)].format(v=table[tier])
+                for eff, table in R.HERD_BUILDING_EFFECTS.get(building, {}).items()
+                if (building, eff) in effect_text and tier < len(table))
+            village_turns = max(1, round(turns[tier] * construction.VILLAGE_STORAGE_TURNS_MULT))
+            out.append(f"  {building.title()} T{tier}: {cost} — "
+                       f"{village_turns} turns, {effects}")
+    return out
 
 
 def _commanders_article():
@@ -1241,6 +1420,97 @@ def _luxury_article():
     return "\n\n".join(parts)
 
 
+def _livestock_article():
+    R_ = R
+    feed_rows = [f"  {a}: {v:g} Fodder per head" for a, v in
+                 sorted(R_.FODDER_PER_HEAD_WINTER.items(), key=lambda kv: -kv[1])
+                 if v]
+    parts = [
+        "Livestock & Herds",
+        (
+            "Animals are not a stockpiled resource. Each Village keeps a "
+            "living herd — real head counts that breed, die, get eaten and "
+            "can be traded — and no herd occupies any storage space at all. "
+            "What a herd needs is Fodder, and somewhere to shelter."
+        ),
+        "THE HERD YEAR",
+        (
+            "Herds run on the season rather than being recalculated from "
+            "nothing each turn:"
+        ),
+        "\n".join([
+            "  Spring — births",
+            "  Summer — the Fodder harvest is cut and stored",
+            "  Autumn — the cull: animals slaughtered for Meat and Leather",
+            "  Winter — the herd eats stored Fodder to survive",
+        ]),
+        (
+            "Milk, Wool, Eggs and Honey come off the living herd every "
+            "season. Meat and Leather come only from animals actually "
+            "slaughtered."
+        ),
+        "FODDER AND THE WINTER",
+        (
+            "Fodder is a Crop like any other — it grows on plains, it is "
+            "harvested, and it competes with food crops for the same land. "
+            "It is also the bulkiest thing a village stores, and it lives in "
+            "its own pool: the Barn."
+        ),
+        "\n".join(feed_rows),
+        (
+            "A village that cannot feed its herd through Winter culls it "
+            "down to what the hay covers — you still get Meat and Leather "
+            "from most of those animals — and loses the remainder outright. "
+            "This is the decision the whole system turns on: lay in enough "
+            "hay, or take the herd's value now while it still has any."
+        ),
+        "CULL POLICY",
+        (
+            "Every village has a policy setting how hard it harvests each "
+            "Autumn, multiplying each animal's own slaughter rate:"
+        ),
+        "\n".join(f"  {name}: x{mult:g}" + (
+            "  (bank animals for future years, bigger winter feed bill)"
+            if name == "Grow" else
+            "  (maximum meat now, a smaller and cheaper herd through Winter)"
+            if name == "Cull" else "  (the default)")
+            for name, mult in R_.HERD_POLICY_MULTIPLIER.items()),
+        "BUILDINGS",
+        (
+            "Four village buildings shape what a herd can do — Pasture "
+            "(more head), Barn (less winter fodder needed, fewer deaths, and "
+            "the hay store itself), Stable (more Horses) and Slaughterhouse "
+            "(more Meat and Leather per animal taken). See Construction for "
+            "costs."
+        ),
+        "HORSES",
+        (
+            "Horses are the one animal with a use beyond food. They add a "
+            "cavalry bonus to military strength — worth up to "
+            f"+{_pct(R_.CAVALRY_BONUS)} if you can mount every armed "
+            "soldier — and a realm holding at least "
+            f"{commander.MOUNTED_COMMANDER_HORSES} horses puts its "
+            "Commanders in the saddle, raising overland speed from "
+            f"{commander.COMMANDER_CELLS_PER_TURN} to "
+            f"{round(commander.COMMANDER_CELLS_PER_TURN * commander.MOUNTED_SPEED_MULT)} "
+            "cells a turn. Unlike Weapons and Shields, you cannot smith a "
+            "horse: it has to be bred, fed through Winter, and not culled."
+        ),
+        "TRADING ANIMALS",
+        (
+            "Livestock can be bought and sold like any other good, in head "
+            "rather than bulk. A realm only ever sells what is above its "
+            f"breeding core ({_pct(1 - trade.LIVESTOCK_BREEDING_RESERVE)} of "
+            "the herd at most), and demand is judged against what a buyer's "
+            "LAND can carry — so the realm that wants animals is the one "
+            "with empty pasture, usually because a hard Winter just took its "
+            "herd. Imported animals go straight to whichever of the buyer's "
+            "villages has room for them."
+        ),
+    ]
+    return "\n\n".join(parts)
+
+
 def _military_article():
     sp = ", ".join(f"{name} {spec.get('mil', 0):+d}%" for name, spec in
                    sorted(SPECIES.items(), key=lambda kv: -kv[1].get("mil", 0)))
@@ -1261,8 +1531,18 @@ def _military_article():
             f"{_pct(R.MILITIA_WEIGHT)} of an armed soldier.",
             f"  Shields add up to +{_pct(R.SHIELD_BONUS)}, scaled by how much "
             "of your ARMED strength they cover.",
+            f"  Horses add up to +{_pct(R.CAVALRY_BONUS)} the same way — "
+            "cavalry, scaled by how many of your armed soldiers you can "
+            "actually mount (see Livestock & Herds).",
             f"  Then a per-species modifier: {sp}.",
         ]),
+        (
+            "Horses are the one military input you cannot smith. Weapons and "
+            "Shields come out of a forge with ore you already hold; a horse "
+            "has to be bred, fed through Winter and not culled — which makes "
+            "a Stable, the Grow herd policy and a full hay Barn all read "
+            "straight through into your army's strength."
+        ),
         (
             "Two consequences worth planning around. Weapons and Shields "
             "beyond what your levy can carry are wasted — arming 400 soldiers "
@@ -1443,6 +1723,7 @@ ARTICLES = {
     "overview": ("Overview", _overview_article()),
     "settlements": ("Settlements & Villages", _settlements_article()),
     "storage": ("Storage & Spoilage", _storage_article()),
+    "livestock_herds": ("Livestock & Herds", _livestock_article()),
     "currency": ("Currency", _currency_article()),
     "prosperity": ("Prosperity", _prosperity_article()),
     "local_logistics": ("Local Logistics", _local_logistics_article()),
@@ -1470,6 +1751,7 @@ NAV = [
     ("luxury_goods", "Luxury Goods", "resources"),
     ("settlements", "Settlements & Villages", "article"),
     ("storage", "Storage & Spoilage", "article"),
+    ("livestock_herds", "Livestock & Herds", "article"),
     ("currency", "Currency", "article"),
     ("prosperity", "Prosperity", "article"),
     ("local_logistics", "Local Logistics", "article"),

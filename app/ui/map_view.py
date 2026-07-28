@@ -30,6 +30,7 @@ from app.world import trade
 from app.world import expansion
 from app.world import commander
 from app.world import wrap
+from app.world.nation import is_eliminated
 from app.ui.compendium import CompendiumWindow
 
 _FLASH_COLOR = (255, 236, 120)   # bright gold — region gained
@@ -236,7 +237,52 @@ _COMMANDER_STYLE = {"fill": "#e685ff", "outline": "#4a1a5c", "r": 7}
 _SHIP_STYLE = {"fill": "#c9a86a", "outline": "#5c3f1a", "r": 6}
 # Above this many villages in a region, skip name labels (village view) so it
 # doesn't turn into unreadable text soup.
+# --- UI layout ---------------------------------------------------------------
+# The map canvas fills the window and these are overlaid on it, each foldable
+# down to a slim edge tab (see _apply_panel_layout).
+_RESOURCE_GROUP = {
+    "Crops": "Food", "Food Products": "Food", "Fishing": "Food",
+    "Forestry": "Industry", "Mining": "Industry", "Manufactured Goods": "Industry",
+    "Luxury Goods": "Luxury", "Livestock": "Livestock",
+}
+_RESOURCE_GROUP_ORDER = ("Food", "Industry", "Luxury", "Livestock", "Other")
+# Goods a realm dies without. Low stock of these is promoted above the groups,
+# so a firewood crisis is visible without expanding anything.
+_SURVIVAL_RESOURCES = {"Firewood", "Fodder", "Bread", "Salted Meat", "Smoked Fish",
+                       "Cheese", "Clothes"}
+_LOW_STOCK_THRESHOLD = 200
+
+_ALERTS_PANEL_W = 260
+_LEFT_PANEL_W = 200
+_RIGHT_PANEL_W = 320
+_EDGE_TAB_W = 14
+
 _VILLAGE_LABEL_LIMIT = 24
+
+# Viewport culling (see MapView._visible_point / _visible_bbox / _visible_pts).
+# Generous enough that nothing whose *body* is on screen is ever dropped
+# because its anchor point sits just outside: a marker can be _MARKER_MAX_R
+# across, a caravan draws a glow ring at 2.4x its radius, and settlement /
+# village names hang ~15px below the anchor.
+_CULL_PAD_POINT = 48   # point features (markers + their labels/badges)
+_CULL_PAD_LINE = 32    # segments and polylines (roads, routes)
+
+# Village names are two text items each (shadow + fill), and text is the most
+# expensive canvas item there is. Only label villages once the camera is close
+# enough that the names are actually readable rather than overlapping soup.
+_VILLAGE_LABEL_MIN_SCALE = 2.2   # screen px per world cell
+
+# Below this badge radius (px) the alert "!" glyph is dropped and only the
+# coloured warning triangle is drawn -- see _draw_alert_badge.
+_ALERT_BADGE_GLYPH_MIN_R = 7.0
+
+# Dirt roads only draw once the camera is at least this close (screen px per
+# world cell) -- roughly a 55-cell-wide viewport, i.e. about the point where a
+# single region fills the screen and its tracks become worth reading. Tuned by
+# measurement rather than feel: on a 105-village realm it is the difference
+# between ~1000 and ~750 canvas items at the wide end of village view. Lower it
+# to bring dirt roads in earlier, at a proportional cost per frame.
+_DIRT_ROAD_MIN_SCALE = 20.0
 
 
 def _fmt_amount(n):
@@ -298,6 +344,15 @@ class MapView(tk.Frame):
         self.mode = "political"
         self._img = None
         self._place = (0, 0, 1)         # vx0, vy0, scale
+        # Per-frame camera constants, refreshed once at the top of render()
+        # and read by world_to_screen()/the _visible_* culling helpers.
+        # Hoisted out of world_to_screen specifically because that runs
+        # hundreds-to-thousands of times a frame and used to call
+        # canvas.winfo_width() on every single one -- a full Tk round-trip
+        # per coordinate conversion, for a value that cannot change within
+        # a frame.
+        self._canvas_wh = (1, 1)
+        self._view_center_x = 0.0
         self._base_img = None           # cached full-grid PIL image
         self._fog_overlay_img = None    # cached fog mask ("L" image) — see _ensure_fog_overlay
         self._fog_key = None
@@ -339,6 +394,7 @@ class MapView(tk.Frame):
         # name (including "Gold"); shown alongside current totals in the
         # resource bar until the next End Turn overwrites them.
         self._resource_deltas = {}
+        self._panel_cards_open = {}
 
         # Year-rollover banner (see _show_year_banner): the player faction's
         # resource snapshot as of the start of the current in-game year,
@@ -362,8 +418,13 @@ class MapView(tk.Frame):
 
         self._build_resource_bar()
 
+        # The map is the base layer and fills the whole window; every panel is
+        # an overlay placed on top of it. That's what lets a panel be folded
+        # away and actually give the map back its area, instead of the old
+        # fixed three-column split where the map only ever got the leftover
+        # ~55% no matter what.
         self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
-        self.canvas.pack(side="left", fill="both", expand=True)
+        self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda e: self.render())
         # Free camera: press/drag/release (drag pans, a plain click still
         # drills down/selects exactly as before) plus wheel-zoom.
@@ -398,6 +459,10 @@ class MapView(tk.Frame):
         self._build_trade_log()
         self._build_alerts_panel()
         self._build_panel()
+        self._build_edge_tabs()
+        self._left_collapsed = False
+        self._right_collapsed = False
+        self._apply_panel_layout()
         self.set_world(world)
 
     # --- world binding -----------------------------------------------------
@@ -717,8 +782,17 @@ class MapView(tk.Frame):
         body.pack(side="left", fill="both", expand=True)
         header = tk.Frame(body, bg=theme.PANEL)
         header.pack(fill="x")
+        close = tk.Label(header, text="✕", bg=theme.PANEL, fg=theme.MUTED,
+                         font=("Segoe UI", 8), cursor="hand2")
+        close.pack(side="left", padx=(8, 4), pady=4)
+        close.bind("<Button-1>", lambda e: self._toggle_trade_log())
         tk.Label(header, text="TRADE LOG", bg=theme.PANEL, fg=theme.MUTED,
-                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=8, pady=4)
+                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=(0, 8), pady=4)
+        # The tab that reopens it once closed.
+        self._trade_log_btn = tk.Label(self, text="TRADE LOG", bg="#232a36",
+                                       fg=theme.MUTED, font=("Segoe UI", 8, "bold"),
+                                       padx=8, pady=4, cursor="hand2")
+        self._trade_log_btn.bind("<Button-1>", lambda e: self._toggle_trade_log())
         tabs = tk.Frame(header, bg=theme.PANEL)
         tabs.pack(side="right", padx=6)
         self._trade_log_tab_btns = {}
@@ -756,7 +830,31 @@ class MapView(tk.Frame):
         self._trade_log_frame_widget = self.trade_log_frame
 
         self._resize_trade_log(self._trade_log_width)
-        self.trade_log_frame.place(relx=0.0, rely=1.0, anchor="sw", x=0, y=0)
+        self._trade_log_open = False
+        self._place_trade_log()
+
+    def _place_trade_log(self):
+        """Dock the log at the bottom-left, clear of whatever the left panel
+        is currently doing. Closed by default and hidden entirely when empty:
+        it used to sit there as a large black rectangle over the map with
+        nothing in it, permanently costing map area to show nothing."""
+        x = (_LEFT_PANEL_W if not getattr(self, "_left_collapsed", False)
+             else _EDGE_TAB_W)
+        if getattr(self, "_trade_log_open", False):
+            self.trade_log_frame.place(relx=0.0, rely=1.0, anchor="sw", x=x, y=0)
+            self.trade_log_frame.lift()
+            self._trade_log_btn.place_forget()
+        else:
+            self.trade_log_frame.place_forget()
+            entries = len(getattr(self, "_trade_log_entries", []) or [])
+            self._trade_log_btn.config(
+                text=f"TRADE LOG ({entries})" if entries else "TRADE LOG")
+            self._trade_log_btn.place(relx=0.0, rely=1.0, anchor="sw", x=x + 8, y=-8)
+            self._trade_log_btn.lift()
+
+    def _toggle_trade_log(self):
+        self._trade_log_open = not getattr(self, "_trade_log_open", False)
+        self._place_trade_log()
         self._refresh_trade_log_tab_styles()
 
     def _resize_trade_log(self, width):
@@ -824,6 +922,22 @@ class MapView(tk.Frame):
                           else f"{prefix}{qty:,} {resource}"
                           for resource, qty in payment)
 
+    @staticmethod
+    def _payment_has_coin(ev):
+        """Did any actual Gold change hands in this event?
+
+        Domestic transfers deliberately settle in barter (see trade.
+        _collect_payment's barter_first path) -- a realm has no reason to burn
+        its treasury moving its own grain between its own barns. That's sound,
+        but it means most rows in this log move no coin at all, which is a
+        large part of why the trade log and the Gold figure never appeared to
+        agree. Rows that moved no coin are marked, rather than silently
+        reading as income you never received."""
+        payment = ev.get("payment")
+        if not payment:
+            return bool(ev.get("price"))   # legacy events: assume coin
+        return any(resource == "Gold" and qty for resource, qty in payment)
+
     def _actual_payment_value(self, ev):
         """Gold-equivalent value of an event's REAL payment list -- the
         actual (resource, qty) tuple list trade._collect_payment returned
@@ -889,7 +1003,8 @@ class MapView(tk.Frame):
                 # sign=-1: both Gold AND any barter items in the payment
                 # leave the buyer (see _payment_desc docstring on why this
                 # matters for multi-item rows).
-                new_entries.append({"turn": turn, "tab": "foreign", "kind": "cost",
+                new_entries.append({"turn": turn, "tab": "foreign", "coin": self._payment_has_coin(ev),
+                                    "kind": "cost",
                                     "group": "You",
                                     "value": self._actual_payment_value(ev),
                                     "text": f"Bought {ev['quantity']} {ev['resource']} "
@@ -908,7 +1023,8 @@ class MapView(tk.Frame):
                 # (the seller really did get all of them).
                 bonus = ev.get("bonus_gold", 0)
                 suffix = f" (incl. +{bonus:,}g trade bonus)" if bonus else ""
-                new_entries.append({"turn": turn, "tab": "foreign", "kind": "income",
+                new_entries.append({"turn": turn, "tab": "foreign", "coin": self._payment_has_coin(ev),
+                                    "kind": "income",
                                     "group": None,
                                     "value": self._actual_payment_value(ev),
                                     "text": f"Sold {ev['quantity']} {ev['resource']} "
@@ -941,7 +1057,8 @@ class MapView(tk.Frame):
             if etype == "regional_dispatched" and ev["price"] > 0:
                 # sign=-1: same mix-payment sign rule as the foreign
                 # delivered buyer row above (see _payment_desc).
-                new_entries.append({"turn": turn, "tab": "domestic", "kind": "cost",
+                new_entries.append({"turn": turn, "tab": "domestic", "coin": self._payment_has_coin(ev),
+                                    "kind": "cost",
                                     "group": ev["dest_name"],
                                     "value": self._actual_payment_value(ev),
                                     "text": f"buys {ev['quantity']} {ev['resource']} "
@@ -954,7 +1071,8 @@ class MapView(tk.Frame):
                 # as "{origin} paid +Ng", which flipped the direction of
                 # the money flow and read opposite of what actually happened.
                 # sign=1: every item in the payment is incoming to seller_st.
-                new_entries.append({"turn": turn, "tab": "domestic", "kind": "income",
+                new_entries.append({"turn": turn, "tab": "domestic", "coin": self._payment_has_coin(ev),
+                                    "kind": "income",
                                     "group": None,
                                     "value": self._actual_payment_value(ev),
                                     "text": f"{ev['origin_name']} sold "
@@ -1020,9 +1138,17 @@ class MapView(tk.Frame):
                          ).pack(fill="x", padx=4, pady=(6, 1))
             color = {"income": theme.GOOD, "cost": theme.BAD,
                     "muted": theme.MUTED}[g["kind"]]
+            # A row that moved no coin is drawn muted and tagged, so a barter
+            # transfer stops looking like gold you gained or spent -- the
+            # single biggest reason this log and the Gold figure read as
+            # contradicting each other. See _payment_has_coin.
+            no_coin = all(not it.get("coin", True) for it in g["items"])
+            if no_coin and g["kind"] != "muted":
+                color = theme.MUTED
             if len(g["items"]) == 1:
-                tk.Label(frame, text="  " + g["items"][0]["text"], bg="#0d1017", fg=color,
-                         font=("Segoe UI", 8), anchor="w", justify="left"
+                tag = "  (barter — no coin)" if no_coin and g["kind"] != "muted" else ""
+                tk.Label(frame, text="  " + g["items"][0]["text"] + tag, bg="#0d1017",
+                         fg=color, font=("Segoe UI", 8), anchor="w", justify="left"
                          ).pack(fill="x", padx=4)
                 continue
 
@@ -1097,17 +1223,31 @@ class MapView(tk.Frame):
         rebuilt from scratch each refresh, not appended to, so a problem
         still shows here for as long as it's actually ongoing.  Hidden
         entirely (via place_forget) when there's nothing wrong."""
-        self.alerts_frame = tk.Frame(self.canvas, bg="#1a0d0d",
+        self._alerts_open = True
+        self._alerts_expanded = set()
+        self.alerts_frame = tk.Frame(self, bg="#1a0d0d",
                                      highlightbackground=theme.BAD,
-                                     highlightthickness=1, width=300)
+                                     highlightthickness=1, width=_ALERTS_PANEL_W)
         header = tk.Frame(self.alerts_frame, bg=theme.PANEL)
         header.pack(fill="x")
         self._alerts_header_lbl = tk.Label(
             header, text="ALERTS", bg=theme.PANEL, fg=theme.BAD,
             font=("Segoe UI", 8, "bold"))
         self._alerts_header_lbl.pack(side="left", padx=8, pady=4)
+        close = tk.Label(header, text="✕", bg=theme.PANEL, fg=theme.MUTED,
+                         font=("Segoe UI", 8), cursor="hand2")
+        close.pack(side="right", padx=8)
+        close.bind("<Button-1>", lambda e: self._toggle_alerts())
         self._alerts_rows_frame = tk.Frame(self.alerts_frame, bg="#1a0d0d")
         self._alerts_rows_frame.pack(fill="both", expand=True, padx=4, pady=(2, 6))
+
+        # Badge that takes the panel's place once it's dismissed, so alerts can
+        # always be brought back and their count stays visible meanwhile.
+        self._alerts_btn = tk.Label(self, text="⚠", bg="#1a0d0d", fg=theme.BAD,
+                                    font=("Segoe UI", 9, "bold"), cursor="hand2",
+                                    padx=8, pady=4,
+                                    highlightbackground=theme.BAD, highlightthickness=1)
+        self._alerts_btn.bind("<Button-1>", lambda e: self._toggle_alerts())
 
     def _refresh_alerts(self):
         """Recompute the current alert set (see the __init__ note on why
@@ -1130,27 +1270,110 @@ class MapView(tk.Frame):
                 node_ids[nid] = a["severity"]
         self._alert_node_ids = node_ids
 
+        self._render_alerts()
+
+    _ALERT_GROUP_LABEL = {
+        "herd_culled": "herds culled — no winter fodder",
+        "herd_underfed": "herds short of winter fodder",
+        "storage_overflow": "storage full — production stopped",
+        "storage_nearly_full": "storage nearly full",
+        "starving": "starving",
+        "freezing": "freezing",
+        "food_shortage": "food shortage",
+        "firewood_shortage": "firewood shortage",
+        "no_firewood_source": "no local firewood source",
+    }
+
+    def _render_alerts(self):
+        """One row per alert KIND with a count, expandable to the affected
+        settlements.
+
+        The old panel printed the first eight alerts as full sentences and
+        added "+142 more". Because alerts of a kind differ only by settlement
+        name, that was the same three-line paragraph repeated eight times,
+        permanently covering the top-left quarter of the map, while 142
+        problems stayed invisible. Measured on a real save: 150 alerts for the
+        player across 4 distinct kinds, and 1,088 map-wide. Grouping turns
+        that into four lines that name every problem, and the detail is one
+        click away."""
         for w in self._alerts_rows_frame.winfo_children():
             w.destroy()
-        if not alerts:
+        alerts = self._current_alerts
+        if not alerts or not getattr(self, "_alerts_open", True):
             self.alerts_frame.place_forget()
+            self._update_alerts_button()
             return
+
+        groups = {}
+        for a in alerts:
+            groups.setdefault(a["kind"], []).append(a)
+        ordered = sorted(groups.items(),
+                         key=lambda kv: (0 if any(x["severity"] == "critical"
+                                                  for x in kv[1]) else 1,
+                                         -len(kv[1])))
         self._alerts_header_lbl.config(text=f"ALERTS ({len(alerts)})")
-        for a in alerts[:self._ALERTS_MAX_VISIBLE]:
-            color = theme.BAD if a["severity"] == "critical" else self._ALERT_WARN_COLOR
-            row = tk.Button(self._alerts_rows_frame, text="⚠ " + a["message"],
-                            command=lambda n=a["node"]: self._jump_to_alert_node(n),
-                            bg="#1a0d0d", fg=color, activebackground="#2a1515",
-                            activeforeground=color, relief="flat", anchor="w",
-                            justify="left", wraplength=280, font=("Segoe UI", 8),
-                            cursor="hand2", bd=0, highlightthickness=0)
-            row.pack(fill="x", pady=1)
-        remaining = len(alerts) - self._ALERTS_MAX_VISIBLE
-        if remaining > 0:
-            tk.Label(self._alerts_rows_frame, text=f"+ {remaining} more...",
-                     bg="#1a0d0d", fg=theme.MUTED, font=("Segoe UI", 8),
-                     anchor="w").pack(fill="x")
-        self.alerts_frame.place(relx=0.0, rely=0.0, anchor="nw", x=0, y=0)
+        for kind, items in ordered:
+            critical = any(x["severity"] == "critical" for x in items)
+            colour = theme.BAD if critical else self._ALERT_WARN_COLOR
+            expanded = kind in self._alerts_expanded
+            label = self._ALERT_GROUP_LABEL.get(kind, kind.replace("_", " "))
+            arrow = "▾" if expanded else "▸"
+            head = tk.Label(self._alerts_rows_frame,
+                            text=f"{arrow} {len(items)}   {label}",
+                            bg="#1a0d0d", fg=colour, anchor="w", justify="left",
+                            font=("Segoe UI", 8, "bold"), cursor="hand2",
+                            wraplength=_ALERTS_PANEL_W - 24)
+            head.pack(fill="x", pady=1)
+            head.bind("<Button-1>", lambda e, k=kind: self._toggle_alert_group(k))
+            if not expanded:
+                continue
+            for a in items[:self._ALERTS_MAX_VISIBLE]:
+                row = tk.Button(self._alerts_rows_frame,
+                                text="    " + a["node"].name,
+                                command=lambda n=a["node"]: self._jump_to_alert_node(n),
+                                bg="#1a0d0d", fg=theme.MUTED, activebackground="#2a1515",
+                                activeforeground=colour, relief="flat", anchor="w",
+                                justify="left", font=("Segoe UI", 8),
+                                cursor="hand2", bd=0, highlightthickness=0)
+                row.pack(fill="x")
+            extra = len(items) - self._ALERTS_MAX_VISIBLE
+            if extra > 0:
+                tk.Label(self._alerts_rows_frame, text=f"    + {extra} more",
+                         bg="#1a0d0d", fg=theme.MUTED, font=("Segoe UI", 8),
+                         anchor="w").pack(fill="x")
+        self.alerts_frame.place(relx=0.0, rely=0.0, anchor="nw",
+                                x=_LEFT_PANEL_W if not getattr(self, "_left_collapsed", False)
+                                else _EDGE_TAB_W, y=0)
+        self.alerts_frame.lift()
+        self._update_alerts_button()
+
+    def _toggle_alert_group(self, kind):
+        self._alerts_expanded ^= {kind}
+        self._render_alerts()
+
+    def _toggle_alerts(self):
+        self._alerts_open = not getattr(self, "_alerts_open", True)
+        self._render_alerts()
+
+    def _update_alerts_button(self):
+        """The always-visible badge that reopens a dismissed alerts panel."""
+        btn = getattr(self, "_alerts_btn", None)
+        if btn is None:
+            return
+        count = len(self._current_alerts)
+        if not count:
+            btn.place_forget()
+            return
+        critical = any(a["severity"] == "critical" for a in self._current_alerts)
+        btn.config(text=f"⚠ {count}",
+                   fg=theme.BAD if critical else self._ALERT_WARN_COLOR)
+        if getattr(self, "_alerts_open", True):
+            btn.place_forget()
+        else:
+            btn.place(relx=0.0, rely=0.0, anchor="nw",
+                      x=(_LEFT_PANEL_W if not getattr(self, "_left_collapsed", False)
+                         else _EDGE_TAB_W) + 8, y=8)
+            btn.lift()
 
     def _jump_to_alert_node(self, node):
         """Navigate straight to an alerted settlement/village and select it
@@ -1179,13 +1402,23 @@ class MapView(tk.Frame):
         it's commonly a couple dozen rows long instead of one or two, so
         this needs to actually scroll (a plain Frame doesn't) rather than
         just clip silently past the bottom of the panel."""
-        rb = tk.Frame(self, bg=theme.PANEL, width=190)
-        rb.pack(side="left", fill="y")
+        rb = tk.Frame(self, bg=theme.PANEL, width=_LEFT_PANEL_W)
+        # Placed, not packed: the map canvas fills the whole window and every
+        # panel is an overlay on top of it, so the map can be given back its
+        # full area whenever a panel is folded away (see _toggle_left_panel).
+        rb.place(x=0, y=0, relheight=1.0, width=_LEFT_PANEL_W)
         rb.pack_propagate(False)
         self._resource_bar = rb
+        self._resource_groups_open = set()
 
-        tk.Label(rb, text="RESOURCES", bg=theme.PANEL, fg=theme.MUTED,
-                 font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=12, pady=(14, 6))
+        head = tk.Frame(rb, bg=theme.PANEL)
+        head.pack(fill="x", padx=12, pady=(14, 6))
+        tk.Label(head, text="RESOURCES", bg=theme.PANEL, fg=theme.MUTED,
+                 font=("Segoe UI", 8, "bold")).pack(side="left")
+        tk.Label(head, text="◀", bg=theme.PANEL, fg=theme.MUTED, cursor="hand2",
+                 font=("Segoe UI", 8)).pack(side="right")
+        for wdg in (head,) + tuple(head.winfo_children()):
+            wdg.bind("<Button-1>", lambda e: self._toggle_left_panel())
 
         scroll_area = tk.Frame(rb, bg=theme.PANEL)
         scroll_area.pack(fill="both", expand=True, padx=(12, 0))
@@ -1249,43 +1482,247 @@ class MapView(tk.Frame):
                      wraplength=160, justify="left").pack(anchor="w", pady=4)
             return
 
-        # Gold always shows, even at 0 -- everything else only if there's
-        # actually something to report (a real stock, or a delta that
-        # explains why it's now 0), so a couple dozen genuinely-empty
-        # resource types (e.g. crops that don't grow in this climate)
-        # don't bury the ones that actually matter.
-        order = ["Gold"] + sorted(
-            (r for r in current if r != "Gold"
-             and (current.get(r, 0) > 0 or self._resource_deltas.get(r, 0) != 0)),
-            key=lambda r: (RESOURCES.get(r, {}).get("tier", 9), r))
-        for resource in order:
+        # Thirty-odd rows at equal weight is not a list, it's a wall: Gold sat
+        # next to Shields with identical emphasis and the tail scrolled off
+        # the bottom of the screen. Grouped and collapsed instead, with Gold
+        # pinned and anything actually in trouble promoted out of its group so
+        # problems find you rather than the other way round.
+        present = [r for r in current if r != "Gold"
+                   and (current.get(r, 0) > 0 or self._resource_deltas.get(r, 0) != 0)]
+        self._draw_resource_row("Gold", current.get("Gold", 0),
+                                self._resource_deltas.get("Gold", 0), gold=True)
+
+        attention = self._resources_needing_attention(current, present)
+        if attention:
+            self._draw_resource_header("NEEDS ATTENTION")
+            for resource in attention:
+                self._draw_resource_row(resource, current.get(resource, 0),
+                                        self._resource_deltas.get(resource, 0),
+                                        warn=True)
+
+        groups = {}
+        for resource in present:
+            groups.setdefault(_RESOURCE_GROUP.get(
+                RESOURCES.get(resource, {}).get("category"), "Other"), []).append(resource)
+        for group in _RESOURCE_GROUP_ORDER:
+            members = groups.get(group)
+            if not members:
+                continue
+            members.sort(key=lambda r: (RESOURCES.get(r, {}).get("tier", 9), r))
+            total = sum(current.get(r, 0) for r in members)
+            expanded = group in self._resource_groups_open
+            self._draw_resource_group_header(group, total, expanded, len(members))
+            if expanded:
+                for resource in members:
+                    self._draw_resource_row(resource, current.get(resource, 0),
+                                            self._resource_deltas.get(resource, 0),
+                                            indent=True)
+
+    def _resources_needing_attention(self, current, present):
+        """Resources worth promoting above the fold: survival goods that have
+        run low, and anything falling fast. Deliberately short -- a list that
+        flags everything flags nothing."""
+        out = []
+        for resource in present:
             amount = current.get(resource, 0)
             delta = self._resource_deltas.get(resource, 0)
-            row = tk.Frame(self._resource_rows, bg=theme.PANEL)
-            row.pack(fill="x", pady=1)
-            tk.Label(row, text=resource, bg=theme.PANEL, fg=theme.INK,
-                     font=("Segoe UI", 9), anchor="w").pack(side="left")
-            if delta:
-                color = theme.GOOD if delta > 0 else theme.BAD
-                sign = "+" if delta > 0 else "-"
-                tk.Label(row, text=f"{sign}{_fmt_amount(abs(delta))}", bg=theme.PANEL,
-                         fg=color, font=("Segoe UI", 9, "bold")).pack(side="right")
-            tk.Label(row, text=_fmt_amount(amount), bg=theme.PANEL, fg=theme.MUTED,
-                     font=("Segoe UI", 9)).pack(side="right", padx=(0, 6))
+            critical = resource in _SURVIVAL_RESOURCES
+            if critical and amount < _LOW_STOCK_THRESHOLD:
+                out.append(resource)
+            elif delta < 0 and amount and abs(delta) > amount * 0.25:
+                out.append(resource)
+        return out[:5]
+
+    def _draw_resource_header(self, text):
+        tk.Label(self._resource_rows, text=text, bg=theme.PANEL, fg=theme.MUTED,
+                 font=("Segoe UI", 7, "bold"), anchor="w").pack(fill="x", pady=(8, 1))
+
+    def _draw_resource_group_header(self, group, total, expanded, count):
+        row = tk.Frame(self._resource_rows, bg=theme.PANEL, cursor="hand2")
+        row.pack(fill="x", pady=1)
+        arrow = "▾" if expanded else "▸"
+        tk.Label(row, text=f"{arrow} {group}", bg=theme.PANEL, fg=theme.INK,
+                 font=("Segoe UI", 9, "bold"), anchor="w").pack(side="left")
+        tk.Label(row, text=_fmt_amount(total), bg=theme.PANEL, fg=theme.MUTED,
+                 font=("Segoe UI", 9)).pack(side="right", padx=(0, 6))
+        for wdg in (row,) + tuple(row.winfo_children()):
+            wdg.bind("<Button-1>", lambda e, g=group: self._toggle_resource_group(g))
+
+    def _toggle_resource_group(self, group):
+        self._resource_groups_open ^= {group}
+        self._update_resource_bar()
+
+    def _draw_resource_row(self, resource, amount, delta, gold=False,
+                           warn=False, indent=False):
+        row = tk.Frame(self._resource_rows, bg=theme.PANEL)
+        row.pack(fill="x", pady=1)
+        fg = theme.INK if (gold or not indent) else theme.MUTED
+        if warn:
+            fg = theme.WARN
+        tk.Label(row, text=("   " if indent else "") + resource, bg=theme.PANEL,
+                 fg=fg, font=("Segoe UI", 9, "bold") if gold else ("Segoe UI", 9),
+                 anchor="w").pack(side="left")
+        if delta:
+            colour = theme.GOOD if delta > 0 else theme.BAD
+            sign = "+" if delta > 0 else "-"
+            tk.Label(row, text=f"{sign}{_fmt_amount(abs(delta))}", bg=theme.PANEL,
+                     fg=colour, font=("Segoe UI", 9, "bold")).pack(side="right")
+        tk.Label(row, text=_fmt_amount(amount), bg=theme.PANEL, fg=theme.MUTED,
+                 font=("Segoe UI", 9)).pack(side="right", padx=(0, 6))
+        if gold:
+            for wdg in (row,) + tuple(row.winfo_children()):
+                wdg.bind("<Button-1>", lambda e: self.open_treasury())
+                wdg.configure(cursor="hand2")
+            # Gold is the one row whose headline number regularly fails to
+            # explain itself: most of it is minted silently from Gold Ore, some
+            # is out on a caravan's return leg, and some is held back by the
+            # trade reserve. Click through for the real accounting.
+            tk.Label(row, text="ⓘ", bg=theme.PANEL, fg=theme.ACCENT,
+                     font=("Segoe UI", 8)).pack(side="right", padx=(0, 2))
+
+    # --- treasury ------------------------------------------------------------
+    _TREASURY_CAUSE_HELP = {
+        "minted": "struck from Gold Ore at your settlements",
+        "foreign trade": "sales to and purchases from other realms",
+        "domestic trade": "transfers between your own settlements (mostly barter, little coin)",
+        "construction": "buildings, shipyards and storage works",
+        "expansion": "wildland claims",
+        "other": "anything not covered above",
+    }
+
+    def open_treasury(self):
+        """Where the gold actually is, and where it actually came from.
+
+        This exists because the headline number and the trade log genuinely
+        describe different things: measured on a real save, 100% of a
+        faction's gold change over 60 turns came from minting Gold Ore --
+        a silent per-turn production chain that appears in no log -- while
+        the trade log recorded thousands of domestic transfers that pay in
+        barter and move no coin at all. Neither was wrong; there was just
+        nowhere that reconciled them."""
+        if getattr(self, "_treasury_window", None) is not None:
+            try:
+                self._treasury_window.destroy()
+            except tk.TclError:
+                pass
+        player = self._player_faction()
+        if player is None:
+            return
+        wd = self.world
+        fac_idx = wd.factions.index(player)
+
+        win = tk.Toplevel(self)
+        self._treasury_window = win
+        win.title("Treasury")
+        win.configure(bg=theme.BG)
+        win.geometry("460x560")
+
+        def header(text):
+            tk.Label(win, text=text, bg=theme.BG, fg=theme.MUTED,
+                     font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=16, pady=(14, 4))
+
+        def line(text, fg=None, bold=False):
+            tk.Label(win, text=text, bg=theme.BG, fg=fg or theme.INK,
+                     font=("Segoe UI", 9, "bold") if bold else ("Segoe UI", 9),
+                     justify="left", anchor="w", wraplength=420).pack(anchor="w", padx=16)
+
+        total = resources.faction_gold(wd, fac_idx)
+        transit = resources.gold_in_transit(wd, fac_idx)
+        reserve = trade.GOLD_TRADE_RESERVE
+        settlements = [s for s in wd.settlements if s.faction_idx == fac_idx]
+        spendable = sum(trade._spendable_gold(s) for s in settlements)
+
+        header("TOTAL")
+        line(f"{total:,} gold", bold=True)
+        line(f"{spendable:,} available for trade", theme.MUTED)
+        line(f"{total - spendable:,} held back "
+             f"({reserve:,}/settlement reserve, plus coin in villages)", theme.MUTED)
+        if transit:
+            line(f"{transit:,} in transit — already sold, still on the road home",
+                 theme.WARN)
+
+        header("WHERE IT IS")
+        holders = sorted(((getattr(s, "resources", None) or {}).get("Gold", 0), s.name)
+                         for s in settlements)
+        for amount, name in reversed(holders[-8:]):
+            line(f"  {name}: {amount:,}", theme.MUTED)
+        village_gold = total - sum(a for a, _ in holders)
+        if village_gold:
+            line(f"  villages: {village_gold:,} (cannot pay for trade)", theme.MUTED)
+
+        header("WHERE IT CAME FROM (recent turns)")
+        ledger = resources.gold_ledger(wd, fac_idx)
+        if not ledger:
+            line("  No recorded flows yet — end a turn to start the ledger.", theme.MUTED)
+        else:
+            agg = {}
+            for entry in ledger:
+                for cause, value in entry.items():
+                    if cause not in ("turn", "net"):
+                        agg[cause] = agg.get(cause, 0) + value
+            span = f"last {len(ledger)} turn{'s' if len(ledger) != 1 else ''}"
+            line(f"  over the {span}:", theme.MUTED)
+            for cause, value in sorted(agg.items(), key=lambda kv: -abs(kv[1])):
+                colour = theme.GOOD if value > 0 else theme.BAD
+                line(f"    {value:+,}  {cause}", colour)
+                line(f"          {self._TREASURY_CAUSE_HELP.get(cause, '')}", theme.MUTED)
+            line(f"    {sum(agg.values()):+,}  net", None, bold=True)
+
+        header("LAST 8 TURNS")
+        for entry in ledger[-8:]:
+            causes = "  ".join(f"{k} {v:+,}" for k, v in entry.items()
+                               if k not in ("turn", "net"))
+            line(f"  turn {entry['turn']}: {entry['net']:+,}   {causes}", theme.MUTED)
+
+        tk.Button(win, text="Close", command=win.destroy, bg="#232a36", fg=theme.INK,
+                  activebackground=theme.ACCENT, relief="flat",
+                  font=theme.FONT).pack(side="bottom", pady=12)
 
     # --- panel -------------------------------------------------------------
     def _build_panel(self):
-        p = tk.Frame(self, bg=theme.PANEL, width=300)
-        p.pack(side="right", fill="y")
+        p = tk.Frame(self, bg=theme.PANEL, width=_RIGHT_PANEL_W)
+        # Overlay, like the resource bar -- see _build_resource_bar.
+        p.place(relx=1.0, y=0, anchor="ne", relheight=1.0, width=_RIGHT_PANEL_W)
         p.pack_propagate(False)
         self._panel = p
 
-        self.title_lbl = tk.Label(p, text="Faction", bg=theme.PANEL, fg=theme.INK,
+        head = tk.Frame(p, bg=theme.PANEL)
+        head.pack(fill="x", padx=14, pady=(14, 0))
+        self.title_lbl = tk.Label(head, text="Faction", bg=theme.PANEL, fg=theme.INK,
                                   font=theme.FONT_TITLE)
-        self.title_lbl.pack(anchor="w", padx=14, pady=(14, 6))
+        self.title_lbl.pack(side="left")
+        collapse = tk.Label(head, text="▶", bg=theme.PANEL, fg=theme.MUTED,
+                            cursor="hand2", font=("Segoe UI", 8))
+        collapse.pack(side="right")
+        collapse.bind("<Button-1>", lambda e: self._toggle_right_panel())
+
+        # Everything between the title and the pinned bottom controls scrolls.
+        # The old panel packed straight into the frame, so on an information-
+        # dense selection (a village with storage, a herd and seven buildable
+        # things) the Build buttons fell off the bottom of the window with no
+        # way to reach them at all.
+        body = tk.Frame(p, bg=theme.PANEL)
+        body.pack(fill="both", expand=True, pady=(6, 0))
+        pcanvas = tk.Canvas(body, bg=theme.PANEL, highlightthickness=0)
+        pcanvas.pack(side="left", fill="both", expand=True)
+        pbar = tk.Scrollbar(body, orient="vertical", command=pcanvas.yview)
+        pbar.pack(side="right", fill="y")
+        pcanvas.configure(yscrollcommand=pbar.set)
+        self._panel_canvas = pcanvas
+        inner = tk.Frame(pcanvas, bg=theme.PANEL)
+        pwin = pcanvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda e: pcanvas.configure(scrollregion=pcanvas.bbox("all")))
+        pcanvas.bind("<Configure>", lambda e: pcanvas.itemconfig(pwin, width=e.width))
+        pcanvas.bind("<Enter>", lambda e: pcanvas.bind_all(
+            "<MouseWheel>", lambda ev: pcanvas.yview_scroll(int(-ev.delta / 120), "units")))
+        pcanvas.bind("<Leave>", lambda e: pcanvas.unbind_all("<MouseWheel>"))
+        self._panel_body = inner
+        p = inner   # everything below builds into the scrolling body
+
         self.info = tk.Label(p, text="Click a faction to inspect it.",
                              bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                             justify="left", wraplength=270, anchor="w")
+                             justify="left", wraplength=_RIGHT_PANEL_W - 40, anchor="w")
         self.info.pack(anchor="w", padx=14)
 
         # Prosperity meter — a settlement/village-only bar (see
@@ -1327,27 +1764,85 @@ class MapView(tk.Frame):
         self.actions = tk.Frame(p, bg=theme.PANEL)
         self.actions.pack(fill="x", padx=14, pady=16)
 
-        tk.Button(p, text="Compendium (F1)", command=self.open_compendium,
+        # --- pinned controls: these live on the OUTER panel, below the
+        # scrolling body, so End Turn and the view toggle are always on
+        # screen no matter how much detail the selection has.
+        foot = tk.Frame(self._panel, bg=theme.PANEL)
+        foot.pack(side="bottom", fill="x")
+        tk.Button(foot, text="Compendium (F1)", command=self.open_compendium,
                   bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                   relief="flat", font=theme.FONT).pack(side="bottom", fill="x",
                                                        padx=14, pady=(0, 6))
-        self.view_btn = tk.Button(p, text="View: Political", command=self._toggle_mode,
+        self.view_btn = tk.Button(foot, text="View: Political", command=self._toggle_mode,
                                   bg="#232a36", fg=theme.INK,
                                   activebackground=theme.ACCENT, relief="flat",
                                   font=theme.FONT)
-        self.view_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 14))
-        tk.Button(p, text="End Turn", command=self._on_end_turn,
-                  bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                  relief="flat", font=theme.FONT).pack(side="bottom", fill="x",
-                                                       padx=14, pady=(4, 0))
-        self.turn_lbl = tk.Label(p, text="", bg=theme.PANEL, fg=theme.MUTED,
+        self.view_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 8))
+        tk.Button(foot, text="End Turn", command=self._on_end_turn,
+                  bg=theme.ACCENT, fg="#06121f", activebackground=theme.ACCENT,
+                  relief="flat", font=theme.FONT_BOLD).pack(side="bottom", fill="x",
+                                                            padx=14, pady=(4, 6))
+        self.turn_lbl = tk.Label(foot, text="", bg=theme.PANEL, fg=theme.MUTED,
                                  font=theme.FONT_BOLD)
         self.turn_lbl.pack(side="bottom", padx=14, pady=(8, 0))
-        self.back_btn = tk.Button(p, text="← Back to World",
+        self.back_btn = tk.Button(foot, text="← Back to World",
                                   command=self._exit_region_view, bg="#232a36",
                                   fg=theme.INK, activebackground=theme.ACCENT,
                                   relief="flat", font=theme.FONT)
+        self._panel_foot = foot
         # back_btn is packed only while zoomed in.
+
+    # --- panel collapsing ----------------------------------------------------
+    def _toggle_left_panel(self):
+        self._left_collapsed = not getattr(self, "_left_collapsed", False)
+        self._apply_panel_layout()
+
+    def _toggle_right_panel(self):
+        self._right_collapsed = not getattr(self, "_right_collapsed", False)
+        self._apply_panel_layout()
+
+    def _apply_panel_layout(self):
+        """Place or hide each side panel, leaving a slim always-visible tab in
+        its place so a collapsed panel can be brought back."""
+        left_hidden = getattr(self, "_left_collapsed", False)
+        right_hidden = getattr(self, "_right_collapsed", False)
+        if left_hidden:
+            self._resource_bar.place_forget()
+            self._left_tab.place(x=0, rely=0.5, anchor="w", width=_EDGE_TAB_W, height=90)
+            self._left_tab.lift()
+        else:
+            self._left_tab.place_forget()
+            self._resource_bar.place(x=0, y=0, relheight=1.0, width=_LEFT_PANEL_W)
+            self._resource_bar.lift()
+        if right_hidden:
+            self._panel.place_forget()
+            self._right_tab.place(relx=1.0, rely=0.5, anchor="e",
+                                  width=_EDGE_TAB_W, height=90)
+            self._right_tab.lift()
+        else:
+            self._right_tab.place_forget()
+            self._panel.place(relx=1.0, y=0, anchor="ne", relheight=1.0,
+                              width=_RIGHT_PANEL_W)
+            self._panel.lift()
+        self._render_alerts()
+        self._place_trade_log()
+        # Called once during __init__ before set_world, so there may be no
+        # world to draw yet.
+        if getattr(self, "world", None) is not None:
+            self.render()
+
+    def _build_edge_tabs(self):
+        """The slim strips that remain when a side panel is folded away."""
+        self._left_tab = tk.Frame(self, bg="#232a36", cursor="hand2")
+        tk.Label(self._left_tab, text="▶", bg="#232a36", fg=theme.ACCENT,
+                 font=("Segoe UI", 9)).place(relx=0.5, rely=0.5, anchor="center")
+        self._right_tab = tk.Frame(self, bg="#232a36", cursor="hand2")
+        tk.Label(self._right_tab, text="◀", bg="#232a36", fg=theme.ACCENT,
+                 font=("Segoe UI", 9)).place(relx=0.5, rely=0.5, anchor="center")
+        for frame, cb in ((self._left_tab, self._toggle_left_panel),
+                          (self._right_tab, self._toggle_right_panel)):
+            for wdg in (frame,) + tuple(frame.winfo_children()):
+                wdg.bind("<Button-1>", lambda e, c=cb: c())
 
     _MODES = ["political", "fertility", "elevation", "biome", "climate"]
 
@@ -1527,11 +2022,20 @@ class MapView(tk.Frame):
         """True if fog isn't currently gating the view, or this specific
         cell has been revealed — used for point features (settlements)
         where precise per-cell gating is more accurate than a per-nation
-        check (see _is_known, used instead for identity info like labels)."""
-        if not self._fog_is_active():
-            return True
+        check (see _is_known, used instead for identity info like labels).
+
+        Deliberately inlines _fog_is_active()'s check rather than calling it:
+        this is one of the hottest functions in the renderer (every road
+        endpoint, every marker, every route cell) and the extra Python call
+        plus hasattr() per invocation showed up in profiles. Still computed
+        fresh per call, so the correctness note on _fog_is_active holds."""
         wd = self.world
-        return bool(wd.fog[y * wd.w + x])
+        if wd.player_faction_idx is None:
+            return True
+        fog = getattr(wd, "fog", None)
+        if fog is None:
+            return True
+        return bool(fog[y * wd.w + x])
 
     def _is_known(self, nation):
         """True if `nation` is the player or the player has made contact
@@ -1594,8 +2098,12 @@ class MapView(tk.Frame):
                  f"Avg fertility {nation.meta['fertility']}%\n"
                  f"Population {self._total_population(nation):,}\n"
                  f"{self._settle_counts(nation)}\n"
-                 f"{n_regions} regions.{zoom_hint}\n\n"
-                 f"RESOURCES\n{_format_resources(s.get('resources', {}))}")
+                 f"{n_regions} regions.{zoom_hint}")
+        # The realm panel used to print s['resources'] here -- the national
+        # pool, which holds nothing any more now goods live per-node. It read
+        # "RESOURCES: None yet." while the sidebar beside it listed thirty
+        # resources. The sidebar is the real, node-summed figure, so this
+        # doesn't duplicate it: it points at it instead.
 
         self.rel_header.config(text="RELATIONSHIPS")
         for w in self.rel_frame.winfo_children():
@@ -2061,6 +2569,289 @@ class MapView(tk.Frame):
             caption += " — overflowing, spoiling faster"
         self._storage_pct_lbl.config(text=caption)
 
+    _POOL_LABEL = {"household": "Granary (food, firewood)",
+                   "durable": "Warehouse (timber, ore, goods)",
+                   "other": "Vault (gold, luxuries)",
+                   "feed": "Barn (fodder)"}
+
+    # --- panel cards ---------------------------------------------------------
+    # The selection panel used to be one run-on Label: "Grows per year" alone
+    # wrapped to six lines of "·"-separated values, then "Currently stored" did
+    # the same, then Storage, then Herd -- about thirty lines of undifferentiated
+    # prose with inline "Storage:" text standing in for structure. These build
+    # real, foldable sections instead, so a village's detail is scannable and
+    # the parts you don't care about right now fold away.
+    def _card(self, title, subtitle=None, key=None, default_open=True):
+        """A titled, foldable section in the selection panel. Returns the frame
+        to build the body into, or None when the card is folded shut."""
+        if key is None:
+            key = title
+        open_cards = self._panel_cards_open
+        expanded = open_cards.get(key, default_open)
+        head = tk.Frame(self.actions, bg=theme.PANEL, cursor="hand2")
+        head.pack(fill="x", pady=(10, 2))
+        tk.Label(head, text=("▾ " if expanded else "▸ ") + title, bg=theme.PANEL,
+                 fg=theme.INK, font=("Segoe UI", 8, "bold"),
+                 anchor="w").pack(side="left")
+        if subtitle:
+            tk.Label(head, text=subtitle, bg=theme.PANEL, fg=theme.MUTED,
+                     font=("Segoe UI", 8), anchor="e").pack(side="right")
+        for wdg in (head,) + tuple(head.winfo_children()):
+            wdg.bind("<Button-1>", lambda e, k=key: self._toggle_panel_card(k))
+        if not expanded:
+            return None
+        body = tk.Frame(self.actions, bg=theme.PANEL)
+        body.pack(fill="x")
+        return body
+
+    def _toggle_panel_card(self, key):
+        self._panel_cards_open[key] = not self._panel_cards_open.get(key, True)
+        node = self.selected_village or self.selected_settlement
+        if node is not None:
+            (self._show_village if node is self.selected_village
+             else self._show_settlement)(node)
+
+    def _kv(self, parent, label, value, fg=None):
+        """One aligned label/value row -- the replacement for cramming figures
+        into a wrapped sentence."""
+        row = tk.Frame(parent, bg=theme.PANEL)
+        row.pack(fill="x")
+        tk.Label(row, text=label, bg=theme.PANEL, fg=theme.MUTED,
+                 font=("Segoe UI", 8), anchor="w").pack(side="left")
+        tk.Label(row, text=value, bg=theme.PANEL, fg=fg or theme.INK,
+                 font=("Segoe UI", 8), anchor="e").pack(side="right")
+
+    def _bar_row(self, parent, label, used, cap, warn_at=0.85):
+        """A compact labelled meter -- used/cap plus a fill bar, so four
+        storage pools read as four bars instead of four sentences."""
+        frac = (used / cap) if cap else 0
+        colour = (theme.BAD if frac > 1.0 else
+                  theme.WARN if frac > warn_at else theme.GOOD)
+        row = tk.Frame(parent, bg=theme.PANEL)
+        row.pack(fill="x", pady=(3, 0))
+        tk.Label(row, text=label, bg=theme.PANEL, fg=theme.MUTED,
+                 font=("Segoe UI", 8), anchor="w").pack(side="left")
+        tk.Label(row, text=f"{used:,} / {cap:,}", bg=theme.PANEL, fg=colour,
+                 font=("Segoe UI", 8), anchor="e").pack(side="right")
+        meter = tk.Canvas(parent, height=5, bg="#11151b", highlightthickness=0)
+        meter.pack(fill="x", pady=(1, 2))
+        meter.update_idletasks()
+        width = max(1, meter.winfo_width())
+        meter.create_rectangle(0, 0, width * min(1.0, frac), 5,
+                               fill=colour, outline="")
+
+    def _storage_pool_lines(self, node):
+        """One line per typed storage pool (see resources.STORAGE_POOLS) --
+        which building holds what, how much SPACE it's using, what's taking
+        up the most of it, and whether it's throttling production.
+
+        Two things this has to be explicit about. A single "1,847 / 1,850"
+        total was actively misleading once space became typed: it read as
+        "nearly full" while the granary was empty and only the warehouse was
+        jammed. And the numbers are space, not items (Phase 2) -- a unit of
+        Logs eats 3.0 and a unit of Gems 0.1 -- so it names the biggest
+        occupant, which is what turns "my warehouse is full" into "my
+        warehouse is full *of timber*"."""
+        lines = []
+        res = getattr(node, "resources", {}) or {}
+        for pool in resources.STORAGE_POOLS:
+            cap = resources.node_pool_capacity(node, pool)
+            if not cap:
+                continue
+            stock = resources.node_pool_stock(node, pool)
+            building = resources.STORAGE_BUILDING_BY_POOL[pool]
+            tier = resources.storage_tier(node, building)
+            tier_text = f" [T{tier}]" if tier else ""
+            state = ""
+            if stock > cap:
+                state = "  ⚠ FULL — production stopped"
+            elif stock > cap * resources.STORAGE_THROTTLE_START:
+                state = "  ⚠ slowing"
+            lines.append(f"  {self._POOL_LABEL[pool]}{tier_text}: "
+                         f"{stock:,} / {cap:,} space{state}")
+            occupants = [(round(q * resources.resource_bulk(r)), r)
+                         for r, q in res.items()
+                         if q > 0 and resources.storage_class(r) == pool]
+            if occupants:
+                space, name = max(occupants)
+                # Only when one good genuinely dominates -- calling a 19%
+                # share "mostly" is just noise on a well-mixed store.
+                if space and space >= stock * 0.35:
+                    lines.append(f"      mostly {name} "
+                                 f"({res[name]:,} × {resources.resource_bulk(name):g} "
+                                 f"= {space:,} space)")
+        return lines
+
+    _HERD_EFFECT_TEXT = {
+        ("pasture", "capacity"): "herd capacity ×{v:g}",
+        ("stable", "capacity"): "Horse capacity ×{v:g}",
+        ("barn", "feed"): "Winter fodder need ×{v:g}",
+        ("barn", "death"): "livestock deaths ×{v:g}",
+        ("slaughterhouse", "yield"): "Meat & Leather per head ×{v:g}",
+    }
+
+    def _herd_building_effect_lines(self, building, to_tier):
+        """Plain-language effect lines for a herd building at `to_tier` -- the
+        multipliers alone ("0.75") say nothing about what they act on."""
+        lines = []
+        for effect, table in resources.HERD_BUILDING_EFFECTS.get(building, {}).items():
+            if to_tier >= len(table):
+                continue
+            text = self._HERD_EFFECT_TEXT.get((building, effect))
+            if text:
+                lines.append(text.format(v=table[to_tier]))
+        return lines
+
+    def _herd_lines(self, village):
+        """Herd, capacity, Winter feed position and this village's policy.
+        Livestock had no representation in the UI at all before this -- the
+        player could not see a single animal they owned, let alone that a herd
+        was about to be culled for want of hay."""
+        herds = getattr(village, "herds", None)
+        if not herds:
+            return []
+        lines = ["Herd:"]
+        for animal in sorted(herds, key=lambda a: -herds[a]):
+            head = herds[animal]
+            if head <= 0:
+                continue
+            cap = resources.village_herd_capacity(self.world, village, animal)
+            at_cap = "  (at capacity)" if cap and head >= cap else ""
+            lines.append(f"  {animal}: {head:,} of {cap:,}{at_cap}")
+        need = resources.village_winter_fodder_need(village)
+        if need:
+            have = (getattr(village, "resources", {}) or {}).get("Fodder", 0)
+            state = "enough" if have >= need else "SHORT — herd will be culled"
+            lines.append(f"  Winter fodder: {have:,} of {need:,} needed — {state}")
+        lines.append(f"  Cull policy: {resources.herd_policy(village)}")
+        return lines
+
+    def _build_herd_policy_actions(self, village, parent=None):
+        """Grow / Balanced / Cull buttons -- the player's direct dial on the
+        Autumn cull (see resources.HERD_POLICY_MULTIPLIER)."""
+        parent = parent if parent is not None else self.actions
+        if not getattr(village, "herds", None):
+            return
+        current = resources.herd_policy(village)
+        tk.Label(parent, text="Herd policy — how hard to cull in Autumn:",
+                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                 justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+        row = tk.Frame(parent, bg=theme.PANEL)
+        row.pack(fill="x", pady=2)
+        for policy in resources.HERD_POLICIES:
+            active = policy == current
+            tk.Button(row, text=policy,
+                      command=lambda p=policy, v=village: self._do_set_herd_policy(v, p),
+                      bg=theme.ACCENT if active else "#232a36",
+                      fg="#06121f" if active else theme.INK,
+                      activebackground=theme.ACCENT, relief="flat",
+                      font=theme.FONT).pack(side="left", expand=True, fill="x", padx=1)
+
+    def _do_set_herd_policy(self, village, policy):
+        resources.set_herd_policy(village, policy)
+        self.show_bottom_message(f"{village.name}'s herd policy set to {policy}.")
+        self._show_village(village)
+
+    def _buildable_at(self, node):
+        """Every building this node could ever put up -- pool buildings, the
+        Preserving House, and the herd buildings, deduped (the Barn is both a
+        pool building and a herd building)."""
+        out = [resources.STORAGE_BUILDING_BY_POOL[p] for p in resources.STORAGE_POOLS]
+        out.append(resources.PRESERVING_HOUSE)
+        out += [b for b in resources.HERD_BUILDINGS if b not in out]
+        return out
+
+    def _build_storage_actions(self, node, player, parent=None):
+        """Build/upgrade buttons for all three storage buildings at `node`.
+        Shared by the Settlement and Village panels -- villages can build
+        these too now (smaller and cheaper, see construction.py), which is
+        the whole point of the phase: they were the most overflowing nodes
+        on the map with no lever of their own."""
+        parent = parent if parent is not None else self.actions
+        wd = self.world
+        node_kind = "settlement" if hasattr(node, "kind") else "village"
+        for project in getattr(wd, "storage_projects", []):
+            if project.node_kind == node_kind and project.node_id == node.id:
+                label = project.building.replace("_", " ").title()
+                elapsed = project.total_turns - project.turns_left
+                tk.Label(parent,
+                         text=f"{label} (tier {project.to_tier}) under "
+                              f"construction: {elapsed}/{project.total_turns} turns",
+                         bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
+                         justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+
+        # Pool buildings, then the Preserving House, then the herd buildings.
+        # The Barn appears in both the pool list (it holds the feed pool) and
+        # the herd list (it shelters the animals), so this dedupes rather than
+        # offering it twice.
+        buildings = [resources.STORAGE_BUILDING_BY_POOL[p]
+                     for p in resources.STORAGE_POOLS]
+        buildings.append(resources.PRESERVING_HOUSE)
+        for herd_building in resources.HERD_BUILDINGS:
+            if herd_building not in buildings:
+                buildings.append(herd_building)
+        for building in buildings:
+            to_tier = construction.storage_next_tier(wd, node, building)
+            if to_tier is None:
+                continue
+            cost = construction.storage_build_cost(node, building, to_tier)
+            if cost is None:
+                continue
+            afford = construction.can_afford(player, cost, wd)
+            label = building.replace("_", " ").title()
+            verb = "Upgrade" if to_tier > 1 else "Build"
+            if building == resources.PRESERVING_HOUSE:
+                table = (resources.VILLAGE_PRESERVING_CAP_MULT if node_kind == "village"
+                         else resources.PRESERVING_CAP_MULT)
+                rate = int(resources.CONVERSION_RATE_CAP * table[to_tier])
+                salt_costs = ", ".join(
+                    f"{out} {resources.SALT_PER_PRESERVED[out]:g}"
+                    for out in resources.PRESERVATION_RECIPES
+                    if out in resources.SALT_PER_PRESERVED)
+                effect = (f"Cures Fish→Smoked Fish, Milk→Cheese, "
+                          f"Meat→Salted Meat\n"
+                          f"up to {rate:,}/turn\n"
+                          f"Salt burned per unit: {salt_costs}")
+            else:
+                parts = []
+                pool = resources.STORAGE_POOL_BY_BUILDING.get(building)
+                if pool is not None:
+                    table = (resources.VILLAGE_STORAGE_TIER_BONUS if node_kind == "village"
+                             else resources.STORAGE_TIER_BONUS).get(building, [0])
+                    if to_tier < len(table):
+                        added = table[to_tier] - table[to_tier - 1]
+                        current_cap = resources.node_pool_capacity(node, pool)
+                        parts.append(f"+{added:,} {pool} space "
+                                     f"({current_cap:,} → {current_cap + added:,})")
+                parts.extend(self._herd_building_effect_lines(building, to_tier))
+                effect = "\n".join(parts)
+            tk.Label(parent,
+                     text=f"{verb} {label} → tier {to_tier}\n"
+                          f"Cost: {_format_resources(cost)}\n"
+                          f"Build time: "
+                          f"{construction.storage_build_turns(node, building, to_tier)} turns\n"
+                          f"{effect}",
+                     bg=theme.PANEL, fg=theme.INK if afford else theme.BAD,
+                     font=theme.FONT, justify="left",
+                     wraplength=260).pack(anchor="w", pady=(6, 2))
+            tk.Button(parent, text=f"{verb} {label}",
+                      command=lambda n=node, b=building: self._do_build_storage(n, b),
+                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                      relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+
+    def _do_build_storage(self, node, building):
+        player = self._player_faction()
+        if player is None:
+            return
+        msg = construction.start_storage_building(self.world, player, node, building)
+        self.show_bottom_message(msg)
+        if hasattr(node, "kind"):
+            self._show_settlement(node)
+        else:
+            self._show_village(node)
+        self._update_resource_bar()
+        self.render()
+
     def _show_settlement(self, st):
         wd = self.world
         self.selected_village = None   # a settlement and a village are never both selected
@@ -2089,10 +2880,8 @@ class MapView(tk.Frame):
         lines.append(f"Currently stored: {_format_resources(getattr(st, 'resources', {}))}")
         if getattr(st, "has_shipyard", False):
             lines.append("Has a Shipyard — commanders here launch free, fast ships.")
-        if getattr(st, "has_granary", False):
-            lines.append("Has a Granary — more storage space.")
-        if getattr(st, "has_warehouse", False):
-            lines.append("Has a Warehouse — more storage space.")
+        lines.append("Storage:")
+        lines.extend(self._storage_pool_lines(st))
         self.info.config(fg=theme.INK, text="\n".join(lines))
 
         prosperity = getattr(st, "prosperity", None)
@@ -2100,7 +2889,7 @@ class MapView(tk.Frame):
             self._show_prosperity_bar(prosperity)
         else:
             self._hide_prosperity_bar()
-        stored = sum(getattr(st, "resources", {}).values())
+        stored = resources.node_space_used(st)
         capacity = resources.settlement_storage_capacity(st)
         self._show_storage_bar(stored, capacity)
 
@@ -2128,45 +2917,7 @@ class MapView(tk.Frame):
                       bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                       relief="flat", font=theme.FONT).pack(fill="x", pady=2)
 
-        granary_project = next((p for p in wd.granary_projects if p.settlement_id == st.id), None)
-        if granary_project is not None:
-            elapsed = granary_project.total_turns - granary_project.turns_left
-            tk.Label(self.actions, text=f"Granary under construction: "
-                     f"{elapsed}/{granary_project.total_turns} turns",
-                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
-        elif construction.can_build_granary(wd, st):
-            afford = construction.can_afford(player, construction.GRANARY_COST, wd)
-            tk.Label(self.actions,
-                     text=f"Cost: {_format_resources(construction.GRANARY_COST)}\n"
-                          f"Build time: {construction.GRANARY_BUILD_TURNS} turns\n"
-                          f"+{resources.GRANARY_STORAGE_BONUS:,} storage space",
-                     bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
-            tk.Button(self.actions, text="Build Granary",
-                      command=lambda s=st: self._do_build_granary(s),
-                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                      relief="flat", font=theme.FONT).pack(fill="x", pady=2)
-
-        warehouse_project = next((p for p in wd.warehouse_projects if p.settlement_id == st.id), None)
-        if warehouse_project is not None:
-            elapsed = warehouse_project.total_turns - warehouse_project.turns_left
-            tk.Label(self.actions, text=f"Warehouse under construction: "
-                     f"{elapsed}/{warehouse_project.total_turns} turns",
-                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
-        elif construction.can_build_warehouse(wd, st):
-            afford = construction.can_afford(player, construction.WAREHOUSE_COST, wd)
-            tk.Label(self.actions,
-                     text=f"Cost: {_format_resources(construction.WAREHOUSE_COST)}\n"
-                          f"Build time: {construction.WAREHOUSE_BUILD_TURNS} turns\n"
-                          f"+{resources.WAREHOUSE_STORAGE_BONUS:,} storage space",
-                     bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
-            tk.Button(self.actions, text="Build Warehouse",
-                      command=lambda s=st: self._do_build_warehouse(s),
-                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                      relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+        self._build_storage_actions(st, player)
 
     def _do_build_shipyard(self, st):
         player = self._player_faction()
@@ -2176,63 +2927,104 @@ class MapView(tk.Frame):
             self._show_settlement(st)
         self.render()
 
-    def _do_build_granary(self, st):
-        player = self._player_faction()
-        msg = construction.start_granary(self.world, player, st)
-        self.show_bottom_message(msg)
-        if self.selected_settlement is st:
-            self._show_settlement(st)
-        self.render()
-
-    def _do_build_warehouse(self, st):
-        player = self._player_faction()
-        msg = construction.start_warehouse(self.world, player, st)
-        self.show_bottom_message(msg)
-        if self.selected_settlement is st:
-            self._show_settlement(st)
-        self.render()
-
     def _show_village(self, v):
+        """Village panel, rebuilt as folding cards (see _card).
+
+        Previously one Label holding ~30 lines of prose -- a six-line run-on
+        of everything the village grows, another for everything it stores,
+        then storage and herd as inline "Header:" text. Now: a short summary
+        that's always visible, and Production / Storage / Herd / Build as
+        sections you open only when you care."""
         wd = self.world
         self.selected_settlement = None   # a village and a settlement are never both selected
-        self.title_lbl.config(text="Village")
+        self.title_lbl.config(text=v.name)
         region = wd.regions[v.region_id]
-        annual_yield = resources.village_projected_annual_yield(wd, v)
-        lines = [v.name, f"Village in {region.name}, "
-                 f"{wd.factions[v.faction_idx].name}",
-                 f"Grows per year: {_format_resources(annual_yield)}"]
-        population = getattr(v, "population", None)
-        if population is not None:
-            max_pop = getattr(v, "max_population", None)
-            cap_text = f" of {max_pop:,} max" if max_pop else ""
-            lines.append(f"Population: {population:,}{cap_text} "
-                         f"({v.adults:,} adults, {v.children:,} children)")
-        needs = resources.settlement_needs(v, wd.season)
-        lines.append(f"Needs: {_format_resources(needs)} per turn")
-        # "Grows per year" above is a PROJECTION (what this village would
-        # produce over a full year at current conditions) -- this is the
-        # actual current stock sitting in its own storage right now, same
-        # distinction _show_settlement makes.
-        lines.append(f"Currently stored: {_format_resources(getattr(v, 'resources', {}))}")
-        self.info.config(fg=theme.INK, text="\n".join(lines))
+        self.info.config(
+            fg=theme.MUTED,
+            text=f"Village in {region.name}\n{wd.factions[v.faction_idx].name}")
 
         prosperity = getattr(v, "prosperity", None)
         if prosperity is not None:
             self._show_prosperity_bar(prosperity)
         else:
             self._hide_prosperity_bar()
-        stored = sum(getattr(v, "resources", {}).values())
-        capacity = resources._node_storage_capacity(v)
-        self._show_storage_bar(stored, capacity)
+        # No aggregate storage bar any more: space is typed (Phase 3), so a
+        # single "1,474 / 3,300" total is a number with no meaning -- the
+        # Storage card below shows the four real pools instead.
+        self._hide_storage_bar()
 
-        # Villages have no Build actions of their own (Granary/Warehouse/
-        # Shipyard are Settlement-only) -- but this still has to clear
-        # whatever a previously-selected Settlement's panel left behind,
-        # or its Build buttons stay stuck on screen after switching to a
-        # village (this used to be the one _show_* panel that never
-        # touched self.actions at all).
         for w in self.actions.winfo_children():
             w.destroy()
+        player = self._player_faction()
+        own = player is not None and v.faction_idx == wd.factions.index(player)
+
+        body = self._card("SUMMARY")
+        if body is not None:
+            population = getattr(v, "population", None)
+            if population is not None:
+                max_pop = getattr(v, "max_population", None)
+                self._kv(body, "Population",
+                         f"{population:,}" + (f" / {max_pop:,}" if max_pop else ""))
+                self._kv(body, "Adults · children", f"{v.adults:,} · {v.children:,}")
+            needs = resources.settlement_needs(v, wd.season)
+            self._kv(body, "Needs per turn", _format_resources(needs))
+
+        if own:
+            options = sum(1 for b in self._buildable_at(v)
+                          if construction.storage_next_tier(wd, v, b) is not None)
+            body = self._card("BUILD", f"{options} available", key="build",
+                              default_open=False)
+            if body is not None:
+                self._build_storage_actions(v, player, body)
+
+        yield_ = resources.village_projected_annual_yield(wd, v)
+        body = self._card("PRODUCTION", f"{len(yield_)} goods/yr",
+                          key="production", default_open=False)
+        if body is not None:
+            for res_name, amount in sorted(yield_.items(), key=lambda kv: -kv[1]):
+                self._kv(body, res_name, f"{amount:,}/yr")
+
+        stock = {r: a for r, a in (getattr(v, "resources", {}) or {}).items() if a}
+        body = self._card("STORAGE", f"{len(stock)} kinds held", key="storage")
+        if body is not None:
+            for pool in resources.STORAGE_POOLS:
+                cap = resources.node_pool_capacity(v, pool)
+                if not cap:
+                    continue
+                building = resources.STORAGE_BUILDING_BY_POOL[pool]
+                tier = resources.storage_tier(v, building)
+                label = f"{building.title()}{f' T{tier}' if tier else ''}"
+                self._bar_row(body, label, resources.node_pool_stock(v, pool), cap)
+
+
+        body = self._card("HELD", f"{len(stock)} kinds", key="held",
+                          default_open=False)
+        if body is not None:
+            for res_name, amount in sorted(stock.items(), key=lambda kv: -kv[1]):
+                self._kv(body, res_name, f"{amount:,}")
+
+        herds = getattr(v, "herds", None)
+        if herds and any(herds.values()):
+            body = self._card("HERD", f"{sum(herds.values()):,} head", key="herd")
+            if body is not None:
+                for animal in sorted(herds, key=lambda a: -herds[a]):
+                    if herds[animal] <= 0:
+                        continue
+                    cap = resources.village_herd_capacity(wd, v, animal)
+                    self._kv(body, animal, f"{herds[animal]:,} / {cap:,}")
+                need = resources.village_winter_fodder_need(v)
+                if need:
+                    have = (getattr(v, "resources", None) or {}).get("Fodder", 0)
+                    short = have < need
+                    self._kv(body, "Winter fodder", f"{have:,} / {need:,}",
+                             fg=theme.BAD if short else theme.GOOD)
+                    if short:
+                        tk.Label(body, text="herd will be culled", bg=theme.PANEL,
+                                 fg=theme.BAD, font=("Segoe UI", 8),
+                                 anchor="w").pack(fill="x")
+                if own:
+                    self._build_herd_policy_actions(v, body)
+
 
     def _show_commander(self, cmd):
         """Panel for a selected Commander: position, current order, and
@@ -2989,14 +3781,48 @@ class MapView(tk.Frame):
         potentially far off-screen. The single shared conversion every
         _draw_* method and every click handler should use -- replaces the
         old local `screen()` closure and the half-dozen places that used
-        to hand-roll this same math inline."""
+        to hand-roll this same math inline.
+
+        The viewport centre it wraps against comes from self._view_center_x,
+        recomputed once per frame in render(), rather than being rederived
+        here from canvas.winfo_width() on every call -- see __init__."""
         vx0, vy0, scale = self._place
-        view_w = self.canvas.winfo_width() / scale
-        center = vx0 + view_w / 2
         width = self.world.w
-        k = round((center - gx) / width)
+        k = round((self._view_center_x - gx) / width)
         wrapped_gx = gx + k * width
         return ((wrapped_gx - vx0) * scale, (gy - vy0) * scale)
+
+    # --- viewport culling ---------------------------------------------------
+    # Every _draw_* method below rebuilds its canvas items from scratch each
+    # frame, and canvas cost is essentially linear in the number of items
+    # created. Without culling, village view drew the zoomed faction's ENTIRE
+    # road network, village list and settlement list on every frame no matter
+    # how far in the camera was -- so zooming in never got cheaper, and the
+    # per-frame cost grew with the size of the player's realm rather than with
+    # what's actually on screen. These three predicates are the guard: convert
+    # to screen space first (which is cheap, and already wrap-correct via
+    # world_to_screen), then skip anything the canvas would clip away anyway.
+
+    def _visible_point(self, sx, sy, pad=_CULL_PAD_POINT):
+        """Is this screen-space point within `pad` px of the canvas?"""
+        cw, ch = self._canvas_wh
+        return -pad <= sx <= cw + pad and -pad <= sy <= ch + pad
+
+    def _visible_bbox(self, x0, y0, x1, y1, pad=_CULL_PAD_LINE):
+        """Does this screen-space bounding box overlap the padded canvas?"""
+        cw, ch = self._canvas_wh
+        if x0 > x1:
+            x0, x1 = x1, x0
+        if y0 > y1:
+            y0, y1 = y1, y0
+        return not (x1 < -pad or x0 > cw + pad or y1 < -pad or y0 > ch + pad)
+
+    def _visible_pts(self, pts, pad=_CULL_PAD_LINE):
+        """Same test for a flat [x0, y0, x1, y1, ...] polyline point list --
+        the form the create_line callers already build."""
+        xs = pts[0::2]
+        ys = pts[1::2]
+        return self._visible_bbox(min(xs), min(ys), max(xs), max(ys), pad)
 
     def screen_to_world(self, sx, sy):
         """Inverse of world_to_screen: canvas pixel coords -> world cell
@@ -3054,6 +3880,10 @@ class MapView(tk.Frame):
         vx0, vy0, vx1, vy1 = self._fit_aspect(self.view, cw / ch)
         scale = cw / (vx1 - vx0)
         self._place = (vx0, vy0, scale)
+        # Frame-constant camera values world_to_screen() and the _visible_*
+        # culling helpers read instead of re-querying Tk per call.
+        self._canvas_wh = (cw, ch)
+        self._view_center_x = (vx0 + vx1) / 2
 
         # Crop the visible grid region and scale it to the canvas (nearest).
         # The camera is free-scrolling and never itself wrapped (self.view
@@ -3240,6 +4070,8 @@ class MapView(tk.Frame):
             if ship.id in aboard_ids:
                 continue
             x, y = screen(ship.pos[0] + 0.5, ship.pos[1] + 0.5)
+            if not self._visible_point(x, y):
+                continue
             c.create_polygon(x - r, y + r * 0.4, x + r, y + r * 0.4,
                              x + r * 0.6, y - r * 0.5, x - r * 0.6, y - r * 0.5,
                              fill=style["fill"], outline=style["outline"], width=1.5)
@@ -3260,10 +4092,13 @@ class MapView(tk.Frame):
                     pts = []
                     for gx, gy in remaining_path:
                         pts.extend(screen(gx + 0.5, gy + 0.5))
-                    c.create_line(*pts, fill=style["fill"], width=1.5,
-                                  dash=(3, 3), capstyle="round", smooth=True)
+                    if self._visible_pts(pts):
+                        c.create_line(*pts, fill=style["fill"], width=1.5,
+                                      dash=(3, 3), capstyle="round", smooth=True)
 
             x, y = screen(cmd.pos[0] + 0.5, cmd.pos[1] + 0.5)
+            if not self._visible_point(x, y):
+                continue
             if cmd is self.selected_commander:
                 c.create_oval(x - r - 3, y - r - 3, x + r + 3, y + r + 3,
                               outline="#ffffff", width=2)
@@ -3297,6 +4132,8 @@ class MapView(tk.Frame):
             st = wd.settlements[sid]
             style = _SETTLE_STYLE[st.kind]
             x, y = screen(st.pos[0] + 0.5, st.pos[1] + 0.5)
+            if not self._visible_point(x, y):
+                continue
             r = self._marker_radius(style["base"])
             if st is self.selected_settlement:      # selection ring
                 c.create_oval(x - r - 3, y - r - 3, x + r + 3, y + r + 3,
@@ -3334,8 +4171,16 @@ class MapView(tk.Frame):
         br = max(4, r * 0.55)
         c.create_polygon(bx, by - br, bx + br, by + br, bx - br, by + br,
                          fill=color, outline="#1a0d0d", width=1)
-        c.create_text(bx, by + br * 0.35, text="!", fill="#1a0d0d",
-                      font=("Segoe UI", max(6, int(br)), "bold"))
+        # The "!" is a text item -- the most expensive kind the canvas has --
+        # and below a handful of pixels it renders as an unreadable smudge on
+        # top of an already-unmistakable coloured triangle. Zoomed out over a
+        # developed realm this was hundreds of text items a frame for no
+        # legible benefit, so it's drawn only once the badge is big enough to
+        # actually read. The triangle itself still shows at every zoom, so an
+        # alert is never silently hidden.
+        if br >= _ALERT_BADGE_GLYPH_MIN_R:
+            c.create_text(bx, by + br * 0.35, text="!", fill="#1a0d0d",
+                          font=("Segoe UI", max(6, int(br)), "bold"))
 
     def _fog_clip_runs(self, cells):
         """Split an ordered path into maximal contiguous runs where at
@@ -3383,6 +4228,8 @@ class MapView(tk.Frame):
                 pts = []
                 for gx, gy in run:
                     pts.extend(screen(gx + 0.5, gy + 0.5))
+                if not self._visible_pts(pts):
+                    continue
                 c.create_line(*pts, fill=color, width=w, capstyle="round",
                               joinstyle="round", dash=dash, smooth=True)
 
@@ -3426,7 +4273,7 @@ class MapView(tk.Frame):
                 pts = []
                 for gx, gy in run:
                     pts.extend(screen(gx + 0.5, gy + 0.5))
-                if len(pts) < 4:
+                if len(pts) < 4 or not self._visible_pts(pts):
                     continue
                 c.create_line(*pts, fill=color, width=w, capstyle="round",
                               joinstyle="round", dash=dash, smooth=True)
@@ -3436,6 +4283,8 @@ class MapView(tk.Frame):
             if not self._cell_revealed(*caravan.pos):
                 continue
             x, y = screen(*[v + 0.5 for v in caravan.pos])
+            if not self._visible_point(x, y):
+                continue
             # Your own trade vs. somebody else's passing through -- see the
             # style definitions. Roughly half the caravans crossing your view
             # at any time belong to other factions.
@@ -3478,6 +4327,8 @@ class MapView(tk.Frame):
                     pts = []
                     for gx, gy in run:
                         pts.extend(screen(gx + 0.5, gy + 0.5))
+                    if not self._visible_pts(pts):
+                        continue
                     c.create_line(*pts, fill=_TRADE_ROUTE_CONSTRUCTION_COLOR, width=width,
                                   capstyle="round", joinstyle="round", dash=(3, 5), smooth=True)
 
@@ -3494,11 +4345,15 @@ class MapView(tk.Frame):
             pts = []
             for gx, gy in cells:
                 pts.extend(screen(gx + 0.5, gy + 0.5))
+            if not self._visible_pts(pts):
+                continue
             c.create_line(*pts, fill=_DIRT_ROAD_COLOR, width=width, capstyle="round",
                           dash=(4, 3), smooth=True)
 
         for project in wd.settlement_projects:
             x, y = screen(project.pos[0] + 0.5, project.pos[1] + 0.5)
+            if not self._visible_point(x, y):
+                continue
             r = 4
             c.create_rectangle(x - r, y - r, x + r, y + r, outline="#f2e9c9",
                                width=2, dash=(2, 2))
@@ -3530,9 +4385,16 @@ class MapView(tk.Frame):
         """One road segment. Stone roads (bridge=True) that cross a river
         get the crossing stretch recolored brown (_BRIDGE_COLOR) — see
         _river_span — so it visually reads as a bridge instead of the road
-        just barging through the water."""
+        just barging through the water.
+
+        Off-screen segments bail out here rather than in _draw_roads so the
+        cull also skips _river_span below -- that walks every cell along the
+        segment against world.river_cells, which is far more expensive than
+        the create_line it feeds."""
         x0, y0 = screen(ax + 0.5, ay + 0.5)
         x1, y1 = screen(bx + 0.5, by + 0.5)
+        if not self._visible_bbox(x0, y0, x1, y1):
+            return
         span = self._river_span(ax, ay, bx, by) if bridge else None
         if span is None:
             c.create_line(x0, y0, x1, y1, fill=color, width=width,
@@ -3560,7 +4422,10 @@ class MapView(tk.Frame):
         scale); Stone — the trunk network — is visible even from the world
         map, same idea as trade routes already being shown at every zoom
         level. A stone road crossing a river gets a brown bridge span (see
-        _draw_road_segment) — dirt tracks don't bother with one."""
+        _draw_road_segment) — dirt tracks don't bother with one.
+
+        Dirt is gated a second time on the zoom level within region/village
+        view (_DIRT_ROAD_MIN_SCALE) — see the comment below."""
         wd = self.world
         width = max(1.0, self._place[2] * 0.18)
 
@@ -3577,11 +4442,21 @@ class MapView(tk.Frame):
                                             _STONE_ROAD_COLOR, width, bridge=True)
             return
 
+        # Dirt tracks are the densest thing on the map -- a developed realm has
+        # thousands of them, and at the wide end of village view (the camera
+        # you land on entering it) they alone were about half of every canvas
+        # item drawn, for a tangle of 1px lines too fine to read anything from.
+        # They come in once the camera is close enough for them to mean
+        # something; stone roads, the trunk network, still show at every zoom
+        # exactly as before.
+        show_dirt = self._place[2] >= _DIRT_ROAD_MIN_SCALE
         for cid in self.zoom_faction.meta.get("regions", []):
             for (ax, ay), (bx, by), tier in wd.roads_by_region.get(cid, []):
+                is_stone = tier == "stone"
+                if not is_stone and not show_dirt:
+                    continue
                 if not (self._cell_revealed(ax, ay) or self._cell_revealed(bx, by)):
                     continue
-                is_stone = tier == "stone"
                 color = _STONE_ROAD_COLOR if is_stone else _DIRT_ROAD_COLOR
                 dash = None if is_stone else (4, 3)
                 self._draw_road_segment(c, screen, ax, ay, bx, by, color, width,
@@ -3591,17 +4466,33 @@ class MapView(tk.Frame):
         """Small dots for villages — only shown in village view, which now
         covers every village the zoomed faction owns (not just the region
         last clicked through — see _enter_village_view). Names are skipped
-        past a village-count threshold to avoid label soup."""
+        past a village-count threshold to avoid label soup.
+
+        Both the markers and the name threshold are viewport-relative: a
+        developed realm can own hundreds of villages, and drawing (and
+        counting) all of them regardless of where the camera is was the
+        single largest per-frame cost in village view. Culling to what's
+        on screen means zooming in genuinely gets cheaper, and it also makes
+        the label rule behave the way a player expects -- names appear once
+        you're close enough to read them, instead of being switched off
+        forever by a realm-wide village count."""
         if self.zoom_region is None:
             return
         wd = self.world
         style = _VILLAGE_STYLE
         r = self._marker_radius(style["base"])
         zf = wd.factions.index(self.zoom_faction)
-        villages = [v for v in wd.villages if v.faction_idx == zf]
-        show_names = len(villages) <= _VILLAGE_LABEL_LIMIT
-        for v in villages:
+        visible = []
+        for v in wd.villages:
+            if v.faction_idx != zf:
+                continue
             x, y = screen(v.pos[0] + 0.5, v.pos[1] + 0.5)
+            if not self._visible_point(x, y):
+                continue
+            visible.append((v, x, y))
+        show_names = (len(visible) <= _VILLAGE_LABEL_LIMIT
+                      and self._place[2] >= _VILLAGE_LABEL_MIN_SCALE)
+        for v, x, y in visible:
             if v is self.selected_village:          # selection ring
                 c.create_oval(x - r - 3, y - r - 3, x + r + 3, y + r + 3,
                               outline="#ffffff", width=2)
@@ -3625,7 +4516,8 @@ class MapView(tk.Frame):
             # is still one click away in its own panel. Only nation names are
             # sparse enough to be worth drawing over the map.
             return
-        items = [(f.name, f.center) for f in wd.factions if self._is_known(f)]
+        items = [(f.name, f.center) for f in wd.factions
+                 if self._is_known(f) and not is_eliminated(f)]
         for name, center in items:
             lx, ly = screen(center[0] * wd.w, center[1] * wd.h)
             c.create_text(lx + 1, ly + 1, text=name, fill="#000000", font=_LABEL_FONT)
@@ -3661,6 +4553,8 @@ class MapView(tk.Frame):
             for x0, y0, x1, y1 in self._region_border_segments(region):
                 sx0, sy0 = screen(x0, y0)
                 sx1, sy1 = screen(x1, y1)
+                if not self._visible_bbox(sx0, sy0, sx1, sy1):
+                    continue
                 c.create_line(sx0, sy0, sx1, sy1, fill=theme.BAD, width=width,
                               capstyle="round")
             lx, ly = screen(region.center[0] * wd.w, region.center[1] * wd.h)
@@ -3686,5 +4580,7 @@ class MapView(tk.Frame):
         for x0, y0, x1, y1 in self._region_border_segments(self._flash_region):
             sx0, sy0 = screen(x0, y0)
             sx1, sy1 = screen(x1, y1)
+            if not self._visible_bbox(sx0, sy0, sx1, sy1):
+                continue
             c.create_line(sx0, sy0, sx1, sy1, fill=color, width=width,
                           capstyle="round")

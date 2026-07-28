@@ -10,6 +10,7 @@ from app.ui.pause_menu import PauseMenuView
 from app.ui.load_game_menu import LoadGameMenuView
 from app.ui.map_view import MapView
 from app.ui.battle_view import BattleView
+from app.ui.game_over import GameOverView
 from app.core.events import bus
 from app.core.save import (save_game, load_game, has_save, list_saves,
                            new_save_id, delete_save)
@@ -51,6 +52,7 @@ class App(tk.Tk):
         self._paused = False
         self._save_id = None
         self._save_created_at = None
+        self._pending_elimination = None   # see _on_faction_eliminated
 
         self._build_topbar()
 
@@ -71,11 +73,15 @@ class App(tk.Tk):
             self.content, on_resume=self._resume_from_pause,
             on_save=self._save_from_pause,
             on_return_to_menu=self._return_to_menu_from_pause, on_exit=self.destroy)
+        self.game_over_view = GameOverView(
+            self.content, on_return_to_menu=self._return_to_menu_from_defeat,
+            on_exit=self.destroy)
         for view in (self.menu_view, self.new_game_view, self.load_game_view,
-                     self.pause_view):
+                     self.pause_view, self.game_over_view):
             view.place(relx=0, rely=0, relwidth=1, relheight=1)
 
         bus.on("battle:over", self._on_battle_over)
+        bus.on("faction:eliminated", self._on_faction_eliminated)
         self.bind("<Escape>", self._on_escape)
         self.bind("<F1>", self._on_f1)
         self.bind("<e>", self._on_end_turn_key)
@@ -144,6 +150,48 @@ class App(tk.Tk):
         from app.world.resources import advance_turn
         advance_turn(self.world)
 
+    # --- faction elimination -----------------------------------------------
+    def _on_faction_eliminated(self, payload):
+        """A nation has lost its last region (see
+        app/world/territory.py's eliminate_faction). Somebody else's defeat
+        is news; the player's own ends the run.
+
+        The defeat screen is deferred with after_idle rather than raised
+        inline: this fires from deep inside transfer_region, which is itself
+        called from the middle of resolving a battle or a turn, and tearing
+        the map out from under that mid-resolution leaves the caller drawing
+        into a screen that's no longer showing."""
+        if self.world is None:
+            return
+        dead_idx = payload["faction_idx"]
+        if dead_idx != self.world.player_faction_idx:
+            # Queued rather than shown now: this fires while the battle screen
+            # is still up, and _return_from_battle overwrites the bottom
+            # message with its own conquest line the moment the player
+            # dismisses it — so announcing here would be invisible or
+            # instantly clobbered. Flushed there instead.
+            self._pending_elimination = payload
+            return
+        self.after_idle(lambda: self._show_defeat(payload))
+
+    def _show_defeat(self, payload):
+        from app.world import resources
+        turn = getattr(self.world, "turn", 0)
+        self.game_over_view.set_result(
+            payload["faction"].name, payload["conqueror"].name, turn,
+            year=resources.current_year(turn))
+        self._paused = False
+        self.show_screen("game_over")
+
+    def _return_to_menu_from_defeat(self):
+        """Back to the main menu after a defeat. The save is deliberately
+        left on disk: deleting the player's run for them is not this
+        screen's call to make, and the Load Game menu can still delete it."""
+        self.world = None
+        self._save_id = None
+        self._save_created_at = None
+        self._goto_menu()
+
     # --- top bar -----------------------------------------------------------
     def _build_topbar(self):
         bar = tk.Frame(self, bg=theme.PANEL)
@@ -167,7 +215,8 @@ class App(tk.Tk):
 
     def show_screen(self, name):
         view = {"menu": self.menu_view, "new_game": self.new_game_view,
-                "map": self.map_view, "battle": self.battle_view}[name]
+                "map": self.map_view, "battle": self.battle_view,
+                "game_over": self.game_over_view}[name]
         if view is None:
             return
         self._paused = False
@@ -388,6 +437,8 @@ class App(tk.Tk):
         the transition itself rather than the battle's last animation frame."""
         outcome = getattr(self, "_battle_outcome", None)
         self._battle_outcome = None
+        eliminated = getattr(self, "_pending_elimination", None)
+        self._pending_elimination = None
         if outcome is not None:
             self.map_view.refresh()
         self.show_screen("map")
@@ -396,9 +447,17 @@ class App(tk.Tk):
         region, attacker, defender = outcome["region"], outcome["attacker"], outcome["defender"]
         if outcome["result"] == "success":
             self.map_view.flash_region(region, "success")
-            self.map_view.show_bottom_message(
-                f"{attacker.name} successfully acquired {region.name} "
-                f"through {self._ACQUISITION_MEANS}.")
+            if eliminated is not None:
+                # Taking a nation's last region is the bigger news of the two
+                # — lead with that rather than the region line.
+                self.map_view.show_bottom_message(
+                    f"{attacker.name} takes {region.name} — the last of "
+                    f"{eliminated['faction'].name}, which is now no more.",
+                    ms=6200)
+            else:
+                self.map_view.show_bottom_message(
+                    f"{attacker.name} successfully acquired {region.name} "
+                    f"through {self._ACQUISITION_MEANS}.")
         else:
             self.map_view.flash_region(region, "failure")
             if outcome.get("stalemate"):

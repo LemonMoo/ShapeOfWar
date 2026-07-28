@@ -6,7 +6,9 @@ import math
 
 from app.core.events import bus
 from app.world import wrap
+from app.world.nation import is_eliminated
 from app.world.worldgen import OCEAN, _bfs_distance
+from app.world.resources import _SETTLEMENT_STORAGE_RESOURCES
 
 _NEIGH4 = ((1, 0), (-1, 0), (0, 1), (0, -1))
 _NAVAL_COAST_REACH = 3   # same reach as the trade-route coastal test in worldgen.py
@@ -238,12 +240,24 @@ def transfer_region(world, region, new_faction_idx):
             old_settlements.remove(sid)
         new_settlements.append(sid)
 
-    # Move this region's most recent turn's yield out of the old faction's
-    # stockpile and into the new one's (military isn't recomputed here —
-    # like the resource move itself, that happens on the next End Turn).
+    # Move this region's most recent turn's yield between the two national
+    # pools -- but ONLY for resources that actually live in a national pool.
+    #
+    # Everything in _SETTLEMENT_STORAGE_RESOURCES (which today is very nearly
+    # the whole registry) is held per-node, and this region's settlements and
+    # villages have just changed hands a few lines above with their stock
+    # aboard. Re-adding their yield to the conqueror's national pool counted
+    # the same goods twice AND banked the copy somewhere nothing can ever
+    # spend it from: can_afford/_pay_cost read node storage for these, never
+    # the pool. Measured on a real save, that had quietly accumulated 48,509
+    # phantom units across the factions -- goods the resource bar displayed
+    # and no one could touch. See _purge_phantom_pool for the cleanup of
+    # stock already banked this way.
     new_res = new_faction.stats.setdefault("resources", {})
     old_res = old_faction.stats.setdefault("resources", {}) if old_faction is not None else None
     for resource, amount in region.resources.items():
+        if resource in _SETTLEMENT_STORAGE_RESOURCES:
+            continue      # travelled with the nodes, not through a pool
         if old_res is not None:
             old_res[resource] = max(0, old_res.get(resource, 0) - amount)
         new_res[resource] = new_res.get(resource, 0) + amount
@@ -256,3 +270,87 @@ def transfer_region(world, region, new_faction_idx):
 
     bus.emit("region:transferred", {"region": region, "old_faction": old_faction,
                                      "new_faction": new_faction})
+
+    # Losing the last region is what ends a nation. Checked here, after the
+    # transfer is fully committed and its event has fired, so every listener
+    # sees consistent territory before anything gets torn down.
+    if (old_faction is not None
+            and not old_faction.meta.get("regions")
+            and not is_eliminated(old_faction)):
+        eliminate_faction(world, old_faction_idx, new_faction_idx)
+
+
+def eliminate_faction(world, dead_idx, conqueror_idx):
+    """Retire the faction at `dead_idx`, whose last region has just been
+    taken by `conqueror_idx`.
+
+    The faction is tombstoned rather than removed from world.factions --
+    see app/world/nation.py's is_eliminated for why that is not optional.
+    Its standing assets are then settled:
+
+      * Fixed works in progress (roads, settlements, shipyards, granaries,
+        warehouses, wildland claims) pass to the conqueror, who now holds
+        the ground they are being built on.
+      * Trade routes and part-built trade routes are re-pointed at the
+        conqueror, since the goods still have somewhere to go -- except
+        where that would leave a route with the conqueror at BOTH ends,
+        which is not a trade route at all and is dropped.
+      * Commanders, ships and in-transit caravans are removed. They belong
+        to a nation that no longer exists, and unlike a half-built road
+        there is no ground for them to pass to.
+
+    Emits 'faction:eliminated' with both factions so the UI can announce it.
+    """
+    dead = world.factions[dead_idx]
+    dead.eliminated = True
+    dead.eliminated_by = conqueror_idx
+    dead.eliminated_turn = getattr(world, "turn", None)
+
+    # --- mobile assets: removed outright -------------------------------
+    dead_ship_ids = {s.id for s in world.ships if s.faction_idx == dead_idx}
+    world.ships = [s for s in world.ships if s.faction_idx != dead_idx]
+    world.commanders = [c for c in world.commanders if c.faction_idx != dead_idx]
+    for cmd in world.commanders:
+        # A surviving commander can't still be aboard a ship that just went
+        # down with its nation.
+        if getattr(cmd, "aboard_ship_id", None) in dead_ship_ids:
+            cmd.aboard_ship_id = None
+    world.trade_caravans = [c for c in world.trade_caravans
+                            if dead_idx not in (c.seller_idx, c.buyer_idx)]
+
+    # --- fixed works in progress: inherited by the conqueror -----------
+    for attr in ("road_projects", "settlement_projects", "shipyard_projects",
+                 "granary_projects", "warehouse_projects", "claim_projects"):
+        for proj in getattr(world, attr, []):
+            if proj.faction_idx == dead_idx:
+                proj.faction_idx = conqueror_idx
+
+    # --- trade routes: re-pointed, or dropped if they'd self-loop ------
+    kept_routes = []
+    for route in world.trade_routes:
+        a = conqueror_idx if route["a_faction"] == dead_idx else route["a_faction"]
+        b = conqueror_idx if route["b_faction"] == dead_idx else route["b_faction"]
+        if a == b:
+            continue
+        route["a_faction"], route["b_faction"] = a, b
+        kept_routes.append(route)
+    world.trade_routes = kept_routes
+    # trade_routes_by_pair is keyed by frozenset({a_idx, b_idx}); the keys we
+    # just rewrote are stale, so rebuild it from the surviving routes rather
+    # than trying to patch individual entries.
+    world.trade_routes_by_pair = {
+        frozenset((r["a_faction"], r["b_faction"])): r for r in kept_routes}
+
+    kept_projects = []
+    for proj in world.trade_route_projects:
+        a = conqueror_idx if proj.a_idx == dead_idx else proj.a_idx
+        b = conqueror_idx if proj.b_idx == dead_idx else proj.b_idx
+        if a == b:
+            continue
+        proj.a_idx, proj.b_idx = a, b
+        kept_projects.append(proj)
+    world.trade_route_projects = kept_projects
+
+    bus.emit("faction:eliminated", {
+        "faction": dead, "faction_idx": dead_idx,
+        "conqueror": world.factions[conqueror_idx], "conqueror_idx": conqueror_idx})

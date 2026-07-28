@@ -10,6 +10,7 @@ import math
 import random
 
 from app.world import territory
+from app.world.nation import is_eliminated
 from app.world import resources
 from app.world import wrap
 from app.world.worldgen import (UNCLAIMED, _place_settlements_for_faction,
@@ -350,7 +351,7 @@ def run_expansion_ai(world):
     adjacency-to-a-weak-point/etc -- a reasonable future refinement, not
     this one."""
     for fac_idx, nation in enumerate(world.factions):
-        if fac_idx == world.player_faction_idx:
+        if fac_idx == world.player_faction_idx or is_eliminated(nation):
             continue
         if _ai_has_active_construction(world, fac_idx):
             continue
