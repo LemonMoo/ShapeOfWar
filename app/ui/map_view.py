@@ -253,6 +253,7 @@ _SURVIVAL_RESOURCES = {"Firewood", "Fodder", "Bread", "Salted Meat", "Smoked Fis
 _LOW_STOCK_THRESHOLD = 200
 
 _ALERTS_PANEL_W = 260
+_TREASURY_W = 300
 _LEFT_PANEL_W = 200
 _RIGHT_PANEL_W = 320
 _EDGE_TAB_W = 14
@@ -425,7 +426,7 @@ class MapView(tk.Frame):
         # ~55% no matter what.
         self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
-        self.canvas.bind("<Configure>", lambda e: self.render())
+        self.canvas.bind("<Configure>", lambda e: self._on_canvas_configure())
         # Free camera: press/drag/release (drag pans, a plain click still
         # drills down/selects exactly as before) plus wheel-zoom.
         self.canvas.bind("<ButtonPress-1>", self._on_press)
@@ -459,6 +460,7 @@ class MapView(tk.Frame):
         self._build_trade_log()
         self._build_alerts_panel()
         self._build_panel()
+        self._build_treasury_panel()
         self._build_edge_tabs()
         self._left_collapsed = False
         self._right_collapsed = False
@@ -542,6 +544,9 @@ class MapView(tk.Frame):
             self._show_settlement(self.selected_settlement)
         if self.selected_village is not None:
             self._show_village(self.selected_village)
+        # Treasury is an in-game panel that can be left open across End Turn,
+        # so it has to be rebuilt here to show the turn's new figures.
+        self._refresh_treasury()
         if self.selected_commander is not None:
             self._show_commander(self.selected_commander)
         self._update_resource_bar()
@@ -1571,7 +1576,7 @@ class MapView(tk.Frame):
                  font=("Segoe UI", 9)).pack(side="right", padx=(0, 6))
         if gold:
             for wdg in (row,) + tuple(row.winfo_children()):
-                wdg.bind("<Button-1>", lambda e: self.open_treasury())
+                wdg.bind("<Button-1>", lambda e: self.toggle_treasury())
                 wdg.configure(cursor="hand2")
             # Gold is the one row whose headline number regularly fails to
             # explain itself: most of it is minted silently from Gold Ore, some
@@ -1581,54 +1586,115 @@ class MapView(tk.Frame):
                      font=("Segoe UI", 8)).pack(side="right", padx=(0, 2))
 
     # --- treasury ------------------------------------------------------------
+    def _build_treasury_panel(self):
+        """The Treasury as an in-game panel rather than an OS window.
+
+        It used to be a tk.Toplevel, which meant it floated free of the game,
+        could be dragged off the edge of it, and dropped behind the main window
+        the moment you touched the map -- so you could not keep it open and
+        watch it update as you ended a turn, which is exactly when the numbers
+        are interesting. As an overlay it stays inside the game's bounds, keeps
+        its place while you pan and zoom, and refreshes in step with the turn
+        (see _refresh_treasury / refresh)."""
+        self._treasury_open = False
+        f = tk.Frame(self, bg=theme.PANEL, highlightbackground=theme.ACCENT,
+                     highlightthickness=1, width=_TREASURY_W)
+        self.treasury_frame = f
+
+        head = tk.Frame(f, bg="#232a36", cursor="fleur")
+        head.pack(fill="x")
+        tk.Label(head, text="TREASURY", bg="#232a36", fg=theme.ACCENT,
+                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=8, pady=4)
+        close = tk.Label(head, text="\u2715", bg="#232a36", fg=theme.MUTED,
+                         font=("Segoe UI", 8), cursor="hand2")
+        close.pack(side="right", padx=8)
+        close.bind("<Button-1>", lambda e: self.close_treasury())
+        # Drag by the header, clamped so it can never leave the game window.
+        for wdg in (head,) + tuple(head.winfo_children()):
+            if wdg is close:
+                continue
+            wdg.bind("<ButtonPress-1>", self._treasury_drag_start)
+            wdg.bind("<B1-Motion>", self._treasury_drag)
+        self._treasury_body = tk.Frame(f, bg=theme.PANEL)
+        self._treasury_body.pack(fill="both", expand=True)
+        self._treasury_pos = None      # (x, y); None means "dock me by default"
+
+    def _treasury_drag_start(self, event):
+        self._treasury_grab = (event.x_root, event.y_root,
+                               self.treasury_frame.winfo_x(),
+                               self.treasury_frame.winfo_y())
+
+    def _treasury_drag(self, event):
+        grab = getattr(self, "_treasury_grab", None)
+        if grab is None:
+            return
+        gx, gy, ox, oy = grab
+        x = ox + (event.x_root - gx)
+        y = oy + (event.y_root - gy)
+        self._treasury_pos = self._clamp_to_view(
+            x, y, self.treasury_frame.winfo_width(),
+            self.treasury_frame.winfo_height())
+        self.treasury_frame.place(x=self._treasury_pos[0], y=self._treasury_pos[1])
+
+    def _clamp_to_view(self, x, y, w, h):
+        """Keep a floating panel fully inside the game window -- the whole
+        point of it being an in-game window rather than an OS one."""
+        max_x = max(0, self.winfo_width() - w)
+        max_y = max(0, self.winfo_height() - h)
+        return (min(max(0, x), max_x), min(max(0, y), max_y))
+
+    def open_treasury(self):
+        self._treasury_open = True
+        self._refresh_treasury()
+
+    def close_treasury(self):
+        self._treasury_open = False
+        self.treasury_frame.place_forget()
+
+    def toggle_treasury(self):
+        if getattr(self, "_treasury_open", False):
+            self.close_treasury()
+        else:
+            self.open_treasury()
+
     _TREASURY_CAUSE_HELP = {
         "minted": "struck from Gold Ore at your settlements",
         "foreign trade": "sales to and purchases from other realms",
-        "domestic trade": "transfers between your own settlements (mostly barter, little coin)",
+        "domestic trade": "transfers between your own settlements (mostly barter)",
         "construction": "buildings, shipyards and storage works",
         "expansion": "wildland claims",
         "other": "anything not covered above",
     }
 
-    def open_treasury(self):
-        """Where the gold actually is, and where it actually came from.
-
-        This exists because the headline number and the trade log genuinely
-        describe different things: measured on a real save, 100% of a
-        faction's gold change over 60 turns came from minting Gold Ore --
-        a silent per-turn production chain that appears in no log -- while
-        the trade log recorded thousands of domestic transfers that pay in
-        barter and move no coin at all. Neither was wrong; there was just
-        nowhere that reconciled them."""
-        if getattr(self, "_treasury_window", None) is not None:
-            try:
-                self._treasury_window.destroy()
-            except tk.TclError:
-                pass
+    def _refresh_treasury(self):
+        """Rebuild the Treasury contents in place. Called when it is opened and
+        again from refresh() after every End Turn, so it can be left open and
+        watched -- which is the only way to see minting, trade income and
+        construction spend land as they happen."""
+        if not getattr(self, "_treasury_open", False):
+            return
         player = self._player_faction()
         if player is None:
+            self.close_treasury()
             return
         wd = self.world
         fac_idx = wd.factions.index(player)
-
-        win = tk.Toplevel(self)
-        self._treasury_window = win
-        win.title("Treasury")
-        win.configure(bg=theme.BG)
-        win.geometry("460x560")
+        body = self._treasury_body
+        for w in body.winfo_children():
+            w.destroy()
 
         def header(text):
-            tk.Label(win, text=text, bg=theme.BG, fg=theme.MUTED,
-                     font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=16, pady=(14, 4))
+            tk.Label(body, text=text, bg=theme.PANEL, fg=theme.MUTED,
+                     font=("Segoe UI", 7, "bold")).pack(anchor="w", padx=12, pady=(10, 2))
 
         def line(text, fg=None, bold=False):
-            tk.Label(win, text=text, bg=theme.BG, fg=fg or theme.INK,
-                     font=("Segoe UI", 9, "bold") if bold else ("Segoe UI", 9),
-                     justify="left", anchor="w", wraplength=420).pack(anchor="w", padx=16)
+            tk.Label(body, text=text, bg=theme.PANEL, fg=fg or theme.INK,
+                     font=("Segoe UI", 9, "bold") if bold else ("Segoe UI", 8),
+                     justify="left", anchor="w", wraplength=_TREASURY_W - 26
+                     ).pack(anchor="w", padx=12)
 
         total = resources.faction_gold(wd, fac_idx)
         transit = resources.gold_in_transit(wd, fac_idx)
-        reserve = trade.GOLD_TRADE_RESERVE
         settlements = [s for s in wd.settlements if s.faction_idx == fac_idx]
         spendable = sum(trade._spendable_gold(s) for s in settlements)
 
@@ -1636,47 +1702,61 @@ class MapView(tk.Frame):
         line(f"{total:,} gold", bold=True)
         line(f"{spendable:,} available for trade", theme.MUTED)
         line(f"{total - spendable:,} held back "
-             f"({reserve:,}/settlement reserve, plus coin in villages)", theme.MUTED)
+             f"({trade.GOLD_TRADE_RESERVE:,}/settlement reserve, plus village coin)",
+             theme.MUTED)
         if transit:
-            line(f"{transit:,} in transit — already sold, still on the road home",
+            line(f"{transit:,} in transit \u2014 sold, still on the road home",
                  theme.WARN)
 
         header("WHERE IT IS")
         holders = sorted(((getattr(s, "resources", None) or {}).get("Gold", 0), s.name)
                          for s in settlements)
-        for amount, name in reversed(holders[-8:]):
+        for amount, name in reversed(holders[-6:]):
             line(f"  {name}: {amount:,}", theme.MUTED)
         village_gold = total - sum(a for a, _ in holders)
         if village_gold:
             line(f"  villages: {village_gold:,} (cannot pay for trade)", theme.MUTED)
 
-        header("WHERE IT CAME FROM (recent turns)")
         ledger = resources.gold_ledger(wd, fac_idx)
+        header("WHERE IT CAME FROM")
         if not ledger:
-            line("  No recorded flows yet — end a turn to start the ledger.", theme.MUTED)
+            line("  Nothing recorded yet \u2014 end a turn.", theme.MUTED)
         else:
             agg = {}
             for entry in ledger:
                 for cause, value in entry.items():
                     if cause not in ("turn", "net"):
                         agg[cause] = agg.get(cause, 0) + value
-            span = f"last {len(ledger)} turn{'s' if len(ledger) != 1 else ''}"
-            line(f"  over the {span}:", theme.MUTED)
+            line(f"  over the last {len(ledger)} turns:", theme.MUTED)
             for cause, value in sorted(agg.items(), key=lambda kv: -abs(kv[1])):
-                colour = theme.GOOD if value > 0 else theme.BAD
-                line(f"    {value:+,}  {cause}", colour)
-                line(f"          {self._TREASURY_CAUSE_HELP.get(cause, '')}", theme.MUTED)
+                line(f"    {value:+,}  {cause}",
+                     theme.GOOD if value > 0 else theme.BAD)
+                line(f"        {self._TREASURY_CAUSE_HELP.get(cause, '')}", theme.MUTED)
             line(f"    {sum(agg.values()):+,}  net", None, bold=True)
+            header("RECENT TURNS")
+            for entry in ledger[-6:]:
+                causes = "  ".join(f"{k} {v:+,}" for k, v in entry.items()
+                                   if k not in ("turn", "net"))
+                line(f"  turn {entry['turn']}: {entry['net']:+,}   {causes}", theme.MUTED)
 
-        header("LAST 8 TURNS")
-        for entry in ledger[-8:]:
-            causes = "  ".join(f"{k} {v:+,}" for k, v in entry.items()
-                               if k not in ("turn", "net"))
-            line(f"  turn {entry['turn']}: {entry['net']:+,}   {causes}", theme.MUTED)
-
-        tk.Button(win, text="Close", command=win.destroy, bg="#232a36", fg=theme.INK,
-                  activebackground=theme.ACCENT, relief="flat",
-                  font=theme.FONT).pack(side="bottom", pady=12)
+        # Default dock: just left of the side panel, near the top -- out of the
+        # way of both the alerts overlay and the trade log.
+        self.treasury_frame.update_idletasks()
+        w = _TREASURY_W
+        h = min(self.treasury_frame.winfo_reqheight(),
+                max(200, self.winfo_height() - 90))
+        self.treasury_frame.configure(height=h)
+        self.treasury_frame.pack_propagate(False)
+        if self._treasury_pos is None:
+            right = (_RIGHT_PANEL_W if not getattr(self, "_right_collapsed", False)
+                     else _EDGE_TAB_W)
+            self._treasury_pos = self._clamp_to_view(
+                self.winfo_width() - right - w - 12, 40, w, h)
+        else:
+            self._treasury_pos = self._clamp_to_view(*self._treasury_pos, w, h)
+        self.treasury_frame.place(x=self._treasury_pos[0], y=self._treasury_pos[1],
+                                  width=w, height=h)
+        self.treasury_frame.lift()
 
     # --- panel -------------------------------------------------------------
     def _build_panel(self):
@@ -1791,6 +1871,16 @@ class MapView(tk.Frame):
                                   relief="flat", font=theme.FONT)
         self._panel_foot = foot
         # back_btn is packed only while zoomed in.
+
+    def _on_canvas_configure(self):
+        """Redraw, and re-clamp any floating in-game panel so a window resize
+        can't strand it outside the visible area."""
+        self.render()
+        if getattr(self, "_treasury_open", False) and self._treasury_pos:
+            f = self.treasury_frame
+            self._treasury_pos = self._clamp_to_view(
+                *self._treasury_pos, f.winfo_width(), f.winfo_height())
+            f.place(x=self._treasury_pos[0], y=self._treasury_pos[1])
 
     # --- panel collapsing ----------------------------------------------------
     def _toggle_left_panel(self):

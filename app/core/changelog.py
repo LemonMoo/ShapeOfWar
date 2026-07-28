@@ -20,6 +20,19 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 35,
+        "title": "In-Game Treasury, and a Bad Fix Undone",
+        "items": [
+            "The Treasury is now an in-game panel instead of a separate window — it stays inside the game, keeps its place while you pan and zoom, and can be dragged anywhere (but never off the edge)",
+            "Leave it open across End Turn and it updates in step with the turn, which is the only way to actually watch minting, trade income and construction spend land",
+            "Click the Gold row to toggle it open or closed",
+            "IMPORTANT FIX: v0.2.1's legacy-save cleanup was destroying goods, and measured WORSE than doing nothing at all — over 100 turns it cost 5,198 population against 4,737 for leaving the save alone, plus 942 gold the realm would have minted from ore in that pile",
+            "The cleanup now only MOVES goods into real spare capacity (settlements first, since only they run conversion recipes) and destroys nothing. Population loss over 100 turns: 1,197, against 4,737 untouched and 5,198 under v0.2.1",
+            "Anything that still cannot be rehoused stays where it is and drains through the ordinary overflow rule, so it can be eaten and converted on the way down rather than deleted",
+            "Saves that already went through v0.2.1's cleanup are eligible for the corrected pass — what it destroyed is gone, but any overflow still sitting there now gets rehoused instead of ignored",
+        ],
+    },
+    {
         "version": 34,
         "title": "Towns & Cities Get the New Panel",
         "items": [

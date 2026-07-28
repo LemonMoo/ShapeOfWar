@@ -3994,9 +3994,13 @@ def _close_gold_ledger(world):
 # rather than a transition. Worse, all of it is simply destroyed.
 #
 # So on first load of such a world the excess is spilled into whatever spare
-# capacity the rest of that faction actually has -- the goods are real and
-# somewhere else can hold them -- and only what genuinely has nowhere to go is
-# dropped. Runs once per world, guarded by a flag on the world itself.
+# capacity the rest of that faction actually has -- settlements first, since
+# only they run the conversion recipes. Nothing is destroyed: anything that
+# cannot be rehoused stays where it is and drains through the ordinary
+# overflow rule, which lets it still be eaten and converted on the way down.
+# Runs once per world, guarded by a flag on the world itself.
+_OVERFLOW_MIGRATION_VERSION = 2   # 1 = the destructive clamp shipped in
+                                  # v0.2.1; 2 = move-only, destroys nothing
 LEGACY_OVERFLOW_FACTOR = 1.5   # only a hoard this far past capacity counts as
                                # legacy. A settled realm normally runs a few
                                # percent over on its durable pool -- that is the
@@ -4005,12 +4009,18 @@ LEGACY_OVERFLOW_FACTOR = 1.5   # only a hoard this far past capacity counts as
 
 
 def migrate_legacy_overflow(world):
-    """Redistribute pre-typed-pool overflow into the realm's spare capacity,
-    discarding only what nothing can hold. Idempotent and self-guarding."""
-    if getattr(world, "_overflow_migrated", False):
+    """Redistribute pre-typed-pool overflow into the realm's real spare
+    capacity. Never destroys anything -- see the section note for the
+    measurements that ruled that out. Idempotent and self-guarding."""
+    # Versioned, not a plain boolean. v0.2.1 shipped a destructive variant of
+    # this migration and marked worlds done; those saves must still be eligible
+    # for the corrected move-only pass, which can only help them (whatever it
+    # destroyed is gone, but any overflow still sitting there gets rehoused).
+    if getattr(world, "_overflow_migration_version", 0) >= _OVERFLOW_MIGRATION_VERSION:
         return {}
-    world._overflow_migrated = True
-    moved = {"moved": 0, "dropped": 0}
+    world._overflow_migration_version = _OVERFLOW_MIGRATION_VERSION
+    world._overflow_migrated = True     # legacy flag, kept for older readers
+    moved = {"moved": 0}
 
     nodes_by_faction = {}
     for node in list(world.settlements) + list(world.villages):
@@ -4032,38 +4042,57 @@ def migrate_legacy_overflow(world):
                     receivers.append([node, cap - stock])
             if not donors:
                 continue
+            # Fill settlements before villages. Only settlements run the
+            # conversion recipes, so goods parked in a village are inert:
+            # measured, spilling a legacy ore hoard into villages left the
+            # realm minting 10 gold per 100 turns instead of 952, because the
+            # Gold Ore had nowhere to be turned into coin.
+            receivers.sort(key=lambda entry: 0 if hasattr(entry[0], "kind") else 1)
             for donor in donors:
                 res = getattr(donor, "resources", None) or {}
                 excess = node_pool_stock(donor, pool) - node_pool_capacity(donor, pool)
-                # Shed the bulkiest goods first: they free the most room per
-                # unit moved, so fewer units have to be destroyed.
+                # Shed the CHEAPEST goods per unit of space they free, not
+                # simply the bulkiest. Sorting on bulk alone looks right --
+                # bulky goods free the most room per unit -- but it threw away
+                # Gold Ore (bulk 1.6) ahead of Tools (0.8) purely because ore
+                # is bulkier, and measured on a real save that cut a realm's
+                # ore from 12,662 to 2,430 and its minting from 610 gold per
+                # 20 turns to 10. Value per unit of space is the honest
+                # ordering: dump the cheap bulk (Logs, Stone) and keep what is
+                # actually worth something.
                 names = sorted((r for r, a in res.items()
                                 if a > 0 and storage_class(r) == pool),
-                               key=lambda r: -resource_bulk(r))
+                               key=lambda r: resource_value(r, 1) / (resource_bulk(r) or 1.0))
                 for name in names:
                     if excess <= 0:
                         break
                     bulk = resource_bulk(name) or 1.0
-                    shed_units = min(res[name], int(excess / bulk) + 1)
-                    if shed_units <= 0:
-                        continue
-                    res[name] -= shed_units
-                    excess -= shed_units * bulk
-                    left = shed_units
+                    # Move only what somewhere can actually hold. NOTHING is
+                    # destroyed here: an earlier version clamped each hoard
+                    # down to capacity and discarded the remainder, which
+                    # measured WORSE than leaving it alone entirely -- over
+                    # 100 turns population went -5,198 against -4,737 for
+                    # doing nothing, because the discarded stock was exactly
+                    # the reserve the population had been eating, and it also
+                    # cost the realm the 952 gold it would have minted from
+                    # the ore in that pile. Whatever cannot be rehoused stays
+                    # put and drains through the ordinary overflow rule, which
+                    # at least lets it be consumed and converted on the way
+                    # down.
                     for entry in receivers:
-                        if left <= 0:
+                        if excess <= 0 or res.get(name, 0) <= 0:
                             break
                         node, room = entry
-                        take = min(left, int(room / bulk))
+                        take = min(res[name], int(room / bulk), int(excess / bulk) + 1)
                         if take <= 0:
                             continue
+                        res[name] -= take
                         if not hasattr(node, "resources"):
                             node.resources = {}
                         node.resources[name] = node.resources.get(name, 0) + take
                         entry[1] = room - take * bulk
-                        left -= take
+                        excess -= take * bulk
                         moved["moved"] += take
-                    moved["dropped"] += left
     return moved
 
 
