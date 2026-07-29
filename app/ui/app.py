@@ -251,6 +251,19 @@ class App(tk.Tk):
         self._paused = False
         self._current_screen = name
         view.tkraise()
+        # tkraise() only changes stacking order, never keyboard focus -- an
+        # Entry on the screen being left (the New Game screen's realm-name/
+        # ruler-name fields are the real case this bit: their StringVars
+        # carry a live trace that re-applies whatever they contain onto the
+        # actual game world on every keystroke, by design, so the preview
+        # updates as you type) would otherwise go on quietly receiving and
+        # inserting every keypress from behind whatever screen is now on
+        # top, including single-letter shortcuts like E for End Turn --
+        # silently renaming your kingdom one keystroke at a time, turn
+        # after turn. Moving focus to the new screen's own frame on every
+        # transition means a leftover Entry never keeps eating keystrokes
+        # once its screen isn't the one showing any more.
+        view.focus_set()
 
         if name in _GAME_SCREENS:
             self.nav_frame.pack(side="left")
