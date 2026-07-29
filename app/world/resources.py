@@ -3938,7 +3938,7 @@ def _grow_city_villages(world):
     stops trying (village_growth_maxed) instead of re-scanning for nothing
     every turn thereafter."""
     from app.world.worldgen import (Village, _roll_population, _VILLAGE_FARM_RANGE,
-                                    _VILLAGE_FERT_PATCH)
+                                    _VILLAGE_FERT_PATCH, _local_road_path)
     from app.world.lexicon import make_settlement_namer
 
     for st in world.settlements:
@@ -3976,7 +3976,9 @@ def _grow_city_villages(world):
                    population, adults, children, prosperity, max_population)
         world.villages.append(v)
         region.villages.append(v.id)
-        world.roads_by_region.setdefault(region_id, []).append((st.pos, v.pos, "dirt"))
+        path = _local_road_path(world, st.pos, v.pos, faction_idx=st.faction_idx)
+        segs = world.roads_by_region.setdefault(region_id, [])
+        segs.extend((p1, p2, "dirt") for p1, p2 in zip(path, path[1:]))
         _connect_new_village_to_region(world, region, v)
 
         st.villages_spawned += 1
@@ -3988,13 +3990,14 @@ def _connect_new_village_to_region(world, region, new_village):
     villages already in its own region -- not just back to the City that
     founded it -- so a region ends up genuinely interconnected (better
     trading/logistics reach) instead of a pure hub-and-spoke back to one
-    city. Straight-line dirt segments, same instant-connection style the
-    city->village link right above already uses, not the gradual
-    RoadProject/pathfinding machinery construction.py's other roads go
-    through. Picks the VILLAGE_MESH_MAX_LINKS closest existing villages
-    within VILLAGE_MESH_LINK_RADIUS, not every village in the region
-    regardless of distance, so one spawn event can't blanket a large,
-    already-crowded region in new links."""
+    city. Terrain-aware paths (_local_road_path), same as every other road
+    in the region, not the gradual RoadProject machinery construction.py's
+    player/AI-built roads go through -- this is instant, like the
+    city->village link right above. Picks the VILLAGE_MESH_MAX_LINKS
+    closest existing villages within VILLAGE_MESH_LINK_RADIUS, not every
+    village in the region regardless of distance, so one spawn event can't
+    blanket a large, already-crowded region in new links."""
+    from app.world.worldgen import _local_road_path
     candidates = []
     for vid in region.villages:
         if vid == new_village.id:
@@ -4008,7 +4011,9 @@ def _connect_new_village_to_region(world, region, new_village):
     candidates.sort(key=lambda t: t[0])
     segs = world.roads_by_region.setdefault(region.id, [])
     for _, other in candidates[:VILLAGE_MESH_MAX_LINKS]:
-        segs.append((new_village.pos, other.pos, "dirt"))
+        path = _local_road_path(world, new_village.pos, other.pos,
+                                faction_idx=region.faction_idx)
+        segs.extend((p1, p2, "dirt") for p1, p2 in zip(path, path[1:]))
 
 
 # --- turn loop ---------------------------------------------------------------

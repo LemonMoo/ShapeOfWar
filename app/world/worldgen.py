@@ -1028,6 +1028,37 @@ def _mst_edges(points):
     return edges
 
 
+_ROAD_BBOX_PAD = 20   # matches construction.py's _BBOX_PAD -- the same
+                      # "how far past the two endpoints' bounding box a
+                      # detour might reasonably need to go" margin
+
+
+def _local_road_path(world, a, b, faction_idx=None):
+    """Terrain-aware path between two points within a region -- the same
+    Dijkstra + elevation-cost machinery construction.py's _path_between
+    uses for constructed roads/trade routes, inlined here rather than
+    imported (construction.py imports FROM worldgen.py already; the
+    reverse would be circular). Used to lay village/settlement roads that
+    actually bend around mountains and rivers instead of cutting a straight
+    line through them, the same as every other road in the game already
+    does once it's built by hand. Falls back to the straight two-point
+    segment if pathfinding somehow fails, same fallback shape
+    _path_between uses."""
+    if a == b:
+        return [a]
+    ay, by = a[1], b[1]
+    y0, y1 = sorted((ay, by))
+    ry0 = max(0, y0 - _ROAD_BBOX_PAD)
+    ry1 = min(world.h, y1 + _ROAD_BBOX_PAD + 1)
+    xs = wrap.bbox_span_wrap(a[0], b[0], world.w, _ROAD_BBOX_PAD)
+    cellset = {(x, y) for y in range(ry0, ry1) for x in xs
+               if world.owner[y][x] != OCEAN}
+    path = _path_dijkstra(cellset,
+                          lambda c: _elev_cost(world, world.base_cost, c, faction_idx),
+                          a, b, world.w)
+    return path or [a, b]
+
+
 def _init_village_fields(world):
     """Shared water-distance field + occupancy hash for village placement,
     cached on `world` — same "compute once, reuse per-claim later" pattern
@@ -1153,9 +1184,20 @@ def _place_villages_for_region(world, rng, region, fixed_n=None):
     points += [world.settlements[sid].pos for sid in region.meta_settlements]
     is_settlement = [False] * len(vids) + [True] * len(region.meta_settlements)
     edges = _mst_edges(points)
-    world.roads_by_region[region.id] = [
-        (points[a], points[b], "stone" if (is_settlement[a] and is_settlement[b]) else "dirt")
-        for a, b in edges]
+    # Which pairs connect is still decided by cheap Euclidean MST (topology
+    # only) -- but each chosen edge is now walked as a real terrain-aware
+    # path (_local_road_path) instead of stored as a single straight (a, b)
+    # segment, so a road actually bends around a mountain or river the same
+    # way the goods travelling it already do (see resources.py's
+    # run_local_logistics/_local_path, which route around obstacles
+    # regardless of what the drawn road looked like).
+    segs = []
+    for a, b in edges:
+        pa, pb = points[a], points[b]
+        tier = "stone" if (is_settlement[a] and is_settlement[b]) else "dirt"
+        path = _local_road_path(world, pa, pb, faction_idx=region.faction_idx)
+        segs.extend((p1, p2, tier) for p1, p2 in zip(path, path[1:]))
+    world.roads_by_region[region.id] = segs
 
 
 def _generate_villages(world, rng):
