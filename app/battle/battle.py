@@ -126,6 +126,16 @@ class Battle:
         soft anti-dogpile term). Snapshot from the last update() tick."""
         return self._threat.get(enemy, 0)
 
+    # Default formation, front-to-back, before the player drags anything
+    # during planning: Archers hang back where their range still reaches
+    # the enemy without them taking the first charge, Swordsmen anchor the
+    # line that actually meets it, everything else (Cavalry, species
+    # specials) starts in the middle. Just the starting line, not a
+    # restriction -- planning can drag any unit anywhere in its own half.
+    # Higher tier -> higher `col` below -> physically closer to the
+    # midline/enemy, i.e. further forward.
+    _DEPLOY_TIER = {"archer": 0, "infantry": 2}
+
     def deploy(self, army, composition, side, strength_mult=1.0, with_commander=True):
         """Place an army in a grid along one side from a composition dict
         ``{unit_type: count}``. ``strength_mult`` scales every spawned
@@ -134,7 +144,9 @@ class Battle:
         army.side = side
         x0 = self.width * 0.12 if side == 0 else self.width * 0.88
         entries = []
-        for type_key, count in composition.items():
+        ordered = sorted(composition.items(),
+                         key=lambda kv: self._DEPLOY_TIER.get(kv[0], 1))
+        for type_key, count in ordered:
             entries.extend([type_key] * count)
 
         rows = max(1, math.ceil(math.sqrt(len(entries))))

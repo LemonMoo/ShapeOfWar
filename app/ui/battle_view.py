@@ -16,6 +16,8 @@ from app.ui import theme
 from app.ui import gl_battle
 from app.battle import orders
 from app.battle.shapes import draw_shape
+from app.battle.unit_types import UNIT_TYPES
+from app.world.lexicon import SPECIES
 
 _FRAME_MS = 16              # ~60 fps
 _DT = 1 / 60                # fixed simulation step (seconds)
@@ -54,6 +56,8 @@ class BattleView(tk.Frame):
         self._formation_line = None    # (x0, y0, x1, y1) while right-dragging
         self._formation_slots = []     # [(unit, x, y), ...] previewed placement
         self._planning_keys_bound = False
+        self._select_types = []        # this battle's select-button/hotkey order
+        self._bound_select_keys = []   # exactly what _bind_planning_keys bound
 
         # The battlefield surface. Preferred path is the GPU renderer
         # (app/ui/gl_battle.py) -- it draws the whole field in one instanced
@@ -175,19 +179,19 @@ class BattleView(tk.Frame):
                                    relief="flat", font=theme.FONT)
         self.speed_btn.pack(side="left", padx=2)
 
-        # Per-type quick-select (planning only) — mirror the 1/2/3 hotkeys.
+        # Per-type quick-select: click a unit, rubber-band a box over several,
+        # or use one of these buttons (or its hotkey) to grab every living
+        # unit of that type at once -- the base three plus, dynamically, this
+        # army's own species specials (see _build_select_buttons, called from
+        # set_battle once the battle's actual species is known). Each button
+        # carries a live "selected / alive" count so it also doubles as a
+        # roster readout, not just a selector.
+        tk.Label(p, text="Select (click a unit, drag a box, or a button below):",
+                bg=theme.PANEL, fg=theme.MUTED, font=("Segoe UI", 9)
+                ).pack(anchor="w", padx=14, pady=(0, 2))
         self.select_frame = tk.Frame(p, bg=theme.PANEL)
         self.select_frame.pack(fill="x", padx=14, pady=(0, 4))
-        tk.Label(self.select_frame, text="Select:", bg=theme.PANEL, fg=theme.MUTED,
-                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 4))
-        for label, key, hot in (("Swordsmen", "infantry", "1"),
-                                ("Cavalry", "cavalry", "2"),
-                                ("Archers", "archer", "3"),
-                                ("Assassins", "assassin", "4")):
-            tk.Button(self.select_frame, text=f"{label} ({hot})",
-                      command=lambda k=key: self._select_type(k),
-                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                      relief="flat", font=("Segoe UI", 8)).pack(side="left", padx=1)
+        self._select_buttons = {}    # type_key -> (button, base label)
 
         # --- orders (app/battle/orders.py) ---------------------------------
         # Available during the fight, not just planning: an order you cannot
@@ -294,18 +298,22 @@ class BattleView(tk.Frame):
         self._add_log("Renderer: GPU (accelerated)" if self.using_gpu
                       else "Renderer: canvas (no GPU context)")
 
+        self._build_select_buttons()
+
         self.planning = True
         self.selected_units = set()
         self._drag_mode = None
         self._marquee = None
         self._formation_line = None
         self._formation_slots = []
-        self.plan_hint.config(text="Planning phase — left-drag your units into "
-                              "position, or box-select several. Keys 1/2/3 (or "
-                              "the buttons) select all Swordsmen / Cavalry / "
-                              "Archers. Right-drag a line to form the selection "
-                              "up along it. Space (or \"Deploy Army\") starts "
-                              "the fight.")
+        hotkeys = "/".join(str(i + 1) for i in range(len(self._select_types)))
+        self.plan_hint.config(text="Planning phase — click a unit to select it, "
+                              "left-drag your units into position, or drag a box "
+                              f"over several. Keys {hotkeys} (or the buttons "
+                              "above) select every living unit of that type at "
+                              "once. Right-drag a line to form the selection up "
+                              "along it. Space (or \"Deploy Army\") starts the "
+                              "fight.")
         self._bind_planning_keys()
         self._update_toggle_label()
         self.render()
@@ -320,10 +328,54 @@ class BattleView(tk.Frame):
         # Keys stay bound through the fight -- selection and order hotkeys are
         # exactly what the live phase needs. They come off when the battle ends
         # (_arm_continue), so the battle-over screen isn't taking order presses.
-        self.plan_hint.config(text="Select troops (drag a box, or 1/2/3) and "
-                                   "give orders. Space pauses so you can think.")
+        hotkeys = "/".join(str(i + 1) for i in range(len(self._select_types)))
+        self.plan_hint.config(text="Click a unit, drag a box, or a button above "
+                                   f"({hotkeys}) to select troops, then give "
+                                   "orders below. Space pauses so you can think.")
         self._refresh_order_buttons()
         self._update_toggle_label()
+
+    # --- per-type select buttons: base three plus this army's own species
+    # specials (see app.world.lexicon.SPECIES) -- built fresh per battle since
+    # which specials exist (and how many: Goblins alone field two) depends on
+    # which species army 0 actually is. ------------------------------------
+    _BASE_SELECT_TYPES = ("infantry", "cavalry", "archer")
+
+    def _build_select_buttons(self):
+        for w in self.select_frame.winfo_children():
+            w.destroy()
+        self._select_buttons = {}
+
+        species = None
+        if self.battle and self.battle.armies:
+            species = getattr(self.battle.armies[0], "species", None)
+        specials = [spec["unit"] for spec in SPECIES.get(species, {}).get("specials", ())]
+        self._select_types = list(self._BASE_SELECT_TYPES) + specials
+
+        for i, type_key in enumerate(self._select_types):
+            label = UNIT_TYPES.get(type_key, {}).get("name", type_key.capitalize())
+            hot = str(i + 1)
+            btn = tk.Button(self.select_frame, text=f"{label} ({hot})",
+                            command=lambda k=type_key: self._select_type(k),
+                            bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                            relief="flat", font=("Segoe UI", 8))
+            btn.pack(side="left", padx=1)
+            self._select_buttons[type_key] = (btn, label)
+        self._update_select_counts()
+
+    def _update_select_counts(self):
+        """Refresh each select button's '(selected/alive)' count -- live, not
+        just at plan time, so a button also reads as a roster count that
+        thins out as the fight actually goes (see render()'s call to this)."""
+        if not hasattr(self, "_select_buttons"):
+            return
+        units = self._plannable_units()
+        for type_key, (btn, label) in self._select_buttons.items():
+            alive = [u for u in units if u.type_key == type_key]
+            selected = sum(1 for u in alive if u in self.selected_units)
+            hot = str(self._select_types.index(type_key) + 1)
+            count = f"{selected}/{len(alive)}" if selected else str(len(alive))
+            btn.config(text=f"{label} ({hot}) · {count}")
 
     # --- key bindings: per-type select, order hotkeys, Space ---------------
     # Bound for the whole battle, not just planning: orders are given during
@@ -342,10 +394,10 @@ class BattleView(tk.Frame):
         if self._planning_keys_bound:
             return
         self._planning_keys_bound = True
-        self.bind_all("<Key-1>", lambda e: self._select_type("infantry"), add="+")
-        self.bind_all("<Key-2>", lambda e: self._select_type("cavalry"), add="+")
-        self.bind_all("<Key-3>", lambda e: self._select_type("archer"), add="+")
-        self.bind_all("<Key-4>", lambda e: self._select_type("assassin"), add="+")
+        self._bound_select_keys = list(self._select_types)
+        for i, type_key in enumerate(self._select_types):
+            self.bind_all(f"<Key-{i + 1}>",
+                          lambda e, k=type_key: self._select_type(k), add="+")
         self.bind_all("<space>", self._on_space_deploy, add="+")
         for key, (kind, value) in self._ORDER_KEYS.items():
             self.bind_all(f"<Key-{key}>",
@@ -356,8 +408,9 @@ class BattleView(tk.Frame):
         if not self._planning_keys_bound:
             return
         self._planning_keys_bound = False
-        for seq in ("<Key-1>", "<Key-2>", "<Key-3>", "<Key-4>", "<space>"):
-            self.unbind_all(seq)
+        for i in range(len(getattr(self, "_bound_select_keys", ()))):
+            self.unbind_all(f"<Key-{i + 1}>")
+        self.unbind_all("<space>")
         for key in self._ORDER_KEYS:
             self.unbind_all(f"<Key-{key}>")
 
@@ -778,6 +831,10 @@ class BattleView(tk.Frame):
 
     # --- rendering ---------------------------------------------------------
     def render(self):
+        # Select-button counts are UI chrome, not battlefield geometry -- kept
+        # live regardless of which renderer draws the field below, so they
+        # keep thinning out as units actually die during a running fight.
+        self._update_select_counts()
         # GPU path: the whole field is one instanced draw call, so there is no
         # per-item work to do here at all. Everything below is the canvas
         # fallback, kept intact and still correct.
