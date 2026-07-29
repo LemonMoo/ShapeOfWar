@@ -806,6 +806,28 @@ def _init_settlement_proximity_fields(world, rng):
     world._settle_occupied = {}
 
 
+def _site_score(world, weights, x, y, coast_d, water_d, border_d, rng):
+    """One cell's placement score: weighted fertility + proximity to water/
+    coast/border + elevation + tie-break jitter. `weights` is any dict with
+    fert_w/river_w/coast_w/border_w/elev_w (missing keys score as 0) — the
+    same five-term formula shared by world-gen settlement placement,
+    world-gen village placement, the AI's post-worldgen site picker
+    (construction.py's run_settlement_ai), and the player placement-guide
+    hint, so all four score land the same way instead of drifting apart
+    into separately-tuned formulas that quietly disagree with each other."""
+    sea = world.sea_level
+    span = (1.0 - sea) or 1.0
+    elev = max(0.0, min(1.0, (world.height[y][x] - sea) / span))
+    prox = lambda d, reach: math.exp(-d / reach)   # 1 at the feature, ->0 away
+    w = weights
+    return (w.get("fert_w", 0.0) * world.fertility[y][x]
+            + w.get("river_w", 0.0) * prox(water_d[y][x], 4.0)
+            + w.get("coast_w", 0.0) * prox(coast_d[y][x], 4.0)
+            + w.get("border_w", 0.0) * prox(border_d[y][x], 5.0)
+            + w.get("elev_w", 0.0) * elev
+            + 0.1 * rng.random())         # tie-break jitter
+
+
 def _place_settlements_for_faction(world, rng, fac_idx, cells, namer, fixed_counts=None):
     """Score and place cities/castles/towns for one faction's cells, using
     the shared proximity fields/occupancy hash `_init_settlement_proximity_
@@ -825,12 +847,9 @@ def _place_settlements_for_faction(world, rng, fac_idx, cells, namer, fixed_coun
     claiming land was never how you got one of those for free in the first
     place."""
     from app.world.resources import seed_prosperity
-    sea = world.sea_level
-    span = (1.0 - sea) or 1.0
     coast_d = world._settle_coast_d
     water_d = world._settle_water_d
     border_d = world._settle_border_d
-    prox = lambda d, reach: math.exp(-d / reach)   # 1 at the feature, ->0 away
     species = world.factions[fac_idx].meta["species"]
 
     for kind, t in SETTLEMENT_TYPES.items():
@@ -842,13 +861,7 @@ def _place_settlements_for_faction(world, rng, fac_idx, cells, namer, fixed_coun
         for x, y in cells:
             if (x, y) in world.river_cells:
                 continue                       # don't build in the river
-            elev = max(0.0, min(1.0, (world.height[y][x] - sea) / span))
-            s = (t["fert_w"] * world.fertility[y][x]
-                 + t["river_w"] * prox(water_d[y][x], 4.0)
-                 + t["coast_w"] * prox(coast_d[y][x], 4.0)
-                 + t["border_w"] * prox(border_d[y][x], 5.0)
-                 + t["elev_w"] * elev
-                 + 0.1 * rng.random())         # tie-break jitter
+            s = _site_score(world, t, x, y, coast_d, water_d, border_d, rng)
             scored.append((s, x, y))
         scored.sort(reverse=True)
 
