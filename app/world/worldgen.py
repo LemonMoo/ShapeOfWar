@@ -1523,32 +1523,48 @@ class World:
 
 
 def _pick_continent_centers(rng, width, height):
-    """2-3 continent centers, spaced far enough apart that real open ocean
-    forms between them instead of one landmass touching every edge.
+    """2-3 continents, each a cluster of one or more elliptical blobs, spaced
+    far enough apart that real open ocean forms between them instead of one
+    landmass touching every edge. Returns a flat list of blobs —
+    (cx, cy, radius_x, radius_y, angle) — every one of which shapes the
+    height-field falloff exactly like another continent's blob would; the
+    caller doesn't need to know which blobs share a parent.
 
-    Each gets a different band of *distance from the equator* (0 = map's
-    vertical middle/warmest, 1 = pole/coldest — matches classify_climate's
-    latitude_temp = 1 - dist exactly), picked independently for a random
-    north/south side each time. That's deliberate, not just "spread them
-    across different rows": latitude_temp is symmetric around the equator,
-    so two continents merely in different halves of the map (say y=0.25 and
-    y=0.75) sit at the *same* distance from it and would get identical
-    climates. Banding by distance instead guarantees each continent lands
-    at a meaningfully different temperature.
+    Each continent gets a different band of *distance from the equator*
+    (0 = map's vertical middle/warmest, 1 = pole/coldest — matches
+    classify_climate's latitude_temp = 1 - dist exactly), picked
+    independently for a random north/south side each time. That's
+    deliberate, not just "spread them across different rows": latitude_temp
+    is symmetric around the equator, so two continents merely in different
+    halves of the map (say y=0.25 and y=0.75) sit at the *same* distance
+    from it and would get identical climates. Banding by distance instead
+    guarantees each continent lands at a meaningfully different temperature.
 
-    Each continent's footprint is an ellipse, not a circle: wide east-west
-    (sized off the map's full width, so it stays big enough that the height
-    noise can't easily bridge it to its neighbor) but compact north-south
-    (shrinking a bit as more continents need to fit), so it comfortably
-    clears the equator/pole without needing an impractically tall map."""
+    Two things used to make every continent read as the same shape no
+    matter how the coastline noise warped its edge: every continent shared
+    one fixed ellipse size, and that ellipse was always wide east-west with
+    no rotation. Both are now randomized per continent — independent x/y
+    scale (squat and round through long and thin) and a full-range rotation
+    angle, so the long axis can point anywhere. On top of that, each
+    continent gets 0-3 extra "lobe" blobs clustered around its primary body
+    — their own size, distance and heading — which is what actually
+    produces forks, trailing arms and lopsided coastlines instead of a
+    single ellipse with a rippled edge. The primary blob's own size still
+    sets the placement/separation math and is sized off the map's full
+    width, so a continent stays big enough that the height noise can't
+    easily bridge it to its neighbor; lobes cluster close enough to their
+    parent that they don't upset that spacing in practice, and the existing
+    _has_multiple_landmasses retry catches the rare seed where they do."""
     n = rng.randint(2, 3)
-    radius_x = width * 0.16
-    radius_y = height * 0.30 / n
-    margin_x = min(radius_x * 1.15, width * 0.35)
-    margin_y = radius_y * 1.1
+    base_radius_x = width * 0.16
+    base_radius_y = height * 0.30 / n
     min_norm_dist = 2.6   # separation required, in radius_x/radius_y-normalized units
 
-    centers = []
+    placed = []   # (x, y, radius_x, radius_y) of each continent's PRIMARY
+                  # blob only -- what the spacing/separation check uses
+    blobs = []    # every blob (primary + lobes) that actually shapes the
+                  # terrain -- what generate_world's falloff loop consumes
+
     for band in range(n):
         d_lo = band / n
         d_hi = (band + 1) / n
@@ -1558,6 +1574,12 @@ def _pick_continent_centers(rng, width, height):
         # crowding each other (min_norm_dist below still catches genuine
         # collisions either way, but this cuts down how often it has to).
         side = 1.0 if band % 2 == 0 else -1.0
+
+        radius_x = base_radius_x * rng.uniform(0.70, 1.35)
+        radius_y = base_radius_y * rng.uniform(0.70, 1.35)
+        margin_x = min(radius_x * 1.15, width * 0.35)
+        margin_y = radius_y * 1.1
+
         for _ in range(500):
             dist = rng.uniform(d_lo, d_hi)          # 0=equator, 1=pole
             y = (0.5 + side * dist / 2.0) * height
@@ -1568,17 +1590,34 @@ def _pick_continent_centers(rng, width, height):
             # actually touch through it): this still stops two centers
             # from being placed "close" purely because the seam happens to
             # be the short way around between them, which a flat (x-ox)
-            # distance alone wouldn't catch.
-            if all((wrap.dx_wrap(ox, x, width) / radius_x) ** 2
-                  + ((y - oy) / radius_y) ** 2 >= min_norm_dist ** 2
-                  for ox, oy in centers):
-                centers.append((x, y))
+            # distance alone wouldn't catch. Averaged against each already-
+            # placed continent's OWN radius now that sizes vary, so a big
+            # continent and a small one still get a sensible amount of
+            # space between them either way round.
+            if all((wrap.dx_wrap(ox, x, width) / ((radius_x + orx) / 2)) ** 2
+                  + ((y - oy) / ((radius_y + ory) / 2)) ** 2 >= min_norm_dist ** 2
+                  for ox, oy, orx, ory in placed):
                 break
         else:
             y = (0.5 + ((d_lo + d_hi) / 2.0) / 2.0) * height
-            centers.append((rng.uniform(margin_x, width - margin_x),
-                           max(margin_y, min(height - margin_y, y))))
-    return centers, radius_x, radius_y
+            y = max(margin_y, min(height - margin_y, y))
+            x = rng.uniform(margin_x, width - margin_x)
+        placed.append((x, y, radius_x, radius_y))
+
+        angle = rng.uniform(0.0, math.pi)   # ellipse is symmetric past pi
+        blobs.append((x, y, radius_x, radius_y, angle))
+
+        for _ in range(rng.randint(0, 3)):
+            lobe_dir = rng.uniform(0.0, 2 * math.pi)
+            lobe_dist = rng.uniform(0.35, 0.95)
+            lx = x + math.cos(lobe_dir) * radius_x * lobe_dist
+            ly = y + math.sin(lobe_dir) * radius_y * lobe_dist
+            lobe_rx = radius_x * rng.uniform(0.35, 0.75)
+            lobe_ry = radius_y * rng.uniform(0.35, 0.75)
+            lobe_angle = rng.uniform(0.0, math.pi)
+            blobs.append((lx, ly, lobe_rx, lobe_ry, lobe_angle))
+
+    return blobs
 
 
 def _has_multiple_landmasses(land, width, height, land_cells):
@@ -1711,9 +1750,7 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     #    _pick_continent_centers depends on that) -- only its outline warps.
     octaves = [(0.028, 1.0), (0.060, 0.5), (0.130, 0.25), (0.260, 0.07)]
     height_octaves = _periodic_octaves(width, octaves)
-    centers, radius_x, radius_y = _pick_continent_centers(rng, width, height)
-    inv_rx2 = 1.0 / (radius_x * radius_x)
-    inv_ry2 = 1.0 / (radius_y * radius_y)
+    blobs = _pick_continent_centers(rng, width, height)
 
     # Warp field: two octaves each for x and y, at a wavelength comparable to
     # the coarsest height octave so it bends whole stretches of coastline
@@ -1735,18 +1772,27 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     v = noise.fbm_grid(width, height, nseed, height_octaves,
                        warp_x=warp_x, warp_y=warp_y)
 
-    # Falloff from the nearest continent center -- wrap-aware (see the note
-    # this used to carry: two centers near opposite edges of the map must
-    # compute comparable "distance to land" through the seam, or ocean depth
-    # shading shows a visible discontinuity at x=0/width right where the
-    # wrap makes it a real seam rather than a map edge nobody sees both
-    # sides of at once).
+    # Falloff from the nearest blob (a continent's primary body or one of its
+    # lobes -- see _pick_continent_centers) -- wrap-aware (see the note this
+    # used to carry: two blobs near opposite edges of the map must compute
+    # comparable "distance to land" through the seam, or ocean depth shading
+    # shows a visible discontinuity at x=0/width right where the wrap makes
+    # it a real seam rather than a map edge nobody sees both sides of at
+    # once). Each blob now carries its own size AND rotation, so the wrap-
+    # aware x/y deltas are rotated into the blob's own local frame before
+    # being weighted by its (possibly very different from its neighbors')
+    # radii -- previously every blob shared one axis-aligned ellipse, which
+    # is exactly what made every continent read as the same shape.
     xs = np.arange(width, dtype=np.float64)
     ys = np.arange(height, dtype=np.float64).reshape(-1, 1)
     best_d2 = None
-    for ccx, ccy in centers:
-        dx = np.abs(((xs - ccx + width / 2) % width) - width / 2)
-        d2 = dx * dx * inv_rx2 + (ys - ccy) ** 2 * inv_ry2
+    for ccx, ccy, brx, bry, bangle in blobs:
+        ddx = ((xs - ccx + width / 2) % width) - width / 2
+        ddy = ys - ccy
+        ca, sa = math.cos(bangle), math.sin(bangle)
+        lx = ddx * ca + ddy * sa
+        ly = -ddx * sa + ddy * ca
+        d2 = lx * lx / (brx * brx) + ly * ly / (bry * bry)
         best_d2 = d2 if best_d2 is None else np.minimum(best_d2, d2)
     # Softened from a flat 0.85x: at that strength the falloff so dominated
     # the region right around a continent's nominal edge that the (now
