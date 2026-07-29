@@ -13,9 +13,10 @@ run_settlement_ai, wired into the turn loop alongside advance_projects.
 import math
 import random
 
-from app.world.worldgen import (OCEAN, Settlement,
+from app.world.worldgen import (OCEAN, Settlement, SETTLEMENT_TYPES,
                                 SETTLEMENT_TAX_INCOME, _roll_population, _path_dijkstra,
-                                _elev_cost, _SEA_COAST_REACH)
+                                _elev_cost, _SEA_COAST_REACH, _site_score,
+                                _too_close_any, _mark_occupied_both)
 from app.world.lexicon import make_settlement_namer
 from app.world.resources import (seed_prosperity, _SETTLEMENT_STORAGE_RESOURCES,
                                  settlement_storage_capacity)
@@ -625,6 +626,7 @@ def _finish_settlement(world, project):
                     project.pos, project.faction_idx, project.region_id, tax_income,
                     population, adults, children, prosperity, max_population)
     world.settlements.append(st)
+    _mark_occupied_both(world, *project.pos)
     faction.meta.setdefault("settlements", []).append(st.id)
     if 0 <= project.region_id < len(world.regions):
         region = world.regions[project.region_id]
@@ -709,19 +711,42 @@ def _ai_has_active_construction(world, fac_idx):
 
 
 # --- AI settlement construction ----------------------------------------------
-def _region_settlement_pos(world, region):
-    """A free cell in `region` to build on: not a river, not already a
-    settlement, village, or under construction — a region can easily have
-    villages but no settlement yet (the normal outcome of a wildland
-    claim), so this is exactly the kind of region run_settlement_ai targets
-    and villages must be excluded here too, not just other settlements.
-    None if nothing's available."""
+def _region_settlement_pos(world, region, kind):
+    """The best-scoring free cell in `region` for `kind`, using the same
+    _site_score formula world-gen placement uses (worldgen.py) instead of
+    a blind random.choice -- an AI City now actually seeks fertile/
+    riverside/coastal land, a Castle actually seeks the frontier and high
+    ground, the same as a freshly generated world's own settlements do.
+
+    Excludes rivers, and anything already a settlement, village, or under
+    construction — a region can easily have villages but no settlement yet
+    (the normal outcome of a wildland claim), so this is exactly the kind
+    of region run_settlement_ai targets and villages must be excluded here
+    too, not just other settlements. Falls back to the best-scoring cell
+    even if nothing clears the usual minimum spacing (worldgen.py's
+    _too_close_any, checked against world-gen's own occupancy hashes plus
+    every settlement finished since — see _finish_settlement's
+    _mark_occupied_both call) rather than refusing to build at all just
+    because the region is a tight fit. None only if the region has no
+    free land whatsoever."""
     occupied = {st.pos for st in world.settlements}
     occupied.update(p.pos for p in world.settlement_projects)
     occupied.update(world.villages[vid].pos for vid in region.villages)
     candidates = [c for c in region.cells
                  if c not in world.river_cells and c not in occupied]
-    return random.choice(candidates) if candidates else None
+    if not candidates:
+        return None
+    coast_d = world._settle_coast_d
+    water_d = world._settle_water_d
+    border_d = world._settle_border_d
+    weights = SETTLEMENT_TYPES[kind]
+    scored = sorted(
+        ((_site_score(world, weights, x, y, coast_d, water_d, border_d, random), x, y)
+         for x, y in candidates), reverse=True)
+    for s, x, y in scored:
+        if not _too_close_any(world, x, y, weights["spacing"]):
+            return (x, y)
+    return scored[0][1], scored[0][2]
 
 
 def run_settlement_ai(world):
@@ -736,9 +761,10 @@ def run_settlement_ai(world):
     overbuild safeguard, not just "no second settlement project" -- and
     targets a region it owns that has no settlements in it yet, reaching
     for the priciest/most-capable kind it can currently afford (City,
-    then Castle, then Town). Deliberately simple: no site scoring, no
-    catching up a faction that's fallen behind faster than one project at
-    a time."""
+    then Castle, then Town), scored per-kind against that region's own
+    land via _region_settlement_pos rather than one random cell for
+    whichever kind happened to be affordable. No catching up a faction
+    that's fallen behind faster than one project at a time."""
     for fac_idx, nation in enumerate(world.factions):
         if fac_idx == world.player_faction_idx or is_eliminated(nation):
             continue
@@ -749,13 +775,13 @@ def run_settlement_ai(world):
         if not empty_regions:
             continue
         region = random.choice(empty_regions)
-        pos = _region_settlement_pos(world, region)
-        if pos is None:
-            continue
         for kind in ("city", "castle", "town"):
-            if can_afford(nation, SETTLEMENT_BUILD_COST[kind], world):
+            if not can_afford(nation, SETTLEMENT_BUILD_COST[kind], world):
+                continue
+            pos = _region_settlement_pos(world, region, kind)
+            if pos is not None:
                 start_settlement(world, nation, pos, kind)
-                break
+            break
 
 
 # --- AI storage construction ---------------------------------------------

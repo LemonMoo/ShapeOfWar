@@ -457,6 +457,7 @@ class MapView(tk.Frame):
         # Castle placement: when not None, holds the (own-territory) region
         # the player is about to click a build site within.
         self.building_mode = None
+        self._placement_hint_cells = None   # see _score_placement_hint
 
         # Post-battle border flash (see flash_region()): "success" (gold) for
         # a region gained, "failure" (red) for a failed attack.
@@ -568,6 +569,7 @@ class MapView(tk.Frame):
         self._attack_enemy = None
         self._attack_frontier = []
         self.building_mode = None
+        self._placement_hint_cells = None
         self._flash_region = None
         if self._flash_id is not None:
             self.after_cancel(self._flash_id)
@@ -4204,6 +4206,7 @@ class MapView(tk.Frame):
     # --- settlement placement -------------------------------------------------
     def _begin_settlement_placement(self, region, kind):
         self.building_mode = (region, kind)
+        self._placement_hint_cells = self._score_placement_hint(region, kind)
         cost = construction.SETTLEMENT_BUILD_COST[kind]
         turns = construction.SETTLEMENT_BUILD_TURNS[kind]
         self.info.config(fg=theme.MUTED,
@@ -4218,8 +4221,41 @@ class MapView(tk.Frame):
                   relief="flat", font=theme.FONT).pack(fill="x", pady=2)
         self.render()
 
+    def _score_placement_hint(self, region, kind):
+        """The region's own best-scoring cells for `kind`, by the same
+        _site_score formula world-gen and the AI use (worldgen.py) --
+        purely advisory (see _draw_placement_hint): the player can still
+        click anywhere in the region, this just marks where a City/Castle/
+        Town would naturally want to sit. Computed once when placement is
+        armed, not per frame -- a region can be a few hundred to several
+        thousand cells, and the score doesn't change while the mode is up.
+        Capped to the top decile so the hint reads as 'the good spots',
+        not a full-region heatmap."""
+        from app.world.worldgen import SETTLEMENT_TYPES, _site_score
+        import random as _random
+        wd = self.world
+        occupied = {st.pos for st in wd.settlements}
+        occupied.update(p.pos for p in wd.settlement_projects)
+        occupied.update(wd.villages[vid].pos for vid in region.villages)
+        coast_d = getattr(wd, "_settle_coast_d", None)
+        water_d = getattr(wd, "_settle_water_d", None)
+        border_d = getattr(wd, "_settle_border_d", None)
+        if coast_d is None or water_d is None or border_d is None:
+            return []   # pre-Phase-2 save with no cached proximity fields yet
+        weights = SETTLEMENT_TYPES[kind]
+        rng = _random.Random(0)   # fixed seed -- a stable hint, not a new
+                                   # roll of the tie-break jitter every frame
+        scored = sorted(
+            ((_site_score(wd, weights, x, y, coast_d, water_d, border_d, rng), x, y)
+             for x, y in region.cells
+             if (x, y) not in wd.river_cells and (x, y) not in occupied),
+            reverse=True)
+        top_n = max(1, len(scored) // 10)
+        return [(x, y) for _, x, y in scored[:top_n]]
+
     def _cancel_settlement_placement(self):
         self.building_mode = None
+        self._placement_hint_cells = None
         if self.selected_region is not None:
             self._show_region(self.selected_region)
         self.render()
@@ -4446,6 +4482,7 @@ class MapView(tk.Frame):
                 player = self._player_faction()
                 msg = construction.start_settlement(wd, player, (gx, gy), kind)
                 self.building_mode = None
+                self._placement_hint_cells = None
                 self._base_key = None
                 self.show_bottom_message(msg)
                 if self.selected_region is region:
@@ -4862,6 +4899,7 @@ class MapView(tk.Frame):
             if sbx1 > sbx0:
                 self._draw_terrain_symbols(c, screen, sbx0, by0, sbx1, by1)
         self._draw_construction(c, screen)
+        self._draw_placement_hint(c, screen)
         self._draw_settlements(c, screen)
         self._draw_villages(c, screen)
         self._draw_labels(c, screen)
@@ -5380,6 +5418,23 @@ class MapView(tk.Frame):
                          fill="#000000", font=("Segoe UI", 7))
             c.create_text(x, y + r + 7, text=label,
                          fill="#f2e9c9", font=("Segoe UI", 7))
+
+    def _draw_placement_hint(self, c, screen):
+        """While a settlement placement is armed (self.building_mode), mark
+        the region's own best-scoring cells (see _score_placement_hint) with
+        a small gold dot -- purely advisory, same land-scoring formula
+        world-gen and the AI use, so the player can see at a glance where a
+        City/Castle/Town would naturally want to sit without being made to
+        build there. Clicking anywhere else in the region still works."""
+        if self.building_mode is None or not self._placement_hint_cells:
+            return
+        for gx, gy in self._placement_hint_cells:
+            x, y = screen(gx + 0.5, gy + 0.5)
+            if not self._visible_point(x, y):
+                continue
+            r = 2.5
+            c.create_oval(x - r, y - r, x + r, y + r,
+                         fill="#ffec78", outline="")
 
     def _river_span(self, ax, ay, bx, by):
         """(t0, t1) fractional span along the straight segment (ax,ay)->
