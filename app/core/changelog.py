@@ -20,6 +20,14 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 45,
+        "title": "Play the Whole Game From the Globe",
+        "items": [
+            "THE GLOBE IS A REAL MAP NOW, NOT JUST A VIEW. Clicking a city, a village, or your own commander used to just select whatever region was underneath it -- there was no way to open a settlement's panel or give a commander an order without switching back to the flat map. All of that works from the globe now: select settlements and villages directly, select and move your commander (including a right-click shortcut to send them somewhere), pick an attack target, and place a new City/Town/Castle -- the same gold-dot hint the flat map shows for where the land wants one now shows on the globe too",
+            "FIXED: fog of war on the globe was hazing over territory you'd already fully revealed, not just the genuinely unexplored parts -- a filtering issue that blurred the hidden/revealed boundary outward from orbit. Your own land (and anywhere else you've actually seen) now reads as fully clear; only real fog of war shows clouds",
+        ],
+    },
+    {
         "version": 44,
         "title": "Settlements Read the Map Now",
         "items": [
