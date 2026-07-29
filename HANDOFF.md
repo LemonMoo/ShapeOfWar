@@ -3,23 +3,27 @@
 Python/Tkinter desktop 4X strategy game. Single developer, turn-based, procedurally
 generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 
-**Last release: v0.2.6** ("Drawn by the Graphics Card"), commit `342cc50`.
+**Last release: v0.3.0** ("A World You Can Turn"), commit `fc0423f`.
 
 ---
 
-## 0. Read this first — unreleased work
+## 0. Read this first
 
-Everything below is committed but **not released**: v0.2.6 predates all of it.
+v0.3.0 shipped the globe (§2), the end-turn movement animation (§7), species
+signature units (§4.1) and the Balance Lab (§5). Everything is released and the
+working tree is clean.
 
-- **The 3D globe** (`app/ui/gl_globe.py` + wiring in `map_view.py`). Terrain,
-  fog, roads, trade routes, caravans, names, alert badges, three working zoom
-  levels. See §2.
-- **End-turn movement animation** — caravans, shipments, commanders and ships
-  slide along the route they actually took instead of teleporting. View-only;
-  nothing in `app/world` knows it exists. See §7.
-- **Species signature units** — one or two per species, on top of the shared
-  Swordsman/Archer/Cavalry core. Working and legible, **not balanced**. See §4.1;
-  read it before touching the numbers.
+**The one thing to know before touching anything:** the signature units are
+working and legible but **not balanced**, and the release notes say so out loud.
+Read §4.1 before moving any number — `dev/balance_lab.py` is the tool for it, and
+the shares are the knob, not the stats.
+
+Release flow, for the next one: bump `APP_VERSION` in `build.bat`, add a
+`CHANGELOG_ENTRIES` entry at the top of `app/core/changelog.py` (never renumber
+the older `version:` integers — that re-flags dismissed entries as NEW for
+existing players), write `release_notes_<x.y.z>.md`, run `build.bat`, then
+`gh release create v<x.y.z> dist/ShapesOfWar.exe --repo LemonMoo/ShapeOfWar
+--title "..." --notes-file release_notes_<x.y.z>.md`.
 
 ---
 
