@@ -1217,11 +1217,11 @@ def _expansion_article():
             "strength."
         ),
         (
-            "Win: the region transfers, and gets settled fresh — "
-            f"{expansion.WILDLAND_VILLAGE_MIN}–"
-            f"{expansion.WILDLAND_VILLAGE_MAX} Villages scaled by area, "
-            "but NEVER a free City/Town/Castle; a real Settlement still "
-            "has to be built there like any other (see Construction)."
+            "Win: the region transfers, and gets settled fresh — at least "
+            f"{expansion.WILDLAND_VILLAGE_MIN} Village, more wherever the "
+            "land can actually support them, but NEVER a free City/Town/"
+            "Castle; a real Settlement still has to be built there like "
+            "any other (see Construction)."
         ),
         (
             "Loss: no refund. The garrison digs in — its strength rating "

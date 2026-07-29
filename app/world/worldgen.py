@@ -64,6 +64,17 @@ SETTLEMENT_TYPES = {
 # `fixed_counts` param and its two call sites).
 STARTING_SETTLEMENT_COUNTS = {"city": 1, "town": 2, "castle": 0}
 
+# Satellite clustering: a Town is biased toward land near an already-placed
+# City/Castle from the SAME _place_settlements_for_faction call (never a
+# different faction's), so towns read as organic growth around an anchor
+# instead of landing wherever fert/river/coast alone scores best with no
+# regard for anything else already there. Cities and Castles get no such
+# bias -- a Castle in particular is a frontier fort, not something that
+# should be pulled toward the capital.
+SETTLEMENT_CLUSTER_ANCHORS = {"town": ("city", "castle")}
+SETTLEMENT_CLUSTER_W = {"town": 0.6}
+SETTLEMENT_CLUSTER_REACH = {"town": 10.0}
+
 # Gold tax revenue per settlement kind per turn — same "rolled once at
 # placement" treatment as upkeep, just positive instead of negative.
 SETTLEMENT_TAX_INCOME = {
@@ -851,17 +862,30 @@ def _place_settlements_for_faction(world, rng, fac_idx, cells, namer, fixed_coun
     water_d = world._settle_water_d
     border_d = world._settle_border_d
     species = world.factions[fac_idx].meta["species"]
+    # Anchor positions placed so far in THIS call, by kind -- what a later
+    # kind's cluster bias (see SETTLEMENT_CLUSTER_ANCHORS) measures against.
+    # Local to this call, not world.settlements, so one faction's towns never
+    # cluster around a DIFFERENT faction's city.
+    placed_by_kind = defaultdict(list)
 
     for kind, t in SETTLEMENT_TYPES.items():
         if fixed_counts is not None and kind in fixed_counts:
             count = fixed_counts[kind]
         else:
             count = max(t["min"], min(t["max"], len(cells) // t["per_cells"]))
+        anchor_kinds = SETTLEMENT_CLUSTER_ANCHORS.get(kind)
+        anchors = ([pos for ak in anchor_kinds for pos in placed_by_kind[ak]]
+                  if anchor_kinds else [])
+        cluster_w = SETTLEMENT_CLUSTER_W.get(kind, 0.0)
+        cluster_reach = SETTLEMENT_CLUSTER_REACH.get(kind, 8.0)
         scored = []
         for x, y in cells:
             if (x, y) in world.river_cells:
                 continue                       # don't build in the river
             s = _site_score(world, t, x, y, coast_d, water_d, border_d, rng)
+            if anchors:
+                d = min(wrap.dist_wrap((x, y), a, world.w) for a in anchors)
+                s += cluster_w * math.exp(-d / cluster_reach)
             scored.append((s, x, y))
         scored.sort(reverse=True)
 
@@ -883,6 +907,7 @@ def _place_settlements_for_faction(world, rng, fac_idx, cells, namer, fixed_coun
             world.factions[fac_idx].meta["settlements"].append(st.id)
             if 0 <= region_id < len(world.regions):
                 world.regions[region_id].meta_settlements.append(st.id)
+            placed_by_kind[kind].append((x, y))
             placed += 1
 
 
@@ -937,19 +962,39 @@ def _generate_settlements(world, rng):
     _recompute_settle_proximity_all(world)
 
 
-# Village generation. Count scales with region size: from ~3 villages for a
-# small region in a small country up to ~50 for a large region in a huge one.
-_VILLAGE_CELLS_PER = 22   # ~cells per village before min/max clamping
-_VILLAGE_MIN = 3
-_VILLAGE_MAX = 50
-_VILLAGE_FERT_W = 1.0
-_VILLAGE_WATER_W = 0.55
-_VILLAGE_WATER_REACH = 5.0
+# Village generation. No fixed count any more -- villages are placed
+# greedily wherever the land actually supports one (see
+# _place_villages_for_region), so a lush region naturally ends up with many
+# and a barren one with few or none, instead of every region being forced
+# into the same area-scaled 3-50 range regardless of what's actually there.
+VILLAGE_WEIGHTS = {"fert_w": 1.0, "river_w": 0.55}
+_VILLAGE_SPACING = 5.5          # fixed minimum spacing (cells) -- independent
+                                 # of region area now that count isn't either
+_VILLAGE_VIABILITY_MIN = 0.35   # score floor below which land isn't worth a
+                                 # village at all -- a balance constant tuned
+                                 # by eye against real generated worlds
+                                 # (dev/coastline_metrics.py-style renders),
+                                 # not derived from anything else here
+# Ties the production catchment (app/world/resources.py's
+# village_local_sample) to placement spacing, so a village's "how much land
+# is really mine" sample and "how close is too close to my neighbor" are the
+# same underlying idea rather than two numbers someone could tune apart.
+_VILLAGE_CATCHMENT_RADIUS = round(_VILLAGE_SPACING * 0.65)
+# Village-to-village AND village-to-settlement clustering -- land near an
+# already-placed village or settlement scores a bonus, so villages grow as
+# an organic cluster around a town/city and around each other instead of
+# scattering wherever fertility alone peaks. Same bounded-bonus shape as
+# SETTLEMENT_CLUSTER_W above.
+_VILLAGE_CLUSTER_W = 0.5
+_VILLAGE_CLUSTER_REACH = 8.0
 _VILLAGE_FARM_RANGE = (10, 26)   # base farm output before the fertility scalar
 _VILLAGE_FERT_PATCH = 2          # radius (cells) averaged for "land occupied"
-STARTING_VILLAGE_COUNT = 3       # every faction's starting foothold gets exactly
-                                  # this many, regardless of its region's area —
-                                  # see _place_villages_for_region's `fixed_n`
+STARTING_VILLAGE_COUNT = 3       # the starting foothold's HOME region gets at
+                                  # LEAST this many regardless of land quality
+                                  # (a floor, not an exact count -- see
+                                  # _place_villages_for_region's `fixed_n`),
+                                  # so every faction begins with a guaranteed
+                                  # small seed even on a mediocre capital site
 
 
 def _mst_edges(points):
@@ -995,24 +1040,35 @@ def _init_village_fields(world):
 
 
 def _place_villages_for_region(world, rng, region, fixed_n=None):
-    """Sprinkle farming villages within one region — 3 for a small region,
-    up to 50 for a large one — each producing farm output tied to the
-    fertility of the land it sits on, linked by an MST of simple dirt roads.
-    Reusable both for the full initial pass (one call per starting region)
-    and, mid-game, for a single newly claimed region (see
-    app/world/expansion.py).
+    """Greedily sprinkle farming villages within one region: score every
+    cell (fertility + water proximity, same _site_score formula everything
+    else uses, plus a bonus for land near an already-placed village or
+    settlement so villages grow as an organic cluster), then keep placing
+    at the best-scoring remaining cell -- subject to minimum spacing -- for
+    as long as the land actually clears _VILLAGE_VIABILITY_MIN. There is no
+    fixed count: a lush, well-watered region naturally places many, a
+    marginal one places few or none, because the land itself is what's
+    being measured now instead of a flat per-area formula. Reusable both
+    for the full initial pass (one call per starting region) and, mid-game,
+    for a single newly claimed region (see app/world/expansion.py).
 
-    `fixed_n`, when given, overrides the usual area-scaled village count —
-    used for the starting foothold (STARTING_VILLAGE_COUNT) so every
-    faction begins with the same small handful regardless of its home
-    region's actual size; ongoing expansion (fixed_n=None) keeps scaling
-    with the newly claimed region's area as before."""
+    `fixed_n`, when given, is a FLOOR, not an exact count: if viable land
+    alone would place fewer than `fixed_n`, keep taking the next-best
+    remaining cells (ignoring the viability floor, but never the spacing
+    check) until `fixed_n` is reached or land runs out. Used for the
+    starting foothold's home region (STARTING_VILLAGE_COUNT) so every
+    faction begins with a guaranteed small seed regardless of how mediocre
+    its capital's land happens to be, and for a freshly claimed wildland
+    region (expansion.WILDLAND_VILLAGE_MIN) for the same reason on a
+    smaller scale."""
     from app.world.resources import seed_prosperity
     w, h = world.w, world.h
+    coast_d = world._settle_coast_d
     water_d = world._village_water_d
+    border_d = world._settle_border_d
     # A fresh namer per region: villages are only ever viewed one region at a
-    # time, so names need only be unique within a region (a handful to ~50),
-    # not across the whole world's thousands of villages.
+    # time, so names need only be unique within a region, not across the
+    # whole world's thousands of villages.
     namer = make_settlement_namer(rng)
     species = world.factions[region.faction_idx].meta["species"]
     land_cells = [(x, y) for x, y in region.cells
@@ -1023,27 +1079,39 @@ def _place_villages_for_region(world, rng, region, fixed_n=None):
         world.roads_by_region[region.id] = []
         return
 
-    area = len(region.cells)
-    if fixed_n is not None:
-        n = min(fixed_n, len(land_cells))
-    else:
-        n = max(_VILLAGE_MIN, min(_VILLAGE_MAX, round(area / _VILLAGE_CELLS_PER)))
-        n = min(n, len(land_cells))
-
-    scored = []
+    settlement_anchors = [world.settlements[sid].pos for sid in region.meta_settlements]
+    fixed_score = {}
     for x, y in land_cells:
-        s = (_VILLAGE_FERT_W * world.fertility[y][x]
-             + _VILLAGE_WATER_W * math.exp(-water_d[y][x] / _VILLAGE_WATER_REACH)
-             + 0.15 * rng.random())          # tie-break jitter
-        scored.append((s, x, y))
-    scored.sort(reverse=True)
+        s = _site_score(world, VILLAGE_WEIGHTS, x, y, coast_d, water_d, border_d, rng)
+        if settlement_anchors:
+            d = min(wrap.dist_wrap((x, y), a, world.w) for a in settlement_anchors)
+            s += _VILLAGE_CLUSTER_W * math.exp(-d / _VILLAGE_CLUSTER_REACH)
+        fixed_score[(x, y)] = s
 
-    spacing = max(1.5, math.sqrt(area / max(1, n)) * 0.55)
+    # Greedy selection: each round, the best remaining cell by fixed_score
+    # PLUS a fresh village-to-village cluster bonus against whatever's been
+    # placed so far -- genuinely incremental (a village placed this round
+    # can pull the NEXT one toward it), not a one-time snapshot. Re-scores
+    # every remaining candidate each round rather than a cleverer lazy
+    # structure -- region sizes and village counts in practice keep this
+    # cheap (see dev/bench_worldgen.py); revisit only if a real large
+    # region measures otherwise.
+    candidates = list(land_cells)
     placed = []
-    for s, x, y in scored:
-        if len(placed) >= n:
+    while candidates:
+        best_score, best_i = None, None
+        for i, cell in enumerate(candidates):
+            s = fixed_score[cell]
+            if placed:
+                d = min(wrap.dist_wrap(cell, p, world.w) for p in placed)
+                s += _VILLAGE_CLUSTER_W * math.exp(-d / _VILLAGE_CLUSTER_REACH)
+            if best_score is None or s > best_score:
+                best_score, best_i = s, i
+        below_floor_target = fixed_n is not None and len(placed) < fixed_n
+        if best_score < _VILLAGE_VIABILITY_MIN and not below_floor_target:
             break
-        if _too_close_any(world, x, y, spacing):
+        x, y = candidates.pop(best_i)
+        if _too_close_any(world, x, y, _VILLAGE_SPACING):
             continue
         placed.append((x, y))
         _mark_occupied_both(world, x, y)
@@ -1120,8 +1188,20 @@ def _generate_villages(world, rng):
             home_id = (max(landed, key=lambda cid: len(world.regions[cid].cells))
                       if landed else None)
         for cid in regions:
-            n = STARTING_VILLAGE_COUNT if cid == home_id else 0
-            _place_villages_for_region(world, rng, world.regions[cid], fixed_n=n)
+            # Every foothold region gets the real greedy placement now, not
+            # just the home region -- a padding region folded in by
+            # _assign_starting_footholds has real land too, and under the
+            # old region-pooled economy hardcoding it to zero villages was
+            # harmless (the region's yield still reached the faction via the
+            # pool); once production moves to per-village (see
+            # app/world/resources.py), a region with zero villages forever
+            # would produce nothing at all. Only the home region gets the
+            # STARTING_VILLAGE_COUNT floor -- every faction begins with the
+            # same guaranteed small seed there regardless of land quality;
+            # every other foothold region places whatever its own land
+            # actually supports, same as any later-claimed region.
+            floor = STARTING_VILLAGE_COUNT if cid == home_id else None
+            _place_villages_for_region(world, rng, world.regions[cid], fixed_n=floor)
 
 
 # Long-haul trade route pathfinding: used by app/world/trade.py both for the

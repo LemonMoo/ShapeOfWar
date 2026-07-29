@@ -204,17 +204,11 @@ def start_claim(world, faction_idx, region):
 
 _NO_FREE_SETTLEMENT = {"city": 0, "town": 0, "castle": 0}   # see _place_settlements_for_faction
 
-WILDLAND_VILLAGE_MIN = 1
-WILDLAND_VILLAGE_MAX = 3
-WILDLAND_VILLAGE_CELLS_PER = 100   # area per village, before min/max clamping
-
-
-def _wildland_village_count(region):
-    """1-3 villages for a newly claimed region, scaled by area — wildland
-    is meant to stay sparse, not use the much larger (3-50) area-scaled
-    range the starting foothold / general village formula allows."""
-    return max(WILDLAND_VILLAGE_MIN, min(WILDLAND_VILLAGE_MAX,
-              round(len(region.cells) / WILDLAND_VILLAGE_CELLS_PER)))
+WILDLAND_VILLAGE_MIN = 1   # every freshly claimed region gets at least this
+                           # many regardless of land quality (a floor, not an
+                           # exact count -- see _place_villages_for_region);
+                           # good land places however many it can actually
+                           # support beyond that, no fixed cap
 
 
 def settle_newly_claimed_region(world, region):
@@ -224,18 +218,17 @@ def settle_newly_claimed_region(world, region):
     being pre-baked at world-gen for land nobody may ever reach), and
     recompute its resource yield so next turn's advance_turn is accurate.
 
-    Wildland only ever gives up villages (1-3, scaled by area) — no free
-    City, Town, or Castle. Getting one of those now takes an actual
-    construction project (app/world/construction.py's start_settlement/
-    run_settlement_ai), the same as everyone's very first City/Town/Castle
-    always has."""
+    Wildland only ever gives up villages — no free City, Town, or Castle.
+    Getting one of those now takes an actual construction project
+    (app/world/construction.py's start_settlement/run_settlement_ai), the
+    same as everyone's very first City/Town/Castle always has."""
     if not region.settlements_generated:
         namer = make_settlement_namer(random)
         _place_settlements_for_faction(world, random, region.faction_idx,
                                        list(region.cells), namer,
                                        fixed_counts=_NO_FREE_SETTLEMENT)
         _place_villages_for_region(world, random, region,
-                                   fixed_n=_wildland_village_count(region))
+                                   fixed_n=WILDLAND_VILLAGE_MIN)
         region.settlements_generated = True
     region.resources = resources.compute_region_yield(region, world.season)
 
