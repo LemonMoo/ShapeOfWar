@@ -20,6 +20,28 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 40,
+        "title": "A World You Can Turn",
+        "items": [
+            "THE MAP IS A PLANET. Press Globe and your world wraps onto a sphere you can spin freely in any direction, roll over the poles, and fly down to. It is the same map, not a second copy — anything that changes on the flat map is already there",
+            "Everything the flat map draws is on it: roads, trade routes, caravans in transit, realm and region and settlement names, alert badges, fog of war. Click a region on the globe and it selects exactly as it would flat",
+            "FLYING CLOSER IS ZOOMING IN. Realms and trunk roads from orbit, region names lower down, individual villages and dirt tracks near the ground — there is no view to switch into, you just descend",
+            "Terrain keeps its shape all the way to the ice caps. The obvious way to wrap a map on a globe smears everything toward the poles; this one is conformal, so a forest is the same forest at any latitude",
+            "A day/night terminator crosses the world as the years pass, kept light enough to read borders and roads straight through",
+            "Your camera and which view you prefer are remembered in the save",
+            "END TURN NOW MOVES THINGS. Caravans, shipments, ships and commanders travel along their actual route over about three quarters of a second instead of blinking from one cell to the next. A trade network finally looks like one",
+            "EVERY SPECIES HAS A UNIT NOBODY ELSE DOES, paid for out of its own soldiers plus a small bonus, so it is an advantage rather than a reshuffle",
+            "HUMANS — Standard Bearer: mediocre with a sword, but everyone near one hits harder, swings faster and holds a steadier shield. Two banners are worth no more than one; they spread the effect, they do not stack it",
+            "ELVES — Bladesinger: the melee answer an all-archer line never had. Fast, evasive, and frail enough that anything landing a hit nearly kills it. Paid for entirely out of the bows",
+            "DWARVES — Shieldwarden: an anchor. The line around one takes visibly less punishment while it advances, which is what finally makes the dwarven walk across open ground pay",
+            "ORCS — Berserker: no shield at all, and damage that climbs as it bleeds. The only unit in the game more dangerous hurt than whole",
+            "GOBLINS — Sapper: crude bombs at middling range. The blast catches everyone packed around whoever it lands on, so a tight shield wall is the worst thing to face one in. It does from a distance what the Assassin could never survive long enough to do",
+            "The battle AI now gives these units orders too — it only ever recognised Swordsmen, Archers and Cavalry by name, so anything new stood there unordered",
+            "The Compendium (F1) describes every one of them under Military & Combat",
+            "NOTE: SPECIES BALANCE IS IN FLUX. The new units measurably move win rates and are not yet settled — the Shieldwarden is worth about +17 points to Dwarves, while the Elf and Goblin units currently cost their own side. Expect these numbers to move again",
+        ],
+    },
+    {
         "version": 39,
         "title": "Drawn by the Graphics Card",
         "items": [
