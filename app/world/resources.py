@@ -29,6 +29,7 @@ from collections import defaultdict
 from app.world.lexicon import SPECIES
 from app.world.worldgen import (OCEAN, _path_dijkstra, _elev_cost, road_cells,
                                 path_transit_cells, _VILLAGE_CATCHMENT_RADIUS)
+from app.world import wrap
 
 # --- the resource registry --------------------------------------------------
 # category + tier (1 raw agricultural/pastoral .. 4 manufactured), per the
@@ -3449,8 +3450,13 @@ def run_local_logistics(world):
     """Called every turn: within each region, greedily match surplus
     household-economy resources to unmet need among that region's own
     Villages/Settlements (see the module docstring for the full picture),
-    and dispatch a LocalShipment for the first match found per node, same
-    greedy-first-match style as trade.run_trade_ai. Fully automatic --
+    and dispatch a LocalShipment for the first match found per node --
+    nearest candidate first (see the near_by_node precompute below), not
+    just whichever happened to come first in region.villages/
+    meta_settlements' storage order. Distance-preferring, not a hard
+    lock-out: a node still falls through to a farther one if its nearest
+    neighbors don't want the resource, so nothing goes unfed just because
+    its closest neighbor happens to be equally short. Fully automatic --
     no player or AI decision involved, matching how the rest of this
     economy already works."""
     world._local_path_budget = LOCAL_PATH_BUDGET_PER_TURN
@@ -3462,6 +3468,18 @@ def run_local_logistics(world):
             continue
         season = world.season
         needs_by_node = {(kind, node.id): settlement_needs(node, season) for kind, node in nodes}
+        # Nearest-first order per node, precomputed once per region per turn
+        # (not per resource below -- distance doesn't depend on which
+        # resource is being matched, so resorting inside the priority loop
+        # would just repeat the same sort for nothing). Cheap squared
+        # straight-line distance (wrap.dist2_wrap) for ordering only; the
+        # real terrain-aware path is still only computed after a match is
+        # chosen, via _local_path below, unchanged.
+        near_by_node = {}
+        for kind, node in nodes:
+            others = [(k2, n2) for k2, n2 in nodes if n2 is not node]
+            others.sort(key=lambda kn: wrap.dist2_wrap(node.pos, kn[1].pos, world.w))
+            near_by_node[(kind, node.id)] = others
 
         for kind, node in nodes:
             if _active_outgoing_shipments(world, kind, node.id) >= MAX_ACTIVE_LOCAL_SHIPMENTS_PER_NODE:
@@ -3472,9 +3490,7 @@ def run_local_logistics(world):
                 surplus = _node_surplus(node, resource, own_needs)
                 if surplus < LOCAL_SHIPMENT_MIN_QUANTITY:
                     continue
-                for other_kind, other in nodes:
-                    if other is node:
-                        continue
+                for other_kind, other in near_by_node[(kind, node.id)]:
                     if not _node_wants(other_kind, other, resource, needs_by_node[(other_kind, other.id)]):
                         continue
                     qty = min(surplus, LOCAL_SHIPMENT_MAX_QUANTITY)
