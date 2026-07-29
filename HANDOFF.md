@@ -7,18 +7,14 @@ generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 
 ---
 
-## 0. Read this first — uncommitted work
+## 0. Read this first — unreleased work
 
-The 3D globe is **finished and working but not committed**:
+The 3D globe is committed (`8151142`) but **not released**: v0.2.6 predates it.
+`app/ui/gl_globe.py` is the renderer; the wiring in `map_view.py` is the toggle,
+texture sync, pick handler and persistence. `dev/` (tools + harnesses) is now in
+the repo too; the world snapshots it reads are still gitignored.
 
-```
- M app/ui/map_view.py      globe wiring: toggle, texture sync, pick handler, persistence
- ?? app/ui/gl_globe.py     the globe renderer (new file)
- ?? dev/                   dev tools + preserved test worlds (new, see §5)
-```
-
-Commit before doing anything else. Nothing here has been released — v0.2.6
-predates the globe.
+The globe does not yet replace the flat map — see §2 for what is missing.
 
 ---
 
