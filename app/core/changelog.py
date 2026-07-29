@@ -20,6 +20,22 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 42,
+        "title": "Ocean Currents, and a Globe You Can Fly Down To",
+        "items": [
+            "COASTLINES ARE NATURAL NOW. Continents used to be smooth, round-edged blobs no matter the seed — the noise driving them had no way to produce a fjord or a peninsula. Coastlines are now warped into genuinely irregular shapes: bays, headlands, straits and island chains, without going full Norway",
+            "OCEAN CURRENTS are real and physically driven: idealized wind bands off the same latitude the climate system already uses spin up gyres the same way real ocean circulation works, and those currents CARVE the coastline they flow past — a fast channel cuts a strait, a sheltered eddy silts into a spit",
+            "Sail with a current and a sea route is up to 30% faster; fight one and it's up to 30% slower. Both trade convoys and ships route around this, not just you",
+            "Currents render as flowing streamlines on the flat map (toggle: Currents), fog-gated the same as any other route so you only see what you've actually explored",
+            "THE GLOBE GOT A CAMERA. Zooming in used to just move straight down the same overhead ray — an aerial photo with no horizon. It now tilts toward the ground as you descend, up to a steep oblique angle right near the surface, so closing in reads as flying low rather than staring straight down",
+            "SETTLEMENTS ARE REAL 3D SPIRES on the globe now, planted upright out of the ground, not a flat sticker facing the camera",
+            "TERRAIN HAS RELIEF. Mountains actually bulge up off the sphere; the ocean stays flat. The same height field the flat map has always used, just now something you can see the shape of",
+            "FOG OF WAR ON THE GLOBE IS LITERAL CLOUD COVER. Unexplored land used to just look darker; now it's genuinely hidden under drifting clouds — you see weather, not a dim guess at the truth underneath",
+            "A new globe now opens facing YOUR OWN capital instead of the map's arbitrary geometric centre — your realm's name shows up over your own territory at world-view zoom, which previously depended on which way the planet happened to be facing",
+            "Fixed two things that stopped working the moment battles started rendering on the GPU: the drag-select box and the right-click formation-ghost preview during planning, and — more seriously — the 'click to continue' prompt after a battle ended, which drew nothing at all even though clicking anywhere still secretly worked",
+        ],
+    },
+    {
         "version": 41,
         "title": "Build a Realm Before You Enter It",
         "items": [
