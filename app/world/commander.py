@@ -26,6 +26,7 @@ from app.world.worldgen import (OCEAN, _path_dijkstra, _elev_cost, _sea_cost,
                                 _NEIGH8, _DIAG)
 from app.world.construction import can_afford, _pay_cost
 from app.world import wrap
+from app.world import currents
 
 COMMANDER_CELLS_PER_TURN = 5
 COMMANDER_VISION_RADIUS = 8
@@ -270,7 +271,7 @@ def shipyard_at(world, faction_idx, pos):
     return None
 
 
-def _path_dijkstra_nearest(cellset, cost_fn, start, dest, width):
+def _path_dijkstra_nearest(cellset, cost_fn, start, dest, width, edge_cost_fn=None):
     """Like worldgen._path_dijkstra, but never fails: if `dest` isn't in
     `cellset` or isn't reachable from `start`, this returns the path to
     whichever visited cell ends up closest (wrap-aware straight-line) to
@@ -280,7 +281,13 @@ def _path_dijkstra_nearest(cellset, cost_fn, start, dest, width):
     whatever's blocking it, rather than an explicit 'no route' response
     that would itself leak what's blocking it (water, a separate
     landmass, ...). `width` is required for the same reason worldgen.
-    _path_dijkstra needs it -- see that function's docstring."""
+    _path_dijkstra needs it -- see that function's docstring.
+
+    `edge_cost_fn`, if given, multiplies cost_fn(nb) the same way
+    worldgen._path_dijkstra's does -- see that function's docstring for why
+    it's a separate multiplying callback rather than folded into cost_fn
+    itself (a current has no meaning without knowing which way the ship is
+    actually travelling, which cost_fn(nb) alone never sees)."""
     import heapq
     if start not in cellset:
         return None
@@ -303,6 +310,8 @@ def _path_dijkstra_nearest(cellset, cost_fn, start, dest, width):
             if nb not in cellset:
                 continue
             step = cost_fn(nb) * (_DIAG if dx and dy else 1.0)
+            if edge_cost_fn is not None:
+                step *= edge_cost_fn(cur, nb)
             nd = d + step
             if nd < dist.get(nb, 1e18):
                 dist[nb] = nd
@@ -424,23 +433,32 @@ def _ship_path(world, start, dest):
 
     dx, dy = dest
     sea_cost = lambda c: _sea_cost(world, world.base_cost, c)
+    # A ship rides or fights the current the same way a trade convoy does
+    # (see currents.sea_edge_cost_fn) -- one call per _ship_path, not per
+    # step, since the edge_cost_fn closure itself is cheap to build and
+    # reused across every step of the search below.
+    edge_cost = currents.sea_edge_cost_fn(world)
 
     if world.owner[dy][dx] == OCEAN:
         sea_cellset = _ocean_cellset(world, sea_start, dest)
-        sea_path = (_path_dijkstra(sea_cellset, sea_cost, sea_start, dest, world.w)
+        sea_path = (_path_dijkstra(sea_cellset, sea_cost, sea_start, dest, world.w,
+                                   edge_cost_fn=edge_cost)
                    if dest in sea_cellset else None)
         if sea_path is None:
-            sea_path = _path_dijkstra_nearest(sea_cellset, sea_cost, sea_start, dest, world.w)
+            sea_path = _path_dijkstra_nearest(sea_cellset, sea_cost, sea_start, dest,
+                                              world.w, edge_cost_fn=edge_cost)
         return _join_paths(start_land, sea_path)
 
     dest_land, sea_end = _to_sea_leg(world, dest, _SHIP_LANDING_SEARCH_R)
     sea_target = sea_end if sea_end is not None else dest
     sea_cellset = _ocean_cellset(world, sea_start, sea_target)
-    sea_path = (_path_dijkstra(sea_cellset, sea_cost, sea_start, sea_target, world.w)
+    sea_path = (_path_dijkstra(sea_cellset, sea_cost, sea_start, sea_target, world.w,
+                               edge_cost_fn=edge_cost)
                if sea_target in sea_cellset else None)
     reached_landing = sea_path is not None
     if sea_path is None:
-        sea_path = _path_dijkstra_nearest(sea_cellset, sea_cost, sea_start, sea_target, world.w)
+        sea_path = _path_dijkstra_nearest(sea_cellset, sea_cost, sea_start, sea_target,
+                                          world.w, edge_cost_fn=edge_cost)
 
     path = _join_paths(start_land, sea_path)
     if reached_landing and sea_end is not None:

@@ -53,6 +53,7 @@ from app.world.nation import is_eliminated
 from app.world import resources
 from app.world import wrap
 from app.world import rivers
+from app.world import currents
 
 # --- market ------------------------------------------------------------------
 MIN_TRADE_QUANTITY = 20
@@ -726,7 +727,8 @@ def _capital_sea_path(world, a_idx, b_idx):
                        if world.owner[y][x] == OCEAN}
         sea_path = _path_dijkstra(sea_cellset,
                                   lambda c: _sea_cost(world, world.base_cost, c),
-                                  dock_a, dock_b, world.w)
+                                  dock_a, dock_b, world.w,
+                                  edge_cost_fn=currents.sea_edge_cost_fn(world))
         if sea_path is not None:
             path = [a_pos] + sea_path + [b_pos]
 

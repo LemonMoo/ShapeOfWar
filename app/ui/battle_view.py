@@ -73,6 +73,26 @@ class BattleView(tk.Frame):
                         ("<ButtonRelease-3>", self._on_rmb_release)):
             self.viewport.bind(seq, fn)
 
+        # Battle-over banner: an ordinary Tk overlay, not something the GPU
+        # path draws. The canvas renderer has always painted "X is victorious
+        # / click to continue" as canvas items in the tail of render(); the
+        # GPU path has no text primitive at all and skipped that tail
+        # entirely, so a battle ending under GPU rendering left the field
+        # frozen with no visible sign it was over or that anything was
+        # clickable -- click-to-continue was still armed underneath (see
+        # _arm_continue), there was simply nothing on screen saying so. A
+        # plain Label placed on top works for either renderer and inherits
+        # the "all" bindtag, so a click on the label itself still reaches
+        # the globally-bound continue handler.
+        self.over_banner = tk.Frame(self, bg="#000000")
+        self.over_title = tk.Label(self.over_banner, text="", bg="#000000",
+                                   fg="#ffffff", font=("Segoe UI", 18, "bold"))
+        self.over_title.pack(pady=(10, 2), padx=40)
+        self.over_sub = tk.Label(self.over_banner, text="Click anywhere to continue...",
+                                 bg="#000000", fg=theme.MUTED,
+                                 font=("Segoe UI", 11, "bold"))
+        self.over_sub.pack(pady=(0, 10))
+
         self._build_panel()
 
     def _make_viewport(self):
@@ -592,6 +612,22 @@ class BattleView(tk.Frame):
         # the battle-over screen — not just clicks on this canvas.
         self.bind_all("<Button-1>", self._on_continue, add="+")
         self.bind_all("<Key>", self._on_continue, add="+")
+        # The canvas renderer draws its own "X is victorious" banner as
+        # canvas items every render() call, so it needs nothing further. The
+        # GPU renderer draws no text at all, so without this overlay a
+        # battle ending under it left the field simply frozen -- see the
+        # comment where over_banner is built.
+        if self.using_gpu and self.battle is not None:
+            winner = self.battle.winner
+            self.over_title.config(
+                text=f"{winner.name} is victorious" if winner else "Mutual annihilation")
+            # Centered over the BATTLEFIELD, not the whole frame (which also
+            # includes the 300px side panel) -- matches where the canvas
+            # renderer's own banner lands, via place()'s in_ parameter rather
+            # than reparenting the widget.
+            self.over_banner.place(relx=0.5, rely=0.5, anchor="center",
+                                   in_=self.viewport)
+            self.over_banner.lift()
 
     def _disarm_continue(self):
         if not self._continue_armed:
@@ -599,6 +635,7 @@ class BattleView(tk.Frame):
         self._continue_armed = False
         self.unbind_all("<Button-1>")
         self.unbind_all("<Key>")
+        self.over_banner.place_forget()
 
     def _on_continue(self, event):
         self._disarm_continue()

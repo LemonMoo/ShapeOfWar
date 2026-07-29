@@ -270,6 +270,10 @@ _STONE_ROAD_COLOR = "#9a9ba3"
 _BRIDGE_COLOR = "#6e4326"   # a stone road's river crossing, recolored like timber decking
 _TRADE_LAND_COLOR = "#7c5f26"   # long-haul trade road — dark bronze, recedes into the map
 _TRADE_SEA_COLOR = "#557c8c"    # dark shipping-lane blue, dotted like a nautical chart
+_CURRENT_COLOR = "#5ee0c8"      # cool cyan-teal -- distinct from both trade-lane
+                                # blue and the ocean itself, reads as "current
+                                # flow," not "another shipping lane"
+_CURRENT_ARROW_COLOR = "#9df5e4"  # brighter version for the direction chevrons
 # A route currently carrying a caravan is redrawn on top in a bright,
 # saturated version of its color — thicker than the dim static line — so an
 # active trade route reads at a glance, not just its tiny marker.
@@ -414,6 +418,7 @@ class MapView(tk.Frame):
         self.selected_commander = None
         self.commander_move_mode = None   # armed Commander awaiting a destination click
         self.mode = "political"
+        self.show_currents = False   # opt-in overlay -- see _draw_currents
         self._img = None
         self._place = (0, 0, 1)         # vx0, vy0, scale
         # Per-frame camera constants, refreshed once at the top of render()
@@ -1954,6 +1959,13 @@ class MapView(tk.Frame):
                                    activebackground=theme.ACCENT, relief="flat",
                                    font=theme.FONT)
         self.globe_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 4))
+        self.currents_btn = tk.Button(foot, text="Currents: Off",
+                                      command=self._toggle_currents,
+                                      bg="#232a36", fg=theme.INK,
+                                      activebackground=theme.ACCENT, relief="flat",
+                                      font=theme.FONT)
+        self.currents_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 4))
+
         tk.Button(foot, text="End Turn", command=self._on_end_turn,
                   bg=theme.ACCENT, fg="#06121f", activebackground=theme.ACCENT,
                   relief="flat", font=theme.FONT_BOLD).pack(side="bottom", fill="x",
@@ -1967,6 +1979,11 @@ class MapView(tk.Frame):
                                   relief="flat", font=theme.FONT)
         self._panel_foot = foot
         # back_btn is packed only while zoomed in.
+
+    def _toggle_currents(self):
+        self.show_currents = not self.show_currents
+        self.currents_btn.config(text=f"Currents: {'On' if self.show_currents else 'Off'}")
+        self.render()
 
     def _on_canvas_configure(self):
         """Redraw, and re-clamp any floating in-game panel so a window resize
@@ -4708,6 +4725,7 @@ class MapView(tk.Frame):
         # overlay — see that method for why. No per-frame river drawing
         # needed at all.
 
+        self._draw_currents(c, screen)
         self._draw_trade_routes(c, screen)
         self._draw_trade_route_construction(c, screen)
         self._draw_trade_caravans(c, screen)
@@ -5020,6 +5038,68 @@ class MapView(tk.Frame):
                 run = []
         if len(run) >= 2:
             yield run
+
+    def _draw_currents(self, c, screen):
+        """Ocean current streamlines (see app/world/currents.py), traced once
+        at world generation and stored on the world -- this only draws the
+        lines, never recomputes them. Opt-in (self.show_currents, off by
+        default) rather than always-on: the world map is already carrying
+        trade routes, roads and caravans, and currents are read-only
+        flavour/planning information, not something that needs to compete
+        with what you're actually managing every turn.
+
+        Fog-gated per point the same way trade routes are per cell (loosely
+        -- either end of a step revealed is enough): a current is a physical
+        feature of ocean you haven't sailed, and showing the whole thing the
+        moment one corner of the map is explored would hand over shape
+        information about unexplored water for free."""
+        lines = getattr(self.world, "current_streamlines", None)
+        if not self.show_currents or not lines:
+            return
+        width = max(1.0, self._place[2] * 0.14)
+        arrow_r = max(2.5, self._place[2] * 0.9)
+        wd = self.world
+        for line in lines:
+            run = []
+            for i in range(len(line)):
+                x, y = line[i]
+                cx, cy = int(x) % wd.w, min(max(int(y), 0), wd.h - 1)
+                revealed = self._cell_revealed(cx, cy)
+                if revealed:
+                    run.append(line[i])
+                    continue
+                if len(run) >= 2:
+                    self._draw_current_run(c, screen, run, width, arrow_r)
+                run = []
+            if len(run) >= 2:
+                self._draw_current_run(c, screen, run, width, arrow_r)
+
+    def _draw_current_run(self, c, screen, run, width, arrow_r):
+        pts = []
+        for gx, gy in run:
+            pts.extend(screen(gx + 0.5, gy + 0.5))
+        if not self._visible_pts(pts):
+            return
+        c.create_line(*pts, fill=_CURRENT_COLOR, width=width, capstyle="round",
+                      joinstyle="round", smooth=True)
+        # One direction chevron at the run's midpoint -- a plain line says
+        # "water moves here," not which way, and "which way" is the whole
+        # point for a trade route deciding whether to ride this or avoid it.
+        mid = len(run) // 2
+        if 0 < mid < len(run) - 1:
+            (ax, ay), (bx, by) = run[mid - 1], run[mid + 1]
+            dx, dy = bx - ax, by - ay
+            mag = math.hypot(dx, dy) or 1.0
+            ux, uy = dx / mag, dy / mag
+            px, py = -uy, ux
+            cx, cy = screen(run[mid][0] + 0.5, run[mid][1] + 0.5)
+            tip = (cx + ux * arrow_r, cy + uy * arrow_r)
+            left = (cx - ux * arrow_r * 0.6 + px * arrow_r * 0.55,
+                   cy - uy * arrow_r * 0.6 + py * arrow_r * 0.55)
+            right = (cx - ux * arrow_r * 0.6 - px * arrow_r * 0.55,
+                    cy - uy * arrow_r * 0.6 - py * arrow_r * 0.55)
+            c.create_polygon(*tip, *left, *right, fill=_CURRENT_ARROW_COLOR,
+                             outline="")
 
     def _draw_trade_routes(self, c, screen):
         """Long-haul trade routes: land roads (solid gold, terrain-following)

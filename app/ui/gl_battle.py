@@ -338,6 +338,7 @@ class GLBattleFrame(OpenGLFrame):
         b.clear()
         self._emit_midline(b, w, h)
         self._emit_units(b, battle, view)
+        self._emit_planning_overlays(b, view)
         self._emit_projectiles(b, battle)
         self._emit_effects(b, battle)
 
@@ -351,6 +352,59 @@ class GLBattleFrame(OpenGLFrame):
 
     def _emit_midline(self, b, w, h):
         b.add(w * 0.5, h * 0.5, 1.0, h, 0.0, (0.11, 0.13, 0.17), LAYER_SOLID)
+
+    _ACCENT_RGB = hex_rgb("#4da3ff")
+    _GHOST_RGB = hex_rgb("#3d4757")
+    _LINE_W = 1.6
+
+    def _emit_rect_outline(self, b, x0, y0, x1, y1, color):
+        """A thin outline via four filled bars -- the GPU path's answer to
+        the canvas's dashed create_rectangle. Not dashed (there is no cheap
+        dashed-line primitive in an instanced quad batch), but functionally
+        the same marquee box, which is the part that actually matters."""
+        lo_x, hi_x = min(x0, x1), max(x0, x1)
+        lo_y, hi_y = min(y0, y1), max(y0, y1)
+        w = self._LINE_W
+        b.add((lo_x + hi_x) / 2, lo_y, hi_x - lo_x, w, 0.0, color, LAYER_SOLID)
+        b.add((lo_x + hi_x) / 2, hi_y, hi_x - lo_x, w, 0.0, color, LAYER_SOLID)
+        b.add(lo_x, (lo_y + hi_y) / 2, w, hi_y - lo_y, 0.0, color, LAYER_SOLID)
+        b.add(hi_x, (lo_y + hi_y) / 2, w, hi_y - lo_y, 0.0, color, LAYER_SOLID)
+
+    def _emit_line(self, b, x0, y0, x1, y1, color, width=None):
+        w = width or self._LINE_W
+        length = math.hypot(x1 - x0, y1 - y0)
+        if length < 1e-6:
+            return
+        ang = math.atan2(x1 - x0, -(y1 - y0))   # sprites point -Y at rot 0
+        b.add((x0 + x1) / 2, (y0 + y1) / 2, w, length, ang, color, LAYER_SOLID)
+
+    def _emit_planning_overlays(self, b, view):
+        """Marquee box-select and the right-drag formation tool (ghost units
+        + rally flags at each slot the selection will snap into) -- carried
+        over from the canvas renderer, which drew these in the tail of
+        render() that the GPU path skips entirely. Missing here was a real
+        regression: once GPU rendering became the default, both of these
+        planning aids silently stopped appearing with no error, because
+        nothing in this file had ever drawn them."""
+        marquee = getattr(view, "_marquee", None)
+        if marquee is not None:
+            self._emit_rect_outline(b, *marquee, self._ACCENT_RGB)
+
+        line = getattr(view, "_formation_line", None)
+        if line is not None:
+            self._emit_line(b, *line, self._ACCENT_RGB)
+
+        for u, sx, sy in getattr(view, "_formation_slots", ()):
+            r = u.radius
+            layer = SHAPE_LAYER.get(u.type["shape"], LAYER_CIRCLE)
+            b.add(sx, sy, r * 2, r * 2, 0.0, self._GHOST_RGB, layer)
+            pole_top = sy - r - 11
+            self._emit_line(b, sx, sy - r, sx, pole_top, self._ACCENT_RGB)
+            # Pennant: a small triangle sprite is drawn point-first (-Y);
+            # rotate 90 deg so it flies sideways off the pole like the
+            # canvas version's create_polygon pennant did.
+            b.add(sx + 3.5, pole_top + 3, 7.0, 6.0, math.pi / 2,
+                  self._ACCENT_RGB, LAYER_TRIANGLE)
 
     def _emit_units(self, b, battle, view):
         """Every soldier, and its kit -- no detail cutoff. This is the whole

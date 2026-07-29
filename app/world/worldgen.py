@@ -14,11 +14,15 @@ import colorsys
 import math
 import random
 
+import numpy as np
+
 from collections import deque, defaultdict
 
 from app.world.nation import Nation
 from app.world.world_map import WorldMap
 from app.world import wrap
+from app.world import noise
+from app.world import currents
 from app.world.lexicon import (SPECIES, make_faction_namer, make_region_namer,
                                make_ruler_namer, make_settlement_namer,
                                ruler_title)
@@ -1149,7 +1153,7 @@ _SEA_COAST_REACH = 3      # cells from open water a settlement still counts as a
 _DIAG = 2 ** 0.5
 
 
-def _path_dijkstra(cellset, cost_fn, start, goal, width):
+def _path_dijkstra(cellset, cost_fn, start, goal, width, edge_cost_fn=None):
     """Single-source/single-target Dijkstra over `cellset` (a set of (x,y)
     cells), 8-directional, diagonal steps costing sqrt(2) as much as
     orthogonal ones so the resulting path is geometrically honest. Returns the
@@ -1162,7 +1166,17 @@ def _path_dijkstra(cellset, cost_fn, start, goal, width):
     (see wrap.bbox_span_wrap) can actually be traversed across it -- without
     this, stepping from x=width-1 toward x=width would produce a raw (width,
     y) tuple that never matches the (0, y) cell actually in cellset, so the
-    search could never cross the seam even if both cells were present."""
+    search could never cross the seam even if both cells were present.
+
+    `edge_cost_fn`, if given, is called as edge_cost_fn(cur, nb) and
+    MULTIPLIES the ordinary per-cell cost_fn(nb) rather than replacing it --
+    terrain cost and (for sea routes) current alignment both apply, neither
+    overrides the other. Every existing caller leaves this at its default
+    and is completely unaffected; only a route that genuinely has a notion
+    of DIRECTION (a current has no meaning to a step cost_fn(nb) alone
+    already sees, since that only ever knew the destination, never which way
+    the step was travelling) needs to pass one. See
+    app/world/currents.travel_cost_multiplier."""
     import heapq
     if start not in cellset or goal not in cellset:
         return None
@@ -1181,6 +1195,8 @@ def _path_dijkstra(cellset, cost_fn, start, goal, width):
             if nb not in cellset:
                 continue
             step = cost_fn(nb) * (_DIAG if dx and dy else 1.0)
+            if edge_cost_fn is not None:
+                step *= edge_cost_fn(cur, nb)
             nd = d + step
             if nd < dist.get(nb, 1e18):
                 dist[nb] = nd
@@ -1437,6 +1453,17 @@ class World:
         self.height = [[0.0] * w for _ in range(h)]     # elevation, 0..1
         self.fertility = [[0.0] * w for _ in range(h)]  # 0..1 (land); 0 = water
         self.moisture = [[0.0] * w for _ in range(h)]   # 0..1 rainfall noise (land)
+        # Ocean surface current (see app/world/currents.py), [y][x] -> a
+        # signed float; 0 over land and wherever no current was ever solved.
+        # Left as None here rather than pre-filled with zero grids: a world
+        # generated before currents existed has neither attribute at all
+        # (getattr(..., None) everywhere this is read), and one generated
+        # after always overwrites both in generate_world, so there is no
+        # in-between state where these are populated but stale.
+        self.current_u = None
+        self.current_v = None
+        self.current_streamlines = None   # [[(x, y), ...], ...] -- see
+                                          # currents.build_streamlines
         self.biome_grid = [[None] * w for _ in range(h)]    # biome name or None (ocean)
         self.climate_grid = [[None] * w for _ in range(h)]  # climate name or None
         self.turn = 1
@@ -1664,65 +1691,90 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     world = World(width, height)
     world.seed = nseed if seed is None else seed
 
-    # 1. height field: several octaves of value noise + falloff from the
-    #    *nearest* of 2-3 continent centers (see _pick_continent_centers),
-    #    so the map is multiple separate landmasses ringed by ocean rather
-    #    than one blob glued to the middle of the map.
-    octaves = [(0.028, 1.0), (0.060, 0.5), (0.130, 0.25), (0.260, 0.12)]
+    # 1. height field: several octaves of DOMAIN-WARPED value noise + falloff
+    #    from the *nearest* of 2-3 continent centers (see
+    #    _pick_continent_centers), so the map is multiple separate landmasses
+    #    ringed by ocean rather than one blob glued to the middle of the map.
+    #
+    #    Domain warping is what fixes the "sponge" look a previous version of
+    #    this shipped with: plain value noise is ISOTROPIC (no preferred
+    #    direction at any scale), so its zero-crossings are smooth round
+    #    blobs, and thresholding smooth round blobs against a smooth
+    #    elliptical falloff produces continents that are wide, flat-edged
+    #    ellipses with a small ripple on top -- no fjords, no peninsulas,
+    #    nothing a coastline is not physically capable of being. Warping the
+    #    SAMPLE COORDINATES by a separate, lower-frequency noise field before
+    #    evaluating the height octaves breaks that isotropy: the same octaves
+    #    now trace twisted, elongated shapes instead of round ones. Applied to
+    #    the octaves only, never to the falloff term below, so a continent
+    #    still lands roughly where its center was placed (climate banding in
+    #    _pick_continent_centers depends on that) -- only its outline warps.
+    octaves = [(0.028, 1.0), (0.060, 0.5), (0.130, 0.25), (0.260, 0.07)]
     height_octaves = _periodic_octaves(width, octaves)
     centers, radius_x, radius_y = _pick_continent_centers(rng, width, height)
     inv_rx2 = 1.0 / (radius_x * radius_x)
     inv_ry2 = 1.0 / (radius_y * radius_y)
-    raw = [[0.0] * width for _ in range(height)]
-    lo, hi = 1e9, -1e9
-    # _pick_continent_centers' own margin_x is a soft, best-effort spacing
-    # preference (its docstring: "so real open ocean forms... instead of
-    # one landmass touching every edge") -- NOT a hard guarantee; land
-    # regularly reaches x=0/width-1 in practice even in the non-wrap game,
-    # it just never mattered there since a flat edge with no wrap has
-    # nothing to look discontinuous against. Once x=0 and x=width-1 are
-    # real neighbors, two unrelated landmasses landing right at the seam
-    # would visibly collide. This explicit, always-applied falloff forces
-    # a real ocean band there regardless of how the margin's randomness
-    # shakes out for a given seed -- both edges are pushed toward the same
-    # floor value as they approach the seam, which also means they
-    # converge to identical depth-shading right at the wrap boundary.
-    seam_margin = max(6, round(width * 0.03))
-    for y in range(height):
-        for x in range(width):
-            v = sum(amp * _vnoise(x * eff_freq, y * freq, nseed, period_x)
-                    for eff_freq, period_x, freq, amp in height_octaves)
-            # Wrap-aware even though the margin above is meant to keep
-            # every center far enough from x=0/width that land can never
-            # reach the seam: ocean cells are depth-shaded straight off
-            # this raw height value (see map_view.py's ocean color blend),
-            # so a FLAT best_d2 here would still make x=0 and x=width-1
-            # compute wildly different "distance to nearest continent"
-            # whenever centers aren't symmetric across the map, producing
-            # a visible depth-shading seam even where both sides are
-            # legitimately deep ocean.
-            best_d2 = min(wrap.dx_wrap(ccx, x, width) ** 2 * inv_rx2
-                          + (y - ccy) ** 2 * inv_ry2
-                          for ccx, ccy in centers)
-            v -= 0.85 * best_d2                  # push far-from-any-continent cells underwater
-            seam_d = min(x, width - x)           # distance to the nearest edge of the seam
-            if seam_d < seam_margin:
-                t = seam_d / seam_margin
-                fade = t * t * (3 - 2 * t)       # smoothstep: 0 at the seam, 1 by seam_margin cells in
-                v = v * fade - 3.0 * (1 - fade)  # firmly underwater at the seam itself
-            raw[y][x] = v
-            lo = min(lo, v)
-            hi = max(hi, v)
-    span = (hi - lo) or 1.0
-    for y in range(height):
-        for x in range(width):
-            world.height[y][x] = (raw[y][x] - lo) / span
 
-    # threshold so land is ~40% of the map
-    flat = sorted(world.height[y][x] for y in range(height) for x in range(width))
-    world.sea_level = flat[int(len(flat) * 0.60)]
-    land = [[world.height[y][x] > world.sea_level for x in range(width)]
-            for y in range(height)]
+    # Warp field: two octaves each for x and y, at a wavelength comparable to
+    # the coarsest height octave so it bends whole stretches of coastline
+    # rather than just adding another texture layer. Independent seeds for
+    # warp_x vs warp_y -- sharing one would correlate them into a uniform
+    # shear (everything leans the same way) instead of genuine twisting.
+    warp_octaves_spec = [(0.018, 1.0), (0.040, 0.22)]
+    warp_octaves = _periodic_octaves(width, warp_octaves_spec)
+    # Amplitude in CELLS, not a fraction of noise amplitude: ~5% of map width
+    # is enough to turn an ellipse into a recognizably irregular coastline
+    # without dissolving the "2-3 continents in their own latitude band"
+    # structure the rest of the pipeline (climate, capital spacing) counts on.
+    warp_amp = width * 0.05
+    warp_x = (noise.fbm_grid(width, height, nseed + 101, warp_octaves)
+              - 0.5) * 2.0 * warp_amp
+    warp_y = (noise.fbm_grid(width, height, nseed + 202, warp_octaves)
+              - 0.5) * 2.0 * warp_amp
+
+    v = noise.fbm_grid(width, height, nseed, height_octaves,
+                       warp_x=warp_x, warp_y=warp_y)
+
+    # Falloff from the nearest continent center -- wrap-aware (see the note
+    # this used to carry: two centers near opposite edges of the map must
+    # compute comparable "distance to land" through the seam, or ocean depth
+    # shading shows a visible discontinuity at x=0/width right where the
+    # wrap makes it a real seam rather than a map edge nobody sees both
+    # sides of at once).
+    xs = np.arange(width, dtype=np.float64)
+    ys = np.arange(height, dtype=np.float64).reshape(-1, 1)
+    best_d2 = None
+    for ccx, ccy in centers:
+        dx = np.abs(((xs - ccx + width / 2) % width) - width / 2)
+        d2 = dx * dx * inv_rx2 + (ys - ccy) ** 2 * inv_ry2
+        best_d2 = d2 if best_d2 is None else np.minimum(best_d2, d2)
+    # Softened from a flat 0.85x: at that strength the falloff so dominated
+    # the region right around a continent's nominal edge that the (now
+    # warped) noise barely got a vote in where the coast actually fell,
+    # which was the other half of the sponge look -- an ellipse with ripples,
+    # not a noise-shaped landmass. 0.55 lets noise decide the boundary in the
+    # zone that matters (d2 near 1) while still pushing cells far past any
+    # continent firmly underwater, so landmasses stay separated.
+    v = v - 0.55 * best_d2
+
+    seam_margin = max(6, round(width * 0.03))
+    seam_d = np.minimum(xs, width - xs)
+    fade = np.clip(seam_d / seam_margin, 0.0, 1.0)
+    fade = fade * fade * (3 - 2 * fade)      # smoothstep: 0 at the seam, 1 inland of it
+    v = v * fade - 3.0 * (1 - fade)          # firmly underwater at the seam itself
+
+    lo, hi = float(v.min()), float(v.max())
+    span = (hi - lo) or 1.0
+    world_height = (v - lo) / span
+    world.height = world_height.tolist()
+
+    # threshold so land is ~40% of the map -- same "sorted array, index at
+    # 60%" the scalar version used, not np.percentile's default interpolation,
+    # so the land fraction this produces is exactly what it always was.
+    flat_sorted = np.sort(world_height, axis=None)
+    world.sea_level = float(flat_sorted[int(flat_sorted.size * 0.60)])
+    land_mask = world_height > world.sea_level
+    land = land_mask.tolist()
     land_cells = [(x, y) for y in range(height) for x in range(width) if land[y][x]]
     if not land_cells and _attempt < 6:      # extremely unlucky seed; retry
         return generate_world(width, height, rng.random(), n_factions,
@@ -1736,6 +1788,39 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
         return generate_world(width, height, rng.random(), n_factions,
                               player_species, player_name, player_color,
                               player_ruler, _attempt=_attempt + 1)
+
+    # 1b. ocean currents, and the coastline they carve. Run only once the
+    #     pass-0 layout above has already passed the sanity checks (empty
+    #     world / single-blob retries) -- no sense spending a Poisson solve
+    #     on a layout about to be thrown away. See app/world/currents.py for
+    #     the physical model: idealized latitude wind bands (the same
+    #     distance-from-equator quantity the climate system uses) drive a
+    #     wind-stress-curl-forced streamfunction, which both gives a real
+    #     current field for sea travel (app/world/trade.py, commander.py) AND
+    #     reshapes this coastline -- a fast longshore current cuts an inlet,
+    #     a sheltered eddy silts one up, both for a reason the game can point
+    #     to rather than by coincidence of noise.
+    carved_height, carved_land, cu, cv = currents.carve_coastline(
+        world_height, land_mask, world.sea_level, width, height, nseed)
+    carved_cells = [(x, y) for y in range(height) for x in range(width)
+                    if carved_land[y][x]]
+    # Carving nudges a narrow coastal band; it should never be ABLE to erase
+    # a continent or merge two into one, but "never" is still worth checking
+    # rather than assuming -- an empty or collapsed result falls back to the
+    # pre-carve layout instead of failing the whole generation.
+    if carved_cells and _has_multiple_landmasses(carved_land, width, height,
+                                                 carved_cells):
+        world_height, land_mask, land, land_cells = (
+            carved_height, carved_land, carved_land.tolist(), carved_cells)
+        world.height = world_height.tolist()
+    world.current_u = cu.tolist()
+    world.current_v = cv.tolist()
+    # Traced once here rather than per-frame by either renderer -- both the
+    # flat map and the globe draw the exact same lines (see
+    # currents.build_streamlines).
+    world.current_streamlines = currents.build_streamlines(
+        world.current_u, world.current_v, land, width, height)
+
     world.total_land_cells = len(land_cells)
 
     # 2. hydrology: fill basins, form lakes, and route flow-accumulated rivers
