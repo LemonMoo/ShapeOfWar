@@ -73,6 +73,26 @@ def _rgb(r, g, b):
     return (clamp(r), clamp(g), clamp(b))
 
 
+class _GlobeColors(dict):
+    """'#rrggbb' -> (r, g, b) floats in 0..1, memoised.
+
+    The globe rebuilds its overlays every frame from the same handful of
+    palette constants the canvas draws with, and GL wants floats. Converting
+    on the fly turned out to be the one genuinely hot line in that rebuild --
+    thousands of road segments a frame, each parsing the same six hex digits."""
+
+    def __missing__(self, key):
+        value = tuple(c / 255.0 for c in _hex_to_rgb(key))
+        self[key] = value
+        return value
+
+
+_GLOBE_RGB = _GlobeColors()
+_GLOBE_LABEL_COLOR = (0.96, 0.96, 0.96)
+_GLOBE_VILLAGE_LABEL_COLOR = (0.84, 0.86, 0.88)
+_GLOBE_PLAYER_COMMANDER = (0.90, 0.52, 1.0)   # the orchid the flat map uses
+
+
 def _lighten(rgb, amt):
     r, g, b = rgb
     return (r + (255 - r) * amt, g + (255 - g) * amt, b + (255 - b) * amt)
@@ -1998,7 +2018,15 @@ class MapView(tk.Frame):
         self.render()
 
     def _sync_globe(self):
-        """Push the flat map's own raster, fog and markers at the sphere."""
+        """Push the flat map's own raster, fog, overlays and markers at the
+        sphere.
+
+        Everything the flat map draws on top of the terrain is rebuilt here in
+        the globe's own terms: paths become segment strips on the sphere,
+        markers become billboards, names become glyph quads. The three zoom
+        levels are read off the camera's ALTITUDE (globe.zoom_level) rather
+        than from self.zoom_faction/zoom_region -- on the globe, flying closer
+        IS drilling down, so there is no separate view state to enter."""
         wd = self.world
         self._ensure_base()
         self._ensure_fog_overlay()
@@ -2008,25 +2036,210 @@ class MapView(tk.Frame):
         # decoration -- the planet turns under its own sun as the game runs.
         ang = (getattr(wd, "turn", 0) % 100) / 100.0 * 2.0 * math.pi
         g.sun = np.array([math.cos(ang), 0.32, math.sin(ang)])
-        marks = []
-        for st in wd.settlements:
-            if not self._cell_revealed(*st.pos):
-                continue
-            nation = wd.factions[st.faction_idx] if st.faction_idx >= 0 else None
-            col = _hex_to_rgb(nation.color) if nation else (160, 160, 160)
-            marks.append((st.pos[0], st.pos[1], 0.022,
-                          (col[0] / 255.0, col[1] / 255.0, col[2] / 255.0)))
-        for cmd in wd.commanders:
-            mine = cmd.faction_idx == wd.player_faction_idx
-            if not mine and not self._cell_revealed(*cmd.pos):
-                continue          # same fog rule the flat map uses
-            col = ((230, 133, 255) if mine
-                   else _hex_to_rgb(wd.factions[cmd.faction_idx].color))
-            marks.append((cmd.pos[0], cmd.pos[1], 0.016,
-                          (col[0] / 255.0, col[1] / 255.0, col[2] / 255.0)))
-        g.set_markers(marks)
+        level = g.zoom_level
+        # Markers and text are sized in sphere radii / screen pixels; scaling
+        # by altitude keeps them a constant size on screen, so a settlement is
+        # the same dot from orbit as it is from just above the ground.
+        mscale = g.dist / gl_globe.DIST_DEFAULT
+        g.set_lines(self._globe_lines(level))
+        g.set_markers(self._globe_markers(level, mscale))
+        g.set_labels(self._globe_labels(level))
         g.render_now()
         self.world.globe_camera = g.camera_state()
+
+    def _globe_lines(self, level):
+        """Every path the flat map draws, as (cells, rgb, width_px, dash) for
+        gl_globe.set_lines. Fog-clipped through the same _fog_clip_runs the
+        canvas versions use, so the globe never reveals a route the flat map
+        would have hidden."""
+        wd = self.world
+        out = []
+
+        def add(cells, color, width, dash=0):
+            for run in self._fog_clip_runs(cells):
+                if len(run) >= 2:
+                    out.append((run, color, width, dash))
+
+        # Stone roads are the trunk network and show at every altitude; dirt
+        # tracks are region-scale detail and would be a grey haze from orbit.
+        for region in wd.regions:
+            if region.faction_idx < 0:
+                continue
+            for (ax, ay), (bx, by), tier in wd.roads_by_region.get(region.id, []):
+                if tier != "stone" and level < 2:
+                    continue
+                if not (self._cell_revealed(ax, ay) or self._cell_revealed(bx, by)):
+                    continue
+                stone = tier == "stone"
+                add([(ax, ay), (bx, by)],
+                    _GLOBE_RGB[_STONE_ROAD_COLOR if stone else _DIRT_ROAD_COLOR],
+                    2.2 if stone else 1.6)
+
+        for r in wd.trade_routes:
+            sea = r["kind"] == "sea"
+            add(r["cells"],
+                _GLOBE_RGB[_TRADE_SEA_COLOR if sea else _TRADE_LAND_COLOR],
+                1.8 if sea else 2.4, dash=2)
+
+        for proj in wd.trade_route_projects:
+            for seg in proj.built_segments:
+                add(seg, _GLOBE_RGB[_TRADE_ROUTE_CONSTRUCTION_COLOR], 1.8, dash=3)
+
+        # A route with a caravan on it is redrawn brighter on top, exactly as
+        # on the flat map -- an active trade lane should be obvious from orbit.
+        player_idx = wd.player_faction_idx
+        for caravan in wd.trade_caravans:
+            mine = player_idx is not None and player_idx in (caravan.seller_idx,
+                                                             caravan.buyer_idx)
+            if caravan.kind == "sea":
+                color, width = _ACTIVE_ROUTE_SEA_COLOR, 2.2
+            elif caravan.kind == "river":
+                color, width = _RIVER_CARAVAN_STYLE["glow"], 2.2
+            else:
+                color, width = _ACTIVE_ROUTE_LAND_COLOR, 3.0
+            if not mine:
+                color = {"sea": _FOREIGN_SEA_CARAVAN_STYLE,
+                         "river": _FOREIGN_RIVER_CARAVAN_STYLE}.get(
+                             caravan.kind, _FOREIGN_CARAVAN_STYLE)["glow"]
+                width *= 0.5
+            add(caravan.path, _GLOBE_RGB[color], width, dash=2)
+
+        if self.attack_mode is not None:
+            for region in self._attack_frontier:
+                for x0, y0, x1, y1 in self._region_border_segments(region):
+                    out.append(([(x0, y0), (x1, y1)], _GLOBE_RGB[theme.BAD],
+                                2.6, 0))
+        return out
+
+    def _globe_markers(self, level, mscale):
+        """Settlements, villages, commanders, ships and caravans as billboards.
+
+        Culled to what the camera can actually see (globe.visible_mask) -- the
+        GPU would clip and depth-test the rest anyway, but at village altitude
+        over a developed realm that is nearly all of several hundred markers
+        whose geometry there is no reason to build."""
+        wd = self.world
+        g = self.globe
+        marks = []
+
+        def add(items, size, color_of):
+            """items: [(obj, (cx, cy)), ...] already fog-checked."""
+            if not items:
+                return
+            mask = g.visible_mask([pos for _, pos in items])
+            for keep, (obj, pos) in zip(mask, items):
+                if keep:
+                    marks.append((pos[0], pos[1], size * mscale, color_of(obj)))
+
+        def faction_rgb(idx):
+            if idx is None or idx < 0:
+                return (0.63, 0.63, 0.63)
+            return _GLOBE_RGB[wd.factions[idx].color]
+
+        # From orbit only cities; closer in, everything -- the same thinning
+        # rule _draw_settlements applies between world and region view.
+        settlements = [(st, st.pos) for st in wd.settlements
+                       if (level >= 1 or st.kind == "city")
+                       and self._cell_revealed(*st.pos)]
+        add(settlements, 0.020, lambda st: faction_rgb(st.faction_idx))
+
+        if level >= 2:
+            villages = [(v, v.pos) for v in wd.villages
+                        if self._cell_revealed(*v.pos)]
+            add(villages, 0.011, lambda v: _GLOBE_RGB[_VILLAGE_STYLE["fill"]])
+
+        ships_aboard = {cmd.aboard_ship_id for cmd in wd.commanders
+                        if cmd.aboard_ship_id is not None}
+        ships = [(s, s.pos) for s in wd.ships
+                 if s.id not in ships_aboard and self._cell_revealed(*s.pos)]
+        add(ships, 0.012, lambda s: _GLOBE_RGB[_SHIP_STYLE["fill"]])
+
+        caravans = [(c, c.pos) for c in wd.trade_caravans
+                    if self._cell_revealed(*c.pos)]
+        add(caravans, 0.013, lambda c: _GLOBE_RGB[self._caravan_style(c)["fill"]])
+
+        # The player's own commander keeps the orchid it has on the flat map:
+        # it is the one marker you give orders to and must never be mistaken
+        # for a rival's.
+        commanders = [(cmd, cmd.pos) for cmd in wd.commanders
+                      if cmd.faction_idx == wd.player_faction_idx
+                      or self._cell_revealed(*cmd.pos)]
+        add(commanders, 0.016,
+            lambda cmd: (_GLOBE_PLAYER_COMMANDER
+                         if cmd.faction_idx == wd.player_faction_idx
+                         else faction_rgb(cmd.faction_idx)))
+        return marks
+
+    def _globe_labels(self, level):
+        """Names and alert badges, by altitude: realms from orbit, regions at
+        region height, settlements and villages once close enough to be
+        standing over them. Same progression the flat map's three zoom levels
+        give, driven by the camera instead of by a view mode."""
+        wd = self.world
+        g = self.globe
+        out = []
+
+        def add(items, px, color, dy):
+            if not items:
+                return
+            mask = g.visible_mask([pos for _, pos in items])
+            for keep, (text, pos) in zip(mask, items):
+                if keep:
+                    out.append((pos[0], pos[1], text, color, px, dy))
+
+        if level == 0:
+            add([(f.name, (f.center[0] * wd.w, f.center[1] * wd.h))
+                 for f in wd.factions
+                 if self._is_known(f) and not is_eliminated(f)],
+                15.0, _GLOBE_LABEL_COLOR, -14.0)
+        elif level == 1:
+            add([(r.name, (r.center[0] * wd.w, r.center[1] * wd.h))
+                 for r in wd.regions
+                 if r.faction_idx >= 0 and self._is_known(wd.factions[r.faction_idx])
+                 and self._cell_revealed(int(r.center[0] * wd.w),
+                                         int(r.center[1] * wd.h))],
+                12.0, _GLOBE_LABEL_COLOR, -10.0)
+        else:
+            add([(st.name, st.pos) for st in wd.settlements
+                 if self._cell_revealed(*st.pos)],
+                12.0, _GLOBE_LABEL_COLOR, 14.0)
+            # Village names only once there are few enough to read. The whole
+            # facing hemisphere of a developed realm is hundreds of them, which
+            # is label soup rather than information -- the same reason the flat
+            # map gates them on _VILLAGE_LABEL_LIMIT.
+            villages = [(v.name, v.pos) for v in wd.villages
+                        if self._cell_revealed(*v.pos)]
+            if villages:
+                mask = g.visible_mask([pos for _, pos in villages])
+                if int(mask.sum()) <= _VILLAGE_LABEL_LIMIT:
+                    add(villages, 9.0, _GLOBE_VILLAGE_LABEL_COLOR, 10.0)
+
+        # Alerts ride on the same text path rather than getting their own
+        # geometry: a "!" over the marker is the badge, and it is legible at
+        # any altitude the settlement itself is drawn at.
+        if level >= 1 and self._alert_node_ids:
+            alerts = self._alert_node_ids
+            for critical in (True, False):
+                colour = _GLOBE_RGB[theme.BAD if critical
+                                    else self._ALERT_WARN_COLOR]
+                add([("!", n.pos)
+                     for nodes in (wd.settlements, wd.villages) for n in nodes
+                     if (alerts.get(id(n)) == "critical") == critical
+                     and id(n) in alerts and self._cell_revealed(*n.pos)],
+                    14.0, colour, -12.0)
+        return out
+
+    def _caravan_style(self, caravan):
+        """The marker style for a caravan -- yours or somebody else's, by
+        kind. Shared by the flat map's marker pass and the globe's."""
+        mine = (self.world.player_faction_idx is not None
+                and self.world.player_faction_idx in (caravan.seller_idx,
+                                                      caravan.buyer_idx))
+        if caravan.kind == "sea":
+            return _SEA_CARAVAN_STYLE if mine else _FOREIGN_SEA_CARAVAN_STYLE
+        if caravan.kind == "river":
+            return _RIVER_CARAVAN_STYLE if mine else _FOREIGN_RIVER_CARAVAN_STYLE
+        return _CARAVAN_STYLE if mine else _FOREIGN_CARAVAN_STYLE
 
     def _on_globe_pick(self, cx, cy):
         """A click on the planet, resolved to a map cell -- from here on it is

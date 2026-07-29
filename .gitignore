@@ -45,3 +45,6 @@ Thumbs.db
 # Dev world snapshots used by dev/bench_turn.py and the regression harnesses.
 # ~49MB each -- real saves, kept on disk but deliberately out of git.
 dev/worlds/
+
+# Globe render dumps from dev/globe_shot.py -- output, not source.
+dev/shots/
