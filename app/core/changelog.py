@@ -20,6 +20,19 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 44,
+        "title": "Settlements Read the Map Now",
+        "items": [
+            "CONTINENTS AREN'T ALL THE SAME SHAPE ANY MORE. Every one used to share a single fixed, axis-aligned ellipse -- size and orientation never varied, only the coastline texture drawn on top. Continents now get their own randomized size and rotation, plus 0-3 clustered 'lobe' blobs, producing forked arms, diagonal landmasses, and lopsided coasts instead of the same silhouette moved to a new latitude every time",
+            "FIXED: kingdom names overlapping into an unreadable clump at world-view zoom on a crowded map -- names are decluttered and offset clear of their own capital marker now, with your own kingdom always guaranteed a spot",
+            "SETTLEMENT PLACEMENT ACTUALLY READS THE MAP NOW, EVERYWHERE. AI factions used to pick a random cell for every City/Town/Castle they built after world-gen -- no site scoring at all. They now score land the same fertility/river/coast/border/elevation way world-gen itself always has. Placing a settlement yourself shows an advisory gold-dot hint for where the land actually wants one",
+            "NO MORE VILLAGE CAP. Villages used to be capped 3-50 per region by a flat area formula with no regard for the land underneath them. They're now placed greedily wherever the land can actually support one -- a lush, well-watered region places many, a marginal one places few -- and grow as an organic cluster around cities/towns and each other instead of scattering independently",
+            "PRODUCTION IS REAL AND LOCAL NOW. Every village used to draw an equal slice of one number computed for its whole region, regardless of where it actually sat. Each village now produces from its own local land -- mountain villages mine Iron/Coal/Stone, forest villages cut Softwood and Logs -- and settlements draw on that real local supply through the same trade network as always, the way an actual economy would",
+            "ROADS BEND AROUND MOUNTAINS AND RIVERS NOW instead of cutting a straight line through them, matching the terrain-aware routing shipments already used underneath -- the map and the simulation used to visibly disagree",
+            "Local shipments now prefer your nearest neighboring village/settlement over a random one -- previously whichever candidate came first in storage order got picked, however far away that actually was",
+        ],
+    },
+    {
         "version": 43,
         "title": "The Globe Flies Lower, and a Fixed Selection Bug",
         "items": [
