@@ -878,14 +878,28 @@ class GLGlobeFrame(OpenGLFrame):
         # square rather than a smear, and mipmapped LINEAR when minifying,
         # because from orbit a 1100x660 map is squeezed into a few hundred
         # pixels and point-sampling that crawls with every degree of rotation.
-        for tex in (self.tex_map, self.tex_fog):
-            tex.repeat_x = True
-            tex.repeat_y = False
-            try:
-                tex.build_mipmaps()
-                tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.NEAREST)
-            except Exception:
-                tex.filter = (moderngl.LINEAR, moderngl.NEAREST)
+        self.tex_map.repeat_x = True
+        self.tex_map.repeat_y = False
+        try:
+            self.tex_map.build_mipmaps()
+            self.tex_map.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.NEAREST)
+        except Exception:
+            self.tex_map.filter = (moderngl.LINEAR, moderngl.NEAREST)
+        # The fog mask is NOT terrain -- it's a binary revealed/hidden signal
+        # (see vision.fog_mask_bytes), and mipmapped LINEAR filtering was
+        # blending that signal across a wide texel neighborhood once
+        # minified, which from orbit bled cloud haze deep into territory
+        # that was genuinely 100% revealed (owned or otherwise discovered).
+        # A player's own land needs to read as unambiguously clear, not
+        # "clear but a bit hazy near any border" -- so this samples NEAREST
+        # both ways, with no mipmaps at all: a revealed cell is exactly 0
+        # regardless of viewing distance. The cloud layer still looks
+        # organic where it actually IS hidden (the noise FBM in the
+        # fragment shader does that work, not filtering blur at the edge),
+        # it just no longer frays outward onto land that isn't hidden.
+        self.tex_fog.repeat_x = True
+        self.tex_fog.repeat_y = False
+        self.tex_fog.filter = (moderngl.NEAREST, moderngl.NEAREST)
         # Elevation is a DISPLACEMENT map, not something meant to be read
         # crisply up close -- blocky steps in a height field look like
         # terraced ground, where the whole point of relief is a smooth
