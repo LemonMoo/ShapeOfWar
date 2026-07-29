@@ -73,6 +73,53 @@ def _rgb(r, g, b):
     return (clamp(r), clamp(g), clamp(b))
 
 
+# End-turn movement animation. A fixed wall-clock window rather than a fixed
+# number of frames, so a heavy world animates in the same time a light one does
+# -- it just draws fewer frames doing it.
+_MOVE_ANIM_SECONDS = 0.75
+_MOVE_ANIM_FRAME_MS = 33          # ~30fps; the map redraws fully per frame
+
+
+def _path_point(path, frac, world_w):
+    """Continuous position `frac` (0..1) of the way along an ordered cell
+    path. Wrap-aware on x: a route crossing the seam steps from x=1099 to x=0,
+    and interpolating that naively sends the caravan the long way round the
+    entire world."""
+    n = len(path)
+    if n == 1:
+        return (float(path[0][0]), float(path[0][1]))
+    t = max(0.0, min(1.0, frac)) * (n - 1)
+    i = min(n - 2, int(t))
+    f = t - i
+    (ax, ay), (bx, by) = path[i], path[i + 1]
+    x = ax + wrap.dx_wrap(ax, bx, world_w) * f
+    return (wrap.wrap_x(x, world_w), ay + (by - ay) * f)
+
+
+class _PathWalk:
+    """Slides a mover along its own route between two fractions of it."""
+
+    def __init__(self, path, f0, f1, world_w):
+        self.path, self.f0, self.f1, self.w = path, f0, f1, world_w
+
+    def __call__(self, t):
+        return _path_point(self.path, self.f0 + (self.f1 - self.f0) * t, self.w)
+
+
+class _Lerp:
+    """Straight line between two cells -- the fallback for a mover with no
+    route to replay (a ship that was moved rather than sailed)."""
+
+    def __init__(self, a, b, world_w):
+        self.a, self.w = a, world_w
+        self.dx = wrap.dx_wrap(a[0], b[0], world_w)
+        self.dy = b[1] - a[1]
+
+    def __call__(self, t):
+        return (wrap.wrap_x(self.a[0] + self.dx * t, self.w),
+                self.a[1] + self.dy * t)
+
+
 class _GlobeColors(dict):
     """'#rrggbb' -> (r, g, b) floats in 0..1, memoised.
 
@@ -456,6 +503,10 @@ class MapView(tk.Frame):
         # flat map remains the guaranteed path.
         self.globe = None
         self.globe_active = False
+        # End-turn movement animation state (see _start_move_animation).
+        self._move_anim = None       # pending `after` id, or None when idle
+        self._move_tracks = ()       # [(mover, t -> (x, y)), ...]
+        self._anim_pos = {}          # id(mover) -> its position this frame
         self.canvas.bind("<Configure>", lambda e: self._on_canvas_configure())
         # Free camera: press/drag/release (drag pans, a plain click still
         # drills down/selects exactly as before) plus wheel-zoom.
@@ -523,6 +574,8 @@ class MapView(tk.Frame):
         self._base_img = self._base_key = None
         self._px_pol = None   # new world: force a full _precompute_colors rebuild, not a patch
         self._fog_overlay_img = None
+        self._stop_move_animation()   # a slide from the previous world means
+                                      # nothing in this one
         self._fog_key = object()   # never matches any real fog_version -> forces a rebuild
         self._precompute_colors()
         self._last_territory_version = getattr(self.world, "territory_version", 0)
@@ -2148,22 +2201,25 @@ class MapView(tk.Frame):
                         if self._cell_revealed(*v.pos)]
             add(villages, 0.011, lambda v: _GLOBE_RGB[_VILLAGE_STYLE["fill"]])
 
+        # Everything that moves is placed by _display_pos, so the globe gets
+        # the end-turn slide for free rather than needing its own copy of it.
         ships_aboard = {cmd.aboard_ship_id for cmd in wd.commanders
                         if cmd.aboard_ship_id is not None}
-        ships = [(s, s.pos) for s in wd.ships
-                 if s.id not in ships_aboard and self._cell_revealed(*s.pos)]
+        ships = [(s, self._display_pos(s)) for s in wd.ships
+                 if s.id not in ships_aboard
+                 and self._cell_revealed(*self._display_cell(s))]
         add(ships, 0.012, lambda s: _GLOBE_RGB[_SHIP_STYLE["fill"]])
 
-        caravans = [(c, c.pos) for c in wd.trade_caravans
-                    if self._cell_revealed(*c.pos)]
+        caravans = [(c, self._display_pos(c)) for c in wd.trade_caravans
+                    if self._cell_revealed(*self._display_cell(c))]
         add(caravans, 0.013, lambda c: _GLOBE_RGB[self._caravan_style(c)["fill"]])
 
         # The player's own commander keeps the orchid it has on the flat map:
         # it is the one marker you give orders to and must never be mistaken
         # for a rival's.
-        commanders = [(cmd, cmd.pos) for cmd in wd.commanders
+        commanders = [(cmd, self._display_pos(cmd)) for cmd in wd.commanders
                       if cmd.faction_idx == wd.player_faction_idx
-                      or self._cell_revealed(*cmd.pos)]
+                      or self._cell_revealed(*self._display_cell(cmd))]
         add(commanders, 0.016,
             lambda cmd: (_GLOBE_PLAYER_COMMANDER
                          if cmd.faction_idx == wd.player_faction_idx
@@ -2294,6 +2350,146 @@ class MapView(tk.Frame):
     def _clear_end_turn_busy(self):
         self._end_turn_busy = False
 
+    # --- end-turn movement animation -----------------------------------------
+    # Caravans, shipments, commanders and ships used to TELEPORT: End Turn
+    # advanced them several cells and the next render simply drew them
+    # somewhere else. Everything that moves along a path now slides along that
+    # path instead, over a fixed wall-clock window, so a turn reads as things
+    # travelling rather than as the map being redealt.
+    #
+    # This is a VIEW-only effect. Nothing in app/world knows it exists: the
+    # turn resolves exactly as before and the animation replays the ground it
+    # covered. That matters -- the sim stays deterministic and the animation
+    # can be shortened, lengthened or skipped without touching game state.
+
+    @staticmethod
+    def _mover_track(obj):
+        """(path_in_travel_order, fraction_along_it) for anything that moves
+        along a stored route, or (None, None) for a mover whose route the view
+        cannot see (a beached ship, say, which just changes cell).
+
+        Deliberately duck-typed rather than isinstance'd on the three mover
+        classes: caravans and regional shipments already express position as
+        turn_progress/turns_total along `path`, commanders as an index into
+        one, and anything added later that follows either shape animates
+        without this needing to be told about it."""
+        path = getattr(obj, "path", None)
+        if not path or len(path) < 2:
+            return None, None
+        total = getattr(obj, "turns_total", None)
+        if total:
+            frac = min(1.0, getattr(obj, "turn_progress", 0) / max(1, total))
+            if getattr(obj, "leg", "outbound") == "return":
+                return list(reversed(path)), frac
+            return path, frac
+        index = getattr(obj, "path_index", None)
+        if index is None:
+            return None, None
+        return path, index / (len(path) - 1)
+
+    def _movers(self):
+        wd = self.world
+        return (list(wd.trade_caravans) + list(getattr(wd, "regional_shipments", ()))
+                + list(wd.commanders) + list(wd.ships))
+
+    def _movement_snapshot(self):
+        """Where everything stands BEFORE the turn resolves: the route it is
+        on, how far along it is, its leg, and its plain cell as a fallback.
+
+        The mover itself is kept in the snapshot, and that is load-bearing, not
+        bookkeeping. Keying on id() alone is a trap here: a shipment that
+        delivers during the turn is freed, and CPython hands its address
+        straight to the next object allocated -- measured on dev560, 18 brand
+        new shipments a turn inherited the id of one that had just arrived and
+        were animated from the dead one's position, halfway across the map.
+        Holding the reference keeps the old id un-reusable for as long as the
+        snapshot needs it to be unique."""
+        snap = {}
+        for obj in self._movers():
+            path, frac = self._mover_track(obj)
+            snap[id(obj)] = (obj, path, frac, getattr(obj, "leg", None),
+                             tuple(obj.pos))
+        return snap
+
+    def _movement_tracks(self, snap):
+        """[(mover, t -> (x, y)), ...] for the turn that just resolved.
+
+        A mover still on the same route slides along it; one that arrived and
+        dropped its route (a commander does) runs to the end of the route it
+        had; anything else -- newly dispatched, or with no route at all --
+        eases straight from where it was to where it is."""
+        w = self.world.w
+        tracks = []
+        for obj in self._movers():
+            path, frac = self._mover_track(obj)
+            before = snap.get(id(obj))
+            if before is not None and before[0] is not obj:
+                before = None            # an id that outlived its object
+            _, path0, frac0, leg0, pos0 = before or (None, None, 0.0, None, None)
+            if path is None and path0 is not None:
+                path, frac = path0, 1.0     # arrived; its route is gone now
+            if path is not None:
+                # A caravan that turned for home this turn did not travel: it
+                # is standing at the buyer, which is fraction 1 of the outbound
+                # path and fraction 0 of the reversed one. Carrying frac0
+                # across would send it back to the seller to start again.
+                same_route = (before is not None and path0 is not None
+                              and len(path0) == len(path)
+                              and getattr(obj, "leg", None) == leg0)
+                start = frac0 if same_route else 0.0
+                if abs(frac - start) < 1e-6:
+                    continue
+                tracks.append((obj, _PathWalk(path, start, frac, w)))
+            elif pos0 is not None and tuple(obj.pos) != pos0:
+                tracks.append((obj, _Lerp(pos0, tuple(obj.pos), w)))
+        return tracks
+
+    def _start_move_animation(self, tracks):
+        self._stop_move_animation()
+        if not tracks:
+            return
+        self._move_tracks = tracks
+        self._move_t0 = time.monotonic()
+        self._move_anim = self.after(0, self._step_move_animation)
+
+    def _step_move_animation(self):
+        t = min(1.0, (time.monotonic() - self._move_t0) / _MOVE_ANIM_SECONDS)
+        # Smoothstep: a caravan pulls away and settles rather than snapping
+        # into motion and stopping dead on the same frame.
+        eased = t * t * (3.0 - 2.0 * t)
+        self._anim_pos = {id(obj): walk(eased) for obj, walk in self._move_tracks}
+        if t >= 1.0:
+            self._move_anim = None
+            self._move_tracks = ()
+            self._anim_pos = {}
+        self.render()
+        if self._move_anim is not None:
+            self._move_anim = self.after(_MOVE_ANIM_FRAME_MS,
+                                         self._step_move_animation)
+
+    def _stop_move_animation(self):
+        """Drop any animation in flight and put every mover back on its real
+        cell. Called before a new turn and on leaving the view, so a half-
+        finished slide can never be left showing a position the world has
+        already moved on from."""
+        if self._move_anim is not None:
+            self.after_cancel(self._move_anim)
+        self._move_anim = None
+        self._move_tracks = ()
+        self._anim_pos = {}
+
+    def _display_pos(self, obj):
+        """Where to DRAW a mover: its animated position while an end-turn
+        animation is running, otherwise the cell it actually occupies."""
+        return self._anim_pos.get(id(obj)) or obj.pos
+
+    def _display_cell(self, obj):
+        """_display_pos snapped to a whole cell -- what the fog tests want, so
+        a caravan mid-slide is gated on the ground it is crossing rather than
+        on the cell it will end the turn in."""
+        x, y = self._display_pos(obj)
+        return wrap.wrap_x(int(x), self.world.w), max(0, min(self.world.h - 1, int(y)))
+
     def _on_end_turn(self):
         # Rate-limit + re-entrancy guard: the side panels (realm info,
         # resources, trade log) fully tear down and rebuild every turn, so a
@@ -2312,11 +2508,19 @@ class MapView(tk.Frame):
             # frame), then hold the guard for a short cooldown. In `finally`
             # so a rare mid-turn error can never wedge End Turn permanently.
             self.update_idletasks()
-            self.after(_END_TURN_COOLDOWN_MS, self._clear_end_turn_busy)
+            # The guard is held for the whole movement animation as well as the
+            # cooldown: ending another turn mid-slide would animate the next
+            # one from positions the world has already left behind.
+            delay = _END_TURN_COOLDOWN_MS
+            if self._move_anim is not None:
+                delay = max(delay, int(_MOVE_ANIM_SECONDS * 1000) + 40)
+            self.after(delay, self._clear_end_turn_busy)
 
     def _run_end_turn(self):
         before = self._current_resource_snapshot()
         prev_year = resources.current_year(self.world.turn)
+        self._stop_move_animation()
+        movement = self._movement_snapshot()
         self.on_end_turn()
         after = self._current_resource_snapshot()
         self._resource_deltas = {r: after.get(r, 0) - before.get(r, 0)
@@ -2336,6 +2540,10 @@ class MapView(tk.Frame):
             self._year_start_population = pop_now
 
         self.refresh()
+        # After refresh: refresh() renders, and the first animated frame has to
+        # be the one that lands on screen or movers flash at their destination
+        # before setting off back to where they came from.
+        self._start_move_animation(self._movement_tracks(movement))
 
     def _report_regional_trade_events(self):
         """Same idea as _report_trade_events, for Phase 11's domestic
@@ -4641,7 +4849,8 @@ class MapView(tk.Frame):
         for ship in wd.ships:
             if ship.id in aboard_ids:
                 continue
-            x, y = screen(ship.pos[0] + 0.5, ship.pos[1] + 0.5)
+            sx, sy = self._display_pos(ship)
+            x, y = screen(sx + 0.5, sy + 0.5)
             if not self._visible_point(x, y):
                 continue
             c.create_polygon(x - r, y + r * 0.4, x + r, y + r * 0.4,
@@ -4675,7 +4884,7 @@ class MapView(tk.Frame):
             if mine:
                 fill, outline = _COMMANDER_STYLE["fill"], _COMMANDER_STYLE["outline"]
             else:
-                if not self._cell_revealed(*cmd.pos):
+                if not self._cell_revealed(*self._display_cell(cmd)):
                     continue
                 fill = wd.factions[cmd.faction_idx].color
                 outline = "#11151b"
@@ -4694,7 +4903,8 @@ class MapView(tk.Frame):
                         c.create_line(*pts, fill=fill, width=1.5,
                                       dash=(3, 3), capstyle="round", smooth=True)
 
-            x, y = screen(cmd.pos[0] + 0.5, cmd.pos[1] + 0.5)
+            cx, cy = self._display_pos(cmd)
+            x, y = screen(cx + 0.5, cy + 0.5)
             if not self._visible_point(x, y):
                 continue
             if cmd is self.selected_commander:
@@ -4878,9 +5088,12 @@ class MapView(tk.Frame):
 
         player_idx = self.world.player_faction_idx
         for caravan in self.world.trade_caravans:
-            if not self._cell_revealed(*caravan.pos):
+            # Mid-slide this is where the caravan currently IS, not the cell it
+            # will end the turn in -- so it is fog-gated on the ground it is
+            # actually crossing (see _display_pos/_display_cell).
+            if not self._cell_revealed(*self._display_cell(caravan)):
                 continue
-            x, y = screen(*[v + 0.5 for v in caravan.pos])
+            x, y = screen(*[v + 0.5 for v in self._display_pos(caravan)])
             if not self._visible_point(x, y):
                 continue
             # Your own trade vs. somebody else's passing through -- see the
