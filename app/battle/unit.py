@@ -284,6 +284,10 @@ class Unit:
             dmg *= orders.BRACE_CHARGE_MULT
         # A Dwarven Thane's line takes less punishment while he stands.
         self.hp -= dmg * self._aura("damage_taken_mult")
+        if self.hp <= 0:
+            # Drop out of this tick's target snapshot immediately, so nobody
+            # spends the rest of their re-target interval attacking a corpse.
+            battle.mark_dead(self)
         return "hit"
 
     def update(self, dt, battle):

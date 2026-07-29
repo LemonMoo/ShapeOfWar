@@ -329,10 +329,20 @@ for _name, _spec in RESOURCES.items():
 del _name, _spec
 
 
+# Same reasoning as _STORAGE_CLASS_CACHE below: pure function of a name over a
+# table fixed at import, called alongside storage_class in the same hot sums.
+_RESOURCE_BULK_CACHE = {}
+
+
 def resource_bulk(resource):
     """Storage space one unit of `resource` occupies (see _CATEGORY_BULK).
     Unknown resources cost 1.0, the grain reference."""
-    return RESOURCES.get(resource, {}).get("bulk", 1.0)
+    try:
+        return _RESOURCE_BULK_CACHE[resource]
+    except KeyError:
+        value = RESOURCES.get(resource, {}).get("bulk", 1.0)
+        _RESOURCE_BULK_CACHE[resource] = value
+        return value
 
 # Gold-equivalent value per unit, by tier -- the shared "how much is this
 # actually worth" reference used both for trade pricing (app/world/trade.py)
@@ -2629,17 +2639,32 @@ _STORAGE_CLASS_OVERRIDE = {
 }
 
 
+# Memo for storage_class. It is a pure function of a resource NAME over tables
+# that are all finalised at import, so this can never go stale -- and it is one
+# of the hottest calls in the game: a single end turn on a 300-region world made
+# 930,000 of them, because every node_pool_stock sums over every resource a node
+# holds and asks the class of each one.
+_STORAGE_CLASS_CACHE = {}
+
+
 def storage_class(resource):
     """Which storage pool a resource occupies and competes within -- "food"
     (Crops/Food Products/Fishing), "durable" (Mining/Forestry/Manufactured),
     or "other" (Luxury Goods, Gold)."""
+    try:
+        return _STORAGE_CLASS_CACHE[resource]
+    except KeyError:
+        pass
     override = _STORAGE_CLASS_OVERRIDE.get(resource)
     if override:
-        return override
-    if resource in _DURABLE_EXTRA:
-        return "durable"
-    category = RESOURCES.get(resource, {}).get("category")
-    return _STORAGE_CLASS_BY_CATEGORY.get(category, "other")
+        value = override
+    elif resource in _DURABLE_EXTRA:
+        value = "durable"
+    else:
+        category = RESOURCES.get(resource, {}).get("category")
+        value = _STORAGE_CLASS_BY_CATEGORY.get(category, "other")
+    _STORAGE_CLASS_CACHE[resource] = value
+    return value
 
 
 def storage_throttle(node, resource=None):

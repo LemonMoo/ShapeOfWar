@@ -13,6 +13,7 @@ import math
 import tkinter as tk
 
 from app.ui import theme
+from app.ui import gl_battle
 from app.battle import orders
 from app.battle.shapes import draw_shape
 
@@ -54,17 +55,72 @@ class BattleView(tk.Frame):
         self._formation_slots = []     # [(unit, x, y), ...] previewed placement
         self._planning_keys_bound = False
 
-        self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.canvas.bind("<Configure>", lambda e: self.render())
-        self.canvas.bind("<ButtonPress-1>", self._on_press)
-        self.canvas.bind("<B1-Motion>", self._on_drag)
-        self.canvas.bind("<ButtonRelease-1>", self._on_release)
-        self.canvas.bind("<ButtonPress-3>", self._on_rmb_press)
-        self.canvas.bind("<B3-Motion>", self._on_rmb_drag)
-        self.canvas.bind("<ButtonRelease-3>", self._on_rmb_release)
+        # The battlefield surface. Preferred path is the GPU renderer
+        # (app/ui/gl_battle.py) -- it draws the whole field in one instanced
+        # draw call, which is what lets every soldier keep its sword and shield
+        # at any army size. Falls back to the Tk canvas whenever a GL context
+        # cannot be had (libraries missing, no driver, remote session), so the
+        # game still runs everywhere it did before.
+        self.gl = None
+        self.canvas = None
+        self._make_viewport()
+        for seq, fn in (("<Configure>", lambda e: self.render()),
+                        ("<ButtonPress-1>", self._on_press),
+                        ("<B1-Motion>", self._on_drag),
+                        ("<ButtonRelease-1>", self._on_release),
+                        ("<ButtonPress-3>", self._on_rmb_press),
+                        ("<B3-Motion>", self._on_rmb_drag),
+                        ("<ButtonRelease-3>", self._on_rmb_release)):
+            self.viewport.bind(seq, fn)
 
         self._build_panel()
+
+    def _make_viewport(self):
+        """Build the battlefield surface, GPU if we can get one."""
+        # Created optimistically and judged LAZILY. A GL context only exists
+        # once Tk has actually mapped the widget, and this view is built long
+        # before the battle screen is ever raised -- testing for a context here
+        # always failed and silently demoted every machine to the canvas.
+        # Failure is detected in render() instead, where the frame is on screen.
+        if gl_battle.gl_available():
+            try:
+                frame = gl_battle.GLBattleFrame(self, self, width=900, height=600)
+                frame.pack(side="left", fill="both", expand=True)
+                self.gl = frame
+                self.viewport = frame
+                return
+            except Exception:
+                self.gl = None
+        self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.viewport = self.canvas
+
+    def _fallback_to_canvas(self):
+        """Swap a dead GL surface for the canvas, mid-session if need be."""
+        dead, self.gl = self.gl, None
+        try:
+            dead.destroy()
+        except Exception:
+            pass
+        self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.viewport = self.canvas
+        for seq, fn in (("<Configure>", lambda e: self.render()),
+                        ("<ButtonPress-1>", self._on_press),
+                        ("<B1-Motion>", self._on_drag),
+                        ("<ButtonRelease-1>", self._on_release),
+                        ("<ButtonPress-3>", self._on_rmb_press),
+                        ("<B3-Motion>", self._on_rmb_drag),
+                        ("<ButtonRelease-3>", self._on_rmb_release)):
+            self.viewport.bind(seq, fn)
+
+    def viewport_size(self):
+        """(width, height) of the battlefield surface, whichever backend."""
+        return (self.viewport.winfo_width(), self.viewport.winfo_height())
+
+    @property
+    def using_gpu(self):
+        return self.gl is not None and not self.gl.failed
 
     def _build_panel(self):
         p = tk.Frame(self, bg=theme.PANEL, width=300)
@@ -211,6 +267,12 @@ class BattleView(tk.Frame):
         battle.player_side = 0
         counts = " vs ".join(f"{a.name} ({len(a.units)})" for a in battle.armies)
         self.info.config(fg=theme.INK, text=counts)
+        # Say which renderer is live. A packaged build that quietly failed to
+        # get a GL context looks exactly like one that never had the GPU path,
+        # and the only visible symptom is soldiers losing their weapons in big
+        # battles -- which is easy to mistake for a design choice.
+        self._add_log("Renderer: GPU (accelerated)" if self.using_gpu
+                      else "Renderer: canvas (no GPU context)")
 
         self.planning = True
         self.selected_units = set()
@@ -679,6 +741,14 @@ class BattleView(tk.Frame):
 
     # --- rendering ---------------------------------------------------------
     def render(self):
+        # GPU path: the whole field is one instanced draw call, so there is no
+        # per-item work to do here at all. Everything below is the canvas
+        # fallback, kept intact and still correct.
+        if self.gl is not None:
+            self.gl.render_now()
+            if not self.gl.failed:
+                return
+            self._fallback_to_canvas()   # GL died on a live machine; carry on
         c = self.canvas
         c.delete("all")
         w, h = c.winfo_width(), c.winfo_height()

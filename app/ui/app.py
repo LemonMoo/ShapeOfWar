@@ -344,8 +344,11 @@ class App(tk.Tk):
 
     def stage_battle(self, attacker, defender, region=None, claim_project=None,
                      defender_strength_mult=1.0):
-        w = max(self.battle_view.canvas.winfo_width(), 900)
-        h = max(self.battle_view.canvas.winfo_height(), 600)
+        # Via viewport_size, not .canvas: the battlefield surface may be the
+        # GPU frame rather than a Tk canvas (see BattleView._make_viewport).
+        vw, vh = self.battle_view.viewport_size()
+        w = max(vw, 900)
+        h = max(vh, 600)
         battle = Battle(w, h)
         a_army, a_comp = self._army_for(attacker, 0)
         d_army, d_comp = self._army_for(defender, 1)

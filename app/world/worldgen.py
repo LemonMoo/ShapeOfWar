@@ -475,7 +475,19 @@ def _seed_wildland_strength(world, rng, capitals):
 
 
 def _adjacent_region_ids(world, region):
-    """Region ids sharing a cell edge with `region` (4-neighbor)."""
+    """Region ids sharing a cell edge with `region` (4-neighbor).
+
+    Cached on the world: this depends only on region_grid and region.cells,
+    and region SHAPES never change after worldgen -- only who owns them. So
+    the answer is fixed for the life of a world, and recomputing it (a scan
+    over every cell of the region) on every call was pure waste.
+    """
+    cache = getattr(world, "_adjacent_region_cache", None)
+    if cache is None:
+        cache = world._adjacent_region_cache = {}
+    hit = cache.get(region.id)
+    if hit is not None:
+        return hit
     ids = set()
     w, h, cg = world.w, world.h, world.region_grid
     for x, y in region.cells:
@@ -484,6 +496,7 @@ def _adjacent_region_ids(world, region):
                 cid = cg[ny][nx]
                 if cid >= 0 and cid != region.id:
                     ids.add(cid)
+    cache[region.id] = ids
     return ids
 
 

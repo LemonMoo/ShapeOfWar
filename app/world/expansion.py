@@ -71,15 +71,38 @@ WILDLAND_COMBAT_STRENGTH_MULT = 0.9
 CLAIM_ODDS_EXPONENT = 1.75
 
 
-def is_sea_only_claim(world, faction_idx, region):
+def frontier_id_sets(world, faction_idx):
+    """({land-adjacent region ids}, {naval-reachable region ids}) for this
+    faction's unclaimed frontier.
+
+    Exists so a caller asking about MANY regions pays for the territory scan
+    once instead of once per region. The AI loops did the latter: they called
+    is_sea_only_claim for every frontier region, and each call re-scanned the
+    faction's whole territory and then did an `in` test against a LIST. On a
+    300-region world that was ~24% of the entire end-turn cost.
+    """
+    land = {r.id for r in territory.bordering_regions(world, faction_idx, UNCLAIMED)}
+    naval = {r.id for r in territory.naval_reachable_regions(world, faction_idx,
+                                                             UNCLAIMED)}
+    return land, naval
+
+
+def is_sea_only_claim(world, faction_idx, region, frontier=None):
     """True when `region` is claimable only across water — naval-reachable
     from the faction's territory but NOT sharing a land border with it. These
     amphibious claims carry the steep SEA_ONLY_CLAIM_COST and a tougher
     garrison (see SEA_ONLY_STRENGTH_MULT); a normal land-adjacent claim is
-    False and keeps the cheap per-cell cost."""
-    if region in territory.bordering_regions(world, faction_idx, UNCLAIMED):
+    False and keeps the cheap per-cell cost.
+
+    `frontier` is an optional (land_ids, naval_ids) pair from
+    frontier_id_sets, for callers testing many regions at once. Passing it is
+    a pure hoist -- the answer is identical, it just is not recomputed per
+    region."""
+    land, naval = frontier if frontier is not None else frontier_id_sets(
+        world, faction_idx)
+    if region.id in land:
         return False
-    return region in territory.naval_reachable_regions(world, faction_idx, UNCLAIMED)
+    return region.id in naval
 
 
 def claim_cost(region, sea_only=False):
@@ -453,10 +476,12 @@ def run_commander_ai(world):
         # could reach some frontier region so they never moved, while 90% of
         # expansion attempts failed on cost. A commander parked beside land its
         # realm cannot pay for should go and find land it can.
+        # One territory scan for this faction, reused by every test below.
+        fr = frontier_id_sets(world, fac_idx)
         useful = [r for r in frontier
                   if commander_mod.commander_can_reach(world, fac_idx, r)
                   and can_afford(nation,
-                                 claim_cost(r, is_sea_only_claim(world, fac_idx, r)),
+                                 claim_cost(r, is_sea_only_claim(world, fac_idx, r, fr)),
                                  world)]
         if useful:
             continue
@@ -466,7 +491,7 @@ def run_commander_ai(world):
         # and marching to something unaffordable just relocates the problem.
         best = None
         targets = sorted(frontier, key=lambda r: sum(
-            claim_cost(r, is_sea_only_claim(world, fac_idx, r)).values()))[:6]
+            claim_cost(r, is_sea_only_claim(world, fac_idx, r, fr)).values()))[:6]
         for region in targets:
             for cid in _adjacent_region_ids(world, region):
                 staging = world.regions[cid]
@@ -520,9 +545,10 @@ def run_expansion_ai(world):
         # commander-reachable ground made that worse by removing the cheap
         # outliers a random draw used to stumble into, so affordability is now
         # part of the choice rather than a post-hoc test.
+        fr = frontier_id_sets(world, fac_idx)     # scanned once, not per region
         affordable = [r for r in reachable
                       if can_afford(nation,
-                                    claim_cost(r, is_sea_only_claim(world, fac_idx, r)),
+                                    claim_cost(r, is_sea_only_claim(world, fac_idx, r, fr)),
                                     world)]
         if not affordable:
             continue

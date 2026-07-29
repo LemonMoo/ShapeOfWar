@@ -20,6 +20,21 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 39,
+        "title": "Drawn by the Graphics Card",
+        "items": [
+            "Battles are now rendered on the GPU. The whole battlefield — every soldier, every weapon, every arrow — is drawn in a single instanced call instead of thousands of individual canvas items",
+            "EVERY SOLDIER KEEPS ITS KIT. Swords, shields and daggers used to switch off past 160 living units because the glyphs alone cost most of a frame; there is no cutoff any more, at any army size",
+            "Measured on a real battle: 15 fps to 141 fps at ~590 living units, with full equipment drawn the whole time",
+            "Battle simulation is 4-6x faster. Target selection scanned every enemy for every unit, which is quadratic — quadrupling an army raised its cost about twentyfold. It now scores the whole enemy army in one vectorised pass",
+            "Armies of ~5,000 are playable where ~1,000 used to be the practical ceiling",
+            "Machines without a working GPU context fall back to the old canvas renderer automatically, including mid-session, so nothing stops working",
+            "END TURN IS 2.8x FASTER on a large realm (1,199ms to 424ms at 300 regions). Storage-class and bulk lookups are memoised, region adjacency is computed once instead of every call, and the expansion AI no longer rescans a faction's whole territory once per frontier region",
+            "That optimisation is verified identical, not just faster: ownership, stocks, population and faction stats were hashed across ten turns and match exactly",
+            "NOTE: battle outcomes shift slightly. Target selection now reads positions from the start of each tick rather than partway through it — the same way the anti-dogpile count already worked — so targeting is internally consistent for the first time",
+        ],
+    },
+    {
         "version": 38,
         "title": "Battlefield Orders",
         "items": [
