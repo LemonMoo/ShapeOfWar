@@ -16,6 +16,7 @@ import math
 import time
 import tkinter as tk
 
+import numpy as np
 from PIL import Image, ImageTk
 
 from app.ui import theme
@@ -29,6 +30,7 @@ from app.world import construction
 from app.world import trade
 from app.world import expansion
 from app.world import commander
+from app.ui import gl_globe
 from app.world import wrap
 from app.world.nation import is_eliminated
 from app.ui.compendium import CompendiumWindow
@@ -428,6 +430,12 @@ class MapView(tk.Frame):
         # ~55% no matter what.
         self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
+        # The globe is a SECOND view of the same world, stacked in the same
+        # place as the flat map and raised/lowered by _set_globe. Built lazily
+        # (see _ensure_globe) so a machine with no GL never pays for it and the
+        # flat map remains the guaranteed path.
+        self.globe = None
+        self.globe_active = False
         self.canvas.bind("<Configure>", lambda e: self._on_canvas_configure())
         # Free camera: press/drag/release (drag pans, a plain click still
         # drills down/selects exactly as before) plus wheel-zoom.
@@ -498,6 +506,14 @@ class MapView(tk.Frame):
         self._fog_key = object()   # never matches any real fog_version -> forces a rebuild
         self._precompute_colors()
         self._last_territory_version = getattr(self.world, "territory_version", 0)
+        # Restore the view this world was last played in, and where the camera
+        # was left. Both ride along on the world object, so they persist through
+        # a save/load without touching the save schema.
+        want_globe = bool(getattr(world, "prefer_globe", False))
+        if want_globe != self.globe_active:
+            self._set_globe(want_globe)
+        elif self.globe_active and self.globe is not None:
+            self.globe.restore_camera(getattr(world, "globe_camera", None))
         self._exit_ui()
         self._hide_prosperity_bar()
         self._hide_storage_bar()
@@ -1860,6 +1876,11 @@ class MapView(tk.Frame):
                                   activebackground=theme.ACCENT, relief="flat",
                                   font=theme.FONT)
         self.view_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 8))
+        self.globe_btn = tk.Button(foot, text="Globe", command=self.toggle_globe,
+                                   bg="#232a36", fg=theme.INK,
+                                   activebackground=theme.ACCENT, relief="flat",
+                                   font=theme.FONT)
+        self.globe_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 4))
         tk.Button(foot, text="End Turn", command=self._on_end_turn,
                   bg=theme.ACCENT, fg="#06121f", activebackground=theme.ACCENT,
                   relief="flat", font=theme.FONT_BOLD).pack(side="bottom", fill="x",
@@ -1935,6 +1956,105 @@ class MapView(tk.Frame):
                           (self._right_tab, self._toggle_right_panel)):
             for wdg in (frame,) + tuple(frame.winfo_children()):
                 wdg.bind("<Button-1>", lambda e, c=cb: c())
+
+    # --- globe view -----------------------------------------------------------
+    def _ensure_globe(self):
+        """Create the globe on first use. Returns False if this machine cannot
+        have one, in which case the flat map simply stays up."""
+        if self.globe is not None:
+            return not self.globe.failed
+        if not gl_globe.gl_available():
+            return False
+        try:
+            self.globe = gl_globe.GLGlobeFrame(self, on_pick=self._on_globe_pick)
+        except Exception:
+            self.globe = None
+            return False
+        return True
+
+    def toggle_globe(self):
+        self._set_globe(not self.globe_active)
+
+    def _set_globe(self, on):
+        if on and not self._ensure_globe():
+            self.show_bottom_message("This machine has no 3D support — "
+                                     "staying on the flat map.")
+            return
+        self.globe_active = bool(on)
+        if self.globe_active:
+            self.canvas.pack_forget()
+            self.globe.pack(fill="both", expand=True)
+            self.globe.update_idletasks()
+            self.globe.restore_camera(getattr(self.world, "globe_camera", None))
+        else:
+            self.globe.pack_forget()
+            self.canvas.pack(fill="both", expand=True)
+        # Remember which view the player prefers, and where they left the
+        # camera -- both ride along in the save (see app/core/save.py).
+        self.world.prefer_globe = self.globe_active
+        if hasattr(self, "globe_btn"):
+            self.globe_btn.config(text="Flat Map" if self.globe_active else "Globe")
+        self._apply_panel_layout()
+        self.render()
+
+    def _sync_globe(self):
+        """Push the flat map's own raster, fog and markers at the sphere."""
+        wd = self.world
+        self._ensure_base()
+        self._ensure_fog_overlay()
+        g = self.globe
+        g.set_map(self._base_img, self._fog_overlay_img)
+        # Sun angle advances with the year, so the terminator is not a fixed
+        # decoration -- the planet turns under its own sun as the game runs.
+        ang = (getattr(wd, "turn", 0) % 100) / 100.0 * 2.0 * math.pi
+        g.sun = np.array([math.cos(ang), 0.32, math.sin(ang)])
+        marks = []
+        for st in wd.settlements:
+            if not self._cell_revealed(*st.pos):
+                continue
+            nation = wd.factions[st.faction_idx] if st.faction_idx >= 0 else None
+            col = _hex_to_rgb(nation.color) if nation else (160, 160, 160)
+            marks.append((st.pos[0], st.pos[1], 0.022,
+                          (col[0] / 255.0, col[1] / 255.0, col[2] / 255.0)))
+        for cmd in wd.commanders:
+            mine = cmd.faction_idx == wd.player_faction_idx
+            if not mine and not self._cell_revealed(*cmd.pos):
+                continue          # same fog rule the flat map uses
+            col = ((230, 133, 255) if mine
+                   else _hex_to_rgb(wd.factions[cmd.faction_idx].color))
+            marks.append((cmd.pos[0], cmd.pos[1], 0.016,
+                          (col[0] / 255.0, col[1] / 255.0, col[2] / 255.0)))
+        g.set_markers(marks)
+        g.render_now()
+        self.world.globe_camera = g.camera_state()
+
+    def _on_globe_pick(self, cx, cy):
+        """A click on the planet, resolved to a map cell -- from here on it is
+        the ordinary selection path, so the globe gains region/settlement
+        selection without duplicating any of that logic."""
+        wd = self.world
+        if not (0 <= cx < wd.w and 0 <= cy < wd.h):
+            return
+        if not self._cell_revealed(cx, cy):
+            return
+        cid = wd.region_grid[cy][cx]
+        if cid < 0:
+            self.selected = None
+            self.selected_region = None
+            self.render()
+            return
+        region = wd.regions[cid]
+        self.selected_region = region
+        owner = region.faction_idx
+        nation = wd.factions[owner] if owner >= 0 else None
+        self.selected = nation
+        # _show_region reads zoom_faction for "Region of X" -- on the flat map
+        # that is set by drilling into a nation before its regions are clickable.
+        # Clicking a region on the globe IS that drill-in, so set it here too or
+        # the panel has no country to name.
+        self.zoom_faction = nation
+        self._show_region(region)
+        self.render()
 
     _MODES = ["political", "fertility", "elevation", "biome", "climate"]
 
@@ -4100,6 +4220,12 @@ class MapView(tk.Frame):
         return segments
 
     def render(self):
+        if self.globe_active and self.globe is not None:
+            if self.globe.failed:
+                self._set_globe(False)      # GL died -> back to the flat map
+            else:
+                self._sync_globe()
+                return
         c = self.canvas
         c.delete("all")
         cw, ch = c.winfo_width(), c.winfo_height()

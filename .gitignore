@@ -41,3 +41,7 @@ Thumbs.db
 
 # Third-party tool cache
 /.freebuff/
+
+# Dev world snapshots used by dev/bench_turn.py and the regression harnesses.
+# ~49MB each -- real saves, kept on disk but deliberately out of git.
+dev/worlds/
