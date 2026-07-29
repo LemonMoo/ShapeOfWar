@@ -264,6 +264,46 @@ def species_traits(species):
             for key, default in _SPECIES_TRAIT_DEFAULTS.items()}
 
 
+def species_stat_chips(species):
+    """Short comparison tokens: ["HP +20%", "SPD -8%", "no cavalry", "Arbalest"].
+
+    species_trait_summary writes prose for a panel with room for it. This is the
+    same numbers compressed for a row in a table, so five species can be read
+    against each other at a glance rather than one at a time -- which is the
+    only way the choice is an informed one. Same live values either way; neither
+    can drift from the balance table."""
+    t = species_traits(species)
+    out = []
+    for key, label in (("unit_hp_mult", "HP"), ("unit_damage_mult", "DMG"),
+                       ("unit_speed_mult", "SPD")):
+        delta = round((t[key] - 1.0) * 100)
+        if delta:
+            out.append(f"{label} {delta:+d}%")
+    # Cooldown is inverted -- less time between swings is faster attacks.
+    atk = round((1.0 - t["unit_cooldown_mult"]) * 100)
+    if atk:
+        out.append(f"ATK SPD {atk:+d}%")
+    blk = round((t["block_chance_mult"] - 1.0) * 100)
+    if blk:
+        out.append(f"BLOCK {blk:+d}%")
+    if t["dodge_chance"]:
+        out.append(f"DODGE {round(t['dodge_chance'] * 100)}%")
+    if t["no_cavalry"]:
+        out.append("no cavalry")
+    if t["trade_gold_bonus"]:
+        out.append(f"TRADE +{round(t['trade_gold_bonus'] * 100)}%")
+    if t["charge_shields_up"]:
+        out.append("charges shielded")
+    return out
+
+
+def species_units(species):
+    """Display names of the signature units this species fields."""
+    from app.battle.unit_types import UNIT_TYPES
+    return [UNIT_TYPES.get(s["unit"], {}).get("name", s["unit"])
+            for s in species_traits(species)["specials"]]
+
+
 def species_trait_summary(species):
     """Player-facing ["+30% ...", "-10% ..."] bullets describing what a species
     actually does differently, generated from the real numbers above rather
@@ -506,6 +546,133 @@ def make_settlement_namer(rng):
         return name
 
     return namer
+
+
+# --- rulers -------------------------------------------------------------------
+# The monarch is a separate figure from the battlefield Commander: the Commander
+# is the general who marches and can fall (see app/world/commander.py, which has
+# its own species titles -- Marshal, Warden, Thane, Warchief, Chieftain), while
+# this is who sits the throne and whose realm it is. They deliberately do not
+# share a title table, because a player who names both should never wonder which
+# one they just named.
+RULER_TITLES = {
+    "Humans": ("King", "Queen"),
+    "Elves": ("Archon", "Archon"),
+    "Dwarves": ("High King", "High Queen"),
+    "Orcs": ("Warlord", "Warlord"),
+    "Goblins": ("Boss", "Boss"),
+}
+
+# Given name + optional epithet, per species. Kept in the same shape as the
+# faction banks above so a species missing an entry falls back to Human rather
+# than crashing -- the rule every namer in this module follows.
+_RULER_NAMES = {
+    "Humans": (
+        ["Aldric", "Bertran", "Cedric", "Roland", "Gareth", "Halvard", "Emeric",
+         "Rowan", "Tristan", "Odric", "Mathias", "Percival", "Alaric", "Edmund",
+         "Isolde", "Aveline", "Rosamund", "Elayne", "Maribel", "Constance",
+         "Seraphine", "Beatrix", "Adelaide", "Guinevere"],
+        ["the Bold", "the Just", "the Grey", "the Elder", "the Younger",
+         "the Steadfast", "the Wise", "the Undaunted", "the Fair"],
+    ),
+    "Elves": (
+        ["Aerandir", "Caelith", "Elrohir", "Faelar", "Ithilwen", "Lorindel",
+         "Maerwen", "Nithral", "Silvaria", "Thalindra", "Vaelith", "Ysolde",
+         "Aelorin", "Cirdanel", "Elowen", "Fenwyth", "Lythien", "Miravel"],
+        ["of the Dawnwood", "Starcaller", "the Everwatchful", "Moonwoven",
+         "of the Silver Bough", "the Longmemoried", "Duskwalker"],
+    ),
+    "Dwarves": (
+        ["Brokk", "Durgan", "Thrain", "Balgrim", "Norrik", "Ovar", "Hjalmar",
+         "Grimni", "Torvald", "Dvalin", "Kargan", "Rurik", "Hilda", "Brynja",
+         "Sigrun", "Astrid", "Thora", "Gudrun"],
+        ["Ironbeard", "Stoneborn", "the Anvilhanded", "Deepdelver",
+         "Emberforge", "the Unyielding", "Runegraven", "Oathkeeper"],
+    ),
+    "Orcs": (
+        ["Grosh", "Mazrek", "Ugthar", "Karogg", "Drusk", "Vragga", "Skarn",
+         "Ghorak", "Mulgor", "Ruzka", "Thokk", "Zarog", "Ogrim", "Brakka"],
+        ["Skullsplitter", "the Red", "Bonebreaker", "Ironjaw", "the Devourer",
+         "Blackfang", "the Unbroken", "Warbringer"],
+    ),
+    "Goblins": (
+        ["Snik", "Grizzle", "Vex", "Mudge", "Krik", "Sprock", "Nabber",
+         "Wixxle", "Gribbit", "Tozz", "Skree", "Rattle", "Pockets", "Fizzik"],
+        ["the Cunning", "Three-Fingers", "the Unseen", "Quickknife",
+         "the Lucky", "Backstabber", "the Loud", "Nine-Lives"],
+    ),
+}
+
+# Not every ruler gets an epithet. A field of fourteen realms all led by someone
+# "the Bold" or "Ironbeard" reads as generated; a mix reads as a world.
+_EPITHET_CHANCE = 0.55
+
+
+def make_ruler_namer(rng):
+    """(species) -> a unique ruler name. Same contract as make_faction_namer."""
+    used = set()
+
+    def namer(species="Humans"):
+        given, epithets = _RULER_NAMES.get(species, _RULER_NAMES["Humans"])
+        for _ in range(200):
+            name = rng.choice(given)
+            if rng.random() < _EPITHET_CHANCE:
+                name += " " + rng.choice(epithets)
+            if name not in used:
+                used.add(name)
+                return name
+        name = f"{rng.choice(given)} {len(used) + 1}"
+        used.add(name)
+        return name
+
+    return namer
+
+
+def ruler_title(species, rng=None):
+    """The royal title for a species. Two are offered where the species has a
+    gendered pair; picked at random for an AI realm, and offered as a choice to
+    the player (see the New Game screen)."""
+    pair = RULER_TITLES.get(species, RULER_TITLES["Humans"])
+    if rng is None:
+        return pair[0]
+    return rng.choice(pair)
+
+
+# --- colours ------------------------------------------------------------------
+# Every faction's colour is drawn from its SPECIES hue (see worldgen), which is
+# what makes the political map readable: kin look like kin, and two realms of
+# different species never sit on top of each other in hue. A player choosing a
+# colour has to stay inside that logic or it stops being true, so the palette
+# offered is a spread AROUND the species hue rather than the whole wheel.
+PALETTE_HUE_SPREAD = 26.0     # degrees either side of the species hue
+PALETTE_SIZE = 12
+
+
+def species_palette(species, n=PALETTE_SIZE):
+    """`n` distinct hex swatches for a species, light-to-dark across a band
+    centred on its hue. The first entry is the species' "true" colour."""
+    import colorsys
+
+    hue = SPECIES.get(species, {}).get("hue", 45)
+    out = []
+    for i in range(n):
+        # Fan out from the centre rather than sweeping left to right, so the
+        # swatches nearest the species' own hue come first and a player who
+        # just takes the leading option gets the canonical colour.
+        step = (i + 1) // 2 * (1 if i % 2 else -1)
+        h = hue + step * (PALETTE_HUE_SPREAD / max(1, n // 2))
+        sat = 0.62 + 0.16 * ((i % 3) - 1)
+        val = 0.86 - 0.07 * (i % 4)
+        r, g, b = colorsys.hsv_to_rgb((h % 360) / 360.0, sat, val)
+        out.append("#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255)))
+    # Dedupe while keeping order -- a rounding collision would otherwise show
+    # the player two swatches that look and behave identically.
+    seen, unique = set(), []
+    for c in out:
+        if c not in seen:
+            seen.add(c)
+            unique.append(c)
+    return unique
 
 
 def make_faction_namer(rng):

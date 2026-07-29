@@ -98,6 +98,9 @@ def load_game(save_id):
     # Saves predating "every faction has a commander" have only the player's.
     from app.world.commander import ensure_faction_commanders
     ensure_faction_commanders(world)
+    # Saves predating rulers have realms with nobody on the throne.
+    from app.world.nation import ensure_rulers
+    ensure_rulers(world)
     return world
 
 

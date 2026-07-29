@@ -118,8 +118,12 @@ class App(tk.Tk):
         self.new_game_view.reset()
         self.show_screen("new_game")
 
-    def _start_new_game(self, species, name):
-        self.world = generate_world(player_species=species, player_name=name)
+    def _start_new_game(self, world):
+        # The world arrives already generated: the New Game screen builds it in
+        # the background while the player is still naming things, and hands over
+        # the exact one they were looking at in its preview. Generating a fresh
+        # one here would mean the preview was a lie.
+        self.world = world
         self._ensure_game_views()
         self._save_id = new_save_id()
         self._save_created_at = save_game(self.world, self._save_id)

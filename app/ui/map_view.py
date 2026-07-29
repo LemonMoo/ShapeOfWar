@@ -32,7 +32,7 @@ from app.world import expansion
 from app.world import commander
 from app.ui import gl_globe
 from app.world import wrap
-from app.world.nation import is_eliminated
+from app.world.nation import is_eliminated, ruler_label
 from app.ui.compendium import CompendiumWindow
 
 _FLASH_COLOR = (255, 236, 120)   # bright gold — region gained
@@ -2722,9 +2722,14 @@ class MapView(tk.Frame):
             zoom_hint = "\nClick again to attack."
         else:
             zoom_hint = "\nClick again to inspect its regions."
+        # The monarch leads the panel: a realm is a name and whoever sits its
+        # throne, and for a rival it is who you are actually at war with.
+        crown = ruler_label(nation)
         self.info.config(
             fg=theme.INK,
-            text=f"{nation.name}\nSpecies: {nation.meta['species']} "
+            text=f"{nation.name}\n"
+                 + (f"{crown}\n" if crown else "")
+                 + f"Species: {nation.meta['species']} "
                  f"— {nation.meta['trait']}\n"
                  f"Military {s['military']} · Morale {s['morale']} · "
                  f"Gold {gold:,}\n"

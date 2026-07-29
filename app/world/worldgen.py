@@ -20,7 +20,8 @@ from app.world.nation import Nation
 from app.world.world_map import WorldMap
 from app.world import wrap
 from app.world.lexicon import (SPECIES, make_faction_namer, make_region_namer,
-                               make_settlement_namer)
+                               make_ruler_namer, make_settlement_namer,
+                               ruler_title)
 
 
 # Settlement archetypes — pure placement data (where they go). Upkeep used
@@ -374,6 +375,51 @@ def _hex(r, g, b):
 def _hsv_hex(h_deg, s, v):
     r, g, b = colorsys.hsv_to_rgb((h_deg % 360) / 360.0, s, v)
     return _hex(r * 255, g * 255, b * 255)
+
+
+# How close in hue a rival may sit to the player's chosen colour, in degrees.
+# Rivals of the SAME species already crowd one band of the wheel on purpose --
+# kin look like kin -- so this is not about separating everyone, only about
+# keeping the one realm the player actually reads borders for distinguishable.
+_PLAYER_HUE_CLEARANCE = 16.0
+
+
+def _hue_of(hex_color):
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    return colorsys.rgb_to_hsv(r, g, b)[0] * 360.0
+
+
+def _nudge_away_from(color, player_color, rng):
+    """Push a rival's colour off the player's hue if it landed too close.
+
+    Moved rather than re-rolled: a re-roll can land close again, and the colour
+    still has to stay inside its own species' band or the map stops telling you
+    who is kin to whom."""
+    hue = _hue_of(color)
+    delta = (hue - _hue_of(player_color) + 180.0) % 360.0 - 180.0
+    if abs(delta) >= _PLAYER_HUE_CLEARANCE:
+        return color
+    # Move it the way it was already leaning; a dead-on collision breaks the
+    # tie at random so rivals don't all pile up on the same side.
+    if delta > 0 or (delta == 0 and rng.random() < 0.5):
+        away = _PLAYER_HUE_CLEARANCE
+    else:
+        away = -_PLAYER_HUE_CLEARANCE
+    hex_color = color.lstrip("#")
+    r, g, b = (int(hex_color[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    _, s, v = colorsys.rgb_to_hsv(r, g, b)
+    target = _hue_of(player_color)
+    # Verified rather than assumed. A hue is stored as three 8-bit channels, and
+    # rounding to them moves it by a few tenths of a degree -- enough that
+    # aiming exactly at the clearance lands just inside it about half the time.
+    # Push a little further until the colour that actually comes out is clear.
+    out = _hsv_hex(target + away, s, v)
+    for stretch in (1.2, 1.5, 2.0):
+        if abs((_hue_of(out) - target + 180.0) % 360.0 - 180.0) >= _PLAYER_HUE_CLEARANCE:
+            return out
+        out = _hsv_hex(target + away * stretch, s, v)
+    return out
 
 
 _NEIGH8 = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
@@ -1601,11 +1647,15 @@ def _capital_has_nearby_farmland(world, x, y, mseed, land_set, coast_d):
 
 
 def generate_world(width=1100, height=660, seed=None, n_factions=14,
-                    player_species=None, player_name=None, _attempt=0):
+                    player_species=None, player_name=None, player_color=None,
+                    player_ruler=None, _attempt=0):
     """Generate a world. If `player_species`/`player_name` are given, faction
     0 is forced to that species and given that exact name (instead of a
     random roll) and `world.player_faction_idx` is set to 0, so a "New Game"
     flow can drop the player into a nation of their own choosing.
+    `player_color` ("#rrggbb") and `player_ruler` ({"name", "title"}) do the
+    same for the realm's colour and its monarch; rivals are steered away from
+    a chosen colour so the political map stays readable.
 
     `_attempt` is internal — caps the retries below so a run of unlucky
     seeds can never recurse forever."""
@@ -1676,14 +1726,16 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     land_cells = [(x, y) for y in range(height) for x in range(width) if land[y][x]]
     if not land_cells and _attempt < 6:      # extremely unlucky seed; retry
         return generate_world(width, height, rng.random(), n_factions,
-                              player_species, player_name, _attempt=_attempt + 1)
+                              player_species, player_name, player_color,
+                              player_ruler, _attempt=_attempt + 1)
     if (land_cells and _attempt < 6
             and not _has_multiple_landmasses(land, width, height, land_cells)):
         # the 2-3 intended continents got noise-bridged into one blob (rare
         # — see _pick_continent_centers/_has_multiple_landmasses) -- retry
         # with a fresh layout rather than accepting a single-landmass world.
         return generate_world(width, height, rng.random(), n_factions,
-                              player_species, player_name, _attempt=_attempt + 1)
+                              player_species, player_name, player_color,
+                              player_ruler, _attempt=_attempt + 1)
     world.total_land_cells = len(land_cells)
 
     # 2. hydrology: fill basins, form lakes, and route flow-accumulated rivers
@@ -1754,6 +1806,7 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     # 9. build factions (species, color, stats, centroid) from their foothold
     species_names = list(SPECIES.keys())
     namer = make_faction_namer(rng)
+    ruler_namer = make_ruler_namer(rng)
     # per faction: cell count, sum x, sum y, sum fertility (foothold only)
     sums = [[0, 0, 0, 0.0] for _ in capitals]
     for y in range(height):
@@ -1771,8 +1824,23 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
         traits = SPECIES[species]
         cells = max(1, sums[idx][0])
         fert_sum = sums[idx][3]
-        color = _hsv_hex(traits["hue"] + rng.uniform(-14, 14),
-                         rng.uniform(0.55, 0.8), rng.uniform(0.65, 0.9))
+        # The un-nudged roll is kept on the nation (see meta below): rival
+        # colours are DERIVED from it against whatever the player has currently
+        # chosen, so changing your colour on the New Game screen recomputes
+        # theirs from the same base every time instead of walking them further
+        # around the wheel with each click.
+        base_color = _hsv_hex(traits["hue"] + rng.uniform(-14, 14),
+                              rng.uniform(0.55, 0.8), rng.uniform(0.65, 0.9))
+        if is_player and player_color:
+            color = player_color
+        elif player_color:
+            # Keep rivals off the player's chosen colour. The whole political
+            # map is read by colour, and a neighbour who happens to roll within
+            # a few degrees of your own hue makes your own borders unreadable --
+            # which matters far more for YOUR realm than for any other pair.
+            color = _nudge_away_from(base_color, player_color, rng)
+        else:
+            color = base_color
         # military is a placeholder here — resources.seed_initial_stockpiles()
         # recomputes it for real from each faction's starting resource
         # stockpile once regions/settlements/villages all exist.
@@ -1781,6 +1849,14 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
         morale = max(15, min(99, int(rng.uniform(50, 75))))
         center = (sums[idx][1] / cells / width, sums[idx][2] / cells / height)
         name = player_name if (is_player and player_name) else namer(species)
+        # Every realm has a monarch, not just the player's -- a rival you are
+        # about to go to war with should have a name on the throne too, and it
+        # costs one string.
+        if is_player and player_ruler:
+            ruler = dict(player_ruler)
+        else:
+            ruler = {"name": ruler_namer(species),
+                     "title": ruler_title(species, rng)}
         region_ids = [c.id for c in world.regions if c.faction_idx == idx]
         xs = [x for c in region_ids for x, y in world.regions[c].cells]
         ys = [y for c in region_ids for x, y in world.regions[c].cells]
@@ -1788,7 +1864,9 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
         nation = Nation(
             name, color, territory=[], center=center,
             stats={"military": military, "morale": morale},
+            ruler=ruler,
             meta={"species": species, "trait": traits["trait"],
+                  "base_color": base_color,
                   "cells": cells, "capital": capitals[idx],
                   "fertility": round(100 * fert_sum / cells),  # avg %, 0..100
                   "regions": region_ids, "bbox": bbox})
@@ -1854,4 +1932,64 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     from app.world.vision import init_fog
     init_fog(world)
 
+    return world
+
+
+def apply_player_identity(world, species=None, name=None, color=None, ruler=None):
+    """Re-skin the player's realm on an ALREADY GENERATED world.
+
+    Generating a world takes tens of seconds, which makes "regenerate on every
+    click" impossible for a New Game screen that wants to show you your realm
+    as you build it. Almost nothing about a world actually depends on who the
+    player is, though: terrain, regions, rivers, resources and every rival are
+    identical whoever you pick. What does depend on it is one faction's species,
+    name, colour and monarch -- plus the names of ITS settlements and villages,
+    which are drawn from species-flavoured word banks.
+
+    So this patches exactly that, and the New Game screen regenerates only when
+    something genuinely world-shaping changes (size, rival count, or a reroll).
+
+    Deterministic: seeded from the world's own seed, so the same identity on the
+    same world always produces the same names rather than reshuffling them every
+    time a letter is typed.
+    """
+    if not getattr(world, "factions", None):
+        return world
+    idx = world.player_faction_idx
+    if idx is None:
+        return world
+    nation = world.factions[idx]
+
+    if species and species != nation.meta.get("species"):
+        nation.meta["species"] = species
+        nation.meta["trait"] = SPECIES.get(species, {}).get("trait", "")
+        # Settlement and village names are species-flavoured (see
+        # make_settlement_namer), so a realm that switched species would
+        # otherwise keep a stranger's place names.
+        rng = random.Random((getattr(world, "seed", 0), species).__hash__() & 0x7FFFFFFF)
+        namer = make_settlement_namer(rng)
+        owned = set(nation.meta.get("regions", ()))
+        for st in world.settlements:
+            if st.faction_idx == idx:
+                st.name = namer(st.kind, species)
+        for village in world.villages:
+            if village.faction_idx == idx or getattr(village, "region_id", None) in owned:
+                village.name = namer("village", species)
+
+    if name:
+        nation.name = name
+    if ruler:
+        nation.ruler = dict(ruler)
+    if color:
+        nation.color = color
+        # Rivals are re-derived from their own un-nudged base colour, never
+        # from their current one -- otherwise every colour change would shove
+        # them a little further around the wheel until the map went strange.
+        rng = random.Random(getattr(world, "seed", 0))
+        for i, other in enumerate(world.factions):
+            if i == idx:
+                continue
+            base = other.meta.get("base_color")
+            if base:
+                other.color = _nudge_away_from(base, color, rng)
     return world

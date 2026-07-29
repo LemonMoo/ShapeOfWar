@@ -42,10 +42,17 @@ class Nation:
     """
 
     def __init__(self, name, color, territory=None, center=None,
-                 stats=None, meta=None):
+                 stats=None, meta=None, ruler=None):
         self.id = f"nation_{next(_ids)}"
         self.name = name
         self.color = color
+        # Who sits the throne: {"name": str, "title": str}. Distinct from the
+        # battlefield Commander (app/world/commander.py), who is the general
+        # who marches and can fall -- this one is the realm's identity, and it
+        # is why a rival has a name to go to war WITH rather than just a flag.
+        # Defaulted rather than required, so a Nation built by older code or an
+        # older save is still coherent (see nation.ensure_rulers).
+        self.ruler = ruler or {}
         self.territory = territory or []      # list of rings
         self._center = center
         self.stats = {"military": 50, "morale": 50, **(stats or {})}
@@ -64,3 +71,35 @@ class Nation:
             return (0.5, 0.5)
         return (sum(p[0] for p in pts) / len(pts),
                 sum(p[1] for p in pts) / len(pts))
+
+
+def ensure_rulers(world):
+    """Give a monarch to any realm that has none.
+
+    Saves predating rulers have factions with no throne at all, and every UI
+    that shows one would otherwise have to check. Seeded from the world's own
+    seed rather than fresh randomness, so loading the same save twice does not
+    quietly rename a rival's king between sessions."""
+    import random
+
+    from app.world.lexicon import make_ruler_namer, ruler_title
+
+    missing = [n for n in getattr(world, "factions", ()) if not getattr(n, "ruler", None)]
+    if not missing:
+        return 0
+    rng = random.Random(getattr(world, "seed", 0))
+    namer = make_ruler_namer(rng)
+    for nation in missing:
+        species = (nation.meta or {}).get("species", "Humans")
+        nation.ruler = {"name": namer(species), "title": ruler_title(species, rng)}
+    return len(missing)
+
+
+def ruler_label(nation):
+    """'King Aldric the Bold', or just the realm's name if it has no monarch."""
+    ruler = getattr(nation, "ruler", None) or {}
+    name = ruler.get("name")
+    if not name:
+        return ""
+    title = ruler.get("title")
+    return f"{title} {name}" if title else name
