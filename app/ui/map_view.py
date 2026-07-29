@@ -2228,7 +2228,13 @@ class MapView(tk.Frame):
         return out
 
     def _globe_markers(self, level, mscale):
-        """Settlements, villages, commanders, ships and caravans as billboards.
+        """Ships, caravans and the settlement-placement hint as billboards --
+        settlements, villages and commanders now get real 3D pins instead
+        (see _globe_pins): a moving boat or wagon reads fine as a flat icon
+        you glance at in passing, but a place you think of as 'planted
+        there' (or a commander you give orders to) read as an ugly flat dot
+        no matter how you looked at it, worse the more of them piled up on
+        screen once village counts stopped being capped.
 
         Culled to what the camera can actually see (globe.visible_mask) -- the
         GPU would clip and depth-test the rest anyway, but at village altitude
@@ -2247,16 +2253,6 @@ class MapView(tk.Frame):
                 if keep:
                     marks.append((pos[0], pos[1], size * mscale, color_of(obj)))
 
-        def faction_rgb(idx):
-            if idx is None or idx < 0:
-                return (0.63, 0.63, 0.63)
-            return _GLOBE_RGB[wd.factions[idx].color]
-
-        if level >= 2:
-            villages = [(v, v.pos) for v in wd.villages
-                        if self._cell_revealed(*v.pos)]
-            add(villages, 0.011, lambda v: _GLOBE_RGB[_VILLAGE_STYLE["fill"]])
-
         # Everything that moves is placed by _display_pos, so the globe gets
         # the end-turn slide for free rather than needing its own copy of it.
         ships_aboard = {cmd.aboard_ship_id for cmd in wd.commanders
@@ -2270,17 +2266,6 @@ class MapView(tk.Frame):
                     if self._cell_revealed(*self._display_cell(c))]
         add(caravans, 0.013, lambda c: _GLOBE_RGB[self._caravan_style(c)["fill"]])
 
-        # The player's own commander keeps the orchid it has on the flat map:
-        # it is the one marker you give orders to and must never be mistaken
-        # for a rival's.
-        commanders = [(cmd, self._display_pos(cmd)) for cmd in wd.commanders
-                      if cmd.faction_idx == wd.player_faction_idx
-                      or self._cell_revealed(*self._display_cell(cmd))]
-        add(commanders, 0.016,
-            lambda cmd: (_GLOBE_PLAYER_COMMANDER
-                         if cmd.faction_idx == wd.player_faction_idx
-                         else faction_rgb(cmd.faction_idx)))
-
         # Settlement placement hint (see _score_placement_hint) -- the
         # globe's equivalent of the flat map's gold dots over a region's
         # own best-scoring cells while a City/Town/Castle is armed to
@@ -2290,17 +2275,32 @@ class MapView(tk.Frame):
             add(hints, 0.009, lambda _obj: _GLOBE_RGB["#ffec78"])
         return marks
 
-    def _globe_pins(self, level, mscale):
-        """Settlements as real 3D spires (gl_globe.set_pins) rather than
-        billboards -- everything else (villages, ships, caravans,
-        commanders) stays a flat marker in _globe_markers. A settlement is
-        the thing a player thinks of as 'a place, standing there'; nothing
-        else on the map carries that same sense of being planted somewhere.
+    # Village pins: a real spire like a settlement's, just much smaller --
+    # planted, not floating, but unmistakably humbler than a City/Town/
+    # Castle. Sized as a flat multiple of mscale rather than off
+    # _SETTLE_STYLE (villages have no entry there).
+    _GLOBE_VILLAGE_RADIUS = 0.006
+    _GLOBE_VILLAGE_HEIGHT = 0.016
+    # Commander pins: tall and thin rather than short and wide -- a banner/
+    # spike silhouette that never reads as "a small settlement" even though
+    # it shares the same hex-pyramid mesh, because the proportions are
+    # nothing alike.
+    _GLOBE_COMMANDER_RADIUS = 0.007
+    _GLOBE_COMMANDER_HEIGHT = 0.050
 
-        Sized off _SETTLE_STYLE's existing city/castle/town scale (the same
-        numbers the flat map's own marker radius uses), so a city reads
-        bigger than a town here exactly the way it already does everywhere
-        else -- no second, separately-tuned size table."""
+    def _globe_pins(self, level, mscale):
+        """Settlements, villages and commanders as real 3D geometry
+        (gl_globe.set_pins) rather than flat billboards -- all three are
+        things a player thinks of as standing/planted somewhere (or, for a
+        commander, someone you give orders to and must always be able to
+        pick out), not something that merely floats over the map. Ships and
+        caravans stay flat markers in _globe_markers -- a moving icon glanced
+        at in passing doesn't carry the same expectation.
+
+        Settlements are sized off _SETTLE_STYLE's existing city/castle/town
+        scale (the same numbers the flat map's own marker radius uses), so a
+        city reads bigger than a town here exactly the way it already does
+        everywhere else -- no second, separately-tuned size table."""
         wd = self.world
         g = self.globe
 
@@ -2309,21 +2309,47 @@ class MapView(tk.Frame):
                 return (0.63, 0.63, 0.63)
             return _GLOBE_RGB[wd.factions[idx].color]
 
+        pins = []
+
+        def add(items, radius, height, color_of):
+            """items: [(obj, (cx, cy)), ...] already fog-checked."""
+            if not items:
+                return
+            mask = g.visible_mask([pos for _, pos in items])
+            for keep, (obj, pos) in zip(mask, items):
+                if keep:
+                    pins.append((pos[0], pos[1], radius * mscale, height * mscale,
+                                color_of(obj)))
+
         # From orbit only cities; closer in, everything -- the same thinning
         # rule _draw_settlements applies between world and region view.
-        settlements = [st for st in wd.settlements
+        settlements = [(st, st.pos) for st in wd.settlements
                        if (level >= 1 or st.kind == "city")
                        and self._cell_revealed(*st.pos)]
-        if not settlements:
-            return []
-        mask = g.visible_mask([st.pos for st in settlements])
-        pins = []
-        for keep, st in zip(mask, settlements):
+        mask = g.visible_mask([pos for _, pos in settlements]) if settlements else []
+        for keep, (st, pos) in zip(mask, settlements):
             if not keep:
                 continue
             base = _SETTLE_STYLE[st.kind]["base"]
-            pins.append((st.pos[0], st.pos[1], 0.018 * base * mscale,
+            pins.append((pos[0], pos[1], 0.018 * base * mscale,
                         0.052 * base * mscale, faction_rgb(st.faction_idx)))
+
+        if level >= 2:
+            villages = [(v, v.pos) for v in wd.villages
+                        if self._cell_revealed(*v.pos)]
+            add(villages, self._GLOBE_VILLAGE_RADIUS, self._GLOBE_VILLAGE_HEIGHT,
+                lambda v: _GLOBE_RGB[_VILLAGE_STYLE["fill"]])
+
+        # The player's own commander keeps the orchid it has on the flat map:
+        # it is the one marker you give orders to and must never be mistaken
+        # for a rival's.
+        commanders = [(cmd, self._display_pos(cmd)) for cmd in wd.commanders
+                      if cmd.faction_idx == wd.player_faction_idx
+                      or self._cell_revealed(*self._display_cell(cmd))]
+        add(commanders, self._GLOBE_COMMANDER_RADIUS, self._GLOBE_COMMANDER_HEIGHT,
+            lambda cmd: (_GLOBE_PLAYER_COMMANDER
+                        if cmd.faction_idx == wd.player_faction_idx
+                        else faction_rgb(cmd.faction_idx)))
         return pins
 
     def _globe_labels(self, level):
