@@ -43,6 +43,16 @@ STANCES_FOR_TYPE = {
     # holds, or runs in.
     "assassin": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE),
     "commander": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE),
+    # Species signature units. The two that carry a shield can dress a line;
+    # the Berserker (no shield), Bladesinger (no shield) and Sapper (a bomb at
+    # range) fall through to the basic three via allowed_stances' default, but
+    # are listed here anyway so this table reads as the whole roster rather
+    # than the half of it somebody remembered to write down.
+    "bannerman": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE, STANCE_SHIELD_WALL),
+    "shieldwarden": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE, STANCE_SHIELD_WALL),
+    "berserker": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE),
+    "bladesinger": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE),
+    "sapper": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE),
 }
 
 STANCE_LABEL = {

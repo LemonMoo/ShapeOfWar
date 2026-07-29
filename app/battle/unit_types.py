@@ -24,6 +24,23 @@ Speeds/ranges are in canvas pixels; times in seconds.
                     below 1.0, so a bogged-down rider hits softer than its raw
                     ``damage`` implies.
   ``charge_ramp`` : seconds of uninterrupted galloping to reach full momentum.
+  ``dodge_chance``: floor on this type's chance to evade a hit outright, taken
+                    as a MAX against the owning species' own dodge.
+  ``first_strike``: damage multiplier on the opening blow against each DISTINCT
+                    target (tracked by uid -- see Unit._struck).
+  ``hunts_ranged``: ignores everything but enemy ranged units while any live
+                    anywhere on the field. See Battle.choose_target.
+  ``ignores_block``: this attacker's blows cannot be shielded. Dodge still
+                    applies -- it beats armour, not agility.
+  ``frenzy``      : extra damage multiplier at ZERO hp, scaled by how much
+                    health is already gone; a unit with it is more dangerous
+                    hurt than whole.
+  ``splash_radius``/``splash_share``: a landed hit also deals `share` of its
+                    damage to every other enemy within `radius` of the target.
+                    Same shape as a charge impact, but with no momentum term.
+  ``aura``/``aura_radius``: this unit projects a commander-style aura over
+                    friendly soldiers within the radius. Auras do NOT stack --
+                    see Unit._aura.
 """
 UNIT_TYPES = {
     "infantry": {
@@ -116,6 +133,112 @@ UNIT_TYPES = {
         # Ignores everything but enemy ranged units until none are left alive
         # anywhere on the field -- see Battle.choose_target.
         "hunts_ranged": True,
+    },
+    # --- The Sapper (Goblins only) ------------------------------------------
+    # Everything the Assassin is not. The Assassin's failure was never its
+    # numbers -- bigger ones were tried and changed nothing -- it was that its
+    # whole value lives in a moment it rarely survives to reach. So the Sapper
+    # does the same job, breaking up a packed line, from outside contact.
+    #
+    # A crude bomb: slow (2.6s), unreliable (0.65), and only 7 damage where it
+    # lands -- but every enemy within 26px takes 70% of that too. Against a
+    # loose skirmish line it is a bad archer. Against the shield wall that
+    # beats Goblins it hits eight soldiers at once, and the splash goes through
+    # take_hit like anything else, so shields still stop the part of it that
+    # comes from the front.
+    "sapper": {
+        "name": "Sapper", "shape": "chevron", "radius": 5,
+        "max_hp": 16, "speed": 40, "range": 110, "damage": 7, "cooldown": 2.6,
+        "ranged": True, "accuracy": 0.65, "equipment": [],
+        "splash_radius": 26, "splash_share": 0.70,
+    },
+    # --- The Shieldwarden (Dwarves only) ------------------------------------
+    # This slot held an Arbalest first -- a heavy crossbow, higher damage than
+    # a bow, shorter ranged, `ignores_block`. It measured a DISASTER: Dwarves
+    # fell from 25% of their matchups to 8%, the worst single result any change
+    # has produced here. Two reasons, both of which generalise:
+    #
+    #   * Range dominates. 150 against the Archer's 180 means the crossbows
+    #     spend the approach being shot and unable to answer, and they are the
+    #     slowest thing on the field while doing it.
+    #   * It paid for tanky bodies with fragile ones. Dwarves' whole advantage
+    #     is 20% more HP behind a shield; 22 HP crossbowmen throw that away.
+    #
+    # So this is the opposite unit. It plays to the one thing Dwarves already
+    # do that nothing else can -- walk into arrow fire behind their shields --
+    # and it makes everyone around it better at that instead of adding a second
+    # thing they are worse at. Rank-and-file version of the Thane's aura, which
+    # is the one Dwarven mechanic already measured to work.
+    "shieldwarden": {
+        "name": "Shieldwarden", "shape": "hexagon", "radius": 6,
+        "max_hp": 40, "speed": 26, "range": 14, "damage": 7, "cooldown": 0.90,
+        "ranged": False, "equipment": ["sword", "shield"],
+        "block_chance": 0.45, "block_arc_deg": 170,
+        "aura": {"damage_taken_mult": 0.88},
+        "aura_radius": 80,
+    },
+    # --- The Berserker (Orcs only) ------------------------------------------
+    # The Orcish trade taken to its end: no shield whatsoever, and damage that
+    # climbs as it bleeds. `frenzy` is the extra damage multiplier at ZERO hp,
+    # scaled linearly by how much health is already gone -- so a Berserker at
+    # a quarter health hits for 1.6x, and it is the only unit in the game more
+    # dangerous hurt than whole. That inverts the usual "finish the wounded"
+    # instinct Battle.choose_target has, which is the whole idea.
+    #
+    # frenzy 1.2 -> 0.8 and the count cut: at 1.2 this took Orcs from 50% of
+    # their matchups to 65%, which is a fine unit and bad balance -- Orcs were
+    # already mid-table and the roster's problem is its spread.
+    "berserker": {
+        "name": "Berserker", "shape": "chevron", "radius": 6,
+        "max_hp": 34, "speed": 40, "range": 14, "damage": 12, "cooldown": 0.50,
+        "ranged": False, "equipment": ["sword"],
+        "frenzy": 0.8,
+    },
+    # --- The Bladesinger (Elves only) ---------------------------------------
+    # The one special on the roster paid for entirely out of its own species'
+    # strength, with no bonus at all: Elves win ~70% of their matchups on an
+    # all-archer line that never has to close, so their signature unit trades
+    # a slice of exactly that for the melee answer they have never had.
+    #
+    # Fast and evasive rather than tough -- Elves carry no dodge as a species,
+    # so this is the only elf on the field that is hard to hit, and at 22 HP
+    # anything that does hit it is most of the way to killing it.
+    #
+    # It was meant as a sidegrade and measured as the single biggest buff on
+    # the roster: 60% of matchups to 85%. What being closed on costs an
+    # all-archer line turns out to be far more than the bows it gives up, so
+    # the price went from a tenth of the bows to nearly a quarter, and the
+    # dodge came down. If it still measures positive it should get dearer
+    # again -- Elves lead the roster and their signature unit is the one on
+    # this table that has no business making them stronger.
+    "bladesinger": {
+        "name": "Bladesinger", "shape": "diamond", "radius": 5,
+        "max_hp": 22, "speed": 46, "range": 13, "damage": 9, "cooldown": 0.45,
+        "ranged": False, "equipment": ["sword"],
+        "dodge_chance": 0.20,
+    },
+    # --- The Standard Bearer (Humans only) ----------------------------------
+    # The rank-and-file form of the Marshal. Humans' identity is that the line
+    # is worth more than the soldiers in it, and until now the only expression
+    # of that was one commander -- concentrated on a single body that can die,
+    # and worth nothing to the flank he is not standing on.
+    #
+    # Auras do NOT stack (see Unit._aura): a soldier takes the best single
+    # source covering it, commander first. Banners spread the effect across the
+    # field, they do not pile it up in one place -- which is also why the
+    # radius matters more than the count.
+    #
+    # First pass (4 banners, 90px, +8% damage / +0.05 block) measured as doing
+    # nothing at all: 42% of matchups to 40%. Four sources cannot cover a line
+    # of eighty soldiers, so almost nobody was ever inside one. Widened and
+    # strengthened rather than multiplied, since stacking is off by design.
+    "bannerman": {
+        "name": "Standard Bearer", "shape": "hexagon", "radius": 6,
+        "max_hp": 34, "speed": 32, "range": 14, "damage": 6, "cooldown": 0.80,
+        "ranged": False, "equipment": ["sword", "shield"],
+        "block_chance": 0.35, "block_arc_deg": 150,
+        "aura": {"damage_mult": 1.14, "block_add": 0.08, "cooldown_mult": 0.94},
+        "aura_radius": 125,
     },
 }
 

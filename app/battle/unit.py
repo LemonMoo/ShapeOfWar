@@ -84,7 +84,10 @@ class Unit:
         # number is the final word -- an Orcish Warchief is meant to be exactly
         # as tough as the table says, not that times another +22%.
         self.is_commander = type_key == "commander"
-        self.aura = {}
+        # A unit type may carry an aura of its own (the Human Standard Bearer);
+        # a commander's comes from its species profile below and overwrites it.
+        self.aura = t.get("aura") or {}
+        self.aura_radius = t.get("aura_radius", COMMANDER_AURA_RADIUS)
         self.cleave = None
         self.title = t.get("name", "Commander")
         if self.is_commander:
@@ -150,22 +153,31 @@ class Unit:
         # actually has a first strike, so ordinary soldiers carry no extra set.
         self._struck = set() if t.get("first_strike") else None
 
-    # --- commander auras ------------------------------------------------------
-    # Read on demand from the army's living commander rather than written onto
-    # each soldier. That means an aura can never double-apply, never needs
-    # cleaning up when he dies, and costs one distance check at the moment it
-    # actually matters instead of a sweep over every unit every tick.
+    # --- auras ----------------------------------------------------------------
+    # Read on demand from the army's living aura sources rather than written
+    # onto each soldier. That means an aura can never double-apply, never needs
+    # cleaning up when its source dies, and costs a couple of distance checks
+    # at the moment it actually matters instead of a sweep over every unit
+    # every tick.
+    #
+    # Auras do NOT stack. A soldier takes the first source in range that
+    # supplies the key, and Army.aura_sources is ordered commander-first -- so
+    # standing by two Standard Bearers is worth exactly as much as standing by
+    # one, and a Marshal always outranks a banner. Summing them instead would
+    # make clumping around a knot of banners the dominant tactic, which is the
+    # opposite of what a formation bonus should encourage.
     def _aura(self, key, default=1.0):
-        cmd = getattr(self.faction, "commander", None)
-        if cmd is None or cmd is self or not cmd.alive or not cmd.aura:
-            return default
-        value = cmd.aura.get(key)
-        if value is None:
-            return default
-        dx, dy = cmd.x - self.x, cmd.y - self.y
-        if dx * dx + dy * dy > COMMANDER_AURA_RADIUS * COMMANDER_AURA_RADIUS:
-            return default
-        return value
+        for src in getattr(self.faction, "aura_sources", ()):
+            if src is self or not src.alive:
+                continue
+            value = src.aura.get(key)
+            if value is None:
+                continue
+            r = src.aura_radius
+            dx, dy = src.x - self.x, src.y - self.y
+            if dx * dx + dy * dy <= r * r:
+                return value
+        return default
 
     @property
     def attack_range(self):
@@ -247,7 +259,9 @@ class Unit:
             battle.spawn_effect(self.x, self.y, "dodge", "#b7f07a")
             return "dodge"
 
-        block_chance = self.effective_block
+        # A crossbow bolt is the one thing a shield does not stop. Checked
+        # after the dodge, so the Arbalest beats armour and not agility.
+        block_chance = 0.0 if attacker.type.get("ignores_block") else self.effective_block
         if block_chance > 0.0:
             ax, ay = attacker.x - self.x, attacker.y - self.y
             ad = math.hypot(ax, ay) or 1e-6
@@ -365,6 +379,12 @@ class Unit:
             self._cd = self.effective_cooldown
             dmg = (self.damage * self._aura("damage_mult")
                    * orders.stance_mod(self.stance, "damage_mult"))
+            # Frenzy: damage climbs as the unit bleeds, up to +`frenzy` at zero
+            # health. Only the Orcish Berserker has it, and it is the one unit
+            # that is more dangerous hurt than whole.
+            frenzy = self.type.get("frenzy")
+            if frenzy:
+                dmg *= 1.0 + frenzy * (1.0 - max(0.0, self.hp) / self.max_hp)
             charging = self.type.get("charge")
             if charging:
                 # melee_floor (<1) at zero momentum up to melee_floor+charge_bonus
@@ -406,6 +426,8 @@ class Unit:
                     self._begin_cycle_withdraw(battle)
             if self.cleave and outcome == "hit":
                 self._cleave(battle, dmg)
+            if outcome == "hit" and self.type.get("splash_radius"):
+                self._splash(battle, dmg)
             if self._ranged:
                 battle.spawn_projectile(self.x, self.y,
                                         self.target.x, self.target.y,
@@ -510,6 +532,32 @@ class Unit:
                 if dx * dx + dy * dy <= r2:
                     other.take_hit(self, splash, battle)
         battle.spawn_effect(cx, cy, "impact", self.faction.color, size=radius)
+
+    def _splash(self, battle, dmg):
+        """A Goblin Sapper's bomb catches whatever is packed around whoever it
+        landed on. Same shape as a cavalry impact's splash, but off a ranged
+        attack and with no momentum term -- what it costs instead is a 2.6s
+        reload and a two-in-three chance of connecting at all.
+
+        Goes through take_hit like any other blow, so a shield still stops the
+        part of it arriving from the front, and it is only ever reached on a
+        hit that already landed -- so the attack cooldown rate-limits it and
+        this never runs per-frame."""
+        if self.target is None:
+            return
+        radius = self.type["splash_radius"]
+        share = dmg * self.type.get("splash_share", 0.5)
+        cx, cy, r2 = self.target.x, self.target.y, radius * radius
+        for army in battle.armies:
+            if army is self.faction:
+                continue          # sappers are careless, not suicidal
+            for other in army.units:
+                if not other.alive or other is self.target:
+                    continue
+                if (other.x - cx) ** 2 + (other.y - cy) ** 2 <= r2:
+                    other.take_hit(self, share, battle)
+        battle.spawn_effect(cx, cy, "shock", self.faction.color,
+                            dur=0.30, size=radius)
 
     def _charge_splash(self, battle, impact_dmg, momentum):
         """A couched impact ploughs into the whole frontline it reaches, not

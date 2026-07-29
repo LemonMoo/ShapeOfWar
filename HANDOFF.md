@@ -9,12 +9,17 @@ generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 
 ## 0. Read this first — unreleased work
 
-The 3D globe is committed (`8151142`) but **not released**: v0.2.6 predates it.
-`app/ui/gl_globe.py` is the renderer; the wiring in `map_view.py` is the toggle,
-texture sync, pick handler and persistence. `dev/` (tools + harnesses) is now in
-the repo too; the world snapshots it reads are still gitignored.
+Everything below is committed but **not released**: v0.2.6 predates all of it.
 
-The globe does not yet replace the flat map — see §2 for what is missing.
+- **The 3D globe** (`app/ui/gl_globe.py` + wiring in `map_view.py`). Terrain,
+  fog, roads, trade routes, caravans, names, alert badges, three working zoom
+  levels. See §2.
+- **End-turn movement animation** — caravans, shipments, commanders and ships
+  slide along the route they actually took instead of teleporting. View-only;
+  nothing in `app/world` knows it exists. See §7.
+- **Species signature units** — one or two per species, on top of the shared
+  Swordsman/Archer/Cavalry core. Working and legible, **not balanced**. See §4.1;
+  read it before touching the numbers.
 
 ---
 
@@ -75,14 +80,36 @@ Done and verified:
   without touching the save schema. Verified through a pickle round-trip.
 - ~900–1,200 fps in the live view.
 
-**Not done** — the user asked for the globe to *fully replace* the 2D map, and it
-does not yet:
-- Roads, caravans, trade routes, alert badges, region labels and the village
-  drill-down are all still flat-map only.
-- The three zoom levels currently only read camera altitude (`zoom_level`); they do
-  not change what is drawn.
-- The camera is continuous underneath, so **fly-to-surface is the easy path** —
-  discrete levels are the extra work here, not the other way round.
+Overlays (added after the first pass — everything the flat map draws on top of
+terrain now has a globe form):
+- **Lines** — roads, trade routes, route construction, active caravan lanes,
+  attack frontiers. Instanced quads widened in *screen* space, so a road is
+  legible from orbit and from ground level; depth comes from the segment's own
+  place on the sphere, so the planet occludes the far side for free.
+- **Text** — realm, region, settlement and village names plus alert badges,
+  against a PIL-built glyph atlas laid out in screen pixels around a projected
+  anchor.
+- **Zoom levels now change what is drawn**: realms and trunk roads from orbit,
+  region names closer in, villages and dirt tracks near the ground. Flying
+  closer *is* drilling down — there is no view state to enter.
+- `visible_mask` culls markers and labels to what the camera can actually see,
+  horizon included (the visible cap is `p.z > 1/dist`, **not** a hemisphere).
+  From village altitude that is 500 markers down to 21.
+
+**Still flat-map only:** terrain symbols, the terrain legend, the prosperity/
+storage bars, and the post-battle region flash.
+
+Two bugs fixed that predated the overlays: overlay geometry was baked in the
+camera's frame (the planet turned out from under its own markers on the first
+drag — every overlay program now takes `u_rot`), and the day/night terminator
+was physically dark enough to make most of the visible disc unreadable.
+
+**`dev/globe_shot.py`** renders one PNG per zoom level against a real GL
+context. Use it — a shader only compiles against a real context, and "the
+overlay is in the right place" is not a thing a return value can tell you.
+Two traps it documents: pyopengltk swaps buffers at the end of every frame, so
+reading `ctx.screen` afterwards returns the *previous* one; and the dev worlds
+are 99.9% fogged, so with fog left alone every overlay is correctly empty.
 
 Open question for the user: whether the ice caps read as too large. Raising the
 edge latitude trades shape accuracy for coverage; it is a one-constant change.
@@ -119,8 +146,72 @@ it if 10k-unit battles are actually wanted.
 
 ---
 
+## 4.1 Species signature units — working, NOT balanced
+
+Every species now fields at least one unit nobody else has, on top of the shared
+core. Composition lives in **one** place, `lexicon.army_composition` — the
+tournament calls the same function the game does, instead of the hand-copied
+duplicate it used to keep.
+
+| species | unit | what it is |
+|---|---|---|
+| Humans | Standard Bearer | rank-and-file Marshal: an aura, not a fighter |
+| Elves | Bladesinger | fast, evasive melee — the answer an archer line lacked |
+| Dwarves | Shieldwarden | anchor; the line near one takes less punishment |
+| Orcs | Berserker | no shield, damage climbs as it bleeds |
+| Goblins | Assassin + Sapper | counter-archer; and bombs that break formations |
+
+New mechanics behind them: `ignores_block`, `frenzy`, `splash_radius`/`_share`,
+and unit-level `aura` (auras **do not stack** — first source in range wins, and
+`Army.aura_sources` is ordered commander-first).
+
+**The measured state, and it is not good.** `dev/tournament.py 5 on --isolate`
+runs a control with nobody's specials, then one run per species:
+
+| | control | with its own specials | Δ |
+|---|---|---|---|
+| Humans | 42% | 40% | −2 (inert) |
+| Elves | 60% | 35% | −25 |
+| Dwarves | 25% | 30% | +5 |
+| Orcs | 50% | 38% | −12 |
+| Goblins | 70% | 45% | −25 |
+
+Read that with the caveat that it ran **before** the order-AI fix below, so the
+two aura units were measured while walking out of the line they exist to
+protect. Only Dwarves are near where they should be.
+
+What the numbers already established, and these do generalise:
+
+- **The share is the knob, not the stats.** The Bladesinger went from **+25 to
+  −25** on a share change (10% → 22% of the bows) with only its dodge touched.
+  Tune `specials` shares first; reach for stats second.
+- **Range dominates.** This slot first held a Dwarven Arbalest — a crossbow,
+  higher damage than a bow, 150 range against 180, `ignores_block`. It measured
+  **25% → 8%**, the worst single result this project has produced. It gave up
+  spacing *and* paid for tanky bodies with fragile ones.
+- **The Assassin is confirmed a tax, independently.** The control run — which
+  simply removes it — put Goblins at **70%**, against 35% with it. That is open
+  thread #3 measured from the other direction. Its share is now cut to ~3 units
+  from 9; deleting it outright still measures better.
+- **An aura needs coverage, not strength.** Four Standard Bearers at 90px did
+  literally nothing to a line of eighty. Widen the radius before adding bodies —
+  stacking is off by design.
+
+**The order AI now groups by ROLE, not by type name.** It read
+`u.type_key == "infantry"` and friends, which left every new unit permanently
+unordered. The rules themselves are unchanged (§4 #4 still applies — do not
+"improve" them without measuring); they just reach the units they were written
+for. Ranged units are ordered per type, since the rule turns on the group's own
+reach and a Sapper folded in with Archers would stand at a range only Archers
+can shoot from.
+
+---
+
 ## 4. Open threads (roughly by value)
 
+0. **Balance the signature units** (§4.1). Re-run `--isolate` now that the order
+   AI actually orders them, then move shares. Elves and Goblins are 25 points
+   adrift in opposite directions.
 1. **Species retune with orders enabled.** The multipliers in `lexicon.py` were all
    fitted to a game where every unit did one thing: walk at the nearest enemy.
    Orders changed the behaviour, so the traits are now worth different amounts than
@@ -142,7 +233,32 @@ it if 10k-unit battles are actually wanted.
    worse (walling under fire: Orcs 0%/Elves 100%; charging under fire: Dwarves 4%).
    The AI now only braces against an actual charge, cycles cavalry, and holds
    archers in range. Don't "improve" it without measuring.
-5. Compendium has no article for battlefield orders or the Assassin.
+5. Compendium still has no article for battlefield orders. It *does* now
+   describe every signature unit, including the Assassin (Military & Combat →
+   Signature Units).
+
+---
+
+## 7. End-turn movement animation
+
+`MapView._start_move_animation` and friends. Movers slide along the route they
+actually travelled over a fixed 0.75s wall-clock window, eased in and out.
+
+- **View-only.** Nothing in `app/world` knows it exists — the turn resolves
+  first and the animation replays it, so the sim stays deterministic and the
+  animation can be shortened or cut without touching game state.
+- The window is wall-clock, not a frame count, so a heavy world takes the same
+  0.75s and simply draws fewer frames. End Turn stays locked while it runs.
+- Both views place movers through `_display_pos`, so the globe gets it free.
+- **`dev/test_move_anim.py` asserts it is faithful, not merely smooth**: starts
+  on the old cell, ends where the world actually put the mover, walks the cells
+  between, and survives the seam. It immediately caught a real bug — 18
+  shipments a turn animating from halfway across the map, because a shipment
+  that delivers mid-turn is freed and CPython hands its address to the next
+  object allocated, so an `id()`-keyed snapshot matched a *different* object.
+  The snapshot now holds the movers themselves. **`id()` has now bitten this
+  project twice** (the other was battle determinism); treat it as unusable as a
+  key wherever objects churn.
 
 ---
 

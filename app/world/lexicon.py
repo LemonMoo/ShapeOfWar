@@ -56,27 +56,49 @@ SPECIES = {
     # Purely economic edge on paper, so it needs *some* melee identity or it
     # loses every fight by default: disciplined drilled ranks get more out of a
     # shield than anyone else.
+    # The Standard Bearer is the rank-and-file form of the Marshal: Humans'
+    # whole identity is that the line is worth more than the soldiers in it,
+    # and their commander was already the only one whose value is what he does
+    # for everyone else. A handful of banners spreads a weaker version of that
+    # across the field instead of concentrating it on one body that can die.
     "Humans":  {"hue": 45,  "mil": +2,  "eco": +6,  "trait": "adaptable realm-builders",
-                "trade_gold_bonus": 0.15, "block_chance_mult": 1.25},
+                "trade_gold_bonus": 0.15, "block_chance_mult": 1.25,
+                "specials": ({"unit": "bannerman", "of_swordsmen": 0.08,
+                              "bonus": 0.04},)},
     # Quick and deadly, but lightly armoured. No cavalry -- elves fight as
     # archers, and their whole Cavalry share becomes more of them.
     # Attack speed cut 0.85 -> 0.90: an all-archer roster that never has to
     # close was measuring as the clear outlier (92% of its matchups), and the
     # fast draw is where that came from, not their evasion -- elves have no
     # dodge at all.
+    # The Bladesinger is paid for ENTIRELY out of the bows, with no outright
+    # bonus -- the only special on the roster funded that way, because Elves
+    # lead the roster and theirs is the one signature unit that has no business
+    # making them stronger. At a tenth of the bows it measured as the biggest
+    # buff on the table (60% of matchups to 85%): what being closed on costs an
+    # all-archer line is worth far more than the bows it gives up. Hence 22%.
     "Elves":   {"hue": 160, "mil": -8,  "eco": +14, "trait": "ancient forest sages",
                 "unit_cooldown_mult": 0.90, "unit_speed_mult": 1.15,
                 "unit_hp_mult": 0.90, "no_cavalry": True,
-                "cavalry_becomes": "archers"},
+                "cavalry_becomes": "archers",
+                "specials": ({"unit": "bladesinger", "of_archers": 0.22},)},
     # Stout and hard to kill, but methodical -- they march AND swing slower.
     # (Slow feet alone were no drawback at all; the slower swing is the real one.)
     # Dwarves charge behind the shield instead of dropping it: everyone else
     # trades guard for speed (orders.STANCE_CHARGE's block_mult), but a dwarven
     # line comes on with shields up and arrows glance off it. This is the one
     # species that can cross open ground under fire without paying for it.
+    # The Shieldwarden is paid for out of the LINE, not the bows, and that is
+    # the whole lesson of the unit it replaced. A heavy crossbow was tried here
+    # first and took Dwarves from 25% of their matchups to 8% -- it swapped
+    # tanky bodies for fragile ones and gave up 30px of range doing it. The
+    # Warden instead doubles down on the one Dwarven mechanic that already
+    # measures well: the line taking less punishment while it advances.
     "Dwarves": {"hue": 30,  "mil": +10, "eco": +10, "trait": "mountain-forged smiths",
                 "unit_hp_mult": 1.20, "unit_speed_mult": 0.92,
-                "unit_cooldown_mult": 1.08, "charge_shields_up": True},
+                "unit_cooldown_mult": 1.08, "charge_shields_up": True,
+                "specials": ({"unit": "shieldwarden", "of_swordsmen": 0.10,
+                              "bonus": 0.03},)},
     # Biggest, hardest-hitting bodies on the field and no cavalry at all. Note
     # that losing cavalry is not itself a cost here (their share becomes more
     # Swordsmen, who are tankier and carry shields) -- the real counterweight is
@@ -89,10 +111,16 @@ SPECIES = {
     # matchups (0% vs both archer rosters); +15% HP alone took them to 72% but
     # still lost to Elves 88% of the time; this pair lands them at 84% with an
     # even split against Elves.
+    # The Berserker takes the Orcish trade to its end: no shield at all, and
+    # damage that climbs as it bleeds. It is the only unit in the game that is
+    # more dangerous hurt than whole, which makes finishing one off a real
+    # decision rather than free tidying-up.
     "Orcs":    {"hue": 95,  "mil": +16, "eco": -8,  "trait": "warband raiders",
                 "unit_damage_mult": 1.18, "swordsman_size_mult": 1.30,
                 "unit_hp_mult": 1.22, "unit_speed_mult": 1.20,
-                "block_chance_mult": 0.72, "no_cavalry": True},
+                "block_chance_mult": 0.72, "no_cavalry": True,
+                "specials": ({"unit": "berserker", "of_swordsmen": 0.12,
+                              "bonus": 0.01},)},
     # Fast and slippery -- a quarter of all blows miss them entirely -- and
     # they swing quicker than anyone, but they are the frailest thing on the
     # field. No cavalry either: goblins raid on foot. Unlike the Orcs, who pour
@@ -120,9 +148,18 @@ SPECIES = {
                 # monotonically with the number of Assassins fielded (83% with
                 # none, 54% at nine, 21% at thirteen, 8% at seventeen), so the
                 # roster takes the fewest that still make them a real presence.
-                "special_share_of_archers": 0.05,
-                "special_share_of_swordsmen": 0.05,
-                "special_bonus_share": 0.03},
+                # The Sapper is the answer to what the Assassin cannot do.
+                # The Assassin's problem was never its numbers -- it was that
+                # it dies crossing the field, so nothing it is good at ever
+                # happens (0 first strikes and 0 of 9 alive in a measured
+                # battle). The Sapper does the Goblin job -- break up a packed
+                # formation -- from 110px away, where surviving the approach is
+                # not the price of entry. Crude, inaccurate, slow to reload,
+                # and it does not care how good your shields are.
+                "specials": ({"unit": "assassin", "of_archers": 0.02,
+                              "of_swordsmen": 0.02, "bonus": 0.01},
+                             {"unit": "sapper", "of_archers": 0.08,
+                              "bonus": 0.02})},
 }
 
 # Every species trait, with the "no modifier" value each defaults to. Anything
@@ -146,14 +183,76 @@ _SPECIES_TRAIT_DEFAULTS = {
     "charge_shields_up": False, # True = charging does NOT drop this species'
                                 # guard (see Unit.effective_block), so it can
                                 # advance under arrows behind its shields
-    "special_unit": None,       # a unit type only this species fields, taken
-                                # out of its Archer share (see App._army_for)
-    "special_share_of_archers": 0.0,    # fraction of the Archer share it takes
-    "special_share_of_swordsmen": 0.0,  # ...and of the Swordsman share
-    "special_bonus_share": 0.0,         # plus this fraction of military power
-                                        # granted outright -- a species buff, not
-                                        # paid for by anything
+    # Unit types only this species fields, on top of the shared Swordsman /
+    # Archer / Cavalry core. A list of dicts, each:
+    #   {"unit": key, "of_archers": f, "of_swordsmen": f, "bonus": f}
+    # -- the first two are the fraction of that arm's headcount the unit is
+    # paid for out of, and `bonus` is a fraction of military power granted
+    # outright. See army_composition below for why it is funded from three
+    # places rather than one.
+    #
+    # THESE SHARES ARE THE BALANCE KNOB. A signature unit's effect is almost
+    # entirely how many of it you field, not its stats -- the Bladesinger went
+    # from +25 points to -25 on a share change alone, with only its dodge
+    # touched. Measure with `python dev/tournament.py 5 on --isolate`, which
+    # runs a control with nobody's specials and then one run per species, so
+    # each unit's effect is attributable. Turning all five on at once was tried
+    # first and is uninterpretable.
+    "specials": (),
 }
+
+
+# Every army's core, before species specials. Swordsmen carry the line, Archers
+# shoot it in, Cavalry break it -- and a species with no_cavalry redistributes
+# that last share rather than losing the headcount.
+CORE_SHARES = {"infantry": 0.40, "archer": 0.25, "cavalry": 0.20}
+
+
+def army_composition(species, power):
+    """{unit_type: count} for a species at a given military rating.
+
+    THE one place army composition is decided. It used to live in App._army_for
+    with the balance tournament keeping a hand-copied duplicate, and a comment
+    on both asking whoever came next to keep them in step -- which is a bug
+    waiting on a distracted afternoon, since the tournament silently stops
+    measuring the army the game actually fields.
+
+    A special unit is funded from three places: a slice of the Archers, a slice
+    of the Swordsmen, and a bonus granted outright. The bonus is the point --
+    it makes the unit a species ADVANTAGE rather than a reshuffle -- and
+    splitting the rest across both arms stops it gutting either one. Paying for
+    the Goblin Assassin purely out of Archers was measured, and it took them
+    from 88% of their matchups to 0%.
+    """
+    t = species_traits(species)
+    foot, archer, cav = (CORE_SHARES["infantry"], CORE_SHARES["archer"],
+                         CORE_SHARES["cavalry"])
+    if t["no_cavalry"]:
+        # Same headcount either way -- only where it lands differs. Orcs pour
+        # it all into Swordsmen (a heavier foot line); Goblins split it, coming
+        # out as skirmishers rather than a shield wall.
+        mode = t["cavalry_becomes"]
+        if mode == "split":
+            foot += cav / 2
+            archer += cav / 2
+        elif mode == "archers":
+            archer += cav
+        else:
+            foot += cav
+        cav = 0.0
+    comp = {"infantry": round(power * foot), "archer": round(power * archer)}
+    if cav:
+        comp["cavalry"] = round(power * cav)
+    for spec in t["specials"]:
+        from_bows = round(comp["archer"] * spec.get("of_archers", 0.0))
+        from_line = round(comp["infantry"] * spec.get("of_swordsmen", 0.0))
+        bonus = round(power * spec.get("bonus", 0.0))
+        comp["archer"] -= from_bows
+        comp["infantry"] -= from_line
+        total = from_bows + from_line + bonus
+        if total:
+            comp[spec["unit"]] = comp.get(spec["unit"], 0) + total
+    return comp
 
 
 def species_traits(species):
@@ -199,6 +298,16 @@ def species_trait_summary(species):
         out.append(f"fields no Cavalry ({becomes})")
     if t["trade_gold_bonus"]:
         out.append(f"+{round(t['trade_gold_bonus'] * 100)}% Gold from foreign sales")
+    if t["specials"]:
+        # Imported here rather than at module scope: unit_types imports nothing
+        # from this module today, but a species table that cannot be read
+        # without the battle package is a circular import waiting to happen.
+        from app.battle.unit_types import UNIT_TYPES
+        names = [UNIT_TYPES.get(s["unit"], {}).get("name", s["unit"])
+                 for s in t["specials"]]
+        out.append("fields " + " and ".join(names)
+                   + (" -- units no other species has" if len(names) > 1
+                      else ", a unit no other species has"))
     return out
 
 # --- faction names: "<Adj> <Noun>" ------------------------------------------

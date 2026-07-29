@@ -60,7 +60,11 @@ LAYER_RING = 5        # hollow circle -- selection, block sparks
 LAYER_SWORD = 6
 LAYER_SHIELD = 7
 LAYER_DAGGER = 8
-_LAYER_COUNT = 9
+# Appended at the END with the species signature units, so every constant above
+# keeps the index it already had.
+LAYER_HEXAGON = 9
+LAYER_CHEVRON = 10
+_LAYER_COUNT = 11
 
 # Battle shape names (app/battle/shapes.py) -> atlas layer.
 SHAPE_LAYER = {
@@ -68,6 +72,8 @@ SHAPE_LAYER = {
     "square": LAYER_SQUARE,
     "triangle": LAYER_TRIANGLE,
     "diamond": LAYER_DIAMOND,
+    "hexagon": LAYER_HEXAGON,
+    "chevron": LAYER_CHEVRON,
 }
 
 _FLOATS_PER_INSTANCE = 10     # pos2 size2 rot1 color3 layer1 alpha1
@@ -120,6 +126,13 @@ def _build_atlas():
     d.rectangle([n * 0.42, n * 0.24, n * 0.58, n * 0.74], fill=W)
     d.rectangle([n * 0.30, n * 0.70, n * 0.70, n * 0.80], fill=W)
     layers.append(img)                                          # dagger
+    img, d = blank()
+    d.regular_polygon((n / 2, n / 2, n / 2 - pad), 6, rotation=30, fill=W)
+    layers.append(img)                                          # hexagon
+    img, d = blank()
+    d.polygon([(n / 2, n - pad), (n - pad, pad), (n / 2, n * 0.42), (pad, pad)],
+              fill=W)
+    layers.append(img)                                          # chevron
 
     assert len(layers) == _LAYER_COUNT
     small = [im.resize((_TILE, _TILE), Image.LANCZOS) for im in layers]

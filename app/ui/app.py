@@ -293,54 +293,15 @@ class App(tk.Tk):
     def _army_for(self, nation, side):
         """Build a side's Army + unit composition from its military rating.
 
-        Composition is species-aware: a species flagged `no_cavalry` (Orcs --
-        see app/world/lexicon.py) fields none at all, and rolls that cavalry
-        share into its Swordsmen instead, so it brings the same headcount to
-        the field, just all on foot. A _WildlandDefender has no `meta` and so
-        no species: it gets the default mix and baseline stats."""
-        from app.world.lexicon import species_traits
+        Composition itself lives in lexicon.army_composition, which is the one
+        place that decides it -- the balance tournament calls the same function
+        rather than keeping a hand-copied duplicate that can silently drift out
+        of step with what the game actually fields. A _WildlandDefender has no
+        `meta` and so no species: it gets the default mix and baseline stats."""
+        from app.world.lexicon import army_composition
         species = getattr(nation, "meta", {}).get("species")
         army = Army(nation.name, nation.color, side, species=species)
-        power = nation.stats["military"]
-
-        traits = species_traits(species)
-        foot_share, archer_share, cav_share = 0.4, 0.25, 0.2
-        if traits["no_cavalry"]:
-            # Same headcount either way -- only where it lands differs. Orcs
-            # pour it all into Swordsmen (a heavier foot line); Goblins split
-            # it, coming out as skirmishers rather than a shield wall.
-            mode = traits["cavalry_becomes"]
-            if mode == "split":
-                foot_share += cav_share / 2
-                archer_share += cav_share / 2
-            elif mode == "archers":
-                archer_share += cav_share
-            else:
-                foot_share += cav_share
-            cav_share = 0.0
-        composition = {
-            "infantry": round(power * foot_share),
-            "archer": round(power * archer_share),
-        }
-        if cav_share:
-            composition["cavalry"] = round(power * cav_share)
-        # A species with a special unit (Goblins' Assassin) funds it from three
-        # places: a small cut of its Archers, a small cut of its Swordsmen, and
-        # a bonus granted outright. The bonus is the point -- it makes the unit
-        # a species ADVANTAGE rather than a reshuffle, and splitting the rest
-        # across both arms stops it gutting either one (paying for it purely
-        # out of Archers was measured at 88% -> 0% of matchups won).
-        special = traits["special_unit"]
-        if special:
-            from_bows = round(composition["archer"] * traits["special_share_of_archers"])
-            from_line = round(composition["infantry"] * traits["special_share_of_swordsmen"])
-            bonus = round(power * traits["special_bonus_share"])
-            composition["archer"] -= from_bows
-            composition["infantry"] -= from_line
-            total = from_bows + from_line + bonus
-            if total:
-                composition[special] = total
-        return army, composition
+        return army, army_composition(species, nation.stats["military"])
 
     def stage_battle(self, attacker, defender, region=None, claim_project=None,
                      defender_strength_mult=1.0):

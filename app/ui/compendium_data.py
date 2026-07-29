@@ -1654,6 +1654,49 @@ def _military_article():
             "just deals no damage. (A shield can still block an arrow that "
             "comes at a swordsman head-on.)",
         ]),
+        "SIGNATURE UNITS",
+        (
+            "On top of those three, every species fields at least one unit "
+            "nobody else has, paid for out of its own Swordsmen and Archers "
+            "plus a small bonus — so a signature unit is an advantage, not "
+            "simply a reshuffle. They are few in number and specialised; "
+            "none of them is a better Swordsman."
+        ),
+        "\n".join([
+            "  Standard Bearer (Humans): carries the colours rather than the "
+            "fight — mediocre with a sword, but every soldier near one hits "
+            "harder, swings faster and holds a steadier shield. Humans' whole "
+            "identity is that the line is worth more than the soldiers in it, "
+            "and this is that in rank and file rather than concentrated in "
+            "one commander who can die. Standing near two banners is worth "
+            "exactly as much as standing near one: they spread the effect "
+            "across the field, they do not stack it.",
+            "  Bladesinger (Elves): the melee answer an all-archer line has "
+            "never had. Fast, lightly armed and hard to pin down — the only "
+            "elf on the field who can dodge a blow outright — but frail "
+            "enough that anything landing a hit is most of the way to "
+            "killing one. Paid for entirely out of the bows, so fielding "
+            "them is a real trade.",
+            "  Shieldwarden (Dwarves): an anchor, not a duellist. Enormous, "
+            "slow, heavily shielded, and the line around one takes visibly "
+            "less punishment while it advances. Dwarves are the one species "
+            "that crosses open ground under fire with its shields still up; "
+            "the Warden is what makes that crossing pay.",
+            "  Berserker (Orcs): no shield at all, and damage that climbs as "
+            "it bleeds — the only unit in the game more dangerous hurt than "
+            "whole. Leaving one wounded on the field is a decision, not "
+            "tidying-up.",
+            "  Assassin (Goblins): a counter-archer with twin daggers, "
+            "fastest thing on foot, and it ignores everything but enemy "
+            "bowmen while any still live. Its opening strike on each new "
+            "victim lands for several times its damage. Fragile to the point "
+            "of absurdity — caught in the open by anything that hits back, "
+            "it dies at once.",
+            "  Sapper (Goblins): crude bombs at middling range. Slow to "
+            "reload and unreliable, but the blast catches everyone packed "
+            "around whoever it lands on, which makes a tight shield wall the "
+            "worst possible formation to face one in.",
+        ]),
         "TARGETING",
         (
             "Units still overwhelmingly go for whoever's closest, but with "

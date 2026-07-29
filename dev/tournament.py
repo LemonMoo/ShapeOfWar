@@ -8,6 +8,12 @@ Usage:
     python dev/tournament.py               # 3 seeds, orders on and off
     python dev/tournament.py 5             # 5 seeds
     python dev/tournament.py 5 on          # only with the order AI enabled
+    python dev/tournament.py 5 on --ab     # ...also without species specials
+    python dev/tournament.py 5 on --isolate  # one run per species' specials
+
+Composition comes from lexicon.army_composition -- the same function the game
+fields armies with. It used to be a hand-copied duplicate here, which is a
+tournament that can quietly stop measuring the real game.
 
 Read the numbers with care:
   * Sample is small. At 3 seeds each species plays 24 games, so anything under
@@ -30,7 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import app.battle.order_ai as order_ai
 from app.battle.battle import Battle, Army
-from app.world.lexicon import species_traits
+from app.world import lexicon
 
 SPECIES = ["Humans", "Elves", "Dwarves", "Orcs", "Goblins"]
 POWER = 120
@@ -38,43 +44,41 @@ FIELD = (1100, 620)
 TIME_LIMIT = 120.0
 
 
-def composition(species, power=POWER):
-    """Mirrors App._army_for -- keep the two in step or the tournament stops
-    measuring the army the game actually fields."""
-    t = species_traits(species)
-    foot, archer, cav = 0.4, 0.25, 0.2
-    if t["no_cavalry"]:
-        mode = t["cavalry_becomes"]
-        if mode == "split":
-            foot += cav / 2
-            archer += cav / 2
-        elif mode == "archers":
-            archer += cav
-        else:
-            foot += cav
-        cav = 0.0
-    comp = {"infantry": round(power * foot), "archer": round(power * archer)}
-    if cav:
-        comp["cavalry"] = round(power * cav)
-    special = t["special_unit"]
-    if special:
-        from_bows = round(comp["archer"] * t["special_share_of_archers"])
-        from_line = round(comp["infantry"] * t["special_share_of_swordsmen"])
-        bonus = round(power * t["special_bonus_share"])
-        comp["archer"] -= from_bows
-        comp["infantry"] -= from_line
-        if from_bows + from_line + bonus:
-            comp[special] = from_bows + from_line + bonus
-    return comp
+def composition(species, power=POWER, specials=True, only=None):
+    """The army the game itself fields, straight from lexicon.
+
+    This used to be a hand-copied duplicate of App._army_for with a comment on
+    both asking whoever came next to keep them in step. It is now the same
+    function, because a tournament measuring a composition the game does not
+    field is worse than no tournament at all.
+
+    `specials=False` strips the species' signature units and gives their
+    headcount back to the arms that paid for them -- the A/B control for "is
+    this unit worth its slot", measured by DISABLING it rather than by
+    comparing against a remembered number from an earlier build.
+
+    `only=<species>` keeps specials for that species alone. Turning them all on
+    at once measures five changes stacked, and the first run that way was
+    genuinely misleading: the roster spread went 45 -> 78 points, which says
+    nothing about which unit did it. Isolation is the only way to attribute.
+    """
+    if specials and (only is None or only == species):
+        return lexicon.army_composition(species, power)
+    saved = lexicon.SPECIES.get(species, {}).pop("specials", None)
+    try:
+        return lexicon.army_composition(species, power)
+    finally:
+        if saved is not None:
+            lexicon.SPECIES[species]["specials"] = saved
 
 
-def fight(a_species, b_species, seed):
+def fight(a_species, b_species, seed, specials=True, only=None):
     random.seed(seed)
     b = Battle(*FIELD)          # player_side stays None: the AI orders BOTH
     b.deploy(Army(a_species, "#cc3333", 0, species=a_species),
-             composition(a_species), 0)
+             composition(a_species, specials=specials, only=only), 0)
     b.deploy(Army(b_species, "#3399cc", 1, species=b_species),
-             composition(b_species), 1)
+             composition(b_species, specials=specials, only=only), 1)
     t = 0.0
     while not b.over and t < TIME_LIMIT:
         b.update(1 / 60)
@@ -82,7 +86,7 @@ def fight(a_species, b_species, seed):
     return (b.winner.side if b.winner else None), t
 
 
-def run(orders_on, seeds):
+def run(orders_on, seeds, specials=True, only=None):
     real = order_ai.decide_for_army
     if not orders_on:
         order_ai.decide_for_army = lambda *a, **k: None
@@ -92,7 +96,7 @@ def run(orders_on, seeds):
     try:
         for a, b in itertools.permutations(SPECIES, 2):
             for seed in seeds:
-                side, _ = fight(a, b, seed)
+                side, _ = fight(a, b, seed, specials=specials, only=only)
                 games[a] += 1
                 games[b] += 1
                 if side == 0:
@@ -108,20 +112,56 @@ def run(orders_on, seeds):
 
 
 def main():
-    n_seeds = int(sys.argv[1]) if len(sys.argv) > 1 else 3
-    which = sys.argv[2].lower() if len(sys.argv) > 2 else "both"
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    n_seeds = int(args[0]) if args else 3
+    which = args[1].lower() if len(args) > 1 else "both"
     seeds = [11 + 12 * i for i in range(n_seeds)]
     modes = [("orders OFF", False), ("orders ON ", True)]
     if which == "on":
         modes = modes[1:]
     elif which == "off":
         modes = modes[:1]
+    # --ab runs each mode twice, with the species' signature units and without,
+    # so the effect of adding them is measured against a control run in THIS
+    # build rather than against a number remembered from an earlier one.
+    variants = [("", True)] if "--ab" not in flags else [(" -specials", False),
+                                                         (" +specials", True)]
     print(f"{n_seeds} seeds, {len(SPECIES) * (len(SPECIES) - 1) * n_seeds} battles per mode\n")
     for label, on in modes:
-        rates, stale, total = run(on, seeds)
-        spread = max(rates.values()) - min(rates.values())
-        print(f"{label}: " + "  ".join(f"{s[:3]} {rates[s]:3.0f}%" for s in SPECIES)
-              + f" | spread {spread:3.0f}pts | stalemates {stale}/{total}")
+        if "--isolate" in flags:
+            isolate(label, on, seeds)
+            continue
+        for suffix, specials in variants:
+            rates, stale, total = run(on, seeds, specials=specials)
+            spread = max(rates.values()) - min(rates.values())
+            print(f"{label}{suffix}: "
+                  + "  ".join(f"{s[:3]} {rates[s]:3.0f}%" for s in SPECIES)
+                  + f" | spread {spread:3.0f}pts | stalemates {stale}/{total}")
+
+
+def isolate(label, orders_on, seeds):
+    """What each species' signature units are worth ON THEIR OWN.
+
+    A control run with nobody's specials, then one run per species with only
+    that species' specials enabled. The delta on that species' own row is the
+    unit's effect, attributable; the other rows in each run only show what
+    facing it costs everyone else.
+
+    This exists because the first measurement turned all five on at once and
+    was uninterpretable -- the spread moved 33 points and there was no way to
+    say which of five simultaneous changes did it."""
+    base, _, _ = run(orders_on, seeds, specials=False)
+    print(f"{label} control : "
+          + "  ".join(f"{s[:3]} {base[s]:3.0f}%" for s in SPECIES)
+          + f" | spread {max(base.values()) - min(base.values()):3.0f}pts")
+    for species in SPECIES:
+        rates, _, _ = run(orders_on, seeds, specials=True, only=species)
+        delta = rates[species] - base[species]
+        print(f"{label} {species[:7]:<8s}: "
+              + "  ".join(f"{s[:3]} {rates[s]:3.0f}%" for s in SPECIES)
+              + f" | {species} {base[species]:3.0f}% -> {rates[species]:3.0f}% "
+                f"({delta:+.0f})")
 
 
 if __name__ == "__main__":

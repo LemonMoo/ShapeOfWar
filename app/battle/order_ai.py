@@ -67,9 +67,22 @@ def decide_for_army(battle, army):
     if not foes:
         return
 
-    infantry = [u for u in mine if u.type_key == "infantry"]
-    cavalry = [u for u in mine if u.type_key == "cavalry"]
-    archers = [u for u in mine if u.type_key == "archer"]
+    # Grouped by ROLE, not by type name. This used to read `u.type_key ==
+    # "infantry"` and friends, which silently left every species signature unit
+    # unordered -- a Shieldwarden whose entire value is the line taking less
+    # punishment would advance out of the line it was protecting the moment
+    # that line braced. Nothing about the RULES below changed; they now simply
+    # reach the units they were always written for, including any added later.
+    infantry = [u for u in mine if _is_foot(u)]
+    cavalry = [u for u in mine if u.type.get("charge")]
+    # Ranged units are ordered per TYPE rather than as one block, because the
+    # rule turns on the group's own reach -- a Sapper (110) folded in with
+    # Archers (180) would have the whole lot standing at a range only one of
+    # them can shoot from.
+    shot_groups = {}
+    for u in mine:
+        if u._ranged and not u.is_commander:
+            shot_groups.setdefault(u.type_key, []).append(u)
 
     enemy_horse = [u for u in foes if u.type.get("charge")]
     enemy_archers = [u for u in foes if u._ranged]
@@ -110,7 +123,7 @@ def decide_for_army(battle, army):
         _apply_stance(battle, cavalry, orders.STANCE_CYCLE_CHARGE)
 
     # --- archers -------------------------------------------------------------
-    if archers:
+    for archers in shot_groups.values():
         near = _nearest_dist(archers[0], foes)
         reach = archers[0].attack_range
         # Hold the volley while they are still crossing the open ground, then
@@ -128,6 +141,18 @@ def decide_for_army(battle, army):
         # one position where an archer is worth nothing at all.
         stance = orders.STANCE_HOLD if near <= reach else orders.STANCE_ADVANCE
         _apply_stance(battle, archers, stance)
+
+
+def _is_foot(unit):
+    """A soldier who fights in the line: on foot, in melee, and not off doing
+    something else.
+
+    Commanders are excluded because they have their own screening rule
+    (Unit._screened), and hunters -- the Goblin Assassin -- because ordering
+    one is pointless: it ignores everything but enemy bowmen and its whole
+    value is arriving among them, which no stance helps with."""
+    return (not unit._ranged and not unit.type.get("charge")
+            and not unit.is_commander and not unit.type.get("hunts_ranged"))
 
 
 def _apply_stance(battle, units, stance):

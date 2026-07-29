@@ -84,6 +84,12 @@ class Army:
         self.units = []
         self.commander = None        # set by Battle.deploy
         self.commander_lost = False  # latched once he falls -- see morale
+        # Every unit in this army that projects an aura, COMMANDER FIRST --
+        # Unit._aura takes the first source in range rather than summing, so
+        # the order is what makes a Marshal outrank a Standard Bearer. Set by
+        # Battle.deploy; membership never changes, since a dead source is
+        # skipped by the alive check at the point of use.
+        self.aura_sources = []
 
     @property
     def living(self):
@@ -153,6 +159,10 @@ class Battle:
             cmd.is_commander = True
             army.units.append(cmd)
             army.commander = cmd
+        army.aura_sources = ([army.commander] if army.commander is not None
+                             and army.commander.aura else [])
+        army.aura_sources += [u for u in army.units
+                              if u.aura and u is not army.commander]
         self.armies.append(army)
         return army
 
