@@ -2333,9 +2333,31 @@ class MapView(tk.Frame):
                     out.append((pos[0], pos[1], text, color, px, dy))
 
         if level == 0:
+            factions = [f for f in wd.factions
+                       if self._is_known(f) and not is_eliminated(f)]
+            player_idx = wd.player_faction_idx
+            if player_idx is not None:
+                factions.sort(key=lambda f: f is not wd.factions[player_idx])
+            # Same declutter the flat map's world view needs (see
+            # MapView._draw_labels): on a crowded map, realms whose capitals
+            # sit close together project to overlapping, unreadable names
+            # from orbit. There's no live canvas here to bbox-check against,
+            # so this uses a coarser world-space minimum separation instead
+            # -- orbit view only needs "don't stack two names on each
+            # other," not pixel-exact spacing -- and the player's own
+            # kingdom is placed first so it's never the one dropped.
+            min_sep = wd.w * 0.035
+            placed_pts = []
+            kept = []
+            for f in factions:
+                cx, cy = f.center[0] * wd.w, f.center[1] * wd.h
+                if any(wrap.dist_wrap((cx, cy), (px, py), wd.w) < min_sep
+                      for px, py in placed_pts):
+                    continue
+                placed_pts.append((cx, cy))
+                kept.append(f)
             add([(f.name, (f.center[0] * wd.w, f.center[1] * wd.h))
-                 for f in wd.factions
-                 if self._is_known(f) and not is_eliminated(f)],
+                 for f in kept],
                 15.0, _GLOBE_LABEL_COLOR, -14.0)
         elif level == 1:
             add([(r.name, (r.center[0] * wd.w, r.center[1] * wd.h))
@@ -5512,12 +5534,37 @@ class MapView(tk.Frame):
             # is still one click away in its own panel. Only nation names are
             # sparse enough to be worth drawing over the map.
             return
-        items = [(f.name, f.center) for f in wd.factions
-                 if self._is_known(f) and not is_eliminated(f)]
-        for name, center in items:
-            lx, ly = screen(center[0] * wd.w, center[1] * wd.h)
-            c.create_text(lx + 1, ly + 1, text=name, fill="#000000", font=_LABEL_FONT)
-            c.create_text(lx, ly, text=name, fill="#ffffff", font=_LABEL_FONT)
+        items = [f for f in wd.factions if self._is_known(f) and not is_eliminated(f)]
+        player_idx = wd.player_faction_idx
+        # The player's own kingdom always gets a label; everyone else follows
+        # in the existing order and is skipped once their name would land on
+        # top of one already placed. Without this, a map with several rivals
+        # near each other draws every name directly over its neighbors --
+        # unreadable overlapping text instead of legible kingdom names -- and
+        # there was no guarantee your OWN kingdom's name survived that
+        # pileup rather than a rival's.
+        if player_idx is not None:
+            items.sort(key=lambda f: f is not wd.factions[player_idx])
+        placed_boxes = []
+        pad = 3
+        for f in items:
+            lx, cy = screen(f.center[0] * wd.w, f.center[1] * wd.h)
+            # Offset above the anchor point rather than centered on it -- a
+            # nation's capital (and its commander's diamond, which starts
+            # there) sits right at that point too, and a label drawn exactly
+            # on top of its own capital marker read as unreadable overlap
+            # even once OTHER nations' names stopped colliding with it.
+            ly = cy - 14.0
+            shadow = c.create_text(lx + 1, ly + 1, text=f.name, fill="#000000",
+                                   font=_LABEL_FONT)
+            box = c.bbox(shadow)
+            if box and any(not (box[2] + pad < ox0 or box[0] - pad > ox1
+                                or box[3] + pad < oy0 or box[1] - pad > oy1)
+                          for ox0, oy0, ox1, oy1 in placed_boxes):
+                c.delete(shadow)
+                continue
+            c.create_text(lx, ly, text=f.name, fill="#ffffff", font=_LABEL_FONT)
+            placed_boxes.append(box)
 
     def _region_border_segments(self, region):
         """Screen-space-independent (x,y) edge list tracing a region's
