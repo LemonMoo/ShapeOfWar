@@ -274,9 +274,46 @@ actually travelled over a fixed 0.75s wall-clock window, eased in and out.
 - `dev/test_succession.py`, `test_battle_death.py`, `test_elim.py`,
   `test_commander_gate.py`, `test_gate2.py` — regression harnesses. All pass. Run as
   `python dev/test_succession.py dev/worlds/dev560.pkl`.
+- `dev/test_move_anim.py`, `dev/test_tuning.py` — same, for the end-turn
+  animation (§7) and the balance levers (below). Both take no world argument
+  beyond the default.
+- `dev/globe_shot.py` — renders the globe at each zoom level (§2).
 - `dev/worlds/dev560.pkl` — turn 561, 300 owned regions, 14 factions. The benchmark
   world. `dev160.pkl` is an earlier one with active trade. **Gitignored** (49 MB
   each): they exist on disk but not in the repo, so a fresh clone won't have them.
+
+### `dev/balance_lab.py` — the tuning tool
+
+`python dev/balance_lab.py`. Every balance number in the game (217 of them),
+grouped as the source groups them, editable, with the source default shown
+beside anything you've moved. **Edits apply to the live tables immediately**, and
+the tournament runs in the same process — so Run measures exactly what is on
+screen, with no save/reload/restart in between. Standard, `--ab` and `--isolate`
+modes are all there.
+
+Save writes only what *differs* from source defaults, to `dev/balance.json`
+(gitignored — it's a personal scratchpad, not a shared setting).
+`app.core.tuning.load()` runs at startup and applies it, so numbers you like in
+the lab are numbers the game plays with. Packaged builds never see it: `dev/`
+isn't shipped, so a release always runs on source defaults.
+
+`app/core/tuning.py` is the index, and it deliberately does **not** move any
+number out of the module it lives in — the comment explaining why a value is
+what it is belongs next to the value. Two things it depends on:
+
+- **Tables are mutated in place, never rebound.** `unit.py` does
+  `from app.battle.unit_types import UNIT_TYPES`, binding the same dict object;
+  mutating it is visible everywhere, rebinding the module attribute would be
+  visible nowhere.
+- **Scalars imported by value get an explicit mirror list.** There are two
+  (`COMMANDER_AURA_RADIUS`, `COMMANDER_SCREEN_MIN`, both into `app.battle.unit`).
+  A third that isn't added to that list will silently do nothing —
+  `dev/test_tuning.py` asserts specifically against that.
+
+Levers are numbers and flags only. Strings (a unit's `name`, its `shape`) and
+list structure are not editable: they're structure rather than balance, and a
+text box that can put an unregistered shape name into `UNIT_TYPES` is a crash
+waiting to be typed.
 
 ---
 

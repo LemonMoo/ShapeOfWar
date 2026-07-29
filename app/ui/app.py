@@ -505,4 +505,9 @@ class App(tk.Tk):
 
 
 def main():
+    # Balance overrides from dev/balance_lab.py, if any. A no-op when the file
+    # is absent, which is every packaged build -- `dev/` is not shipped, so a
+    # release always runs on the numbers in the source.
+    from app.core import tuning
+    tuning.load()
     App().mainloop()

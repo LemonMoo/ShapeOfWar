@@ -48,3 +48,7 @@ dev/worlds/
 
 # Globe render dumps from dev/globe_shot.py -- output, not source.
 dev/shots/
+
+# Balance overrides written by dev/balance_lab.py -- a local tuning scratchpad,
+# not a shared setting. The game runs on source defaults when it is absent.
+dev/balance.json
