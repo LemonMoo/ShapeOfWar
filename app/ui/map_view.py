@@ -2075,7 +2075,28 @@ class MapView(tk.Frame):
             self.canvas.pack_forget()
             self.globe.pack(fill="both", expand=True)
             self.globe.update_idletasks()
-            self.globe.restore_camera(getattr(self.world, "globe_camera", None))
+            saved = getattr(self.world, "globe_camera", None)
+            if saved:
+                self.globe.restore_camera(saved)
+            else:
+                # First time this world has ever shown the globe: face the
+                # player's own capital rather than leaving the mesh's
+                # arbitrary default orientation (the map's geometric centre,
+                # which is very often on the far side of the planet from
+                # anyone's actual kingdom).
+                #
+                # _ensure_base()/set_map() have to run BEFORE face_cell:
+                # cell_to_point's longitude/latitude math reads the map's
+                # actual width/height off the uploaded image, and a globe
+                # that has never had set_map called yet falls back to a 1x1
+                # placeholder size -- face_cell would aim at a wildly wrong
+                # direction computed against that fake size instead of the
+                # real 1100x660 world. Caught on a real generated world: the
+                # capital-facing rotation landed the capital BEHIND the
+                # camera (z=-0.88 instead of near +1).
+                self._ensure_base()
+                self.globe.set_map(self._base_img)
+                self._face_globe_home()
         else:
             self.globe.pack_forget()
             self.canvas.pack(fill="both", expand=True)
@@ -2086,6 +2107,22 @@ class MapView(tk.Frame):
             self.globe_btn.config(text="Flat Map" if self.globe_active else "Globe")
         self._apply_panel_layout()
         self.render()
+
+    def _face_globe_home(self):
+        """Orient a freshly-opened globe at the player's own capital, or the
+        centre of their territory if a capital can't be found (a sandbox
+        world with no player faction just keeps the default orientation --
+        there is no 'home' to face)."""
+        wd = self.world
+        pidx = wd.player_faction_idx
+        if pidx is None:
+            return
+        nation = wd.factions[pidx]
+        capital = nation.meta.get("capital")
+        if capital is not None:
+            self.globe.face_cell(*capital)
+        elif getattr(nation, "center", None):
+            self.globe.face_cell(nation.center[0] * wd.w, nation.center[1] * wd.h)
 
     def _sync_globe(self):
         """Push the flat map's own raster, fog, overlays and markers at the
@@ -2102,6 +2139,11 @@ class MapView(tk.Frame):
         self._ensure_fog_overlay()
         g = self.globe
         g.set_map(self._base_img, self._fog_overlay_img)
+        # Elevation is static for the life of a world (worldgen never revises
+        # it), so this is skipped once already set for this exact height grid
+        # rather than re-encoding an identical texture every render() call.
+        if g._height_grid is not wd.height:
+            g.set_elevation(wd.height, wd.sea_level)
         # Sun angle advances with the year, so the terminator is not a fixed
         # decoration -- the planet turns under its own sun as the game runs.
         ang = (getattr(wd, "turn", 0) % 100) / 100.0 * 2.0 * math.pi
@@ -2112,6 +2154,7 @@ class MapView(tk.Frame):
         # the same dot from orbit as it is from just above the ground.
         mscale = g.dist / gl_globe.DIST_DEFAULT
         g.set_lines(self._globe_lines(level))
+        g.set_pins(self._globe_pins(level, mscale))
         g.set_markers(self._globe_markers(level, mscale))
         g.set_labels(self._globe_labels(level))
         g.render_now()
@@ -2206,13 +2249,6 @@ class MapView(tk.Frame):
                 return (0.63, 0.63, 0.63)
             return _GLOBE_RGB[wd.factions[idx].color]
 
-        # From orbit only cities; closer in, everything -- the same thinning
-        # rule _draw_settlements applies between world and region view.
-        settlements = [(st, st.pos) for st in wd.settlements
-                       if (level >= 1 or st.kind == "city")
-                       and self._cell_revealed(*st.pos)]
-        add(settlements, 0.020, lambda st: faction_rgb(st.faction_idx))
-
         if level >= 2:
             villages = [(v, v.pos) for v in wd.villages
                         if self._cell_revealed(*v.pos)]
@@ -2242,6 +2278,42 @@ class MapView(tk.Frame):
                          if cmd.faction_idx == wd.player_faction_idx
                          else faction_rgb(cmd.faction_idx)))
         return marks
+
+    def _globe_pins(self, level, mscale):
+        """Settlements as real 3D spires (gl_globe.set_pins) rather than
+        billboards -- everything else (villages, ships, caravans,
+        commanders) stays a flat marker in _globe_markers. A settlement is
+        the thing a player thinks of as 'a place, standing there'; nothing
+        else on the map carries that same sense of being planted somewhere.
+
+        Sized off _SETTLE_STYLE's existing city/castle/town scale (the same
+        numbers the flat map's own marker radius uses), so a city reads
+        bigger than a town here exactly the way it already does everywhere
+        else -- no second, separately-tuned size table."""
+        wd = self.world
+        g = self.globe
+
+        def faction_rgb(idx):
+            if idx is None or idx < 0:
+                return (0.63, 0.63, 0.63)
+            return _GLOBE_RGB[wd.factions[idx].color]
+
+        # From orbit only cities; closer in, everything -- the same thinning
+        # rule _draw_settlements applies between world and region view.
+        settlements = [st for st in wd.settlements
+                       if (level >= 1 or st.kind == "city")
+                       and self._cell_revealed(*st.pos)]
+        if not settlements:
+            return []
+        mask = g.visible_mask([st.pos for st in settlements])
+        pins = []
+        for keep, st in zip(mask, settlements):
+            if not keep:
+                continue
+            base = _SETTLE_STYLE[st.kind]["base"]
+            pins.append((st.pos[0], st.pos[1], 0.018 * base * mscale,
+                        0.052 * base * mscale, faction_rgb(st.faction_idx)))
+        return pins
 
     def _globe_labels(self, level):
         """Names and alert badges, by altitude: realms from orbit, regions at
