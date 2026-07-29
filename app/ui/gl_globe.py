@@ -707,9 +707,22 @@ class GLGlobeFrame(OpenGLFrame):
     """The planet. A Tk widget, so it drops into the same layout the flat map
     canvas occupies and the surrounding panels stay ordinary Tk."""
 
-    def __init__(self, master, on_pick=None, **kw):
+    def __init__(self, master, on_pick=None, on_right_click=None, **kw):
         super().__init__(master, **kw)
-        self.on_pick = on_pick          # called with (cell_x, cell_y) on a click
+        # Called with (cell_or_None, screen_x, screen_y) on a left click --
+        # cell is pick()'s resolved (cell_x, cell_y), or None if the click
+        # missed the planet/ice caps entirely. screen_x/y are passed through
+        # too so the caller can hit-test a specific marker's own projected
+        # position (see project_to_screen) instead of only ever acting on
+        # whatever cell was directly under the cursor -- a click can miss
+        # every cell test and still land on a marker rendered slightly
+        # in front of/behind its exact ground position.
+        self.on_pick = on_pick
+        # Called with (cell_or_None) on a right click -- the globe's
+        # equivalent of the flat map's quick "send selected commander here"
+        # QoL shortcut. No screen coordinates needed since that action only
+        # ever targets a ground cell, never a marker.
+        self.on_right_click = on_right_click
         self.ctx = None
         self.animate = 0
         self._failed = False
@@ -762,6 +775,7 @@ class GLGlobeFrame(OpenGLFrame):
         for seq, fn in (("<ButtonPress-1>", self._press),
                         ("<B1-Motion>", self._motion),
                         ("<ButtonRelease-1>", self._release),
+                        ("<ButtonPress-3>", self._right_click),
                         ("<MouseWheel>", self._wheel),
                         ("<Button-4>", self._wheel),
                         ("<Button-5>", self._wheel)):
@@ -1197,6 +1211,34 @@ class GLGlobeFrame(OpenGLFrame):
         view = _look_at(self.eye(), CAMERA_TARGET, np.array([0.0, 1.0, 0.0]))
         return proj @ view
 
+    def project_to_screen(self, cx, cy):
+        """Map cell -> (screen_x, screen_y) in this widget's own pixel space,
+        or None if the point is over the horizon or behind the camera --
+        the inverse of pick(). Lets a caller hit-test a click against a
+        SPECIFIC marker's actual projected position (a settlement, a
+        commander) instead of pick()'s "whatever cell is under the
+        cursor," the same way the flat map hit-tests a screen-space
+        distance against a marker's own world_to_screen position.
+
+        Uses cell_to_point (terrain-radius-aware, same position a
+        settlement pin actually renders at), not cells_to_points' cheaper
+        base-radius version -- picking should agree with what's on screen,
+        not with visible_mask's coarser culling approximation."""
+        pt_world = self.rot.dot(self.cell_to_point(cx, cy))
+        eye = self.eye()
+        eye_mag = np.linalg.norm(eye)
+        eye_dir = eye / (eye_mag or 1.0)
+        if pt_world.dot(eye_dir) <= 1.0 / max(eye_mag, 1.0 + 1e-6):
+            return None                          # over the horizon
+        hom = np.concatenate([pt_world, [1.0]]) @ self.viewproj().T
+        if hom[3] <= 1e-6:
+            return None                          # behind the camera
+        ndc = hom[:2] / hom[3]
+        if abs(ndc[0]) > 1.2 or abs(ndc[1]) > 1.2:
+            return None                          # well outside the viewport
+        w, h = self._size()
+        return (ndc[0] * 0.5 + 0.5) * w, (1.0 - (ndc[1] * 0.5 + 0.5)) * h
+
     def visible_mask(self, cells, pad=1.2):
         """Which of these cells the camera can actually see -- on the near side
         of the planet AND inside the viewport.
@@ -1302,8 +1344,13 @@ class GLGlobeFrame(OpenGLFrame):
         # A click is a click only if the globe did not really move under it.
         if drag <= 3.0 and self.on_pick is not None:
             cell = self.pick(event.x, event.y)
+            self.on_pick(cell, event.x, event.y)
+
+    def _right_click(self, event):
+        if self.on_right_click is not None:
+            cell = self.pick(event.x, event.y)
             if cell is not None:
-                self.on_pick(*cell)
+                self.on_right_click(cell)
 
     def _wheel(self, event):
         delta = getattr(event, "delta", 0)

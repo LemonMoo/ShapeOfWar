@@ -2058,7 +2058,8 @@ class MapView(tk.Frame):
         if not gl_globe.gl_available():
             return False
         try:
-            self.globe = gl_globe.GLGlobeFrame(self, on_pick=self._on_globe_pick)
+            self.globe = gl_globe.GLGlobeFrame(self, on_pick=self._on_globe_pick,
+                                              on_right_click=self._on_globe_right_click)
         except Exception:
             self.globe = None
             return False
@@ -2410,15 +2411,139 @@ class MapView(tk.Frame):
             return _RIVER_CARAVAN_STYLE if mine else _FOREIGN_RIVER_CARAVAN_STYLE
         return _CARAVAN_STYLE if mine else _FOREIGN_CARAVAN_STYLE
 
-    def _on_globe_pick(self, cx, cy):
-        """A click on the planet, resolved to a map cell -- from here on it is
-        the ordinary selection path, so the globe gains region/settlement
-        selection without duplicating any of that logic."""
+    _GLOBE_COMMANDER_HIT_PX = 14
+    _GLOBE_SETTLEMENT_HIT_PX = 16
+    _GLOBE_VILLAGE_HIT_PX = 12
+
+    def _globe_marker_hit(self, sx, sy, candidates, hit_px):
+        """The first of `candidates` (an iterable of (obj, pos)) whose
+        projected screen position is within `hit_px` of the click, or None.
+        Shared by commander/settlement/village hit-testing below -- same
+        screen-space nearest-marker-wins idea _on_click uses for the flat
+        map, just projected through the globe's own camera (see
+        gl_globe.project_to_screen) instead of world_to_screen."""
+        g = self.globe
+        best_obj, best_d2 = None, hit_px * hit_px
+        for obj, pos in candidates:
+            proj = g.project_to_screen(*pos)
+            if proj is None:
+                continue
+            px, py = proj
+            d2 = (px - sx) ** 2 + (py - sy) ** 2
+            if d2 <= best_d2:
+                best_obj, best_d2 = obj, d2
+        return best_obj
+
+    def _on_globe_right_click(self, cell):
+        """The globe's equivalent of _on_right_click: send the currently
+        selected Commander toward the clicked ground cell directly."""
+        if self.selected_commander is None:
+            return
+        cmd = self.selected_commander
+        self.commander_move_mode = None
+        msg = commander.set_move_order(self.world, cmd, cell)
+        self.show_bottom_message(msg)
+        self._show_commander(cmd)
+        self.render()
+
+    def _on_globe_pick(self, cell, sx, sy):
+        """A click on the globe: (cell_x, cell_y) or None from gl_globe.pick,
+        plus the raw screen coordinates the click landed at. Mirrors
+        _on_click's branch order (planning modes first, then commander
+        selection, then settlement/village markers, then region/faction)
+        so every action the flat map supports is reachable here too --
+        flying closer already IS drilling down on the globe (see
+        gl_globe's zoom_level), so there is no separate per-level branch
+        to duplicate the way _on_click has one per flat-map zoom level."""
         wd = self.world
-        if not (0 <= cx < wd.w and 0 <= cy < wd.h):
+
+        if self.attack_mode is not None:
+            if cell is not None:
+                cx, cy = cell
+                cid = wd.region_grid[cy][cx]
+                if any(c.id == cid for c in self._attack_frontier):
+                    self._launch_attack(wd.regions[cid])
             return
-        if not self._cell_revealed(cx, cy):
+
+        if self.building_mode is not None:
+            if cell is not None:
+                region, kind = self.building_mode
+                cx, cy = cell
+                if wd.region_grid[cy][cx] == region.id:
+                    player = self._player_faction()
+                    msg = construction.start_settlement(wd, player, (cx, cy), kind)
+                    self.building_mode = None
+                    self._placement_hint_cells = None
+                    self._base_key = None
+                    self.show_bottom_message(msg)
+                    if self.selected_region is region:
+                        self._show_region(region)
+                    self.render()
             return
+
+        if self.commander_move_mode is not None:
+            if cell is not None:
+                cmd = self.commander_move_mode
+                self.commander_move_mode = None
+                msg = commander.set_move_order(wd, cmd, cell)
+                self.show_bottom_message(msg)
+                if self.selected_commander is cmd:
+                    self._show_commander(cmd)
+                self.render()
+            return
+
+        # --- Commander selection: same priority _on_click gives it, over
+        # anything else at the point clicked -- only the player's own
+        # commanders (an opponent's is a marker, not something you can open
+        # a panel/orders for).
+        self.selected_commander = None
+        player = self._player_faction()
+        if player is not None:
+            player_idx = wd.factions.index(player)
+            mine = [(cmd, self._display_pos(cmd)) for cmd in wd.commanders
+                   if cmd.faction_idx == player_idx]
+            hit = self._globe_marker_hit(sx, sy, mine, self._GLOBE_COMMANDER_HIT_PX)
+            if hit is not None:
+                self.selected_commander = hit
+                self._show_commander(hit)
+                self.render()
+                return
+
+        # --- Settlement selection: any revealed settlement, any faction --
+        # the flat map already allows this at region-view zoom (a foreign
+        # settlement's marker opens its panel there too; only VILLAGE VIEW,
+        # a whole extra zoom level, is foreign-gated), and the globe already
+        # shows every revealed settlement's pin regardless of owner (see
+        # _globe_pins), so clicking one is consistent with what's on screen.
+        settlements = [(st, st.pos) for st in wd.settlements
+                       if self._cell_revealed(*st.pos)]
+        hit = self._globe_marker_hit(sx, sy, settlements, self._GLOBE_SETTLEMENT_HIT_PX)
+        if hit is not None:
+            self.selected_settlement = hit
+            self.selected_village = None
+            self._show_settlement(hit)
+            self.render()
+            return
+
+        # --- Village selection: same reasoning as settlements above --
+        # _globe_labels/_globe_markers already show any revealed village
+        # regardless of owner, so clicking one is consistent with that,
+        # even though the flat map only ever reaches a village panel
+        # through its own faction's village view.
+        villages = [(v, v.pos) for v in wd.villages if self._cell_revealed(*v.pos)]
+        hit = self._globe_marker_hit(sx, sy, villages, self._GLOBE_VILLAGE_HIT_PX)
+        if hit is not None:
+            self.selected_village = hit
+            self.selected_settlement = None
+            self._show_village(hit)
+            self.render()
+            return
+
+        # --- Fall back to region/faction selection (the globe's original
+        # behavior, unchanged).
+        if cell is None or not self._cell_revealed(*cell):
+            return
+        cx, cy = cell
         cid = wd.region_grid[cy][cx]
         if cid < 0:
             self.selected = None
