@@ -2731,7 +2731,28 @@ class MapView(tk.Frame):
             return
         self._move_tracks = tracks
         self._move_t0 = time.monotonic()
-        self._move_anim = self.after(0, self._step_move_animation)
+        # Run the first frame SYNCHRONOUSLY, not via after(0, ...). _run_end_turn
+        # calls refresh() (which renders movers at their real, final positions)
+        # immediately before this, and refresh()'s render() is itself
+        # synchronous -- so scheduling the animation's own first frame for the
+        # next event-loop tick left a real window where Tk could actually
+        # paint that final-position frame to the screen before
+        # _step_move_animation ever ran and snapped everything back to its
+        # start position. The player saw exactly that: movers flash forward
+        # to their destination, jump back to where they started, then
+        # animate forward again. Calling it here means the canvas already
+        # shows the animation's own t=0 frame by the time anything gets a
+        # chance to paint the screen at all.
+        #
+        # _step_move_animation's own continuation check is "reschedule the
+        # next frame if _move_anim is still non-None" -- previously true by
+        # the side effect of after(0, ...) having already stashed a real
+        # after-id there before the callback ever ran. Calling it directly
+        # skips that, so it needs a truthy placeholder here instead (real
+        # after-ids overwrite it the moment the animation actually
+        # continues past this first frame).
+        self._move_anim = True
+        self._step_move_animation()
 
     def _step_move_animation(self):
         t = min(1.0, (time.monotonic() - self._move_t0) / _MOVE_ANIM_SECONDS)
