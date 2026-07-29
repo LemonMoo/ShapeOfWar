@@ -20,6 +20,16 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 46,
+        "title": "Physical Villages, Sane Formations, No More Runaway Renaming",
+        "items": [
+            "FIXED: a real, if strange-sounding, bug -- typing your kingdom's name and then playing the game could end up with stray letters silently appended to it later, most noticeably an extra E every time you pressed E to end a turn. The Realm Name field never released keyboard focus once the game started, so it kept quietly eating keystrokes behind the scenes and re-applying them to your kingdom's name. Fixed at the root: switching screens now always moves focus properly",
+            "VILLAGES AND COMMANDERS ARE REAL 3D SHAPES ON THE GLOBE NOW, not flat colored dots. This got especially bad once village counts stopped being capped -- a developed region could carpet the globe in a hundred identical blobs. Villages are now small spires like a settlement's, and your commander is a distinct tall, thin pin that never gets mistaken for a tiny town",
+            "BATTLES NOW DEPLOY WITH A SANE DEFAULT FORMATION: Swordsmen anchor the front line, Archers hang back, everything else in the middle -- previously the starting layout was just incidental leftover order, not an actual formation. You can still drag anyone anywhere before deploying",
+            "Battle planning's per-type select buttons now reflect your ACTUAL species -- previously the roster only ever showed a slot for Goblin Assassins, missing their second signature unit (Sapper) entirely and showing nothing at all for Human/Elf/Dwarf/Orc specials. Every species now gets a button (and hotkey) for each of its own signature units, and every button shows a live selected/alive count",
+        ],
+    },
+    {
         "version": 45,
         "title": "Play the Whole Game From the Globe",
         "items": [
