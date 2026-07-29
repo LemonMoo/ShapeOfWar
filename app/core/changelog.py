@@ -20,6 +20,18 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 41,
+        "title": "Build a Realm Before You Enter It",
+        "items": [
+            "NEW GAME IS REBUILT. Name your realm AND its ruler, pick a banner colour, choose the size of the world and how many rivals are in it, and see the actual map — with your starting position marked — before you commit to any of it",
+            "Every realm now has a monarch, not just yours — a rival is someone you're at war WITH, not just a flag on the map. Titles are species flavour: King/Queen, Archon, High King, Warlord, Boss",
+            "Banner colour is a palette drawn from your own species' hue rather than a free-for-all, so the political map stays readable — kin still look like kin, and rivals are steered off whatever colour you pick",
+            "World size is now a choice: Small (tight, 9 realms), Standard (the old default, 14), or Large (room to grow, 18) — plus a slider for exactly how many rivals you want",
+            "The preview generates in the background the moment the screen opens, so you can keep naming things while a bigger world charts itself instead of staring at a blank screen",
+            "Species are shown side by side with their real stat differences and signature units, instead of one at a time — an informed pick instead of a guess",
+        ],
+    },
+    {
         "version": 40,
         "title": "A World You Can Turn",
         "items": [
