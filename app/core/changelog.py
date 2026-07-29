@@ -20,6 +20,15 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 43,
+        "title": "The Globe Flies Lower, and a Fixed Selection Bug",
+        "items": [
+            "GLOBE CAMERA TILTS FOR REAL NOW. v0.3.2's pitch only widened the view as you zoomed in -- it swung the camera around the planet's center rather than tilting a close-up, so full zoom still framed the whole globe. The camera now hovers over the ground point you're looking at and tilts its gaze, and the closest zoom is genuinely low over the surface instead of low-orbit -- closing in finally reads as flying down to somewhere, with a real horizon",
+            "FIXED: selecting a region on the globe (while already in region view) was silently kicking the view back out to the world map instead of just highlighting the region -- it was stomping flat-map-only state it had no business touching",
+            "The Balance Lab now has a way in: a 'Balance Lab (dev)' button on the main menu opens it directly, no more running it by hand from a terminal. It's a dev-only tool and won't appear in packaged builds",
+        ],
+    },
+    {
         "version": 42,
         "title": "Ocean Currents, and a Globe You Can Fly Down To",
         "items": [
