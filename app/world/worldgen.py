@@ -609,7 +609,10 @@ def _assign_starting_footholds(world, capitals, min_cells=MIN_FOOTHOLD_CELLS):
                 world.owner[y][x] = idx
 
 
-_LAKE_DEPTH = 0.012       # filled-minus-original elevation that counts as lake
+_LAKE_DEPTH = 0.016       # filled-minus-original elevation that counts as lake --
+                          # raised from 0.012 (a real, if moderate, cut to lake
+                          # extent/count: fewer shallow depressions clear the
+                          # bar, only genuinely deeper basins still flood)
 
 
 def _generate_hydrology(world, land, rng):
@@ -672,7 +675,10 @@ def _generate_hydrology(world, land, rng):
         if d is not None and land[d[1]][d[0]]:
             acc[d] += acc[p]
 
-    thresh = max(35, len(land_cells) // 550)
+    # Divisor raised from 550 (needs more upstream drainage area before a
+    # cell counts as a river) -- a real, if moderate, cut to how much of the
+    # land reads as river network, not a change to how the network forms.
+    thresh = max(35, len(land_cells) // 700)
     river_cells = {p for p in land_cells if acc[p] >= thresh and p not in lake}
 
     # 3c. build polylines: start at river heads, follow flow to the mouth.
@@ -1657,10 +1663,13 @@ class World:
         self.player_faction_idx = None  # index into self.factions, or None
 
 
-def _pick_continent_centers(rng, width, height):
-    """2-3 continents, each a cluster of one or more elliptical blobs, spaced
-    far enough apart that real open ocean forms between them instead of one
-    landmass touching every edge. Returns a flat list of blobs —
+def _pick_continent_centers(rng, width, height, n):
+    """`n` continents (4-7, chosen by generate_world -- see its own
+    `_target_n`, drawn once and held fixed across any retries so a retry
+    can't quietly settle for fewer continents than was actually asked for),
+    each a cluster of one or more elliptical blobs, spaced far enough apart
+    that real open ocean forms between them instead of one landmass
+    touching every edge. Returns a flat list of blobs —
     (cx, cy, radius_x, radius_y, angle) — every one of which shapes the
     height-field falloff exactly like another continent's blob would; the
     caller doesn't need to know which blobs share a parent.
@@ -1690,53 +1699,90 @@ def _pick_continent_centers(rng, width, height):
     easily bridge it to its neighbor; lobes cluster close enough to their
     parent that they don't upset that spacing in practice, and the existing
     _has_multiple_landmasses retry catches the rare seed where they do."""
-    n = rng.randint(2, 3)
-    base_radius_x = width * 0.16
-    base_radius_y = height * 0.30 / n
-    min_norm_dist = 2.6   # separation required, in radius_x/radius_y-normalized units
+    # base_radius_x held constant (0.16 * width) through n=3, the range this
+    # was tuned at; above that, more continents have to fit in the same
+    # map, so it shrinks -- roughly 0.16 at n=3 down to ~0.07 at n=7 -- or
+    # every additional continent past 3 would mostly just make placement
+    # retry into the crowded/overlapping fallback instead of actually
+    # producing more separate landmasses.
+    base_radius_x = width * 0.16 * min(1.0, 3.0 / n)
+
+    # Each continent is assigned a hemisphere (alternating for variety) AND
+    # a distance-from-equator SLOT within that hemisphere's OWN band count,
+    # not a slice of one shared 0..1 walk split across both hemispheres.
+    # That distinction matters once n gets past 3: splitting a single 0..1
+    # range across n sequential, alternating-side bands means bands 1..n-2
+    # all land in a thin strip hugging the equator on alternating sides --
+    # nominally "opposite hemispheres" but barely separated in actual y,
+    # since none of them ever reach far toward either pole. Giving each
+    # hemisphere its own independent 0..1 spread (roughly n/2 slots each)
+    # is what actually spreads continents from equator to pole on BOTH
+    # sides, which is what the height-per-band formula below assumes.
+    north_count = (n + 1) // 2
+    south_count = n // 2
+    base_radius_y = height * 0.30 / max(north_count, south_count, 1)
 
     placed = []   # (x, y, radius_x, radius_y) of each continent's PRIMARY
                   # blob only -- what the spacing/separation check uses
     blobs = []    # every blob (primary + lobes) that actually shapes the
                   # terrain -- what generate_world's falloff loop consumes
 
+    slot_by_side = {1.0: 0, -1.0: 0}
     for band in range(n):
-        d_lo = band / n
-        d_hi = (band + 1) / n
         # Alternate north/south by band (not randomly) so adjacent bands
         # land on opposite sides of the equator, maximizing their actual
         # separation instead of risking two bands both landing north and
-        # crowding each other (min_norm_dist below still catches genuine
-        # collisions either way, but this cuts down how often it has to).
+        # crowding each other (the best-of-K scoring below still finds the
+        # least-bad spot either way, but this cuts down how often it has to).
         side = 1.0 if band % 2 == 0 else -1.0
+        side_count = north_count if side > 0 else south_count
+        slot = slot_by_side[side]
+        slot_by_side[side] += 1
+        d_lo = slot / side_count
+        d_hi = (slot + 1) / side_count
 
         radius_x = base_radius_x * rng.uniform(0.70, 1.35)
         radius_y = base_radius_y * rng.uniform(0.70, 1.35)
         margin_x = min(radius_x * 1.15, width * 0.35)
         margin_y = radius_y * 1.1
 
-        for _ in range(500):
+        # Best-of-K candidate placement, not "accept the first spot that
+        # clears a threshold, or give up and place blind": with only 2-3
+        # continents there was so much free room that a random spot cleared
+        # min_norm_dist almost immediately, so a plain accept-or-retry loop
+        # never really had to work for it. At n up to 7 the map is
+        # genuinely crowded well before the last couple of continents place,
+        # and a threshold-and-retry approach degrades catastrophically right
+        # when it matters most: once every candidate in 500 tries fails the
+        # bar, it gives up and places completely blind, ignoring every
+        # already-placed continent entirely. Scoring every candidate by its
+        # actual minimum normalized distance to what's already down, and
+        # keeping the best one seen, always returns the least-crowded spot
+        # this band could find instead of an all-or-nothing threshold.
+        best_score, best_xy = -1.0, None
+        for _ in range(60):
             dist = rng.uniform(d_lo, d_hi)          # 0=equator, 1=pole
             y = (0.5 + side * dist / 2.0) * height
             y = max(margin_y, min(height - margin_y, y))
             x = rng.uniform(margin_x, width - margin_x)
+            if not placed:
+                best_xy = (x, y)
+                break
             # Wrap-aware even though margin_x already keeps every center's
             # own falloff off the seam (so two continents can never
             # actually touch through it): this still stops two centers
-            # from being placed "close" purely because the seam happens to
+            # from being scored "close" purely because the seam happens to
             # be the short way around between them, which a flat (x-ox)
             # distance alone wouldn't catch. Averaged against each already-
             # placed continent's OWN radius now that sizes vary, so a big
             # continent and a small one still get a sensible amount of
             # space between them either way round.
-            if all((wrap.dx_wrap(ox, x, width) / ((radius_x + orx) / 2)) ** 2
-                  + ((y - oy) / ((radius_y + ory) / 2)) ** 2 >= min_norm_dist ** 2
-                  for ox, oy, orx, ory in placed):
-                break
-        else:
-            y = (0.5 + ((d_lo + d_hi) / 2.0) / 2.0) * height
-            y = max(margin_y, min(height - margin_y, y))
-            x = rng.uniform(margin_x, width - margin_x)
+            score = min((wrap.dx_wrap(ox, x, width) / ((radius_x + orx) / 2)) ** 2
+                        + ((y - oy) / ((radius_y + ory) / 2)) ** 2
+                        for ox, oy, orx, ory in placed)
+            if score > best_score:
+                best_score, best_xy = score, (x, y)
+        x, y = best_xy
         placed.append((x, y, radius_x, radius_y))
 
         angle = rng.uniform(0.0, math.pi)   # ellipse is symmetric past pi
@@ -1755,12 +1801,20 @@ def _pick_continent_centers(rng, width, height):
     return blobs
 
 
-def _has_multiple_landmasses(land, width, height, land_cells):
-    """True if the land mask splits into at least two *substantial*
+def _has_multiple_landmasses(land, width, height, land_cells, min_count=2):
+    """True if the land mask splits into at least `min_count` *substantial*
     (>=3% of total land) connected components — real separate continents,
-    not one dominant blob plus a few stray noise-speck islands. On the rare
-    seed where the intended 2-3 continents end up noise-bridged into one,
-    generate_world retries with a fresh layout instead of accepting it."""
+    not one dominant blob plus a few stray noise-speck islands. On a seed
+    where the intended N continents end up noise-bridged into fewer,
+    generate_world retries with a fresh layout instead of accepting it.
+
+    `min_count` defaults to 2 (the original "not one single merged blob"
+    bar); generate_world's own call passes the actual requested continent
+    count (minus one, tolerating one incidental merge) now that count can
+    be as high as 7 -- the old flat "at least 2" bar was written when 2-3
+    was the only range this ever ran at, and stopped meaning anything once
+    more than 2 continents landing merged into 2 or 3 became the common
+    case instead of the rare one."""
     total = len(land_cells)
     if total == 0:
         return False
@@ -1783,9 +1837,7 @@ def _has_multiple_landmasses(land, width, height, land_cells):
                     stack.append((nx, ny))
         if size >= threshold:
             substantial += 1
-            if substantial >= 2:
-                return True
-    return False
+    return substantial >= min_count
 
 
 # --- capital placement: reject sites with no real farmland nearby ----------
@@ -1849,7 +1901,7 @@ def _capital_has_nearby_farmland(world, x, y, mseed, land_set, coast_d):
 
 def generate_world(width=1100, height=660, seed=None, n_factions=14,
                     player_species=None, player_name=None, player_color=None,
-                    player_ruler=None, _attempt=0):
+                    player_ruler=None, _attempt=0, _target_n=None):
     """Generate a world. If `player_species`/`player_name` are given, faction
     0 is forced to that species and given that exact name (instead of a
     random roll) and `world.player_faction_idx` is set to 0, so a "New Game"
@@ -1859,9 +1911,16 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     a chosen colour so the political map stays readable.
 
     `_attempt` is internal — caps the retries below so a run of unlucky
-    seeds can never recurse forever."""
+    seeds can never recurse forever. `_target_n` is also internal: the
+    continent count (see _pick_continent_centers) is drawn once, on the
+    first attempt, and then held fixed across any retries -- otherwise a
+    retry would re-roll it along with everything else, and a seed that
+    asked for 7 continents could quietly settle for whatever lower count
+    first came up clean instead of actually retrying toward 7."""
     rng = random.Random(seed)
     nseed = rng.randint(0, 2 ** 31 - 1)
+    if _target_n is None:
+        _target_n = rng.randint(4, 7)
     world = World(width, height)
     world.seed = nseed if seed is None else seed
 
@@ -1885,7 +1944,7 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     #    _pick_continent_centers depends on that) -- only its outline warps.
     octaves = [(0.028, 1.0), (0.060, 0.5), (0.130, 0.25), (0.260, 0.07)]
     height_octaves = _periodic_octaves(width, octaves)
-    blobs = _pick_continent_centers(rng, width, height)
+    blobs = _pick_continent_centers(rng, width, height, _target_n)
 
     # Warp field: two octaves each for x and y, at a wavelength comparable to
     # the coarsest height octave so it bends whole stretches of coastline
@@ -1896,9 +1955,16 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     warp_octaves = _periodic_octaves(width, warp_octaves_spec)
     # Amplitude in CELLS, not a fraction of noise amplitude: ~5% of map width
     # is enough to turn an ellipse into a recognizably irregular coastline
-    # without dissolving the "2-3 continents in their own latitude band"
-    # structure the rest of the pipeline (climate, capital spacing) counts on.
-    warp_amp = width * 0.05
+    # without dissolving the "each continent stays its own landmass"
+    # structure the rest of the pipeline (climate, capital spacing) counts
+    # on -- true at n=3, the range this was tuned at, but a FIXED map-wide
+    # amplitude stops scaling down with continent size the way radius
+    # already does (_pick_continent_centers' own base_radius_x), so at
+    # n=7 (continents under half the n=3 size) this alone was enough to
+    # reliably bridge neighbors into one blob. Same min(1.0, 3.0/n) shrink
+    # as base_radius_x, so warp intensity stays proportional to continent
+    # size instead of overwhelming it.
+    warp_amp = width * 0.05 * min(1.0, 3.0 / _target_n)
     warp_x = (noise.fbm_grid(width, height, nseed + 101, warp_octaves)
               - 0.5) * 2.0 * warp_amp
     warp_y = (noise.fbm_grid(width, height, nseed + 202, warp_octaves)
@@ -1960,15 +2026,25 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     if not land_cells and _attempt < 6:      # extremely unlucky seed; retry
         return generate_world(width, height, rng.random(), n_factions,
                               player_species, player_name, player_color,
-                              player_ruler, _attempt=_attempt + 1)
+                              player_ruler, _attempt=_attempt + 1,
+                              _target_n=_target_n)
+    # Tolerate one incidental merge (_target_n - 1) rather than demanding
+    # the full requested count survive noise-bridging every single time --
+    # with up to 7 continents landing fairly close together, a strict "all
+    # of them" bar would retry far more often than a real geological map
+    # would ever need to look "wrong".
     if (land_cells and _attempt < 6
-            and not _has_multiple_landmasses(land, width, height, land_cells)):
-        # the 2-3 intended continents got noise-bridged into one blob (rare
-        # — see _pick_continent_centers/_has_multiple_landmasses) -- retry
-        # with a fresh layout rather than accepting a single-landmass world.
+            and not _has_multiple_landmasses(land, width, height, land_cells,
+                                             min_count=max(2, _target_n - 1))):
+        # too many of the intended continents got noise-bridged together --
+        # see _pick_continent_centers/_has_multiple_landmasses -- retry with
+        # a fresh layout (same _target_n, so a retry can't quietly settle
+        # for fewer continents than actually asked for) rather than
+        # accepting a badly-collapsed one.
         return generate_world(width, height, rng.random(), n_factions,
                               player_species, player_name, player_color,
-                              player_ruler, _attempt=_attempt + 1)
+                              player_ruler, _attempt=_attempt + 1,
+                              _target_n=_target_n)
 
     # 1b. ocean currents, and the coastline they carve. Run only once the
     #     pass-0 layout above has already passed the sanity checks (empty
@@ -1988,9 +2064,12 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     # Carving nudges a narrow coastal band; it should never be ABLE to erase
     # a continent or merge two into one, but "never" is still worth checking
     # rather than assuming -- an empty or collapsed result falls back to the
-    # pre-carve layout instead of failing the whole generation.
+    # pre-carve layout instead of failing the whole generation. Same
+    # min_count as the pre-carve check just above: carving shouldn't be
+    # allowed to quietly undo what that check already accepted.
     if carved_cells and _has_multiple_landmasses(carved_land, width, height,
-                                                 carved_cells):
+                                                 carved_cells,
+                                                 min_count=max(2, _target_n - 1)):
         world_height, land_mask, land, land_cells = (
             carved_height, carved_land, carved_land.tolist(), carved_cells)
         world.height = world_height.tolist()
