@@ -165,20 +165,22 @@ New mechanics behind them: `ignores_block`, `frenzy`, `splash_radius`/`_share`,
 and unit-level `aura` (auras **do not stack** — first source in range wins, and
 `Army.aura_sources` is ordered commander-first).
 
-**The measured state, and it is not good.** `dev/tournament.py 5 on --isolate`
-runs a control with nobody's specials, then one run per species:
+**The measured state.** `dev/tournament.py 5 on --isolate` runs a control with
+nobody's specials, then one run per species. Two runs, either side of the
+order-AI fix described below (3 seeds on the second, so treat anything under
+~15 points there as noise):
 
-| | control | with its own specials | Δ |
-|---|---|---|---|
-| Humans | 42% | 40% | −2 (inert) |
-| Elves | 60% | 35% | −25 |
-| Dwarves | 25% | 30% | +5 |
-| Orcs | 50% | 38% | −12 |
-| Goblins | 70% | 45% | −25 |
+| | control | with its own specials | Δ before AI fix | Δ after |
+|---|---|---|---|---|
+| Humans | 42% | 33% | −2 | −8 |
+| Elves | 62% | 46% | −25 | −17 |
+| **Dwarves** | 17% | **33%** | +5 | **+17** |
+| Orcs | 54% | 46% | −12 | −8 |
+| Goblins | 75% | 46% | −25 | −29 |
 
-Read that with the caveat that it ran **before** the order-AI fix below, so the
-two aura units were measured while walking out of the line they exist to
-protect. Only Dwarves are near where they should be.
+The Shieldwarden is the one clear success, and only once the AI actually ordered
+it — the roster's worst species gains 17 points. Everything else is still a net
+cost to its own species; Goblins remain 29 points adrift.
 
 What the numbers already established, and these do generalise:
 
