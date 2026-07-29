@@ -3,15 +3,17 @@
 Python/Tkinter desktop 4X strategy game. Single developer, turn-based, procedurally
 generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 
-**Last release: v0.3.0** ("A World You Can Turn"), commit `fc0423f`.
+**Last release: v0.3.1** ("Build a Realm Before You Enter It"), commit `fa29532`.
 
 ---
 
 ## 0. Read this first
 
 v0.3.0 shipped the globe (§2), the end-turn movement animation (§7), species
-signature units (§4.1) and the Balance Lab (§5). Everything is released and the
-working tree is clean.
+signature units (§4.1) and the Balance Lab (§5). v0.3.1 shipped the New Game
+overhaul (§8): rulers, species-tinted banner colours, world size/rival count,
+and a background-generated map preview you actually play rather than a fresh
+roll. Everything is released and the working tree is clean.
 
 **The one thing to know before touching anything:** the signature units are
 working and legible but **not balanced**, and the release notes say so out loud.
@@ -340,3 +342,47 @@ changes which felt right and were wrong. Worth continuing:
 - When a fix underperforms, revert it and record why. Anchoring the engaged rank in
   melee was a good idea that measured worse (front-rank travel 150px → 336px), and
   the finding lives in a comment where the next person will hit it.
+
+---
+
+## 8. New Game overhaul (v0.3.1)
+
+`app/ui/new_game.py` (rebuilt), `app/ui/world_preview.py` (new), plus new data
+in `lexicon.py` (rulers, `species_palette`, `species_stat_chips`/`species_units`)
+and `worldgen.py` (`apply_player_identity`, `_nudge_away_from`).
+
+**The one thing that makes it work:** `generate_world` takes 8s (Small) / 18s
+(Standard) / 37s (Large). The screen starts generating in the background the
+moment it opens, and Play hands over the **exact world object** the preview was
+showing — never a fresh roll. Species, name, colour and ruler are *not*
+world-shaping (terrain and every rival are identical whoever you play), so
+they're patched onto the already-generated world via `apply_player_identity` in
+~0.1ms, which is what makes browsing species feel instant. Only size, rival
+count, or an explicit reroll starts a new background generation.
+
+- **Rulers** are a new, deliberately separate concept from the battlefield
+  Commander (`app/world/commander.py`) — the Commander marches and can fall,
+  the ruler is who the realm belongs to. Every faction gets one, seeded
+  deterministically from the world seed. `nation.ensure_rulers` migrates old
+  saves; `app.core.save.load_game` calls it.
+- **Colour** is `species_palette(species)` — 12 swatches fanned around the
+  species' own hue, not a free picker. Rivals are steered off whatever the
+  player picks (`_nudge_away_from`), verified rather than assumed: 8-bit colour
+  rounding meant aiming exactly at the clearance distance landed just inside it
+  about half the time, so it checks its own output and pushes further if the
+  first attempt wasn't actually clear.
+- **The preview** (`app/ui/world_preview.py`) is a small, separate thumbnail
+  renderer — not MapView reused. It samples the world grid on a stride and
+  paints the political read only (water, unclaimed land, realm colours, a ring
+  on the capital), sharing MapView's palette constants.
+- A Tk trap worth remembering: a `Label`'s `width`/`height` are **characters**
+  when it holds text and **pixels** when it holds an image. Sizing the preview
+  label directly gave a squashed map in one state and a 258-line placeholder in
+  the other. Fixed with a fixed-size `Frame` holding centred content instead.
+
+`dev/test_new_game.py` asserts the chain the screen's promise rests on:
+identity patching is fast enough to run per keystroke, doesn't touch terrain or
+rivals' names, rival colours are stable under repeated edits, and — the one
+that actually matters — Play hands over the identical world object the preview
+was showing, with the identity that was on screen at the moment it was pressed.
+It generates a real (Small) world, so it's the slowest harness in `dev/`.
