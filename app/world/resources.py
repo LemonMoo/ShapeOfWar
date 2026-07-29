@@ -28,7 +28,7 @@ from collections import defaultdict
 
 from app.world.lexicon import SPECIES
 from app.world.worldgen import (OCEAN, _path_dijkstra, _elev_cost, road_cells,
-                                path_transit_cells)
+                                path_transit_cells, _VILLAGE_CATCHMENT_RADIUS)
 
 # --- the resource registry --------------------------------------------------
 # category + tier (1 raw agricultural/pastoral .. 4 manufactured), per the
@@ -871,24 +871,15 @@ def _biome_land_shares(biome, resource_names):
 _CROP_SHARES_BY_BIOME = {biome: _biome_land_shares(biome, _CROPS) for biome in BIOMES}
 
 
-def compute_crop_yield(region, season):
-    """This region's Crop production for `season` from the new per-crop
-    registry (RESOURCE_SPAWN + GROWTH_CYCLE) -- additive to, and
-    independent of, compute_region_yield's existing Grain-based number
-    (see its STALE note above; the two coexist as separate resource lines
-    for now, nothing has been unified). A crop contributes nothing at all
-    outside its own Harvest season -- the actual "instead of simply
-    producing food every turn" mechanic. When it is harvest time, output
-    scales with the region's biome cell count, this crop's rarity-weighted
-    share of that biome's farmland (see _biome_land_shares), its climate
-    affinity, and fertility (weighted per-crop via fertility_weight -- a
-    weight of 0 means fertility has no effect at all, 1.0 means it fully
-    scales output between half and 1.5x across the 0..100% fertility
-    range)."""
-    biome_counts = getattr(region, "biome_counts", {})
-    climate = getattr(region, "dominant_climate", "temperate")
-    fertility_frac = region.stats.get("fertility", 50) / 100.0
-
+def _crop_yield_core(biome_counts, climate, fertility_frac, season):
+    """The actual Crop-yield formula, parameterized on raw geography
+    (biome cell counts, dominant climate, fertility fraction) rather than a
+    Region -- shared by compute_crop_yield (the region-wide wrapper, still
+    used where a whole-region estimate is genuinely wanted: claim-spoils
+    sizing, the Compendium) and compute_village_yield (the real per-village
+    production a village's own local land sample feeds into every turn).
+    See compute_crop_yield's docstring for what each term means; this is
+    exactly that formula, just no longer tied to reading a Region."""
     result = {}
     for biome, cell_count in biome_counts.items():
         for crop, share in _CROP_SHARES_BY_BIOME.get(biome, {}).items():
@@ -902,6 +893,31 @@ def compute_crop_yield(region, season):
             if amount:
                 result[crop] = result.get(crop, 0) + amount
     return result
+
+
+def compute_crop_yield(region, season):
+    """This region's Crop production for `season` from the new per-crop
+    registry (RESOURCE_SPAWN + GROWTH_CYCLE) -- additive to, and
+    independent of, compute_region_yield's existing Grain-based number
+    (see its STALE note above; the two coexist as separate resource lines
+    for now, nothing has been unified). A crop contributes nothing at all
+    outside its own Harvest season -- the actual "instead of simply
+    producing food every turn" mechanic. When it is harvest time, output
+    scales with the region's biome cell count, this crop's rarity-weighted
+    share of that biome's farmland (see _biome_land_shares), its climate
+    affinity, and fertility (weighted per-crop via fertility_weight -- a
+    weight of 0 means fertility has no effect at all, 1.0 means it fully
+    scales output between half and 1.5x across the 0..100% fertility
+    range).
+
+    A whole-region estimate now -- real per-turn production is per-village
+    (see compute_village_yield); this stays for callers that genuinely want
+    "if this whole region were farmed as one" (claim-spoils sizing, the
+    Compendium's projected-yield figures)."""
+    biome_counts = getattr(region, "biome_counts", {})
+    climate = getattr(region, "dominant_climate", "temperate")
+    fertility_frac = region.stats.get("fertility", 50) / 100.0
+    return _crop_yield_core(biome_counts, climate, fertility_frac, season)
 
 
 # --- Phase 12: industry specialization ---------------------------------------
@@ -1018,18 +1034,15 @@ def _raw_yield_per_cell(resource):
 BASELINE_INDUSTRY_FLOOR = {"Logs": 3, "Stone": 3}
 
 
-def compute_industry_yield(region, season):
-    """This region's Forestry/Mining production -- the industrial-output
-    counterpart to compute_crop_yield just above, sharing its exact
-    formula shape (see that function's docstring), just without any
-    harvest-season gating (see the section note above for why). Per-resource
-    base rates (see _raw_yield_per_cell) -- structural wood and mining are cut
-    hard as durable, sink-less storage-cloggers; Firewood stays high because
-    it's survival-critical."""
-    biome_counts = getattr(region, "biome_counts", {})
-    climate = getattr(region, "dominant_climate", "temperate")
-    fertility_frac = region.stats.get("fertility", 50) / 100.0
-
+def _industry_yield_core(biome_counts, climate, fertility_frac):
+    """The actual Forestry/Mining formula, parameterized the same way
+    _crop_yield_core is -- shared by compute_industry_yield (region-wide
+    wrapper) and compute_village_yield (real per-village production).
+    Deliberately does NOT apply BASELINE_INDUSTRY_FLOOR -- that floor is a
+    per-REGION guarantee (see compute_industry_yield's note on it), applied
+    once after summing every village's own real output, not per-village
+    (a village-by-village floor would multiply it by however many villages
+    a region happens to have, which was never the intent)."""
     result = {}
     for biome, cell_count in biome_counts.items():
         for resource, share in _INDUSTRY_SHARES_BY_BIOME.get(biome, {}).items():
@@ -1041,6 +1054,27 @@ def compute_industry_yield(region, season):
             amount = round(amount)
             if amount:
                 result[resource] = result.get(resource, 0) + amount
+    return result
+
+
+def compute_industry_yield(region, season):
+    """This region's Forestry/Mining production -- the industrial-output
+    counterpart to compute_crop_yield just above, sharing its exact
+    formula shape (see that function's docstring), just without any
+    harvest-season gating (see the section note above for why). Per-resource
+    base rates (see _raw_yield_per_cell) -- structural wood and mining are cut
+    hard as durable, sink-less storage-cloggers; Firewood stays high because
+    it's survival-critical.
+
+    A whole-region estimate now -- real per-turn production is per-village
+    (see compute_village_yield), with BASELINE_INDUSTRY_FLOOR applied once
+    at the region level afterward (see recompute_region_resources), not
+    here. This function stays for callers that genuinely want a whole-
+    region number (claim-spoils sizing, the Compendium)."""
+    biome_counts = getattr(region, "biome_counts", {})
+    climate = getattr(region, "dominant_climate", "temperate")
+    fertility_frac = region.stats.get("fertility", 50) / 100.0
+    result = _industry_yield_core(biome_counts, climate, fertility_frac)
 
     # Every region scrapes together SOME timber and stone, whatever its biome:
     # scrub and deadwood, and rock prised out of the ground. Without this a
@@ -1202,28 +1236,26 @@ def _produce_fishing(world):
 
 
 def village_projected_annual_yield(world, village):
-    """{resource: amount} this Village can expect to receive over a full
-    year (len(SEASONS) * TURNS_PER_SEASON turns) from its region's
-    production -- real numbers, not the flavor farm_output stat (see the
-    Village class). Crops only count during their own Harvest season (see
-    GROWTH_CYCLE/compute_crop_yield); Forestry/Mining are continuous,
-    every turn, all year (see compute_industry_yield). Both are actually
-    computed at the REGION level and split evenly across every Village the
-    region has (see _route_farm_production), so this is specifically this
-    village's own share, not the region's raw total -- a region with more
-    villages means a smaller individual share of the same regional yield,
-    not a bigger one."""
+    """{resource: amount} this Village can expect to produce over a full
+    year (len(SEASONS) * TURNS_PER_SEASON turns) from its OWN local land
+    (see compute_village_yield) -- real numbers, not the flavor
+    farm_output stat (see the Village class). Crops only count during
+    their own Harvest season (see GROWTH_CYCLE); Forestry/Mining are
+    continuous, every turn, all year. Production is per-village now, not a
+    region-wide number divided by however many villages happen to share
+    the region -- more villages on good land means more total production,
+    not a thinner slice for each one."""
     region = world.regions[village.region_id]
-    n_targets = max(1, len(getattr(region, "villages", [])))
+    biome_counts, climate, fertility_frac = village_local_sample(world, village, region)
     annual = defaultdict(float)
     for season in SEASONS:
-        for crop, amount in compute_crop_yield(region, season).items():
+        for crop, amount in _crop_yield_core(biome_counts, climate, fertility_frac, season).items():
             annual[crop] += amount * TURNS_PER_SEASON
     # No season gating for Forestry/Mining -- one season's worth already
     # represents every season, so just scale by the full year's turn count.
-    for resource, amount in compute_industry_yield(region, world.season).items():
+    for resource, amount in _industry_yield_core(biome_counts, climate, fertility_frac).items():
         annual[resource] += amount * TURNS_PER_SEASON * len(SEASONS)
-    result = {r: round(a / n_targets) for r, a in annual.items() if round(a / n_targets) > 0}
+    result = {r: round(a) for r, a in annual.items() if round(a) > 0}
     # Fish doesn't go through the region-level split above at all (see
     # _produce_fishing) -- it's this village's own adjacency, not a shared
     # regional pool, so it's added directly rather than divided by n_targets.
@@ -2771,6 +2803,133 @@ def _route_farm_production(world, region, resource_amounts, throttle=True):
     return delivered
 
 
+def village_local_sample(world, village, region, radius=None):
+    """(biome_counts, climate, fertility_frac) sampled over a radius-R patch
+    of the map around `village`, filtered to this village's own region --
+    the real production catchment a village's own local yield is computed
+    from (see compute_village_yield). Same sampling shape worldgen.py's
+    _place_villages_for_region already used for the old decorative
+    farm_output stat (a small patch averaged for "land occupied"), just
+    biome-classified instead of fertility-only, and over the radius tied to
+    placement spacing (worldgen._VILLAGE_CATCHMENT_RADIUS) so "how much
+    land is really mine" and "how close is too close to my neighbor" are
+    the same underlying idea rather than two numbers that could drift
+    apart."""
+    r = radius or _VILLAGE_CATCHMENT_RADIUS
+    x, y = village.pos
+    biome_counts = defaultdict(int)
+    climate_counts = defaultdict(int)
+    fert_sum, n = 0.0, 0
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            nx, ny = x + dx, y + dy
+            if not (0 <= nx < world.w and 0 <= ny < world.h):
+                continue
+            if world.region_grid[ny][nx] != region.id:
+                continue
+            biome = world.biome_grid[ny][nx]
+            if biome:
+                biome_counts[biome] += 1
+            climate = world.climate_grid[ny][nx]
+            if climate:
+                climate_counts[climate] += 1
+            fert_sum += world.fertility[ny][nx]
+            n += 1
+    climate = (max(climate_counts, key=climate_counts.get) if climate_counts
+              else region.dominant_climate)
+    fertility_frac = (fert_sum / n) if n else region.stats.get("fertility", 50) / 100.0
+    return dict(biome_counts), climate, fertility_frac
+
+
+def compute_village_yield(world, village, season):
+    """This village's own real production for `season` -- food AND
+    industry both, computed from its own local land (village_local_sample)
+    instead of a region-wide pool split evenly across however many
+    villages exist. Where a village actually sits now determines what it
+    can grow or mine: more villages on good land means more real
+    production, not a thinner slice of one fixed regional number."""
+    region = world.regions[village.region_id]
+    biome_counts, climate, fertility_frac = village_local_sample(world, village, region)
+    result = _crop_yield_core(biome_counts, climate, fertility_frac, season)
+    for resource, amount in _industry_yield_core(biome_counts, climate, fertility_frac).items():
+        result[resource] = result.get(resource, 0) + amount
+    return result
+
+
+def _deliver_village_yield(village, resource_amounts, throttle=True):
+    """This village's own locally-computed yield straight into its own
+    storage, throttled per-resource exactly like _route_farm_production's
+    per-target throttle above -- just one target now, since the yield is
+    already local instead of needing to be split. Returns {resource:
+    amount} actually delivered, for prosperity valuation (crediting a
+    harvest that was never taken in would be wrong, same reasoning as
+    _route_farm_production's own docstring)."""
+    delivered = {}
+    if not resource_amounts:
+        return delivered
+    if not hasattr(village, "resources"):
+        village.resources = {}
+    for resource, amount in resource_amounts.items():
+        factor = storage_throttle(village, resource) if throttle else 1.0
+        share = round(amount * factor)
+        if share:
+            village.resources[resource] = village.resources.get(resource, 0) + share
+            delivered[resource] = delivered.get(resource, 0) + share
+    return delivered
+
+
+def recompute_region_resources(world, region, season, throttle=True):
+    """Produce and deliver every one of `region`'s villages' own local
+    yield for `season` (see compute_village_yield), applying
+    BASELINE_INDUSTRY_FLOOR once at the region level afterward (a
+    per-village floor would multiply it by however many villages a region
+    has -- see compute_industry_yield's note on it, unchanged from before).
+
+    Sets region.resources to the summed RAW yield -- matching what
+    compute_region_yield used to put there ("this turn's yield" in the
+    region panel, territory's transfer-on-conquest), not what was actually
+    captured into storage. Returns (raw_total, delivered_total):
+    delivered_total is what prosperity should be valued against, since a
+    village that idled its harvest for want of storage shouldn't be
+    credited with the prosperity of bringing it in (region.resources itself
+    already carried this exact raw-vs-delivered distinction before this
+    function existed -- see advance_turn's own use of `delivered` alongside
+    region.resources).
+
+    Shared by advance_turn, seed_initial_stockpiles, and
+    expansion.settle_newly_claimed_region so all three compute and deliver
+    per-village production the same way instead of three near-duplicate
+    loops."""
+    raw_total = {}
+    delivered_total = {}
+    villages = [world.villages[vid] for vid in getattr(region, "villages", [])]
+    for village in villages:
+        yield_ = compute_village_yield(world, village, season)
+        for resource, amount in yield_.items():
+            raw_total[resource] = raw_total.get(resource, 0) + amount
+        delivered = _deliver_village_yield(village, yield_, throttle=throttle)
+        for resource, amount in delivered.items():
+            delivered_total[resource] = delivered_total.get(resource, 0) + amount
+
+    if villages:
+        for resource, floor in BASELINE_INDUSTRY_FLOOR.items():
+            have = raw_total.get(resource, 0)
+            if have < floor:
+                topup = floor - have
+                raw_total[resource] = floor
+                target = min(villages, key=lambda v: getattr(v, "resources", {}).get(resource, 0))
+                if not hasattr(target, "resources"):
+                    target.resources = {}
+                factor = storage_throttle(target, resource) if throttle else 1.0
+                share = round(topup * factor)
+                if share:
+                    target.resources[resource] = target.resources.get(resource, 0) + share
+                    delivered_total[resource] = delivered_total.get(resource, 0) + share
+
+    region.resources = raw_total
+    return raw_total, delivered_total
+
+
 def advance_settlement_production_chains(world):
     """The settlement-storage half of advance_production_chains (Phase 8):
     recipes whose output belongs to _SETTLEMENT_STORAGE_RESOURCES convert
@@ -3870,30 +4029,6 @@ STARTING_GOLD_PER_FACTION = 4000   # a faction's total starting Gold reserve
                                    # opens up trading for more.
 
 
-def _crop_yield_at_own_harvest(region):
-    """Every Crop's yield computed at ITS OWN harvest season, regardless
-    of the world's current season -- summed across all 4 calls to
-    compute_crop_yield (each Crop only ever contributes during its own
-    single Harvest season out of the four, so nothing double-counts).
-    Used only for seeding a fresh game's starting stockpile (see
-    seed_initial_stockpiles): world.season is always "Spring" at
-    generation time (see generate_world), and no Crop's GROWTH_CYCLE
-    actually harvests in Spring -- every single one is Summer or Autumn
-    -- so seeding off the live season the normal way (compute_region_yield)
-    always seeded exactly zero starting Crops/Food Products, no matter
-    what the map looked like. That's a real bug, not a balance choice: a
-    fresh settlement/village had nothing to eat at all until the world's
-    season clock happened to reach whichever season its local crops
-    harvest in -- up to 3 seasons (worst case ~75 turns) away -- which is
-    what was actually driving population collapse in the game's opening
-    stretch, not a per-capita rate problem."""
-    result = {}
-    for season in SEASONS:
-        for crop, amount in compute_crop_yield(region, season).items():
-            result[crop] = result.get(crop, 0) + amount
-    return result
-
-
 def seed_initial_stockpiles(world):
     """Called once at world-gen (after regions/settlements/villages exist):
     gives every faction a starting reserve instead of an empty treasury
@@ -3911,23 +4046,41 @@ def seed_initial_stockpiles(world):
     for region in world.regions:
         if region.faction_idx < 0:      # UNCLAIMED — no faction to seed
             continue
-        nation = world.factions[region.faction_idx]
-        # Crops use their OWN harvest season (see _crop_yield_at_own_harvest
-        # for why -- world.season at generation time is always "Spring",
-        # which no Crop actually harvests in); Forestry/Mining are
-        # continuous/season-agnostic, so the live season is fine for them.
-        region.resources = dict(_crop_yield_at_own_harvest(region))
-        for resource, amount in compute_industry_yield(region, world.season).items():
-            region.resources[resource] = region.resources.get(resource, 0) + amount
-        settlement_bound = {r: a for r, a in region.resources.items()
-                            if r in _SETTLEMENT_STORAGE_RESOURCES}
-        faction_bound = {r: a for r, a in region.resources.items()
-                         if r not in _SETTLEMENT_STORAGE_RESOURCES}
-        _route_farm_production(
-            world, region, {r: a * _STARTING_STOCKPILE_TURNS for r, a in settlement_bound.items()})
-        res = nation.stats["resources"]
-        for resource, amount in faction_bound.items():
-            res[resource] = res.get(resource, 0) + amount * _STARTING_STOCKPILE_TURNS
+        raw_total = {}
+        for vid in getattr(region, "villages", []):
+            village = world.villages[vid]
+            biome_counts, climate, fertility_frac = village_local_sample(world, village, region)
+            # Crops use their OWN harvest season, regardless of the world's
+            # current season -- world.season at generation time is always
+            # "Spring" (see generate_world), and no Crop's GROWTH_CYCLE
+            # actually harvests in Spring -- every single one is Summer or
+            # Autumn -- so seeding off the live season the normal way
+            # always seeded exactly zero starting Crops/Food Products, no
+            # matter what the map looked like. That's a real bug, not a
+            # balance choice: a fresh village had nothing to eat at all
+            # until the world's season clock happened to reach whichever
+            # season its local crops harvest in -- up to 3 seasons (worst
+            # case ~75 turns) away -- which is what was actually driving
+            # population collapse in the game's opening stretch, not a
+            # per-capita rate problem. Summed across all 4 seasons since
+            # each Crop only ever contributes during its own single
+            # Harvest season, so nothing double-counts.
+            yield_ = {}
+            for season in SEASONS:
+                for crop, amount in _crop_yield_core(biome_counts, climate,
+                                                     fertility_frac, season).items():
+                    yield_[crop] = yield_.get(crop, 0) + amount
+            # Forestry/Mining are continuous/season-agnostic, so this is
+            # already right regardless of which season generation happens
+            # to start on.
+            for resource, amount in _industry_yield_core(biome_counts, climate,
+                                                          fertility_frac).items():
+                yield_[resource] = yield_.get(resource, 0) + amount
+            for resource, amount in yield_.items():
+                raw_total[resource] = raw_total.get(resource, 0) + amount
+            _deliver_village_yield(
+                village, {r: a * _STARTING_STOCKPILE_TURNS for r, a in yield_.items()})
+        region.resources = raw_total
     for nation in world.factions:
         # Currency overhaul: Gold is minted from Gold Ore now, not drawn
         # from a flat per-turn tax -- a brand new faction wouldn't have
@@ -4170,22 +4323,16 @@ def advance_turn(world):
     world._gold_turn = defaultdict(dict)
     _gold_mark = _gold_snapshot(world)
 
-    production = defaultdict(lambda: defaultdict(int))
     production_value = defaultdict(float)
     for region in world.regions:
-        region.resources = compute_region_yield(region, world.season)
-        settlement_bound = {r: a for r, a in region.resources.items()
-                            if r in _SETTLEMENT_STORAGE_RESOURCES}
-        faction_bound = {r: a for r, a in region.resources.items()
-                         if r not in _SETTLEMENT_STORAGE_RESOURCES}
-        # Value what was actually taken in, not what the fields could have
-        # yielded -- a village that idled its harvest for want of storage
+        # Real per-village production now (see recompute_region_resources) --
+        # each village produces from its own local land instead of one
+        # region-wide number split evenly across however many happen to
+        # exist. Value what was actually taken in (delivered), not the raw
+        # yield -- a village that idled its harvest for want of storage
         # shouldn't still be credited with the prosperity of bringing it in.
-        delivered = _route_farm_production(world, region, settlement_bound)
+        _raw, delivered = recompute_region_resources(world, region, world.season)
         production_value[region.faction_idx] += _resource_bundle_value(delivered)
-        fac_res = production[region.faction_idx]
-        for resource, amount in faction_bound.items():
-            fac_res[resource] += amount
 
     # Herds run seasonally at the village now (see advance_herds) -- the old
     # once-a-year region-level path is gone, along with the meat spike it made.
@@ -4196,10 +4343,6 @@ def advance_turn(world):
         res = nation.stats.setdefault("resources", {})
         _purge_phantom_pool(nation)   # see that function: unspendable stock
         _apply_spoilage(res)
-        fac_production = production.get(fac_idx, {})
-        for resource, amount in fac_production.items():
-            res[resource] = int(res.get(resource, 0) + amount)
-        production_value[fac_idx] += _resource_bundle_value(fac_production)
         _clamp_to_storage(nation)
         _recompute_military(nation, world, fac_idx)
 

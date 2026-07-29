@@ -230,7 +230,17 @@ def settle_newly_claimed_region(world, region):
         _place_villages_for_region(world, random, region,
                                    fixed_n=WILDLAND_VILLAGE_MIN)
         region.settlements_generated = True
-    region.resources = resources.compute_region_yield(region, world.season)
+    # A preview only -- real per-village production (and delivery into each
+    # village's own storage) happens next turn via advance_turn's own call
+    # to recompute_region_resources; this just keeps the region panel's
+    # "this turn's yield" accurate in the meantime rather than showing
+    # stale zeros for a freshly claimed region until the turn actually ticks.
+    region.resources = {}
+    for vid in region.villages:
+        village = world.villages[vid]
+        for resource, amount in resources.compute_village_yield(
+                world, village, world.season).items():
+            region.resources[resource] = region.resources.get(resource, 0) + amount
 
 
 def _region_has_interregion_road(world, region):
