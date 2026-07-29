@@ -2406,11 +2406,20 @@ class MapView(tk.Frame):
         owner = region.faction_idx
         nation = wd.factions[owner] if owner >= 0 else None
         self.selected = nation
-        # _show_region reads zoom_faction for "Region of X" -- on the flat map
-        # that is set by drilling into a nation before its regions are clickable.
-        # Clicking a region on the globe IS that drill-in, so set it here too or
-        # the panel has no country to name.
-        self.zoom_faction = nation
+        # Deliberately does NOT touch self.zoom_faction. That is flat-map
+        # drill-down state with real side effects elsewhere in this file --
+        # which raster _ensure_base builds (region-mode vs political-mode),
+        # back-button visibility, foreign-nation gating (_zoom_is_foreign) --
+        # and setting it here was a real bug: selecting a region on the globe
+        # was quietly flipping the FLAT MAP into "drilled into this faction"
+        # state, and the next thing to read zoom_faction (often on the very
+        # same click, via code that assumes it is only ever set through the
+        # flat map's own drill-in flow) would act on a change the player
+        # never asked for -- surfacing as the view snapping back out to the
+        # world map instead of just highlighting the clicked region. Region
+        # ownership now comes straight from the region itself wherever it's
+        # needed (see _show_region), so nothing here has to borrow flat-map
+        # state to work.
         self._show_region(region)
         self.render()
 
@@ -3082,7 +3091,16 @@ class MapView(tk.Frame):
             self._show_wildland_region(region)
             return
         s = region.stats
-        country = self.zoom_faction
+        # region.faction_idx, not self.zoom_faction: they always agree for a
+        # region the flat map could show you (you can only select a region
+        # while drilled into its own owner), but zoom_faction is FLAT-MAP
+        # state with real side effects elsewhere in this file (which raster
+        # _ensure_base builds, back-button visibility, camera-animation
+        # targets...). Deriving the owner straight from the region itself
+        # means a caller showing a region panel never has to first put the
+        # flat map's own drill-down state into some particular shape just to
+        # get the right name printed here.
+        country = self.world.factions[region.faction_idx]
         wd = self.world
         n_villages = len(getattr(region, "villages", []))
         total_cells = sum(region.biome_counts.values()) or 1
@@ -4567,7 +4585,17 @@ class MapView(tk.Frame):
     def _ensure_base(self):
         """Rebuild the full-grid PIL image only when what it depicts changes."""
         wd = self.world
-        if self.zoom_faction is not None:
+        # Region-mode (per-region shading, with the selected one picked out)
+        # applies whenever EITHER the flat map has drilled into a faction
+        # (zoom_faction) OR something has a specific region selected without
+        # that drill-down state (the globe: see _on_globe_pick, which
+        # deliberately never touches zoom_faction). Either alone is enough --
+        # they used to always coincide on the flat map, but the globe needed
+        # a way to ask for a region highlight without also pulling in
+        # zoom_faction's other side effects (back-button visibility,
+        # _zoom_is_foreign, ...).
+        region_mode = self.zoom_faction is not None or self.selected_region is not None
+        if region_mode:
             sc = self.selected_region.id if self.selected_region else -1
             key = ("region", sc)
         elif self.mode != "political":
@@ -4577,7 +4605,7 @@ class MapView(tk.Frame):
         if key == self._base_key and self._base_img is not None:
             return
 
-        if self.zoom_faction is not None:
+        if region_mode:
             if self.selected_region is not None:
                 sc = self.selected_region.id
                 base, hi = self._px_region, self._px_region_hi

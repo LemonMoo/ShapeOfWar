@@ -52,7 +52,13 @@ def gl_available():
 
 # Camera distance in sphere radii. 1.0 is the surface, so MIN is "just above
 # the ground" and MAX frames the whole planet.
-DIST_MIN = 1.12
+# 0.02 radii of altitude above the ground -- close enough that the visible cap
+# is a genuinely small patch of the planet (~8 degrees of angular radius, not
+# the ~27 degrees 1.12 gave), which is what "full zoom, near the surface"
+# needs to actually mean for the camera pitch below to have anything to tilt
+# INTO. 1.12 measured as still framing the whole visible planet even at full
+# pitch -- altitude alone was the problem, not just camera angle.
+DIST_MIN = 1.02
 DIST_MAX = 4.2
 DIST_DEFAULT = 2.8
 # Altitudes at which the view means "world" / "region" / "village". Kept as
@@ -68,7 +74,17 @@ LEVEL_VILLAGE_DIST = 1.45
 # angle instead of just getting closer, the same trade real map applications
 # (and most 3D strategy games) make once you approach the ground.
 PITCH_START_DIST = LEVEL_REGION_DIST   # pitch is exactly 0 at/above this altitude
-PITCH_MAX_DEG = 58.0                   # oblique angle reached at DIST_MIN
+PITCH_MAX_DEG = 72.0                   # oblique angle reached at DIST_MIN -- a
+                                       # steep, clearly horizon-revealing tilt
+
+# The point the camera always looks at, in the unrotated planet frame -- the
+# "north pole of camera space" that user drags bring whatever ground they
+# want to see around to. Every camera computation (eye(), the view matrix,
+# pick()'s ray) targets this SAME point rather than the sphere's centre, which
+# is what lets tilting narrow the view down to a patch of terrain instead of
+# just showing more of the whole planet from a wider angle -- see eye()'s own
+# comment for why those are not the same thing.
+CAMERA_TARGET = np.array([0.0, 0.0, 1.0])
 
 
 def pitch_for_dist(dist):
@@ -1086,16 +1102,33 @@ class GLGlobeFrame(OpenGLFrame):
 
     # --- camera ---------------------------------------------------------------
     def eye(self):
-        """Camera position: always exactly self.dist from the sphere's
-        centre (so DIST_MIN/DIST_MAX keep meaning a literal distance), swung
-        toward +Y by pitch_for_dist as the camera nears the surface. Always
-        looking at the origin (redraw()/pick() both target (0,0,0)), so
-        swinging eye off the Z axis is what actually produces an oblique
-        view: the ray from an off-axis eye to dead centre no longer meets
-        the sphere along that point's own surface normal."""
+        """Camera position: hovers above CAMERA_TARGET (the ground point
+        actually being looked at -- see that constant) at a fixed altitude
+        of (self.dist - 1), tilting from directly overhead toward a shallow,
+        raking angle as pitch_for_dist ramps up near the surface.
+
+        This is NOT the same thing as orbiting the sphere's CENTRE at
+        distance self.dist while tilting -- that was the first version, and
+        it does not do what "tilt toward the horizon" is supposed to mean:
+        pitching the eye around the sphere's centre while still aiming at
+        that centre just shows MORE of the whole planet (you're looking at
+        the same point from further round its curve), which measured as the
+        globe staying zoomed to whole-planet framing even at DIST_MIN and
+        full pitch. Orbiting around the GROUND POINT instead, at a constant
+        hover height above it, is what actually narrows the view down to a
+        close, horizon-revealing slice of terrain as you tilt -- the same
+        thing Google Earth or a flight camera does when it tilts on
+        approach.
+
+        At pitch=0 this reduces to exactly the old eye=(0,0,dist): altitude
+        is measured along CAMERA_TARGET's own normal, which for that point
+        IS (0,0,1), so eye lands at (0,0,1+altitude) = (0,0,dist)."""
         theta = pitch_for_dist(self.dist)
-        return np.array([0.0, self.dist * math.sin(theta),
-                         self.dist * math.cos(theta)], dtype="f8")
+        altitude = self.dist - 1.0
+        normal = CAMERA_TARGET                  # already a unit vector
+        horiz = np.array([0.0, 1.0, 0.0])       # tangent to the sphere there
+        return CAMERA_TARGET + altitude * (math.cos(theta) * normal
+                                           - math.sin(theta) * horiz)
 
     @property
     def zoom_level(self):
@@ -1147,7 +1180,7 @@ class GLGlobeFrame(OpenGLFrame):
     def viewproj(self):
         w, h = self._size()
         proj = _perspective(45.0, w / max(1, h), 0.05, 40.0)
-        view = _look_at(self.eye(), np.zeros(3), np.array([0.0, 1.0, 0.0]))
+        view = _look_at(self.eye(), CAMERA_TARGET, np.array([0.0, 1.0, 0.0]))
         return proj @ view
 
     def visible_mask(self, cells, pad=1.2):
@@ -1172,9 +1205,16 @@ class GLGlobeFrame(OpenGLFrame):
         if n == 0:
             return np.zeros(0, dtype=bool)
         pts = self.cells_to_points(cells) @ self.rot.T
-        eye_dir = self.eye()
-        eye_dir = eye_dir / (np.linalg.norm(eye_dir) or 1.0)
-        seen = pts.dot(eye_dir) > 1.0 / max(self.dist, 1.0 + 1e-6)
+        eye = self.eye()
+        eye_mag = np.linalg.norm(eye)
+        eye_dir = eye / (eye_mag or 1.0)
+        # Threshold is 1/|eye|, not 1/self.dist: eye() now hovers above a
+        # ground point rather than orbiting the sphere's centre (see its own
+        # comment), so its actual distance from that centre generally is NOT
+        # self.dist any more once pitched -- using the nominal dist here would
+        # quietly mis-place the horizon the same way assuming eye stayed on
+        # the Z axis used to.
+        seen = pts.dot(eye_dir) > 1.0 / max(eye_mag, 1.0 + 1e-6)
         hom = np.concatenate([pts, np.ones((n, 1))], axis=1) @ self.viewproj().T
         wc = hom[:, 3]
         ok = seen & (wc > 1e-6)
@@ -1198,7 +1238,7 @@ class GLGlobeFrame(OpenGLFrame):
         # implicitly, before the camera could pitch) was only ever correct
         # because eye happened to always sit on the Z axis; it silently
         # pointed clicks the wrong way the moment eye could swing off it.
-        right, up, forward = _camera_basis(origin, np.zeros(3),
+        right, up, forward = _camera_basis(origin, CAMERA_TARGET,
                                            np.array([0.0, 1.0, 0.0]))
         direction = ndc_x * right + ndc_y * up + forward
         direction /= np.linalg.norm(direction)
@@ -1291,7 +1331,7 @@ class GLGlobeFrame(OpenGLFrame):
 
         eye = self.eye()
         proj = _perspective(45.0, w / max(1, h), 0.05, 40.0)
-        view = _look_at(eye, np.zeros(3), np.array([0.0, 1.0, 0.0]))
+        view = _look_at(eye, CAMERA_TARGET, np.array([0.0, 1.0, 0.0]))
         viewproj = (proj @ view).astype("f4")
 
         self.tex_map.use(0)

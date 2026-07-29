@@ -12,7 +12,8 @@ _CHANGELOG_PANEL_WIDTH = 320
 
 
 class MainMenuView(tk.Frame):
-    def __init__(self, master, on_new_game, on_load_game, on_quit, has_save):
+    def __init__(self, master, on_new_game, on_load_game, on_quit, has_save,
+                 on_balance_lab=None):
         super().__init__(master, bg=theme.BG)
         self._has_save = has_save
 
@@ -37,6 +38,15 @@ class MainMenuView(tk.Frame):
         tk.Button(center, text="Quit", command=on_quit, width=22,
                   bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
                   relief="flat", font=theme.FONT_BOLD, pady=10).pack(pady=6)
+
+        # Dev-only: only present when running from source with dev/ on disk
+        # (see App._balance_lab_path) -- a packaged build never ships dev/,
+        # so this button simply doesn't exist there rather than erroring.
+        if on_balance_lab is not None:
+            tk.Button(center, text="Balance Lab (dev)", command=on_balance_lab,
+                      width=22, bg=theme.BG, fg=theme.MUTED,
+                      activebackground=theme.ACCENT, relief="flat",
+                      font=theme.FONT, pady=4).pack(pady=(18, 0))
 
         self._build_changelog_panel()
         self.refresh()

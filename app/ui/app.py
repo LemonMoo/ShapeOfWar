@@ -1,6 +1,9 @@
 """Main application window: top nav bar, screen switching, and the glue that
 stages battles from the map.
 """
+import os
+import subprocess
+import sys
 import tkinter as tk
 
 from app.ui import theme
@@ -62,7 +65,8 @@ class App(tk.Tk):
 
         self.menu_view = MainMenuView(
             self.content, on_new_game=self._goto_new_game,
-            on_load_game=self._goto_load_menu, on_quit=self.destroy, has_save=has_save)
+            on_load_game=self._goto_load_menu, on_quit=self.destroy, has_save=has_save,
+            on_balance_lab=self._open_balance_lab if self._balance_lab_path() else None)
         self.new_game_view = NewGameView(
             self.content, on_play=self._start_new_game, on_back=self._goto_menu)
         self.load_game_view = LoadGameMenuView(
@@ -110,6 +114,27 @@ class App(tk.Tk):
             self.map_view.set_world(self.world)
 
     # --- menu / new-game / save-load ---------------------------------------
+    def _balance_lab_path(self):
+        """Path to dev/balance_lab.py, or None if this is a packaged build
+        (build.bat's PyInstaller run never bundles dev/) or the script isn't
+        there for some other reason. Checked once at startup so a frozen exe
+        never even shows the button."""
+        if getattr(sys, "frozen", False):
+            return None
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        path = os.path.join(repo_root, "dev", "balance_lab.py")
+        return path if os.path.isfile(path) else None
+
+    def _open_balance_lab(self):
+        """Balance Lab is its own Tk root running a tournament in-process
+        (see dev/balance_lab.py) -- a second tk.Tk() sharing this process's
+        mainloop isn't something Tkinter supports, so it launches as a
+        separate process instead of a Toplevel."""
+        path = self._balance_lab_path()
+        if path is not None:
+            subprocess.Popen([sys.executable, path])
+
     def _goto_menu(self):
         self.menu_view.refresh()
         self.show_screen("menu")
