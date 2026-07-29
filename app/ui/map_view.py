@@ -2280,6 +2280,14 @@ class MapView(tk.Frame):
             lambda cmd: (_GLOBE_PLAYER_COMMANDER
                          if cmd.faction_idx == wd.player_faction_idx
                          else faction_rgb(cmd.faction_idx)))
+
+        # Settlement placement hint (see _score_placement_hint) -- the
+        # globe's equivalent of the flat map's gold dots over a region's
+        # own best-scoring cells while a City/Town/Castle is armed to
+        # place. Same advisory-only meaning: it doesn't restrict the click.
+        if self.building_mode is not None and self._placement_hint_cells:
+            hints = [(None, pos) for pos in self._placement_hint_cells]
+            add(hints, 0.009, lambda _obj: _GLOBE_RGB["#ffec78"])
         return marks
 
     def _globe_pins(self, level, mscale):
