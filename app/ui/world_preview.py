@@ -21,13 +21,23 @@ from app.ui.map_view import (_LAKE_RGB, _OCEAN_DEEP, _OCEAN_SHALLOW, _RIVER_RGB,
 OCEAN = -1
 
 
-def render_world(world, size=(360, 216), player_idx=None, mark_player=True):
+def render_world(world, size=(360, 216), player_idx=None, mark_player=True,
+                 hide_rivals=True):
     """A political thumbnail of `world` at roughly `size`, as a PIL RGB image.
 
     Aspect is taken from the world, not from `size`: worlds come in different
     proportions (see the size presets on the New Game screen) and stretching one
     to fit a fixed box would misrepresent the shape of the very thing the player
-    is being asked to judge."""
+    is being asked to judge.
+
+    `hide_rivals` (the default) paints only the player's own starting territory
+    and leaves every rival's land reading as unclaimed. A new game begins fully
+    fogged -- the player has not met anyone yet, and diplomacy only discovers a
+    neighbour by proximity once play starts (diplomacy.run_proximity_contact) --
+    so a setup screen that lays out all fourteen realms is handing over
+    information the game itself then spends the opening hour making you earn.
+    Dev tools that genuinely want the whole political picture pass False (see
+    dev/weather_shot.py)."""
     w, h = world.w, world.h
     box_w, box_h = size
     scale = min(box_w / w, box_h / h)
@@ -38,6 +48,13 @@ def render_world(world, size=(360, 216), player_idx=None, mark_player=True):
     # thousands of lookups -- cheap enough to redraw on every colour click,
     # which is what makes the preview feel live rather than staged.
     colors = [_hex_to_rgb(n.color) for n in world.factions]
+    shown = None
+    if hide_rivals:
+        idx = world.player_faction_idx if player_idx is None else player_idx
+        # With no player to be, there is nobody whose land it would be fair to
+        # show, so everything reads as unclaimed rather than everything reading
+        # as somebody's.
+        shown = idx if idx is not None and 0 <= idx < len(colors) else -1
     owner, height_grid, sea = world.owner, world.height, world.sea_level
     lakes, rivers = world.lake_cells, world.river_cells
     px = []
@@ -57,7 +74,7 @@ def render_world(world, size=(360, 216), player_idx=None, mark_player=True):
                 px.append(_LAKE_RGB)
             elif (x, y) in rivers:
                 px.append(_RIVER_RGB)
-            elif o >= 0:
+            elif o >= 0 and (shown is None or o == shown):
                 px.append(colors[o] if o < len(colors) else _UNCLAIMED_RGB)
             else:
                 # Unclaimed land, lifted a little by elevation so the shape of
@@ -114,8 +131,13 @@ def land_summary(world, idx):
             nearest = (d, other)
     if nearest is None:
         return f"{regions} starting region(s) · {fertility}% fertility"
-    d, other = nearest
+    d, _other = nearest
     far = d / max(1, world.w)
     room = "isolated" if far > 0.28 else ("elbow room" if far > 0.16 else "crowded")
+    # How much room you have is a fact about YOUR position and worth knowing
+    # before you commit to it. WHO is out there is not: the preview no longer
+    # paints rival territory (see render_world's hide_rivals), and naming the
+    # nearest one here would give away through the summary exactly what the map
+    # stopped giving away.
     return (f"{regions} starting region(s) · {fertility}% avg fertility · "
-            f"{room} — nearest rival is {other.name}")
+            f"{room}")

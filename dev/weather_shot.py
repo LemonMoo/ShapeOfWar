@@ -109,7 +109,7 @@ def main():
         print(f"  {r.name:20s} ({r.dominant_climate:9s}) {ev.label:16s} "
              f"{ev.turns_left}/{ev.duration} turns left")
 
-    img = render_world(world, (900, 540), mark_player=False)
+    img = render_world(world, (900, 540), mark_player=False, hide_rivals=False)
     scale_x = img.width / world.w
     scale_y = img.height / world.h
     draw = ImageDraw.Draw(img)

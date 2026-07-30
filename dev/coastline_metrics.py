@@ -104,7 +104,7 @@ def main():
               f"{m['coast_cells']:>7} {m['irregularity']:>12.3f} "
               f"{m['mean_width']:>10.2f} {gen_s:>6.1f}")
         path = os.path.join(SHOTS_DIR, f"coastline_seed{seed}.png")
-        render_world(world, size=(world.w, world.h)).save(path)
+        render_world(world, size=(world.w, world.h), hide_rivals=False).save(path)
         print(f"         -> {path}")
 
 

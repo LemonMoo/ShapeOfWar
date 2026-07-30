@@ -160,6 +160,23 @@ def test_preview(world):
           abs(img.width / img.height - world.w / world.h) < 0.02)
     check("land summary says something", len(land_summary(world, 0)) > 20,
           land_summary(world, 0))
+
+    # Only the player's own starting zone is shown. A new game begins fully
+    # fogged and neighbours are discovered by proximity once play starts, so a
+    # setup screen painting every realm hands over what the game then makes you
+    # earn.
+    from app.ui.map_view import _hex_to_rgb
+    hidden = render_world(world, (430, 258), player_idx=0)
+    shown_all = render_world(world, (430, 258), player_idx=0, hide_rivals=False)
+    pixels_hidden, pixels_all = set(hidden.getdata()), set(shown_all.getdata())
+    rival_hues = {_hex_to_rgb(n.color) for n in world.factions[1:]}
+    mine = _hex_to_rgb(world.factions[0].color)
+    check("no rival's colour appears in the preview",
+          not (rival_hues & pixels_hidden),
+          str(sorted(rival_hues & pixels_hidden))[:80])
+    check("the player's own colour still does", mine in pixels_hidden)
+    check("rivals ARE drawn when a dev tool asks for them",
+          bool(rival_hues & pixels_all))
     check("chips and units exist for every species",
           all(species_stat_chips(s) or species_units(s) for s in SPECIES))
 

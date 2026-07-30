@@ -173,7 +173,19 @@ def recompute(world):
         # territory, which is the whole point: an island start with no
         # adjacent unclaimed land can still see somewhere by walking/
         # sailing a commander there.
+        # A Cartographer's Guild does not reveal ground of its own (beyond its
+        # small local survey below) -- it widens what everything your realm
+        # already has out in the world reports back. See resources.py's Guild
+        # section: this is the whole mechanic, and it is why the building is
+        # worth a great deal to a realm running caravans and almost nothing to
+        # a hermit.
+        from app.world.resources import (cartographer_radius,
+                                         cartographer_traffic_bonus,
+                                         CARTOGRAPHER_LOGS_TRAFFIC)
+        guild = cartographer_traffic_bonus(world, player_idx)
+
         from app.world.commander import COMMANDER_VISION_RADIUS
+        commander_reach = COMMANDER_VISION_RADIUS + guild
         for cmd in world.commanders:
             if cmd.faction_idx != player_idx:
                 continue
@@ -184,13 +196,41 @@ def recompute(world):
             while cfrontier:
                 x, y = cfrontier.popleft()
                 d = cdist[(x, y)]
-                if d >= COMMANDER_VISION_RADIUS:
+                if d >= commander_reach:
                     continue
                 for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                     nx, ny = wrap.wrap_x(x + dx, w), y + dy
                     if 0 <= ny < h and (nx, ny) not in cdist:
                         cdist[(nx, ny)] = d + 1
                         cfrontier.append((nx, ny))
+                        reveal(nx, ny)
+
+        # The Guild's own local survey: the ground within a few days' ride,
+        # which a guild really would have walked and measured itself
+        # (resources.advance_cartographers grows the radius; this only turns it
+        # into revealed ground). Deliberately small and hard-capped -- enough
+        # that an expensive building does something the turn it finishes,
+        # nowhere near enough to be a map.
+        for st in world.settlements:
+            if st.faction_idx != player_idx:
+                continue
+            reach = int(cartographer_radius(st))
+            if reach <= 0:
+                continue
+            sx, sy = st.pos
+            sdist = {(sx, sy): 0}
+            sfrontier = deque([(sx, sy)])
+            reveal(sx, sy)
+            while sfrontier:
+                x, y = sfrontier.popleft()
+                d = sdist[(x, y)]
+                if d >= reach:
+                    continue
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, ny = wrap.wrap_x(x + dx, w), y + dy
+                    if 0 <= ny < h and (nx, ny) not in sdist:
+                        sdist[(nx, ny)] = d + 1
+                        sfrontier.append((nx, ny))
                         reveal(nx, ny)
 
         # Roads and trade routes the player owns reveal the ground they
@@ -201,34 +241,54 @@ def recompute(world):
         # every call is fine): reveal() is a no-op for anything already
         # revealed, and fog is monotonic besides, so this only actually
         # does anything the first time a given stretch is built/traveled.
+        route_reach = ROUTE_REVEAL_RADIUS + guild
         for cid in world.factions[player_idx].meta.get("regions", []):
             for (ax, ay), (bx, by), _tier in world.roads_by_region.get(cid, []):
-                _walk_reveal(reveal, w, h, ax, ay, bx, by, radius=ROUTE_REVEAL_RADIUS)
+                _walk_reveal(reveal, w, h, ax, ay, bx, by, radius=route_reach)
         for proj in world.road_projects:
             if proj.faction_idx != player_idx:
                 continue
             for x, y in proj.built_cells:
-                _reveal_around(reveal, w, h, x, y, ROUTE_REVEAL_RADIUS)
+                _reveal_around(reveal, w, h, x, y, route_reach)
         for route in world.trade_routes:
             if route["a_faction"] != player_idx and route["b_faction"] != player_idx:
                 continue
             for x, y in route["cells"]:
-                _reveal_around(reveal, w, h, x, y, ROUTE_REVEAL_RADIUS)
+                _reveal_around(reveal, w, h, x, y, route_reach)
         for proj in world.trade_route_projects:
             if proj.a_idx != player_idx and proj.b_idx != player_idx:
                 continue
             for seg in proj.built_segments:
                 for x, y in seg:
-                    _reveal_around(reveal, w, h, x, y, ROUTE_REVEAL_RADIUS)
+                    _reveal_around(reveal, w, h, x, y, route_reach)
 
         # Trade caravans/ships currently in transit: a real radius around
         # wherever the player's own caravan actually is right now (see
         # CARAVAN_VISION_RADIUS above) — more than the bare route-path
         # reveal above gives on its own, same shape as the Commander BFS
         # just above, just a smaller radius since a caravan isn't scouting.
+        caravan_reach = CARAVAN_VISION_RADIUS + guild
         for caravan in world.trade_caravans:
             if caravan.seller_idx != player_idx and caravan.buyer_idx != player_idx:
                 continue
+            # The pilot's log. Without a Guild a caravan tells you only where
+            # it is right now; with one, the whole stretch it has already
+            # covered comes back as a written record -- which is literally what
+            # the Casa de la Contratacion and the VOC compiled their charts
+            # from. This is what makes a Guild worth having to a trading realm
+            # specifically: it turns every voyage into a survey after the fact.
+            if guild and CARTOGRAPHER_LOGS_TRAFFIC:
+                path = getattr(caravan, "path", None) or ()
+                if path:
+                    # Same outbound/return ordering TradeCaravan.pos uses, so
+                    # "already covered" means the same thing to both.
+                    ordered = (path if getattr(caravan, "leg", "outbound") == "outbound"
+                               else list(reversed(path)))
+                    frac = min(1.0, getattr(caravan, "turn_progress", 0)
+                               / max(1, getattr(caravan, "turns_total", 1) or 1))
+                    for x, y in ordered[:max(1, int(len(ordered) * frac))]:
+                        if 0 <= y < h:
+                            _reveal_around(reveal, w, h, wrap.wrap_x(x, w), y, guild)
             cx, cy = caravan.pos
             cdist = {(cx, cy): 0}
             cfrontier = deque([(cx, cy)])
@@ -236,7 +296,7 @@ def recompute(world):
             while cfrontier:
                 x, y = cfrontier.popleft()
                 d = cdist[(x, y)]
-                if d >= CARAVAN_VISION_RADIUS:
+                if d >= caravan_reach:
                     continue
                 for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                     nx, ny = wrap.wrap_x(x + dx, w), y + dy

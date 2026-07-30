@@ -3139,6 +3139,10 @@ def storage_max_tier(node, building):
         # runs no conversion recipe of any kind (see
         # advance_settlement_production_chains).
         return 0 if village else len(MINT_RATE_MULT) - 1
+    if building == CARTOGRAPHER:
+        # Settlement-only. A guild of surveyors, instrument-makers and copyists
+        # is a town institution; a farming hamlet is not where it lives.
+        return 0 if village else len(CARTOGRAPHER_LOCAL_RADIUS) - 1
     table = VILLAGE_STORAGE_TIER_BONUS if village else STORAGE_TIER_BONUS
     return len(table.get(building, [0])) - 1
 
@@ -3744,6 +3748,121 @@ def has_gold_seam(world, village):
     region = world.regions[village.region_id]
     biome_counts, climate, fertility_frac = village_local_sample(world, village, region)
     return _industry_yield_core(biome_counts, climate, fertility_frac).get("Gold Ore", 0) > 0
+
+
+# --- The Cartographer's Guild: mapping the world without marching on it -----
+# Fog of war only lifts three ways today (see app/world/vision.py): owning the
+# ground, walking a Commander over it, or running a road or caravan across it.
+# Every one of those is either territorial or military, which quietly makes
+# exploration a thing only an expanding or war-faring realm gets to do -- a
+# realm that would rather trade has no way at all to find out what is out there
+# short of marching an army it does not want.
+#
+# The mechanic follows how this was actually done, because the honest history
+# happens to be a much better game rule than the obvious invention.
+#
+# Pre-modern cartographers overwhelmingly did NOT go anywhere. They sat in
+# Lisbon, Seville, Venice and Amsterdam and COMPILED. Spain's Casa de la
+# Contratacion legally required every returning pilot to report to the master
+# chart; Dutch VOC cartographers worked entirely from ships' logs they never
+# sailed on; a portolan coastline is twenty merchants' bearings triangulated
+# into one line. The map grew where your people already went.
+#
+# So the rule here is: a Guild does not GENERATE knowledge, it MULTIPLIES the
+# knowledge your realm is already gathering by moving about. Concretely,
+# vision.py's existing reveals -- around a caravan, along a road, around a
+# commander -- all widen when you have a Guild, and a caravan additionally
+# reports the whole corridor it has travelled rather than just where it is
+# standing right now. That is the pilot's-log rule, exactly.
+#
+# The consequence is the point: a Guild is worth a great deal to a realm with
+# ships and caravans out, and worth almost nothing to a hermit. It can never be
+# "free vision for buying a building", because it reveals nothing on its own
+# beyond the small local survey below.
+#
+# What it DOES do unaided is survey its own neighbourhood -- the ground within
+# a few days' ride, which a guild really would have walked and measured itself.
+# That is deliberately small and hard-capped: enough that an expensive building
+# does something the turn you finish it, nowhere near enough to be a map.
+#
+# "After enough development" is priced rather than gated on a turn number: the
+# cost is Planks, Glass, Tools and coin -- a sawmill, a glassworks and a forge
+# all running at once. A realm that has not built an industry cannot buy one.
+#
+# Paper accelerates the local survey but is never required. Maps are drawn on
+# paper and it is the right consumable, but Paper is made from Cotton at a
+# settlement, and a hard requirement would make the building unreachable on any
+# world where that chain has not connected -- the exact trap the Preserving
+# House hit with Stone (eligible 308 times, affordable zero).
+CARTOGRAPHER = "cartographer"
+# The local survey only: what the guild can measure itself, from home. A
+# Commander's own COMMANDER_VISION_RADIUS is in this same ballpark on purpose --
+# this is a neighbourhood, not a discovery.
+CARTOGRAPHER_LOCAL_RADIUS = [0, 9, 14, 20]
+CARTOGRAPHER_SURVEY_PER_TURN = [0.0, 0.3, 0.45, 0.6]
+CARTOGRAPHER_PAPER_PER_TURN = 1
+CARTOGRAPHER_PAPER_SPEEDUP = 2.0
+
+# How much further your own moving agents report back, by the best Guild in the
+# realm. This is the real mechanic (see above): added to vision.py's
+# CARAVAN_VISION_RADIUS, ROUTE_REVEAL_RADIUS and COMMANDER_VISION_RADIUS.
+CARTOGRAPHER_TRAFFIC_BONUS = [0, 4, 8, 13]
+# With a Guild, a caravan reports the whole route it has travelled so far, not
+# just the ground it is standing on -- the ship's log handed in at the end of
+# the voyage. Off entirely without one.
+CARTOGRAPHER_LOGS_TRAFFIC = True
+
+
+def cartographer_radius(node):
+    """How far this settlement has actually surveyed around itself so far."""
+    return getattr(node, "survey_radius", 0.0)
+
+
+def cartographer_local_radius(node):
+    tier = min(storage_tier(node, CARTOGRAPHER), len(CARTOGRAPHER_LOCAL_RADIUS) - 1)
+    return CARTOGRAPHER_LOCAL_RADIUS[tier]
+
+
+def faction_cartographer_tier(world, fac_idx):
+    """The best Guild in the realm. A national chart office is one institution,
+    not one per town -- a second Guild does not double what your pilots know,
+    so the traffic bonus takes the maximum rather than summing."""
+    best = 0
+    for st in world.settlements:
+        if st.faction_idx == fac_idx:
+            best = max(best, storage_tier(st, CARTOGRAPHER))
+    return min(best, len(CARTOGRAPHER_TRAFFIC_BONUS) - 1)
+
+
+def cartographer_traffic_bonus(world, fac_idx):
+    """Extra cells your own caravans, roads and commanders report back."""
+    return CARTOGRAPHER_TRAFFIC_BONUS[faction_cartographer_tier(world, fac_idx)]
+
+
+def advance_cartographers(world):
+    """One turn of the local survey at every Guild, burning Paper where there
+    is any to burn.
+
+    Only the progress lives here -- turning a radius into revealed fog is
+    vision.recompute's job, same as it already is for Commanders, roads and
+    caravans. Runs for every faction, not just the player: fog is a
+    player-only concept, but a Guild is a real building an AI can own, and
+    having its progress depend on who is looking would be a mess the first time
+    a save changed hands."""
+    for st in world.settlements:
+        tier = min(storage_tier(st, CARTOGRAPHER), len(CARTOGRAPHER_SURVEY_PER_TURN) - 1)
+        if tier <= 0:
+            continue
+        reach = CARTOGRAPHER_LOCAL_RADIUS[tier]
+        done = cartographer_radius(st)
+        if done >= reach:
+            continue
+        rate = CARTOGRAPHER_SURVEY_PER_TURN[tier]
+        res = st.resources if hasattr(st, "resources") else {}
+        if res.get("Paper", 0) >= CARTOGRAPHER_PAPER_PER_TURN:
+            res["Paper"] -= CARTOGRAPHER_PAPER_PER_TURN
+            rate *= CARTOGRAPHER_PAPER_SPEEDUP
+        st.survey_radius = min(reach, done + rate)
 
 
 def preserving_cap_multiplier(node):
@@ -5222,6 +5341,10 @@ def advance_turn(world):
     commander.advance_commanders(world)
     # Successors take the field (see kill_commander); stashed for the UI.
     world.commander_successions = commander.advance_commander_succession(world)
+
+    # Cartographers survey a little further before the fog is recomputed, so
+    # this turn's work shows up this turn rather than one turn late.
+    advance_cartographers(world)
 
     # Fog of war: reveal whatever's now in range as territory changes hands
     # (app/world/vision.py).

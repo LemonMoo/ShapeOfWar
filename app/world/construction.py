@@ -122,6 +122,17 @@ STORAGE_BUILD_COSTS = {
         {"Stone": 520, "Bricks": 300, "Tools": 200, "Gold": 800},
         {"Bricks": 900, "Tools": 500, "Glass": 200, "Gold": 2200},
     ],
+    # The Cartographer's Guild (see resources.py's Guild section). "After
+    # enough development" is priced rather than gated on a turn number: Planks,
+    # Glass and Tools together mean a sawmill, a glassworks and a forge all
+    # running at once, which a realm that has not built an industry simply
+    # cannot buy.
+    "cartographer": [
+        None,
+        {"Planks": 260, "Glass": 90, "Tools": 80, "Gold": 400},
+        {"Planks": 520, "Glass": 240, "Tools": 220, "Gold": 1100},
+        {"Bricks": 700, "Glass": 520, "Tools": 460, "Gold": 2600},
+    ],
 }
 STORAGE_BUILD_TURNS = {"granary": [0, 15, 22, 30],
                        "warehouse": [0, 15, 22, 30],
@@ -129,7 +140,8 @@ STORAGE_BUILD_TURNS = {"granary": [0, 15, 22, 30],
                        "preserving_house": [0, 12, 20],
                        "pasture": [0, 8], "barn": [0, 14],
                        "stable": [0, 12], "slaughterhouse": [0, 10],
-                       "gold_mine": [0, 18, 28], "mint": [0, 16, 26, 36]}
+                       "gold_mine": [0, 18, 28], "mint": [0, 16, 26, 36],
+                       "cartographer": [0, 20, 30, 42]}
 
 # A village builds smaller and cheaper than a settlement -- but it can build,
 # which it never could before. Villages were over capacity 78% of the time in

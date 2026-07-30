@@ -87,6 +87,7 @@ BUILDING_CATEGORY = {
     "pasture": "Livestock", "stable": "Livestock", "slaughterhouse": "Livestock",
     "shipyard": "Naval",
     resources.GOLD_MINE: "Coin", resources.MINT: "Coin",
+    resources.CARTOGRAPHER: "Knowledge",
 }
 
 BUILDING_BLURB = {
@@ -106,6 +107,10 @@ BUILDING_BLURB = {
     resources.MINT:
         "Strikes Gold Ore into coin. Upper tiers recover more metal "
         "from every unit of ore.",
+    resources.CARTOGRAPHER:
+        "Compiles your pilots' and carters' reports into charts. Widens what "
+        "everything you have out in the world sends home — it maps almost "
+        "nothing on its own.",
 }
 
 # Ore on hand at a settlement above which a Mint is plainly the bottleneck,
@@ -326,8 +331,41 @@ def _gold_mine_verdict(world, node):
             "There is a gold seam under this village, barely scratched.", 1.0)
 
 
+def _cartographer_verdict(world, node):
+    """A Guild is judged on how much traffic the realm has for it to compile,
+    because that is the entire mechanic -- it multiplies what your caravans,
+    roads and commanders report and reveals almost nothing by itself. A realm
+    with nothing out in the world gains nothing from one, and the card says so
+    rather than letting the player buy an expensive building that will sit
+    idle."""
+    if getattr(world, "fog_fully_revealed", False):
+        return "idle", "The world is already mapped.", 0.0
+    fac = node.faction_idx
+    caravans = sum(1 for c in getattr(world, "trade_caravans", [])
+                   if fac in (c.seller_idx, c.buyer_idx))
+    routes = sum(1 for r in getattr(world, "trade_routes", [])
+                 if fac in (r.get("a_faction"), r.get("b_faction")))
+    commanders = sum(1 for c in getattr(world, "commanders", [])
+                     if c.faction_idx == fac)
+    traffic = caravans * 2 + routes + commanders
+    if traffic >= 6:
+        return ("useful",
+                f"{caravans} caravans and {routes} trade routes out there with "
+                f"nobody compiling what they see.", float(traffic))
+    if traffic > 0:
+        return ("idle",
+                f"Only {traffic} source{'s' if traffic != 1 else ''} of reports "
+                f"to compile — a guild widens what your traffic sees, so send "
+                f"more out first.", float(traffic))
+    return ("idle",
+            "Nothing of yours is out in the world to report back. A guild "
+            "compiles reports; it does not go looking.", 0.0)
+
+
 def _verdict(world, node, building):
     """(priority, reason, score) -- does THIS node want THIS building?"""
+    if building == resources.CARTOGRAPHER:
+        return _cartographer_verdict(world, node)
     if building == resources.MINT:
         return _mint_verdict(world, node)
     if building == resources.GOLD_MINE:
@@ -379,6 +417,19 @@ def _storage_effect_lines(node, building, to_tier):
         if to_tier < len(yields) and yields[to_tier] > 1.0:
             lines.append(f"{yields[to_tier]:g} coin per unit of ore — less metal "
                          f"left in the slag")
+    if building == resources.CARTOGRAPHER and to_tier is not None:
+        bonus, local = (resources.CARTOGRAPHER_TRAFFIC_BONUS,
+                        resources.CARTOGRAPHER_LOCAL_RADIUS)
+        if to_tier < len(bonus):
+            lines.append(f"+{bonus[to_tier]} cells reported back by every caravan, "
+                         f"road and commander you own")
+            lines.append("Caravans report the whole route travelled, not just "
+                         "where they stand")
+        if to_tier < len(local):
+            lines.append(f"Surveys {local[to_tier]} cells around this settlement "
+                         f"itself, slowly")
+        lines.append(f"Paper doubles the local survey "
+                     f"({resources.CARTOGRAPHER_PAPER_PER_TURN}/turn, optional)")
     if building == resources.PRESERVING_HOUSE and to_tier is not None:
         table = (resources.VILLAGE_PRESERVING_CAP_MULT if node_kind(node) == "village"
                  else resources.PRESERVING_CAP_MULT)
@@ -416,7 +467,7 @@ def _all_buildings(node):
     for herd_building in resources.HERD_BUILDINGS:
         if herd_building not in order:
             order.append(herd_building)
-    order += [resources.GOLD_MINE, resources.MINT]
+    order += [resources.GOLD_MINE, resources.MINT, resources.CARTOGRAPHER]
     if node_kind(node) == "settlement":
         order.append("shipyard")
     return [b for b in order if resources.storage_max_tier(node, b) > 0
