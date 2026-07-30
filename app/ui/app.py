@@ -1,6 +1,7 @@
 """Main application window: top nav bar, screen switching, and the glue that
 stages battles from the map.
 """
+import gc
 import os
 import subprocess
 import sys
@@ -145,12 +146,38 @@ class App(tk.Tk):
         self.new_game_view.reset()
         self.show_screen("new_game")
 
+    def _prepare_world_gc(self):
+        """Exclude the just-loaded world's object graph from the cyclic
+        GC's periodic scans. Diagnosed from a reported GPU-flat-map stutter
+        that turned out not to be GPU-bound at all (GPU usage stayed near
+        0% through it) or GL-specific (the globe, sharing the same
+        moderngl/pyopengltk plumbing, never showed it): a developed world
+        is one big, long-lived object graph (regions, villages,
+        settlements, roads, factions...) that Python's cyclic collector
+        tracks like everything else, and _sync_flatgl's own per-frame work
+        (rebuilding line/marker/label lists while panning) allocates enough
+        short-lived garbage to periodically cross the threshold for a full
+        generation-2 collection -- which has to scan EVERY tracked object,
+        not just the garbage. On a large save that scan alone measured
+        150ms+. gc.freeze() moves everything currently alive (the world,
+        essentially) into a permanent generation the collector skips
+        entirely, so only the actual per-frame garbage ever gets scanned.
+
+        gc.unfreeze() first: without it, loading a SECOND world in the same
+        session (new game after new game, or load after load) would pin
+        the previous world's cyclic garbage in memory forever instead of
+        letting it be collected -- freezing is otherwise permanent."""
+        gc.unfreeze()
+        gc.collect()
+        gc.freeze()
+
     def _start_new_game(self, world):
         # The world arrives already generated: the New Game screen builds it in
         # the background while the player is still naming things, and hands over
         # the exact one they were looking at in its preview. Generating a fresh
         # one here would mean the preview was a lie.
         self.world = world
+        self._prepare_world_gc()
         self._ensure_game_views()
         self._save_id = new_save_id()
         self._save_created_at = save_game(self.world, self._save_id)
@@ -170,6 +197,7 @@ class App(tk.Tk):
 
     def _load_selected_save(self, save_id):
         self.world = load_game(save_id)
+        self._prepare_world_gc()
         self._save_id = save_id
         meta = next((m for m in list_saves() if m["id"] == save_id), None)
         self._save_created_at = meta["created_at"] if meta else None

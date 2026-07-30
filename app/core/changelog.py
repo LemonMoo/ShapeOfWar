@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 54,
+        "title": "Fixed a Real Stutter on Large, Developed Saves",
+        "items": [
+            "FIXED: panning/zooming the flat map could pause for 100-150ms+ on a big kingdom -- Python's garbage collector was periodically re-scanning the whole world just because the map was creating lots of small, short-lived objects every frame; the world is now excluded from those scans entirely",
+        ],
+    },
+    {
         "version": 53,
         "title": "Stop Re-Uploading the Map Texture Every Frame",
         "items": [
