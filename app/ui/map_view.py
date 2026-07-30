@@ -2176,20 +2176,24 @@ class MapView(tk.Frame):
                 if len(run) >= 2:
                     out.append((run, color, width, dash))
 
-        # Stone roads are the trunk network and show at every altitude; dirt
-        # tracks are region-scale detail and would be a grey haze from orbit.
+        # Stone roads and sea lanes are the trunk network and show at every
+        # altitude; dirt tracks are region-scale detail and would be a grey
+        # haze from orbit.
         for region in wd.regions:
             if region.faction_idx < 0:
                 continue
             for (ax, ay), (bx, by), tier in wd.roads_by_region.get(region.id, []):
-                if tier != "stone" and level < 2:
+                if tier not in ("stone", "sea") and level < 2:
                     continue
                 if not (self._cell_revealed(ax, ay) or self._cell_revealed(bx, by)):
                     continue
-                stone = tier == "stone"
-                add([(ax, ay), (bx, by)],
-                    _GLOBE_RGB[_STONE_ROAD_COLOR if stone else _DIRT_ROAD_COLOR],
-                    2.2 if stone else 1.6)
+                if tier == "sea":
+                    color, width = _TRADE_SEA_COLOR, 1.8
+                elif tier == "stone":
+                    color, width = _STONE_ROAD_COLOR, 2.2
+                else:
+                    color, width = _DIRT_ROAD_COLOR, 1.6
+                add([(ax, ay), (bx, by)], _GLOBE_RGB[color], width)
 
         for r in wd.trade_routes:
             sea = r["kind"] == "sea"
@@ -5687,12 +5691,16 @@ class MapView(tk.Frame):
                 if region.faction_idx < 0:
                     continue
                 for (ax, ay), (bx, by), tier in wd.roads_by_region.get(region.id, []):
-                    if tier != "stone":
+                    if tier not in ("stone", "sea"):
                         continue
                     if not (self._cell_revealed(ax, ay) or self._cell_revealed(bx, by)):
                         continue
+                    is_sea = tier == "sea"
+                    color = _TRADE_SEA_COLOR if is_sea else _STONE_ROAD_COLOR
+                    dash = (2, 3) if is_sea else None
                     self._draw_road_segment(c, screen, ax, ay, bx, by,
-                                            _STONE_ROAD_COLOR, width, bridge=True)
+                                            color, width, dash=dash,
+                                            bridge=not is_sea)
             return
 
         # Dirt tracks are the densest thing on the map -- a developed realm has
@@ -5700,18 +5708,23 @@ class MapView(tk.Frame):
         # you land on entering it) they alone were about half of every canvas
         # item drawn, for a tangle of 1px lines too fine to read anything from.
         # They come in once the camera is close enough for them to mean
-        # something; stone roads, the trunk network, still show at every zoom
-        # exactly as before.
+        # something; stone roads (and sea lanes, the other trunk-scale
+        # connector) still show at every zoom exactly as before.
         show_dirt = self._place[2] >= _DIRT_ROAD_MIN_SCALE
         for cid in self.zoom_faction.meta.get("regions", []):
             for (ax, ay), (bx, by), tier in wd.roads_by_region.get(cid, []):
                 is_stone = tier == "stone"
-                if not is_stone and not show_dirt:
+                is_sea = tier == "sea"
+                if not is_stone and not is_sea and not show_dirt:
                     continue
                 if not (self._cell_revealed(ax, ay) or self._cell_revealed(bx, by)):
                     continue
-                color = _STONE_ROAD_COLOR if is_stone else _DIRT_ROAD_COLOR
-                dash = None if is_stone else (4, 3)
+                if is_sea:
+                    color, dash = _TRADE_SEA_COLOR, (2, 3)
+                elif is_stone:
+                    color, dash = _STONE_ROAD_COLOR, None
+                else:
+                    color, dash = _DIRT_ROAD_COLOR, (4, 3)
                 self._draw_road_segment(c, screen, ax, ay, bx, by, color, width,
                                         dash=dash, bridge=is_stone)
 

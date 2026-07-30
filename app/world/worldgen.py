@@ -1040,7 +1040,7 @@ _ROAD_BBOX_PAD = 20   # matches construction.py's _BBOX_PAD -- the same
                       # detour might reasonably need to go" margin
 
 
-def _local_road_path(world, a, b, faction_idx=None):
+def _local_road_path(world, a, b, faction_idx=None, allow_fallback=True):
     """Terrain-aware path between two points within a region -- the same
     Dijkstra + elevation-cost machinery construction.py's _path_between
     uses for constructed roads/trade routes, inlined here rather than
@@ -1048,9 +1048,14 @@ def _local_road_path(world, a, b, faction_idx=None):
     reverse would be circular). Used to lay village/settlement roads that
     actually bend around mountains and rivers instead of cutting a straight
     line through them, the same as every other road in the game already
-    does once it's built by hand. Falls back to the straight two-point
-    segment if pathfinding somehow fails, same fallback shape
-    _path_between uses."""
+    does once it's built by hand.
+
+    `allow_fallback` (default True) returns the straight two-point segment
+    if pathfinding fails -- fine for the within-one-region MST case, where
+    both points are guaranteed to share a landmass. _bridge_region_to_kingdom
+    passes False: its candidate can be anywhere the faction owns a
+    settlement, including a different landmass entirely, where a straight
+    fallback would draw a fake road across open ocean (the reported bug)."""
     if a == b:
         return [a]
     ay, by = a[1], b[1]
@@ -1063,7 +1068,35 @@ def _local_road_path(world, a, b, faction_idx=None):
     path = _path_dijkstra(cellset,
                           lambda c: _elev_cost(world, world.base_cost, c, faction_idx),
                           a, b, world.w)
-    return path or [a, b]
+    if path is not None:
+        return path
+    return [a, b] if allow_fallback else None
+
+
+def _local_sea_lane(world, a, b):
+    """Open-water path between the coastal points nearest `a`/`b` -- same
+    dock-to-dock Dijkstra as trade._capital_sea_path, standalone here for
+    the same reason _local_road_path is (construction.py already imports
+    FROM worldgen.py). Used by _bridge_region_to_kingdom when no land
+    route exists at all between a settlement-less region's villages and
+    any of the faction's settlements."""
+    dock_a = _nearest_ocean_cell(world, a)
+    dock_b = _nearest_ocean_cell(world, b)
+    if not dock_a or not dock_b:
+        return None
+    ay, by = a[1], b[1]
+    y0, y1 = sorted((ay, by))
+    ry0 = max(0, y0 - _ROAD_BBOX_PAD)
+    ry1 = min(world.h, y1 + _ROAD_BBOX_PAD + 1)
+    xs = wrap.bbox_span_wrap(a[0], b[0], world.w, _ROAD_BBOX_PAD)
+    sea_cellset = {(x, y) for y in range(ry0, ry1) for x in xs
+                   if world.owner[y][x] == OCEAN}
+    sea_path = _path_dijkstra(sea_cellset,
+                              lambda c: _sea_cost(world, world.base_cost, c),
+                              dock_a, dock_b, world.w)
+    if sea_path is None:
+        return None
+    return [a] + sea_path + [b]
 
 
 def _init_village_fields(world):
@@ -1262,11 +1295,20 @@ def _bridge_region_to_kingdom(world, region):
     # _local_road_path has no notion of "region" at all -- it searches real
     # land cells in a box around its two endpoints, so it happily paths
     # straight into a neighboring region's territory the same way it
-    # already bends around a mountain or river.
+    # already bends around a mountain or river. allow_fallback=False: if no
+    # land route exists at all (this region's landmass has no other tie to
+    # the target's), don't fake one -- try a sea lane instead, or leave the
+    # region unbridged rather than draw a road straight across open ocean.
     path = _local_road_path(world, nearest_village.pos, target.pos,
-                            faction_idx=faction_idx)
+                            faction_idx=faction_idx, allow_fallback=False)
+    tier = "dirt"
+    if path is None:
+        path = _local_sea_lane(world, nearest_village.pos, target.pos)
+        tier = "sea"
+    if path is None:
+        return
     segs = world.roads_by_region.setdefault(region.id, [])
-    segs.extend((p1, p2, "dirt") for p1, p2 in zip(path, path[1:]))
+    segs.extend((p1, p2, tier) for p1, p2 in zip(path, path[1:]))
 
 
 def _generate_villages(world, rng):
