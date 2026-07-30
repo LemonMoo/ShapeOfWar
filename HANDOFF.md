@@ -3,7 +3,9 @@
 Python/Tkinter desktop 4X strategy game. Single developer, turn-based, procedurally
 generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 
-**Last release: v0.3.1** ("Build a Realm Before You Enter It"), commit `fa29532`.
+**Last release: v0.3.6_1** ("More Continents, Less Water, Smoother Movement").
+Check `gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting
+this line — this repo ships fast, sometimes several releases in one day.
 
 ---
 
@@ -11,11 +13,28 @@ generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 
 v0.3.0 shipped the globe (§2), the end-turn movement animation (§7), species
 signature units (§4.1) and the Balance Lab (§5). v0.3.1 shipped the New Game
-overhaul (§8): rulers, species-tinted banner colours, world size/rival count,
-and a background-generated map preview you actually play rather than a fresh
-roll. Everything is released and the working tree is clean.
+overhaul (§8). v0.3.2-v0.3.4 shipped ocean currents + physically-carved
+coastlines, the globe's camera pitch/3D pins/fog-of-war-as-cloud, and a full
+settlement-placement rework (real site scoring everywhere, uncapped
+density-driven villages, per-village local production replacing a
+region-pooled economy, terrain-aware roads). v0.3.5/v0.3.6 shipped full game
+interaction parity on the globe (select/command everything without dropping
+to the flat map) and a batch of fixes (a kingdom-name-corruption bug, globe
+markers as real 3D pins, default battle formation, per-species special-troop
+select buttons). v0.3.6_1 reworked continent placement (see §9 below) to
+reliably produce 6-7 real, separate landmasses instead of "constantly mostly
+2", cut river/lake density, and fixed a movement-animation timing bug.
+Everything is released and the working tree is clean.
 
-**The one thing to know before touching anything:** the signature units are
+**Next up, not yet started:** a tectonic-plate-driven worldgen model, to
+replace the current "placed elliptical blobs + noise" approach with
+something that actually explains *why* land is shaped the way it is
+(mountain ranges from plate collisions, rifts, etc.) instead of continents
+"poofing up out of nowhere" — the user's own words. See **§9** for the full
+handoff: current-system grounding, a proposed model, phasing, and the open
+questions that still need the user's input before implementation starts.
+
+**The one thing to know before touching anything else:** the signature units are
 working and legible but **not balanced**, and the release notes say so out loud.
 Read §4.1 before moving any number — `dev/balance_lab.py` is the tool for it, and
 the shares are the knob, not the stats.
@@ -386,3 +405,198 @@ rivals' names, rival colours are stable under repeated edits, and — the one
 that actually matters — Play hands over the identical world object the preview
 was showing, with the identity that was on screen at the moment it was pressed.
 It generates a real (Small) world, so it's the slowest harness in `dev/`.
+
+---
+
+## 9. Next up: tectonic-plate-driven worldgen (NOT STARTED — plan only)
+
+The user's own framing: continents currently "poof up out of nowhere" — there
+is no causal story for why land is shaped the way it is. They asked, almost
+in passing, "is there a way we can do a tectonic plate map where we can more
+clearly and deliberately form land masses" — this is a real "yes, and here's
+what it would take" answer, not a small tweak. **Nothing has been built. This
+section is a handoff, not a design that's been agreed to in detail** — the
+open questions at the bottom need the user's actual answers before a line of
+this gets written, the same way the settlement-system rework earlier this
+project started with several rounds of `AskUserQuestion` before any code
+changed.
+
+### Why now, and why not just tune the current system more
+
+This project already went through one full tuning pass on the *current*
+blob-based system this session (see the `v0.3.6_1` release and the commit
+titled "Reliably get 6-7 continents instead of 'constantly mostly 2', less
+water") — continent count went from a flat 2-3 to a reliable 6-7, hemisphere
+banding was fixed so continents actually spread from equator to pole instead
+of clustering near it, and placement itself became a best-of-60-candidates
+search instead of a threshold-and-give-up loop. That work is DONE, released,
+and verified (`git log` for the full story; the commit message is detailed).
+
+That tuning pass is very likely the ceiling for what this architecture can
+give: no matter how well-tuned, "place N elliptical blobs, warp their edges
+with noise, add a few lobes" has no notion of *why* a coastline bends where
+it does, or *why* a mountain range exists at all (there currently ISN'T
+one — elevation past a threshold just reads as "mountain" biome; nothing
+carves an actual RANGE, a long connected ridge, anywhere in the game). A
+plate model is what would give geology an actual reason: mountain ranges at
+collision zones, rifts and new coastline at divergent boundaries, and
+continents that could plausibly have drifted into the shapes they're in.
+
+### The current system, precisely (what this would replace or build on)
+
+- `_pick_continent_centers` (`app/world/worldgen.py:1666`) picks 4-7 blob
+  centers via best-of-60-candidate placement (score = distance to every
+  already-placed blob, keep the best seen — see the function's own
+  docstring), banded by latitude with each hemisphere spreading its own
+  bands independently. Each blob gets 0-3 "lobe" sub-blobs for shape variety.
+  Returns a flat list of `(cx, cy, radius_x, radius_y, angle)` ellipses.
+- `generate_world` (`worldgen.py:1902`) builds the height field as: several
+  octaves of domain-warped value noise (`app/world/noise.py`, vectorized,
+  bit-exact-verified against a scalar reference) MINUS a falloff term from
+  the nearest blob (`best_d2`, computed per-blob with the blob's own
+  rotation/radii). Thresholds the result at whatever elevation value puts
+  ~40% of cells above it (`world.sea_level`).
+- `currents.py`'s `solve_currents`/`carve_coastline` (`currents.py:137`,
+  `:239`) then runs a wind-driven ocean-circulation Poisson solve and uses
+  the resulting current speed to erode/deposit along the coast — this is
+  the ONLY part of the pipeline that already has a real physical model
+  behind it, and it's a good template for how a plate model should be
+  structured (solve the physics once, feed the result into height as a
+  secondary adjustment, not the primary shape).
+- `_generate_hydrology` (`worldgen.py:618`) does real priority-flood
+  drainage + D8 flow accumulation for rivers/lakes — also unaffected by
+  continent SHAPE, just reads whatever height field exists.
+- `_classify_biomes_and_climate` (`worldgen.py:1560`) is purely per-cell
+  (latitude + moisture + relief + coast/river distance) — completely
+  independent of how continents got their shape. **This should need zero
+  changes** regardless of what replaces blob placement, as long as the
+  output is still a `world.height` grid with a `world.sea_level` cutoff.
+- Reusable machinery already in the codebase that a plate model should
+  build on rather than duplicate:
+  - `_grow_weighted` (`worldgen.py:480`) — multi-source Dijkstra flood-fill
+    from seed points, already used for territory growth. This is the
+    natural tool for growing K plate territories outward from K random
+    seeds (uniform cost = clean Voronoi-ish cells; a noise-perturbed cost
+    field = organic, non-polygonal plate boundaries).
+  - `_bfs_distance` (`worldgen.py:709`) — cheap distance-from-a-set-of-cells
+    field, useful for "distance to nearest plate boundary" (mountain-range
+    falloff width) without writing a new distance transform.
+  - `wrap.py`'s wrap-aware distance helpers — a plate boundary can cross the
+    map's east-west seam exactly the way continents already have to handle
+    (see `_pick_continent_centers`' own use of `wrap.dx_wrap`); don't
+    reinvent this, route through `wrap.py` like everything else does.
+  - `noise.py`'s vectorized value noise/domain warp — should very likely
+    SURVIVE this rework as the fine-detail texture layer (local coastline
+    roughness, minor relief) applied ON TOP of a plate-driven base
+    elevation, rather than being the primary shape mechanism it is today.
+
+### A concrete proposed model (starting point, not settled)
+
+1. **Plate assignment.** Scatter K seed points (K is a knob, see open
+   question #2), grow them into plate territories with `_grow_weighted`
+   over the WHOLE map (plates exist under ocean too, so this runs before
+   any land/sea distinction exists). A noise-perturbed cost field gives
+   organic boundaries instead of straight Voronoi edges.
+2. **Plate properties.** Each plate gets a random drift vector (direction +
+   magnitude) and a type — continental (land-biased base elevation) or
+   oceanic (sea-biased). Roughly matching Earth's real ratio (~30%
+   continental) is a reasonable starting point, not a hard rule.
+3. **Boundary classification.** For cells near a plate boundary, compare
+   the two plates' drift vectors against the boundary's own normal
+   direction:
+   - Convergent (closing) + both continental → uplift (mountain range).
+   - Convergent + one oceanic → trench on the oceanic side, coastal
+     mountains on the continental side (real subduction-zone shape).
+   - Divergent (opening) → rift valley on land, or a mid-ocean ridge bump
+     if both oceanic.
+   - Transform (sliding past) → minor perturbation only, mostly a texture
+     effect (fault-line roughness), not a real elevation change.
+4. **Height field composition.** `base_elevation(plate) + boundary_effect
+   (distance to nearest boundary, boundary type) + existing fine-detail
+   noise/warp (unchanged role, smaller relative amplitude now)`. Threshold
+   at the sea-level percentile exactly as today, so the ~40%-land contract
+   downstream code already assumes keeps holding.
+5. **Everything after height-field generation stays as-is**: hydrology,
+   biome/climate classification, currents/erosion, settlement placement —
+   all of it reads `world.height`/`world.sea_level` generically and
+   shouldn't need to know or care that a plate model produced them.
+
+### Phasing (mirrors how the settlement-system rework was actually run this
+### session — investigate, build one verifiable piece, measure, move on)
+
+1. **Plates + boundary classification only, no height integration.**
+   Generate plate assignment and boundary types, render a standalone debug
+   PNG (plate id as flat colour, boundary type as an overlay line) the way
+   `dev/coastline_metrics.py` and this session's various `dev/*_check.py`
+   throwaway scripts did for other worldgen work. Validate the plate
+   geometry looks like plausible tectonics BEFORE touching the height
+   field at all — cheap to iterate, zero risk to anything currently
+   working.
+2. **Height field integration**, replacing `_pick_continent_centers` +
+   blob falloff. Re-measure the same metrics this session already
+   established a baseline for: continent count (target stays 6-7, via
+   whatever the plate-count/continent-count relationship turns out to be —
+   see open question #2), land % (~40%), river/lake density (~1.7-2.2%
+   river, ~0.1-2.6% lake as of `v0.3.6_1` — see the "Reliably get 6-7
+   continents" commit for the exact measurement methodology to reuse).
+3. **Mountain-range shape refinement.** Verify visually that convergent
+   boundaries actually read as elongated RANGES following the boundary's
+   own curve, not blobs — render the biome overlay and eyeball it, the
+   same "measure/render, don't assume" discipline the rest of this
+   project's worldgen work has used throughout.
+4. **Re-verify downstream systems** that implicitly assumed "continents are
+   blob-shaped landmasses with no internal structure": faction/capital
+   placement (does a real mountain RANGE ever wall off a faction's entire
+   starting region?), road pathfinding around mountains (`_ROAD_ELEV_PEN`
+   etc. — should keep working since it's purely elevation-based, but a
+   genuine mountain WALL rather than a scattered peak is a bigger
+   pathfinding obstacle than existed before), the existing full regression
+   suite (`dev/test_*.py`) plus a fresh multi-faction world-gen + 100-turn
+   simulation (the exact pattern used to verify every worldgen change this
+   session).
+5. **Re-tune `currents.py`'s erosion/carving** against the new coastline
+   shapes if plate-driven coastlines erode differently than blob-driven
+   ones did.
+
+### Open questions — ask the user before writing code, don't assume
+
+1. **Scope.** Mountain ranges + basic continental/oceanic plate typing
+   only, or also volcanic/hotspot islands, earthquake-flavour zones for a
+   future feature, etc.? Recommend starting minimal and treating the rest
+   as follow-up, same reasoning as every other multi-phase rework this
+   project has done.
+2. **Plate count vs. continent count.** These are not obviously the same
+   knob — a real continent can span multiple plates (colliding into one
+   landmass), and the current `_target_n` (4-7, `worldgen.py:1902`'s
+   `_target_n` param) drives continent count directly today. Does the user
+   want to keep tuning "continent count" as the primary knob (with plate
+   count as an internal implementation detail that produces roughly that
+   many continents), or expose plate count as its own separate, meaningful
+   dial?
+3. **Does anything from the current blob system survive?** Specifically
+   the "lobe" mechanism (`_pick_continent_centers`' 0-3 extra blobs per
+   continent, added earlier this session for shape variety) — does that
+   stay as an additional texture layer on top of plate-driven bases, or
+   does plate-boundary geometry alone provide enough shape variety to
+   retire it?
+4. **Performance budget.** Current world-gen is ~11-17s (Standard size).
+   Plate boundary classification adds real work (per-cell nearest-boundary
+   lookups, at minimum); is a slower generation acceptable if quality is
+   much better, or is there a ceiling the user cares about? (For
+   reference: Large-size world-gen already runs ~37s today per the New
+   Game screen's own measured numbers, §8 above — so there's precedent for
+   "big and slow is fine if the player is told up front.")
+5. **Does this apply to every world size**, or could Small specifically
+   keep the simpler blob system if plates don't read well at a small
+   scale/short generation budget?
+
+### Where to start (for whoever picks this up)
+
+Read `_pick_continent_centers` and the height-field section of
+`generate_world` in full (`worldgen.py:1666`-`~2050`) plus all of
+`currents.py` — both are directly relevant precedent, and the continent-
+placement code specifically is what this would replace. Do NOT start
+writing plate-generation code before running the open questions above past
+the user; this project's established pattern (see the settlement-system
+rework and the New Game overhaul, §8) is real back-and-forth before a
+large worldgen change starts, not a plan executed silently.
