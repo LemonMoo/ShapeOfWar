@@ -20,6 +20,15 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 49,
+        "title": "Take Direct Command of Your Commander",
+        "items": [
+            "Right-click during a battle to send your Commander (or any selected troops) straight at a spot or an enemy, MOBA-style -- overrides his usual caution about advancing unescorted",
+            "Added a Select All button/hotkey (0) in battle planning",
+            "FIXED: countryside regions with no town of their own could end up with no road connecting them to the rest of your kingdom",
+        ],
+    },
+    {
         "version": 48,
         "title": "Mountains and Coastlines Have a Reason Now",
         "items": [
