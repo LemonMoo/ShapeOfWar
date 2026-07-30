@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 57,
+        "title": "GPU Flat Map Was Hiding All Your HUD Panels",
+        "items": [
+            "FIXED: the resource bar, faction panel, alerts, treasury and trade log were being drawn UNDER the GPU flat map instead of over it, making the whole HUD invisible the moment the map activated",
+        ],
+    },
+    {
         "version": 56,
         "title": "One More Flat Map Panning Cost, Gone",
         "items": [

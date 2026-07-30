@@ -2256,6 +2256,16 @@ class MapView(tk.Frame):
     def _activate_flatgl(self):
         self.canvas.pack_forget()
         self._flatgl.pack(fill="both", expand=True)
+        # self._flatgl is created lazily on the first render() -- well after
+        # the side panels were already built and raised in __init__'s own
+        # _apply_panel_layout() call. A newly created/mapped Tk widget goes
+        # to the TOP of its parent's stacking order by default, and this one
+        # fills the entire MapView area (fill="both", expand=True), so
+        # without this it silently sat on top of and completely hid every
+        # panel (resource bar, faction panel, alerts, treasury, trade log)
+        # the instant the GPU flat map activated -- lower() puts it back at
+        # the bottom, exactly where self.canvas always was.
+        self._flatgl.lower()
         self._flatgl.update_idletasks()   # winfo_width/height valid immediately,
                                            # same reason _set_globe does this
         self._use_flatgl = True
