@@ -299,10 +299,21 @@ class GLFlatMapFrame(OpenGLFrame):
     def set_map(self, map_img, fog_img=None):
         """Hand over the flat map's own raster (PIL RGB, exactly
         world.w x world.h) and fog mask ("L"). Cheap -- upload happens lazily
-        on the next redraw."""
-        self._map_img = map_img
-        self._fog_img = fog_img
-        self._tex_dirty = True
+        on the next redraw, and ONLY when the image actually changed:
+        MapView._sync_flatgl calls this on every single render() (including
+        every frame of a pan/zoom drag), passing MapView._base_img/
+        _fog_overlay_img straight through -- those are themselves cached
+        (MapView._ensure_base/_ensure_fog_overlay only rebuild on a real
+        content change), so most calls hand back the EXACT SAME object as
+        last time. Marking dirty unconditionally here re-encoded and
+        re-uploaded the whole terrain texture to the GPU every frame
+        regardless -- real, avoidable cost (a multi-megabyte tobytes() plus
+        a GPU texture write) that this identity check skips entirely on the
+        overwhelmingly common case where nothing changed."""
+        if map_img is not self._map_img or fog_img is not self._fog_img:
+            self._map_img = map_img
+            self._fog_img = fog_img
+            self._tex_dirty = True
         if map_img is not None:
             self._world_w, self._world_h = map_img.size
 

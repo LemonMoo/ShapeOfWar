@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 53,
+        "title": "Stop Re-Uploading the Map Texture Every Frame",
+        "items": [
+            "The GPU flat map was re-uploading its whole terrain texture to the graphics card on every single frame, even while nothing changed -- now only does it when the map actually needs it",
+        ],
+    },
+    {
         "version": 52,
         "title": "GPU Flat Map No Longer Chokes on a Developed Realm",
         "items": [

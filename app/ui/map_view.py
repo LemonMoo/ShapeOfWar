@@ -2053,8 +2053,19 @@ class MapView(tk.Frame):
         self._flatgl -- see _activate_flatgl). These handlers all work
         purely in terms of self.view/self._place/screen_to_world/
         world_to_screen, not canvas item IDs, so the same functions apply
-        unchanged regardless of which one drew the pixels underneath."""
-        widget.bind("<Configure>", lambda e: self._on_canvas_configure())
+        unchanged regardless of which one drew the pixels underneath.
+
+        add="+" on <Configure> specifically: pyopengltk's own BaseOpenGLFrame
+        already binds <Configure> to its tkResize (glViewport + a redundant
+        initgl() call) in its own __init__. A plain .bind() call REPLACES
+        that rather than adding to it, which would silently drop tkResize
+        for self._flatgl the moment this runs -- harmless in practice
+        (gl_flatmap.redraw() sets the viewport itself every frame regardless
+        of tkResize ever firing), but there's no reason to depend on that
+        and quietly fight a third-party widget's own lifecycle. self.canvas
+        (a plain tk.Canvas) has no such existing binding, so add="+" there
+        is a no-op, not a behavior change."""
+        widget.bind("<Configure>", lambda e: self._on_canvas_configure(), add="+")
         widget.bind("<ButtonPress-1>", self._on_press)
         widget.bind("<B1-Motion>", self._on_drag)
         widget.bind("<ButtonRelease-1>", self._on_release)
