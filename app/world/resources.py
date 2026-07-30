@@ -1198,6 +1198,321 @@ def compute_industry_yield(region, season):
     return result
 
 
+# --- Phase 14: labor -- production is an allocation, not a terrain readout ---
+# Measured before this existed (dev/storage_audit.py, fresh 10-faction world,
+# 120 turns): potential production ran ~51,100 household + ~9,700 durable
+# units per turn against a TOTAL consumption of 944 Food + 659 Clothes + 700
+# Luxury. Roughly fifty times more than anything in the game could use. Stated
+# per person, which is the number that actually shows how far off it was: one
+# village adult harvested 2.58 units of food a turn and ate 0.005 of them.
+#
+# No storage number can absorb a fifty-fold surplus, and it was never
+# storage's job to. Every phase above is a valve on the same unbounded tap:
+# storage_throttle silently deleted 53.6% of all household production at
+# source before it existed, and spoilage/overflow destroyed 774,581 units on
+# top of that. Neither figure was ever shown to the player, and neither was
+# ever a decision -- a village produced exactly what its terrain allowed,
+# every turn, forever, and the storage system quietly ate the difference.
+# That is what made storage feel both punishing and meaningless at once: it
+# was doing all the work and none of it was visible.
+#
+# Labor closes the tap at the correct end. Terrain no longer says what a
+# village produces; it says what it COULD produce. A village's adults are a
+# finite workforce split across the sectors its land offers, and each
+# sector's real output is whichever ceiling binds first -- the land or the
+# hands:
+#
+#     output = min(terrain potential, workers on that sector * output/worker)
+#
+# Both ceilings matter, and that is the entire point. Putting every hand on
+# mining in a village with no ore still yields nothing, so terrain defines
+# the CHOICE SPACE and labor decides what is actually taken out of it. A
+# village can max one sector or spread itself thin over three; what it can no
+# longer do is all of them at once.
+#
+# This also gives the seasons real texture for the first time. Crops only
+# harvest in their own season (Autumn is 52,911 units of the map's farming,
+# Summer 20,653, Spring and Winter zero), so under the default Auto policy
+# hands genuinely move to the woods and the mines over Winter and back to the
+# fields at harvest -- rather than every village doing everything, all year.
+PRODUCTION_SECTORS = ("farming", "forestry", "mining", "fishing")
+
+_SECTOR_BY_CATEGORY = {"Crops": "farming", "Forestry": "forestry",
+                       "Mining": "mining", "Fishing": "fishing"}
+
+# Units of output one worker brings in per turn, by sector -- the calibration
+# knob for the whole system, and the one number to move if total production
+# needs to go up or down. Ratios encode how much work a unit of each is:
+# quarrying and ore are the most labor-hungry per unit, a woodcutter's cord of
+# timber less so, and a harvest the least (one farmer works a lot of acres for
+# a few weeks).
+#
+# These are deliberately NOT set so that a typical village can cover its whole
+# terrain potential -- if they were, labor would never bind and this would be
+# a no-op with extra steps. A p90 village (65 adults, 287 units of farming
+# potential) throwing every hand at the harvest brings in 78 of those 287.
+LABOR_OUTPUT_PER_WORKER = {
+    "farming": 1.2,
+    "forestry": 0.9,
+    "mining": 0.5,
+    "fishing": 0.8,
+}
+
+# Policies a village's labor can be set to. "Auto" is the default and is what
+# an untouched realm runs on -- a player who never opens the panel is never
+# punished for it, same contract DEFAULT_HERD_POLICY already sets.
+LABOR_POLICIES = ("Auto", "Balanced", "Farming", "Forestry", "Mining", "Fishing")
+DEFAULT_LABOR_POLICY = "Auto"
+LABOR_POLICY_SECTOR = {"Farming": "farming", "Forestry": "forestry",
+                       "Mining": "mining", "Fishing": "fishing"}
+# A named focus is an emphasis, not an exclusive assignment: the rest of the
+# village keeps working the other sectors. A hard 100% was tried in design and
+# is a trap -- a village ordered to mine would stop growing its own food and
+# starve on a stockpile of ore.
+LABOR_FOCUS_SHARE = 0.70
+
+# How hard a full pool pulls hands OFF the sector that fills it, under Auto.
+# This is the feedback loop that makes storage *mean* something: a full
+# warehouse doesn't silently delete the timber any more, it sends the
+# woodcutters to the fields. Floor rather than zero so a sector never goes
+# completely dark on a momentarily-full pool.
+LABOR_PRESSURE_FLOOR = 0.15
+
+
+def production_sector(resource):
+    """Which workforce sector produces `resource`. Note this is about who
+    does the WORK, not where the good ends up: Firewood is cut by foresters
+    but stored in the granary (see storage_class), and the two answers are
+    allowed to differ."""
+    return _SECTOR_BY_CATEGORY.get(RESOURCES.get(resource, {}).get("category"))
+
+
+def labor_policy(village):
+    policy = getattr(village, "labor_policy", None)
+    return policy if policy in LABOR_POLICIES else DEFAULT_LABOR_POLICY
+
+
+def set_labor_policy(village, policy):
+    if policy in LABOR_POLICIES:
+        village.labor_policy = policy
+
+
+def village_workforce(village):
+    """Hands available to work this turn. Adults, matching what Food
+    consumption already scales off (FOOD_PER_CAPITA) -- so "how many people
+    does this village feed" and "how many people does it put in the fields"
+    are the same headcount rather than two numbers free to drift apart."""
+    return max(0, getattr(village, "adults", 0) or 0)
+
+
+def _sector_pool_relief(node, potentials_by_sector_resource, sector):
+    """0..1 -- how much room this sector's OUTPUT still has to land in,
+    averaged over its own resources weighted by how much of each it would
+    produce. Averaged rather than taken per-resource because labor is
+    assigned to a sector, not to a good: a forester whose Softwood has
+    nowhere to go is still worth sending out if the Firewood he also cuts is
+    needed. Reuses storage_throttle, so this reads the same typed-pool
+    fullness every other part of the storage system does."""
+    weights = potentials_by_sector_resource.get(sector)
+    if not weights:
+        return 1.0
+    total = sum(weights.values())
+    if total <= 0:
+        return 1.0
+    relief = sum(storage_throttle(node, r) * amt for r, amt in weights.items()) / total
+    return max(LABOR_PRESSURE_FLOOR, relief)
+
+
+def _labor_shares(village, potentials, by_sector_resource):
+    """{sector: fraction of the workforce}, from this village's policy.
+
+    Under every policy a sector with no potential at all gets nothing -- there
+    is no work to send anyone to -- which is also what makes Winter and Spring
+    move hands out of farming on their own, with no seasonal rule anywhere."""
+    live = [s for s in PRODUCTION_SECTORS if potentials.get(s, 0) > 0]
+    if not live:
+        return {}
+    policy = labor_policy(village)
+
+    if policy == "Balanced":
+        weights = {s: 1.0 for s in live}
+    elif policy in LABOR_POLICY_SECTOR:
+        focus = LABOR_POLICY_SECTOR[policy]
+        if focus in live:
+            rest = [s for s in live if s != focus]
+            spare = 1.0 - LABOR_FOCUS_SHARE if rest else 0.0
+            weights = {focus: LABOR_FOCUS_SHARE}
+            rest_total = sum(potentials[s] for s in rest) or 1.0
+            for s in rest:
+                weights[s] = spare * potentials[s] / rest_total
+        else:
+            # Ordered to fish with no water in reach. Fall through to Auto
+            # rather than idling the village on an impossible order.
+            weights = {s: potentials[s] for s in live}
+    else:   # Auto
+        # Potential-weighted, then damped by how full each sector's own output
+        # pool already is -- the storage feedback loop described above.
+        weights = {s: potentials[s] * _sector_pool_relief(village, by_sector_resource, s)
+                   for s in live}
+
+    total = sum(weights.values())
+    if total <= 0:
+        return {s: 1.0 / len(live) for s in live}
+    return {s: w / total for s, w in weights.items()}
+
+
+def village_labor_factors(world, village, potentials, by_sector_resource):
+    """{sector: 0..1} -- the fraction of each sector's terrain potential this
+    village's workforce can actually bring in.
+
+    Labor left over on a sector that has already hit its terrain ceiling is
+    handed to the sectors that haven't. Without that spillover a village with
+    a trivial mine would strand real hands on it: they would be "assigned to
+    mining", produce the mine's whole tiny output, and the remainder would
+    simply evaporate rather than going to the fields.
+
+    The redistribution REPEATS until nothing is left to place or every sector
+    is full, and that is not a refinement -- a single pass silently leaks
+    labor, because a sector receiving spillover can hit its own ceiling too
+    and the excess handed to it has nowhere to go. dev/test_labor.py asserts
+    the invariant directly (no idle hands while any sector is still short); it
+    is what caught this."""
+    workforce = village_workforce(village)
+    if workforce <= 0 or not potentials:
+        return {}
+    shares = _labor_shares(village, potentials, by_sector_resource)
+    if not shares:
+        return {}
+
+    def ceiling(sector):
+        per = LABOR_OUTPUT_PER_WORKER.get(sector, 1.0)
+        return potentials[sector] / per if per > 0 else 0.0
+
+    workers = {s: workforce * f for s, f in shares.items()}
+    for _pass in range(len(workers) + 1):
+        spare = 0.0
+        hungry = []
+        for sector, assigned in workers.items():
+            room = ceiling(sector)
+            if assigned > room:
+                spare += assigned - room
+                workers[sector] = room
+            elif assigned < room:
+                hungry.append(sector)
+        if spare <= 1e-9 or not hungry:
+            break
+        # Redistributed in proportion to the room each still-unsatisfied
+        # sector has left, so a spillover fills the sectors that can actually
+        # absorb it instead of piling onto one that is nearly full again.
+        room_total = sum(ceiling(s) - workers[s] for s in hungry)
+        if room_total <= 1e-9:
+            break
+        for sector in hungry:
+            room_left = ceiling(sector) - workers[sector]
+            workers[sector] += spare * (room_left / room_total)
+
+    factors = {}
+    for sector, assigned in workers.items():
+        potential = potentials[sector]
+        if potential <= 0:
+            continue
+        per = LABOR_OUTPUT_PER_WORKER.get(sector, 1.0)
+        factors[sector] = min(1.0, (assigned * per) / potential)
+    return factors
+
+
+def _village_terrain_potential(world, village, season):
+    """({resource: amount} raw terrain yield, {sector: total},
+    {sector: {resource: amount}}) -- what this village's LAND offers this
+    season, before any labor limit. This is exactly what compute_village_yield
+    used to return outright."""
+    region = world.regions[village.region_id]
+    biome_counts, climate, fertility_frac = village_local_sample(world, village, region)
+    raw = _crop_yield_core(biome_counts, climate, fertility_frac, season)
+    # Weather (see _advance_region_crop_weather) applies to the LAND's offer,
+    # not to the workforce: a drought means there is less out there to bring
+    # in, however many hands are sent.
+    weather_mult = getattr(region, "crop_weather_mult", None)
+    if weather_mult:
+        for crop, amount in list(raw.items()):
+            m = weather_mult.get(crop)
+            if m is not None:
+                raw[crop] = round(amount * m)
+    for resource, amount in _industry_yield_core(biome_counts, climate, fertility_frac).items():
+        raw[resource] = raw.get(resource, 0) + amount
+
+    by_sector = defaultdict(float)
+    by_sector_resource = defaultdict(dict)
+    for resource, amount in raw.items():
+        sector = production_sector(resource)
+        if not sector or amount <= 0:
+            continue
+        by_sector[sector] += amount
+        by_sector_resource[sector][resource] = amount
+
+    # Fishing never went through the biome path (see _produce_fishing) but is
+    # worked by the same hands, so it has to compete for them here or a
+    # fishing village would get its catch for free on top of a full harvest.
+    fish = getattr(village, "fish_yield", None)
+    if fish is None:
+        fish = _node_fish_yield(world, village.pos)
+        village.fish_yield = fish
+    if fish > 0:
+        by_sector["fishing"] += fish
+        by_sector_resource["fishing"]["Fish"] = fish
+
+    return raw, dict(by_sector), dict(by_sector_resource)
+
+
+def village_labor_state(world, village, season):
+    """({sector: 0..1 factor}, {resource: raw potential}) for this village
+    this turn, cached on the village per (turn, season).
+
+    Cached because three separate callers need the same answer within one
+    turn -- compute_village_yield for the harvest, _produce_fishing for the
+    catch, and the UI for what to show the player -- and the potential behind
+    it costs a (2r+1)^2 grid scan per village (village_local_sample). Keyed by
+    season as well as turn because village_projected_annual_yield legitimately
+    asks about seasons that aren't the current one."""
+    key = (getattr(world, "turn", 0), season)
+    cached = getattr(village, "_labor_cache", None)
+    if cached is not None and cached[0] == key:
+        return cached[1], cached[2]
+    raw, potentials, by_sector_resource = _village_terrain_potential(world, village, season)
+    factors = village_labor_factors(world, village, potentials, by_sector_resource)
+    village._labor_cache = (key, factors, raw)
+    return factors, raw
+
+
+def village_labor_report(world, village, season=None):
+    """What the labor panel shows: per sector, the land's offer, the hands on
+    it, what actually comes in, and which of the two ceilings is binding.
+    Read-only, and deliberately recomputed rather than read off
+    village_labor_state's cache -- the panel wants a live answer against
+    current storage, while the cache deliberately freezes one allocation
+    decision per turn."""
+    season = season or getattr(world, "season", SEASONS[0])
+    raw, potentials, by_sector_resource = _village_terrain_potential(world, village, season)
+    factors = village_labor_factors(world, village, potentials, by_sector_resource)
+    workforce = village_workforce(village)
+    shares = _labor_shares(village, potentials, by_sector_resource)
+    rows = []
+    for sector in PRODUCTION_SECTORS:
+        potential = potentials.get(sector, 0)
+        if potential <= 0:
+            continue
+        factor = factors.get(sector, 0.0)
+        rows.append({
+            "sector": sector,
+            "potential": round(potential),
+            "output": round(potential * factor),
+            "workers": round(workforce * shares.get(sector, 0.0)),
+            "factor": factor,
+            "limited_by": "hands" if factor < 0.999 else "land",
+        })
+    return {"policy": labor_policy(village), "workforce": workforce, "sectors": rows}
+
+
 # --- Fishing: renewable, water-body-size-scaled -- deliberately its own
 # code path, not a RESOURCE_SPAWN entry like every resource above. Every
 # other raw resource is a per-region biome share (see compute_crop_yield/
@@ -1320,6 +1635,7 @@ def _produce_fishing(world):
     the underlying adjacency never changes -- avoids re-running the BFS
     above every single turn for every settlement and village in the
     world."""
+    season = getattr(world, "season", SEASONS[0])
     for node in list(world.settlements) + list(world.villages):
         yield_amt = getattr(node, "fish_yield", None)
         if yield_amt is None:
@@ -1327,6 +1643,16 @@ def _produce_fishing(world):
             node.fish_yield = yield_amt
         if yield_amt <= 0:
             continue
+        # A village's boats are crewed by the same hands that work its fields
+        # and woods (Phase 14): the catch is whatever share of the workforce
+        # fishing actually got. Settlements have no labor model -- they are
+        # consumers, and their fishing fleet isn't a village's workforce
+        # question -- so they land the full yield, unchanged.
+        if not hasattr(node, "kind"):
+            factors, _raw = village_labor_state(world, node, season)
+            yield_amt = yield_amt * factors.get("fishing", 0.0)
+            if yield_amt <= 0:
+                continue
         if not hasattr(node, "resources"):
             node.resources = {}
         # Same storage feedback as the harvest (see storage_throttle): boats
@@ -1347,23 +1673,31 @@ def village_projected_annual_yield(world, village):
     region-wide number divided by however many villages happen to share
     the region -- more villages on good land means more total production,
     not a thinner slice for each one."""
-    region = world.regions[village.region_id]
-    biome_counts, climate, fertility_frac = village_local_sample(world, village, region)
     annual = defaultdict(float)
+    # Per season rather than "one season stands in for the year": Forestry and
+    # Mining are still season-independent at the land, but the LABOR split
+    # across them is not (Phase 14) -- with the fields empty over Winter, Auto
+    # sends those hands to the woods, so a year's timber is genuinely not four
+    # times any one season's. Summing compute_village_yield season by season
+    # is the only way to get that right, and it keeps this projection reading
+    # off exactly the function the turn loop produces from.
     for season in SEASONS:
-        for crop, amount in _crop_yield_core(biome_counts, climate, fertility_frac, season).items():
-            annual[crop] += amount * TURNS_PER_SEASON
-    # No season gating for Forestry/Mining -- one season's worth already
-    # represents every season, so just scale by the full year's turn count.
-    for resource, amount in _industry_yield_core(biome_counts, climate, fertility_frac).items():
-        annual[resource] += amount * TURNS_PER_SEASON * len(SEASONS)
+        for resource, amount in compute_village_yield(world, village, season).items():
+            annual[resource] += amount * TURNS_PER_SEASON
     result = {r: round(a) for r, a in annual.items() if round(a) > 0}
     # Fish doesn't go through the region-level split above at all (see
     # _produce_fishing) -- it's this village's own adjacency, not a shared
     # regional pool, so it's added directly rather than divided by n_targets.
-    fish = _node_fish_yield(world, village.pos)
+    # Labor-limited the same way the real catch is, season by season.
+    fish = getattr(village, "fish_yield", None)
+    if fish is None:
+        fish = _node_fish_yield(world, village.pos)
+        village.fish_yield = fish
     if fish:
-        result["Fish"] = result.get("Fish", 0) + fish * YEAR_LENGTH_TURNS
+        caught = sum(fish * village_labor_state(world, village, s)[0].get("fishing", 0.0)
+                     for s in SEASONS) * TURNS_PER_SEASON
+        if round(caught) > 0:
+            result["Fish"] = result.get("Fish", 0) + round(caught)
     # This village's own herd (Milk/Wool/Eggs/Honey off the living animals,
     # Meat/Leather off the Autumn cull). Not divided by n_targets: the herd
     # belongs to THIS village, unlike the region-level crop and industry
@@ -2967,22 +3301,22 @@ def compute_village_yield(world, village, season):
     industry both, computed from its own local land (village_local_sample)
     instead of a region-wide pool split evenly across however many
     villages exist. Where a village actually sits now determines what it
-    can grow or mine: more villages on good land means more real
-    production, not a thinner slice of one fixed regional number."""
-    region = world.regions[village.region_id]
-    biome_counts, climate, fertility_frac = village_local_sample(world, village, region)
-    result = _crop_yield_core(biome_counts, climate, fertility_frac, season)
-    # Weather (see _advance_region_crop_weather): only CROPS are touched --
-    # a drought doesn't affect what's already been mined or logged, and
-    # _industry_yield_core's own result is merged in below, untouched.
-    weather_mult = getattr(region, "crop_weather_mult", None)
-    if weather_mult:
-        for crop, amount in result.items():
-            m = weather_mult.get(crop)
-            if m is not None:
-                result[crop] = round(amount * m)
-    for resource, amount in _industry_yield_core(biome_counts, climate, fertility_frac).items():
-        result[resource] = result.get(resource, 0) + amount
+    CAN grow or mine.
+
+    What it actually brings in is that terrain potential limited by its own
+    finite workforce (Phase 14 -- see village_labor_state): the land's offer
+    and the hands available are two separate ceilings and the smaller one
+    wins. Fish is deliberately excluded from the result even though it
+    competes for the same hands -- it's landed at the node directly by
+    _produce_fishing, which reads the same cached labor factors, and
+    returning it here too would double-count the catch."""
+    factors, raw = village_labor_state(world, village, season)
+    result = {}
+    for resource, amount in raw.items():
+        factor = factors.get(production_sector(resource))
+        share = round(amount * factor) if factor is not None else amount
+        if share:
+            result[resource] = share
     return result
 
 
