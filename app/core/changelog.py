@@ -20,6 +20,14 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 51,
+        "title": "End Turn Stops Freezing the Window",
+        "items": [
+            "End Turn now processes in the background instead of freezing the window every single turn",
+            "The flat map now renders on the GPU when available, fixing choppiness at high resolutions the same way the globe already avoided it",
+        ],
+    },
+    {
         "version": 50,
         "title": "Sea Lanes Instead of Roads Through the Ocean",
         "items": [

@@ -56,6 +56,7 @@ class App(tk.Tk):
         self._save_id = None
         self._save_created_at = None
         self._pending_elimination = None   # see _on_faction_eliminated
+        self._pending_defeat = None        # see _on_faction_eliminated/_flush_pending_defeat
 
         self._build_topbar()
 
@@ -106,7 +107,8 @@ class App(tk.Tk):
             self.map_view = MapView(self.content, self.world,
                                     on_attack=self.stage_battle,
                                     on_end_turn=self.end_turn,
-                                    on_wildland_claim=self.stage_wildland_battle)
+                                    on_wildland_claim=self.stage_wildland_battle,
+                                    on_turn_settled=self._flush_pending_defeat)
             self.battle_view = BattleView(self.content, on_continue=self._return_from_battle)
             for view in (self.map_view, self.battle_view):
                 view.place(relx=0, rely=0, relwidth=1, relheight=1)
@@ -201,7 +203,24 @@ class App(tk.Tk):
             # instantly clobbered. Flushed there instead.
             self._pending_elimination = payload
             return
+        if self.map_view is not None and self.map_view._end_turn_busy:
+            # advance_turn can reach eliminate_faction (and this listener)
+            # from MapView's background turn-processing thread, through
+            # ordinary AI claim resolution -- after_idle must never be
+            # called off the main thread. Stash it instead; MapView calls
+            # _flush_pending_defeat once the turn has actually finished
+            # settling back on the main thread.
+            self._pending_defeat = payload
+            return
         self.after_idle(lambda: self._show_defeat(payload))
+
+    def _flush_pending_defeat(self):
+        """MapView's on_turn_settled callback (main thread, right after a
+        background turn finishes) -- see _on_faction_eliminated."""
+        payload = self._pending_defeat
+        if payload is not None:
+            self._pending_defeat = None
+            self._show_defeat(payload)
 
     def _show_defeat(self, payload):
         from app.world import resources
@@ -292,12 +311,24 @@ class App(tk.Tk):
 
     def _on_toggle_mode_key(self, event):
         """V: cycle the map's view mode (Political/Fertility/Elevation/
-        Biome/Climate -- see MapView._toggle_mode), same gating as End Turn."""
-        if self._current_screen == "map" and not self._paused:
+        Biome/Climate -- see MapView._toggle_mode), same gating as End Turn.
+        Also inert while a background turn is processing (MapView.render()
+        would just no-op it anyway -- skipping the call keeps the key
+        feeling inert rather than silently swallowed)."""
+        if (self._current_screen == "map" and not self._paused
+                and not self.map_view._end_turn_busy):
             self.map_view._toggle_mode()
 
     # --- pause menu (world map only) ----------------------------------------
     def _on_escape(self, event):
+        # Ignored outright while a turn is processing in the background: the
+        # only things Escape can reach from here -- entering the pause menu
+        # (whose Save writes `world` to disk) and _resume_from_pause's
+        # map_view.render() call -- are both unsafe while the worker thread
+        # in MapView still owns `world`. See MapView._run_end_turn.
+        if (self.map_view is not None and self._current_screen == "map"
+                and self.map_view._end_turn_busy):
+            return
         if self._paused:
             self._resume_from_pause()
         elif self._current_screen == "map":

@@ -13,6 +13,8 @@ level at a time. Regions are the future unit of control for territory
 reassignment.
 """
 import math
+import queue
+import threading
 import time
 import tkinter as tk
 
@@ -31,6 +33,9 @@ from app.world import trade
 from app.world import expansion
 from app.world import commander
 from app.ui import gl_globe
+from app.ui import gl_flatmap
+from app.ui.gl_flatmap import (SHAPE_CIRCLE, SHAPE_TRIANGLE, SHAPE_SQUARE,
+                               SHAPE_DIAMOND, SHAPE_HULL)
 from app.world import wrap
 from app.world.nation import is_eliminated, ruler_label
 from app.ui.compendium import CompendiumWindow
@@ -401,14 +406,37 @@ def _resource_shortfall(nation, cost, world):
 
 class MapView(tk.Frame):
     def __init__(self, master, world, on_attack, on_end_turn,
-                on_wildland_claim=None):
+                on_wildland_claim=None, on_turn_settled=None):
         super().__init__(master, bg=theme.BG)
         self.on_attack = on_attack
         self.on_end_turn = on_end_turn
         self.on_wildland_claim = on_wildland_claim
+        # Called (main thread, no args) once a background turn has finished
+        # settling -- after refresh() and the move animation have started, so
+        # App can flush anything it deferred while the turn was in flight (see
+        # App._on_faction_eliminated). Optional: dev harnesses that build a
+        # MapView standalone have nothing that needs the hook.
+        self.on_turn_settled = on_turn_settled
         self._end_turn_busy = False     # re-entrancy/cooldown guard so mashing
                                          # End Turn can't stack panel rebuilds
                                          # mid-teardown (flicker) -- see _on_end_turn
+        # Background end-turn processing (see _run_end_turn/_turn_worker/
+        # _turn_drain): advance_turn runs on a worker thread so the ~300-500ms
+        # it costs on a late-game world stops freezing the window every single
+        # turn. _turn_token invalidates any in-flight result that isn't the
+        # most recent End Turn (defensive -- _end_turn_busy already prevents
+        # a second one from starting, but a stale result must never be able
+        # to land regardless).
+        self._turn_queue = queue.Queue()
+        self._turn_token = 0
+        self._turn_pending = None    # (before_snapshot, prev_year, movement_snapshot)
+        # True for the narrower window the worker thread actually owns
+        # `world` -- as opposed to `_end_turn_busy`, which stays True through
+        # the safe main-thread-only post-processing, animation and cooldown
+        # too. render() gates on this one specifically: _finish_end_turn's
+        # own refresh()/render() calls must go through even though
+        # `_end_turn_busy` is still set at that point.
+        self._turn_in_flight = False
         self.selected = None            # selected faction (world view)
         self.zoom_faction = None        # faction we've zoomed into (region view)
         self.selected_region = None
@@ -503,26 +531,27 @@ class MapView(tk.Frame):
         # ~55% no matter what.
         self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
+        self._bind_map_events(self.canvas)
         # The globe is a SECOND view of the same world, stacked in the same
         # place as the flat map and raised/lowered by _set_globe. Built lazily
         # (see _ensure_globe) so a machine with no GL never pays for it and the
         # flat map remains the guaranteed path.
         self.globe = None
         self.globe_active = False
+        # GPU flat map (see gl_flatmap.py): a third view of the same content
+        # the canvas draws, swapped in for it automatically -- not a player
+        # choice like the globe toggle -- the moment GL is confirmed
+        # available (_ensure_flatgl/_activate_flatgl, called from render()).
+        # Falls back to the canvas the same way the globe falls back to the
+        # flat map: dynamically, every render(), if it ever reports failed
+        # rather than only once at startup.
+        self._flatgl = None
+        self._flatgl_tried = False
+        self._use_flatgl = False
         # End-turn movement animation state (see _start_move_animation).
         self._move_anim = None       # pending `after` id, or None when idle
         self._move_tracks = ()       # [(mover, t -> (x, y)), ...]
         self._anim_pos = {}          # id(mover) -> its position this frame
-        self.canvas.bind("<Configure>", lambda e: self._on_canvas_configure())
-        # Free camera: press/drag/release (drag pans, a plain click still
-        # drills down/selects exactly as before) plus wheel-zoom.
-        self.canvas.bind("<ButtonPress-1>", self._on_press)
-        self.canvas.bind("<B1-Motion>", self._on_drag)
-        self.canvas.bind("<ButtonRelease-1>", self._on_release)
-        self.canvas.bind("<MouseWheel>", self._on_wheel)
-        # QoL: right-click sends the currently-selected Commander straight
-        # to that spot — no need to click Move first (which still works too).
-        self.canvas.bind("<Button-3>", self._on_right_click)
 
         self.bottom_msg = tk.Label(self, text="", bg="#0d1017", fg=theme.INK,
                                    font=("Segoe UI", 13, "bold"), padx=18, pady=10)
@@ -544,6 +573,36 @@ class MapView(tk.Frame):
                                          wraplength=560)
         self.year_summary_lbl.pack(padx=32, pady=(0, 18))
 
+        # Background end-turn busy cover (see _run_end_turn): a full-frame
+        # opaque overlay raised the instant End Turn is pressed. It covers
+        # the canvas AND both side panels, which is what actually matters --
+        # sitting on top absorbs every click meant for anything underneath,
+        # so nothing can act on `world` while the worker thread owns it,
+        # without having to gate each individual button/handler by hand.
+        self._turn_overlay = tk.Frame(self, bg=theme.CANVAS)
+        tk.Label(self._turn_overlay, text="Processing turn…", bg=theme.CANVAS,
+                fg=theme.INK, font=("Segoe UI", 16, "bold")).place(
+                    relx=0.5, rely=0.5, anchor="center")
+
+        # Terrain legend for the GPU flat map (see _sync_flatgl): the
+        # canvas draws its own corner legend as vector items every frame
+        # (_draw_terrain_legend) -- a GL surface can't have Tk items drawn
+        # over it that way, so this is the same box built ONCE as an
+        # ordinary small Tk canvas and left alone; only shown/hidden per
+        # frame, never redrawn, since its content never changes.
+        lw, lh = 116, 56
+        self._flat_legend = tk.Canvas(self, width=lw, height=lh, bg=theme.PANEL,
+                                      highlightthickness=1,
+                                      highlightbackground=theme.LINE)
+        self._flat_legend.create_text(lw / 2, 10, text="LEGEND", fill=theme.MUTED,
+                                      font=("Segoe UI", 7, "bold"))
+        self._draw_forest_glyph(self._flat_legend, 16, 26, 7)
+        self._flat_legend.create_text(32, 26, text="Forest", fill=theme.INK,
+                                      font=("Segoe UI", 8), anchor="w")
+        self._draw_mountain_glyph(self._flat_legend, 16, 46, 7)
+        self._flat_legend.create_text(32, 46, text="Mountain", fill=theme.INK,
+                                      font=("Segoe UI", 8), anchor="w")
+
         self._build_trade_log()
         self._build_alerts_panel()
         self._build_panel()
@@ -553,6 +612,7 @@ class MapView(tk.Frame):
         self._right_collapsed = False
         self._apply_panel_layout()
         self.set_world(world)
+        self.after(120, self._turn_drain)
 
     # --- world binding -----------------------------------------------------
     def set_world(self, world):
@@ -1987,6 +2047,20 @@ class MapView(tk.Frame):
         self.currents_btn.config(text=f"Currents: {'On' if self.show_currents else 'Off'}")
         self.render()
 
+    def _bind_map_events(self, widget):
+        """Wire up the free camera + click/drag/wheel handlers on whichever
+        widget is currently the flat map's drawing surface (self.canvas or
+        self._flatgl -- see _activate_flatgl). These handlers all work
+        purely in terms of self.view/self._place/screen_to_world/
+        world_to_screen, not canvas item IDs, so the same functions apply
+        unchanged regardless of which one drew the pixels underneath."""
+        widget.bind("<Configure>", lambda e: self._on_canvas_configure())
+        widget.bind("<ButtonPress-1>", self._on_press)
+        widget.bind("<B1-Motion>", self._on_drag)
+        widget.bind("<ButtonRelease-1>", self._on_release)
+        widget.bind("<MouseWheel>", self._on_wheel)
+        widget.bind("<Button-3>", self._on_right_click)
+
     def _on_canvas_configure(self):
         """Redraw, and re-clamp any floating in-game panel so a window resize
         can't strand it outside the visible area."""
@@ -2068,6 +2142,14 @@ class MapView(tk.Frame):
     def toggle_globe(self):
         self._set_globe(not self.globe_active)
 
+    def _flat_widget(self):
+        """Whichever widget is currently drawing the flat map -- the GPU
+        frame once _activate_flatgl has swapped it in, the plain canvas
+        otherwise. _set_globe hides/shows this one, not always self.canvas,
+        so toggling the globe on and off works the same regardless of which
+        flat renderer is underneath it."""
+        return self._flatgl if self._use_flatgl else self.canvas
+
     def _set_globe(self, on):
         if on and not self._ensure_globe():
             self.show_bottom_message("This machine has no 3D support — "
@@ -2075,7 +2157,8 @@ class MapView(tk.Frame):
             return
         self.globe_active = bool(on)
         if self.globe_active:
-            self.canvas.pack_forget()
+            self._flat_widget().pack_forget()
+            self._flat_legend.place_forget()
             self.globe.pack(fill="both", expand=True)
             self.globe.update_idletasks()
             saved = getattr(self.world, "globe_camera", None)
@@ -2102,7 +2185,7 @@ class MapView(tk.Frame):
                 self._face_globe_home()
         else:
             self.globe.pack_forget()
-            self.canvas.pack(fill="both", expand=True)
+            self._flat_widget().pack(fill="both", expand=True)
         # Remember which view the player prefers, and where they left the
         # camera -- both ride along in the save (see app/core/save.py).
         self.world.prefer_globe = self.globe_active
@@ -2126,6 +2209,89 @@ class MapView(tk.Frame):
             self.globe.face_cell(*capital)
         elif getattr(nation, "center", None):
             self.globe.face_cell(nation.center[0] * wd.w, nation.center[1] * wd.h)
+
+    # --- GPU flat map -----------------------------------------------------
+    def _ensure_flatgl(self):
+        """Create the GPU flat-map frame on first use. Returns False if this
+        machine cannot have one (no GL) or it has already failed, in which
+        case the Tk/PIL canvas stays in charge -- tried exactly once
+        (_flatgl_tried), not retried every render() the way that would
+        otherwise happen given render() calls this on every frame."""
+        if self._flatgl is not None:
+            return not self._flatgl.failed
+        if self._flatgl_tried or not gl_flatmap.gl_available():
+            return False
+        self._flatgl_tried = True
+        try:
+            self._flatgl = gl_flatmap.GLFlatMapFrame(self)
+        except Exception:
+            return False
+        self._bind_map_events(self._flatgl)
+        return True
+
+    def _activate_flatgl(self):
+        self.canvas.pack_forget()
+        self._flatgl.pack(fill="both", expand=True)
+        self._flatgl.update_idletasks()   # winfo_width/height valid immediately,
+                                           # same reason _set_globe does this
+        self._use_flatgl = True
+
+    def _deactivate_flatgl(self):
+        """Back to the Tk/PIL canvas -- either GL genuinely isn't available
+        on this machine, or self._flatgl started failing after having
+        worked (see render()'s own check, mirroring how the globe falls
+        back to the flat map dynamically rather than only once at startup)."""
+        self._flatgl.pack_forget()
+        self.canvas.pack(fill="both", expand=True)
+        self._use_flatgl = False
+        self._flat_legend.place_forget()   # canvas draws its own legend
+
+    def _flat_level(self):
+        """0/1/2 for world/region/village view -- the flat map's own
+        three-tier zoom state expressed as the same int _map_lines/
+        _map_labels already take from the globe's altitude-derived
+        zoom_level."""
+        if self.zoom_region is not None:
+            return 2
+        if self.zoom_faction is not None:
+            return 1
+        return 0
+
+    def _sync_flatgl(self):
+        """The GPU flat map's equivalent of _sync_globe: push the same
+        terrain raster, fog mask, and line/marker/label content the Tk
+        canvas would draw, in the GPU frame's own terms (see gl_flatmap.py).
+        Also refreshes self._place/_canvas_wh/_view_center_x exactly as the
+        canvas path does, since screen_to_world/world_to_screen/the click
+        handlers all read those regardless of which surface is on screen."""
+        g = self._flatgl
+        cw, ch = g.winfo_width(), g.winfo_height()
+        if cw <= 1 or ch <= 1:
+            return
+        self._ensure_base()
+        self._ensure_fog_overlay()
+        fog_active = self._fog_is_active() and self._fog_overlay_img is not None
+        vx0, vy0, vx1, vy1 = self._fit_aspect(self.view, cw / ch)
+        scale = cw / (vx1 - vx0)
+        self._place = (vx0, vy0, scale)
+        self._canvas_wh = (cw, ch)
+        self._view_center_x = (vx0 + vx1) / 2
+        g.set_map(self._base_img, self._fog_overlay_img if fog_active else None)
+        g.set_view(vx0, vy0, vx1, vy1)
+        level = self._flat_level()
+        g.set_lines(self._map_lines(level, scale=scale))
+        g.set_markers(self._flat_markers(level))
+        g.set_labels(self._map_labels(level) + self._flat_labels_extra())
+        g.render_now()
+        if self.mode == "political":
+            self._flat_legend.place(x=12, y=12)
+            # tk.Canvas overrides tkraise/lift to mean tag_raise (a canvas
+            # ITEM operation) -- Misc.tkraise (raise this WIDGET in the
+            # stacking order, what's actually wanted here) has to be called
+            # explicitly to bypass that override.
+            tk.Misc.tkraise(self._flat_legend)
+        else:
+            self._flat_legend.place_forget()
 
     def _sync_globe(self):
         """Push the flat map's own raster, fog, overlays and markers at the
@@ -2156,20 +2322,36 @@ class MapView(tk.Frame):
         # by altitude keeps them a constant size on screen, so a settlement is
         # the same dot from orbit as it is from just above the ground.
         mscale = g.dist / gl_globe.DIST_DEFAULT
-        g.set_lines(self._globe_lines(level))
+        g.set_lines(self._map_lines(level))
         g.set_pins(self._globe_pins(level, mscale))
         g.set_markers(self._globe_markers(level, mscale))
-        g.set_labels(self._globe_labels(level))
+        g.set_labels(self._map_labels(level, cull=g.visible_mask))
         g.render_now()
         self.world.globe_camera = g.camera_state()
 
-    def _globe_lines(self, level):
+    def _map_lines(self, level, scale=None):
         """Every path the flat map draws, as (cells, rgb, width_px, dash) for
-        gl_globe.set_lines. Fog-clipped through the same _fog_clip_runs the
-        canvas versions use, so the globe never reveals a route the flat map
-        would have hidden."""
+        a GL renderer's set_lines -- shared by the globe (gl_globe.py) and
+        the GPU flat map (gl_flatmap.py): nothing here is sphere-specific,
+        it is pure world-state-to-line-list, so both projections read the
+        same content and only differ in how each cell ends up on screen.
+        Fog-clipped through the same _fog_clip_runs the canvas versions use,
+        so neither GL view ever reveals a route the flat canvas would have
+        hidden.
+
+        `scale` (the flat map's current world-to-screen zoom, self._place[2])
+        is None for the globe, which keeps the fixed pixel widths below --
+        constant screen size regardless of camera altitude is the right
+        call there, the same way markers/text already work. The flat map
+        passes its own scale so roads/routes grow thicker zoomed in, exactly
+        matching what the Tk canvas already does (_draw_roads etc.) -- `lw`
+        below carries each line's canvas width FACTOR, applied as
+        max(minimum, scale*factor), the fixed value otherwise."""
         wd = self.world
         out = []
+
+        def lw(fixed, factor, minimum=1.0):
+            return fixed if scale is None else max(minimum, scale * factor)
 
         def add(cells, color, width, dash=0):
             for run in self._fog_clip_runs(cells):
@@ -2178,7 +2360,8 @@ class MapView(tk.Frame):
 
         # Stone roads and sea lanes are the trunk network and show at every
         # altitude; dirt tracks are region-scale detail and would be a grey
-        # haze from orbit.
+        # haze from orbit. One factor (0.18) for every tier, matching
+        # _draw_roads' own uniform width regardless of tier.
         for region in wd.regions:
             if region.faction_idx < 0:
                 continue
@@ -2188,22 +2371,23 @@ class MapView(tk.Frame):
                 if not (self._cell_revealed(ax, ay) or self._cell_revealed(bx, by)):
                     continue
                 if tier == "sea":
-                    color, width = _TRADE_SEA_COLOR, 1.8
+                    color, width = _TRADE_SEA_COLOR, lw(1.8, 0.18)
                 elif tier == "stone":
-                    color, width = _STONE_ROAD_COLOR, 2.2
+                    color, width = _STONE_ROAD_COLOR, lw(2.2, 0.18)
                 else:
-                    color, width = _DIRT_ROAD_COLOR, 1.6
+                    color, width = _DIRT_ROAD_COLOR, lw(1.6, 0.18)
                 add([(ax, ay), (bx, by)], _GLOBE_RGB[color], width)
 
         for r in wd.trade_routes:
             sea = r["kind"] == "sea"
             add(r["cells"],
                 _GLOBE_RGB[_TRADE_SEA_COLOR if sea else _TRADE_LAND_COLOR],
-                1.8 if sea else 2.4, dash=2)
+                lw(1.8, 0.154) if sea else lw(2.4, 0.22), dash=2)
 
         for proj in wd.trade_route_projects:
             for seg in proj.built_segments:
-                add(seg, _GLOBE_RGB[_TRADE_ROUTE_CONSTRUCTION_COLOR], 1.8, dash=3)
+                add(seg, _GLOBE_RGB[_TRADE_ROUTE_CONSTRUCTION_COLOR],
+                    lw(1.8, 0.18), dash=3)
 
         # A route with a caravan on it is redrawn brighter on top, exactly as
         # on the flat map -- an active trade lane should be obvious from orbit.
@@ -2212,23 +2396,45 @@ class MapView(tk.Frame):
             mine = player_idx is not None and player_idx in (caravan.seller_idx,
                                                              caravan.buyer_idx)
             if caravan.kind == "sea":
-                color, width = _ACTIVE_ROUTE_SEA_COLOR, 2.2
+                color, width = _ACTIVE_ROUTE_SEA_COLOR, lw(2.2, 0.187)
             elif caravan.kind == "river":
-                color, width = _RIVER_CARAVAN_STYLE["glow"], 2.2
+                color, width = _RIVER_CARAVAN_STYLE["glow"], lw(2.2, 0.22)
             else:
-                color, width = _ACTIVE_ROUTE_LAND_COLOR, 3.0
+                color, width = _ACTIVE_ROUTE_LAND_COLOR, lw(3.0, 0.286)
             if not mine:
                 color = {"sea": _FOREIGN_SEA_CARAVAN_STYLE,
                          "river": _FOREIGN_RIVER_CARAVAN_STYLE}.get(
                              caravan.kind, _FOREIGN_CARAVAN_STYLE)["glow"]
-                width *= 0.5
+                width = max(1.0, width * 0.5)
             add(caravan.path, _GLOBE_RGB[color], width, dash=2)
 
         if self.attack_mode is not None:
             for region in self._attack_frontier:
                 for x0, y0, x1, y1 in self._region_border_segments(region):
                     out.append(([(x0, y0), (x1, y1)], _GLOBE_RGB[theme.BAD],
-                                2.6, 0))
+                                lw(2.6, 0.3, minimum=2.0), 0))
+
+        # In-progress road construction (see _draw_construction): only the
+        # portion actually built so far, same as the canvas draws it.
+        for road in wd.road_projects:
+            if len(road.built_cells) >= 2:
+                add(road.built_cells, _GLOBE_RGB[_DIRT_ROAD_COLOR], lw(1.6, 0.18), dash=2)
+
+        # Battle-outcome border flash (see _draw_flash): gold for a region
+        # gained, red for a failed attack, fading/pulsing over its lifetime.
+        if self._flash_region is not None:
+            elapsed = time.time() - self._flash_start
+            envelope = max(0.0, 1.0 - elapsed / _FLASH_DURATION)
+            pulse = abs(math.sin(elapsed * _FLASH_FREQ * math.pi))
+            fade = envelope * (0.35 + 0.65 * pulse)
+            target_255 = (_FLASH_FAIL_COLOR if self._flash_outcome == "failure"
+                         else _FLASH_COLOR)
+            base_255 = _hex_to_rgb(theme.CANVAS)
+            color = tuple((base_255[i] + (target_255[i] - base_255[i]) * fade) / 255.0
+                         for i in range(3))
+            width = lw(2.0 + 4.0 * fade, 0.18 + 0.35 * fade, minimum=2.0)
+            for x0, y0, x1, y1 in self._region_border_segments(self._flash_region):
+                out.append(([(x0, y0), (x1, y1)], color, width, 0))
         return out
 
     def _globe_markers(self, level, mscale):
@@ -2356,21 +2562,25 @@ class MapView(tk.Frame):
                         else faction_rgb(cmd.faction_idx)))
         return pins
 
-    def _globe_labels(self, level):
-        """Names and alert badges, by altitude: realms from orbit, regions at
-        region height, settlements and villages once close enough to be
-        standing over them. Same progression the flat map's three zoom levels
-        give, driven by the camera instead of by a view mode."""
+    def _map_labels(self, level, cull=None):
+        """Names and alert badges, by zoom level: realms at world view,
+        regions at region view, settlements and villages at village view.
+        Shared by the globe and the GPU flat map, same reasoning as
+        _map_lines -- this is world-state-to-label-list, not sphere-specific.
+
+        `cull`, when given, is the globe's g.visible_mask (a point-list ->
+        bool-array culling test against camera altitude/horizon) -- the flat
+        map passes None, since an orthographic GL viewport clips off-screen
+        geometry on its own for free and there is no horizon to test against."""
         wd = self.world
-        g = self.globe
         out = []
 
         def add(items, px, color, dy):
             if not items:
                 return
-            mask = g.visible_mask([pos for _, pos in items])
-            for keep, (text, pos) in zip(mask, items):
-                if keep:
+            mask = cull([pos for _, pos in items]) if cull is not None else None
+            for i, (text, pos) in enumerate(items):
+                if mask is None or mask[i]:
                     out.append((pos[0], pos[1], text, color, px, dy))
 
         if level == 0:
@@ -2418,8 +2628,9 @@ class MapView(tk.Frame):
             villages = [(v.name, v.pos) for v in wd.villages
                         if self._cell_revealed(*v.pos)]
             if villages:
-                mask = g.visible_mask([pos for _, pos in villages])
-                if int(mask.sum()) <= _VILLAGE_LABEL_LIMIT:
+                count = (int(cull([pos for _, pos in villages]).sum())
+                         if cull is not None else len(villages))
+                if count <= _VILLAGE_LABEL_LIMIT:
                     add(villages, 9.0, _GLOBE_VILLAGE_LABEL_COLOR, 10.0)
 
         # Alerts ride on the same text path rather than getting their own
@@ -2435,7 +2646,180 @@ class MapView(tk.Frame):
                      if (alerts.get(id(n)) == "critical") == critical
                      and id(n) in alerts and self._cell_revealed(*n.pos)],
                     14.0, colour, -12.0)
+
+        # Attack-target region names (see _draw_attack_targets) -- the
+        # border highlight itself is in _map_lines, this is just the label.
+        if self.attack_mode is not None and self._attack_frontier:
+            add([(r.name, (r.center[0] * wd.w, r.center[1] * wd.h))
+                 for r in self._attack_frontier],
+                12.0, _GLOBE_LABEL_COLOR, 0.0)
         return out
+
+    _SETTLE_SHAPE = {"city": SHAPE_CIRCLE, "castle": SHAPE_TRIANGLE, "town": SHAPE_SQUARE}
+
+    def _flat_markers(self, level):
+        """Everything the flat map draws as a point marker, as
+        (cell_x, cell_y, radius_world_units, (r,g,b), shape) for
+        gl_flatmap's set_markers -- the GPU flat map's equivalent of
+        _globe_markers/_globe_pins. No standing 3D pins (a "planted spire"
+        viewed by a dead-on orthographic top-down camera foreshortens to a
+        blob, so there is no benefit to the extra geometry the globe uses
+        for settlements/villages/commanders) -- shape is instead carried by
+        gl_flatmap's own marker shader (SHAPE_CIRCLE/TRIANGLE/SQUARE/
+        DIAMOND/HULL), which reproduces the canvas's city/castle/town/
+        commander/ship silhouettes directly. Sized by _marker_radius's own
+        screen-pixel-clamped rule rather than the globe's altitude-relative
+        mscale, so a marker is exactly as legible at any zoom as it already
+        is on the flat canvas.
+
+        No camera-culling here (unlike _globe_markers' visible_mask): an
+        orthographic viewport clips off-screen instances on the GPU for
+        free, and at flat-map scale (hundreds, not tens of thousands, of
+        markers) there is no reason to spend CPU time pre-filtering them."""
+        wd = self.world
+        scale = self._place[2]
+        marks = []
+
+        def px(screen_r):
+            """Screen-pixel radius -> world-unit size for set_markers: the
+            same orthographic projection that places the marker also
+            multiplies this by `scale`, so passing screen_r/scale here
+            reproduces exactly screen_r pixels on screen regardless of
+            zoom -- the constant-screen-size behaviour _marker_radius and
+            the ships/commanders/caravans' fixed "r" already give the
+            canvas."""
+            return screen_r / scale
+
+        def ring(cx, cy, screen_r):
+            marks.append((cx, cy, px(screen_r + 3), (1.0, 1.0, 1.0), SHAPE_CIRCLE))
+
+        # Settlements: city = circle, castle = triangle, town = square,
+        # matching _draw_settlements' own shape-per-kind exactly.
+        if self.zoom_faction is not None:
+            sids = [sid for sid in self.zoom_faction.meta.get("settlements", [])
+                    if self._cell_revealed(*wd.settlements[sid].pos)]
+        else:
+            sids = [s.id for s in wd.settlements if s.kind == "city"
+                    and self._cell_revealed(*s.pos)]
+        for sid in sids:
+            st = wd.settlements[sid]
+            style = _SETTLE_STYLE[st.kind]
+            r = self._marker_radius(style["base"])
+            if st is self.selected_settlement:
+                ring(st.pos[0] + 0.5, st.pos[1] + 0.5, r)
+            marks.append((st.pos[0] + 0.5, st.pos[1] + 0.5, px(r),
+                         _GLOBE_RGB[style["fill"]], self._SETTLE_SHAPE[st.kind]))
+
+        if level >= 2:
+            zf = wd.factions.index(self.zoom_faction)
+            r = self._marker_radius(_VILLAGE_STYLE["base"])
+            for v in wd.villages:
+                if v.faction_idx != zf:
+                    continue
+                if v is self.selected_village:
+                    ring(v.pos[0] + 0.5, v.pos[1] + 0.5, r)
+                marks.append((v.pos[0] + 0.5, v.pos[1] + 0.5, px(r),
+                             _GLOBE_RGB[_VILLAGE_STYLE["fill"]], SHAPE_CIRCLE))
+
+        # Commanders: diamond, player's own kept orchid.
+        cr = _COMMANDER_STYLE["r"]
+        for cmd in wd.commanders:
+            mine = cmd.faction_idx == wd.player_faction_idx
+            if mine:
+                color = _GLOBE_RGB[_COMMANDER_STYLE["fill"]]
+            else:
+                if not self._cell_revealed(*self._display_cell(cmd)):
+                    continue
+                color = _GLOBE_RGB[wd.factions[cmd.faction_idx].color]
+            cx, cy = self._display_pos(cmd)
+            if cmd is self.selected_commander:
+                ring(cx + 0.5, cy + 0.5, cr)
+            marks.append((cx + 0.5, cy + 0.5, px(cr), color, SHAPE_DIAMOND))
+
+        # Ships not currently carrying a commander (one being sailed is
+        # already represented by its Commander marker) -- hull shape.
+        aboard_ids = {cmd.aboard_ship_id for cmd in wd.commanders
+                     if cmd.aboard_ship_id is not None}
+        sr = _SHIP_STYLE["r"]
+        for ship in wd.ships:
+            if ship.id in aboard_ids:
+                continue
+            sx, sy = self._display_pos(ship)
+            marks.append((sx + 0.5, sy + 0.5, px(sr), _GLOBE_RGB[_SHIP_STYLE["fill"]],
+                         SHAPE_HULL))
+
+        # Trade caravans, yours or foreign, land/sea/river.
+        for caravan in wd.trade_caravans:
+            if not self._cell_revealed(*self._display_cell(caravan)):
+                continue
+            style = self._caravan_style(caravan)
+            cx, cy = self._display_pos(caravan)
+            marks.append((cx + 0.5, cy + 0.5, px(style["r"]), _GLOBE_RGB[style["fill"]],
+                         SHAPE_CIRCLE))
+
+        # Settlement placement hint (see _score_placement_hint) -- advisory
+        # gold dots over a region's best-scoring cells while a City/Town/
+        # Castle is armed to place.
+        if self.building_mode is not None and self._placement_hint_cells:
+            for x, y in self._placement_hint_cells:
+                marks.append((x + 0.5, y + 0.5, px(4.0), _GLOBE_RGB["#ffec78"], SHAPE_CIRCLE))
+
+        # In-progress settlement construction sites (see _draw_construction).
+        for project in wd.settlement_projects:
+            marks.append((project.pos[0] + 0.5, project.pos[1] + 0.5, px(4.0),
+                         _GLOBE_RGB["#f2e9c9"], SHAPE_CIRCLE))
+
+        # Forest/mountain terrain-symbol glyphs (see _draw_terrain_symbols):
+        # same jittered per-cell sampling, screen-spacing formula and
+        # _TERRAIN_SYMBOL_MAX_COUNT cap, just emitted as small triangle
+        # markers instead of vector polygons -- a GPU instance is cheap
+        # regardless of count, so none of _draw_terrain_symbols' own
+        # cost-driven tuning is a concern here, only its visual density.
+        if self.mode == "political":
+            cw, ch = self._canvas_wh
+            vx0, vy0, _ = self._place
+            vx1, vy1 = vx0 + cw / scale, vy0 + ch / scale
+            bx0, bx1 = int(math.floor(vx0)), int(math.ceil(vx1))
+            by0 = max(0, int(math.floor(vy0)))
+            by1 = min(wd.h, int(math.ceil(vy1)))
+            spacing = max(_TERRAIN_SYMBOL_MIN_WORLD_SPACING,
+                         round(_TERRAIN_SYMBOL_SCREEN_SPACING / max(scale, 0.01)))
+            visible_area = max(1, (bx1 - bx0) * (by1 - by0))
+            area_spacing = math.ceil(math.sqrt(visible_area / _TERRAIN_SYMBOL_MAX_COUNT))
+            spacing = max(spacing, area_spacing)
+            sym_r = max(2.5, scale * spacing * 0.22)
+            gy0 = by0 - by0 % spacing
+            gx0 = bx0 - bx0 % spacing
+            forest_rgb = _GLOBE_RGB[_FOREST_SYMBOL_FILL]
+            mountain_rgb = _GLOBE_RGB[_MOUNTAIN_SYMBOL_FILL]
+            for gy in range(gy0, by1, spacing):
+                for gx in range(gx0, bx1, spacing):
+                    wx = gx % wd.w
+                    if (wd.owner[gy][wx] == OCEAN or (wx, gy) in wd.river_cells
+                            or (wx, gy) in wd.lake_cells):
+                        continue
+                    if not self._cell_revealed(wx, gy):
+                        continue
+                    biome = wd.biome_grid[gy][wx]
+                    if biome not in ("forest", "mountain"):
+                        continue
+                    jx = self._terrain_jitter(wx, gy, 1) * spacing * 0.7
+                    jy = self._terrain_jitter(wx, gy, 2) * spacing * 0.7
+                    color = forest_rgb if biome == "forest" else mountain_rgb
+                    marks.append((gx + 0.5 + jx, gy + 0.5 + jy, px(sym_r), color,
+                                 SHAPE_TRIANGLE))
+        return marks
+
+    def _flat_labels_extra(self):
+        """Construction-site kind/turns-left captions -- the one bit of
+        _draw_construction's text that _map_labels has no natural home for
+        (it isn't a name, alert, or region caption). Concatenate with
+        _map_labels(level)'s own output when feeding gl_flatmap.set_labels."""
+        wd = self.world
+        return [(project.pos[0] + 0.5, project.pos[1] + 0.5,
+                f"{project.kind[0].upper()}·{project.turns_left}t",
+                (0.95, 0.91, 0.79), 7.0, 10.0)
+                for project in wd.settlement_projects]
 
     def _caravan_style(self, caravan):
         """The marker style for a caravan -- yours or somebody else's, by
@@ -2803,16 +3187,132 @@ class MapView(tk.Frame):
         # them half-built -- the flicker/white-flash/vanishing-panel jank when
         # mashing the button or holding E. Drop any End Turn while one is still
         # settling; a short cooldown after each keeps the cadence civilized.
+        # Held for the WHOLE background turn now, not just the synchronous
+        # part -- see _run_end_turn.
         if self._end_turn_busy:
             return
         self._end_turn_busy = True
         try:
             self._run_end_turn()
+        except Exception:
+            # Only the synchronous setup below (snapshots, cancelling other
+            # animations) can raise here -- advance_turn itself runs on the
+            # worker thread and is never allowed to propagate past
+            # _turn_worker. A failure this early never got as far as
+            # spawning that thread, so nothing will ever clear the guard on
+            # its own; release it here instead of wedging End Turn forever.
+            self._end_turn_busy = False
+            raise
+
+    def _run_end_turn(self):
+        """Kick off a turn and return immediately -- advance_turn() itself
+        runs on a worker thread (see _turn_worker) so its ~300-500ms cost on
+        a late-game world stops freezing the window on every single End
+        Turn. _turn_drain picks the result back up on the main thread and
+        runs _finish_end_turn, which is everything this function used to do
+        synchronously after on_end_turn() returned.
+
+        Nothing else may touch `world` while the worker owns it: the busy
+        overlay (raised below) absorbs every click aimed at the canvas or
+        either side panel, App gates the Escape/mode-toggle hotkeys on
+        `_end_turn_busy`, and render() no-ops while it's set -- see that
+        function and app.py's _on_escape/_on_toggle_mode_key."""
+        before = self._current_resource_snapshot()
+        prev_year = resources.current_year(self.world.turn)
+        self._stop_move_animation()
+        # Camera-zoom easing and the battle-outcome border flash both call
+        # render() on their own timer, independent of anything the player
+        # does -- cancelled here so nothing is left mid-animation for the
+        # whole processing window (render()'s guard would no-op them
+        # regardless, this just avoids the pointless reschedule-and-skip).
+        self._cancel_animation()
+        if self._flash_id is not None:
+            self.after_cancel(self._flash_id)
+            self._flash_id = None
+            self._flash_region = None
+        movement = self._movement_snapshot()
+        self._turn_pending = (before, prev_year, movement)
+        self._turn_token += 1
+        self._turn_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._turn_overlay.tkraise()
+        self._turn_in_flight = True
+        threading.Thread(target=self._turn_worker, args=(self._turn_token,),
+                         daemon=True).start()
+
+    def _turn_worker(self, token):
+        """Background thread: advance_turn and nothing else. No Tk call of
+        any kind is safe here -- see _turn_drain for why, and app.py's
+        _on_faction_eliminated for the one indirect path (bus.emit) that
+        needed guarding because of this."""
+        try:
+            self.on_end_turn()
+            self._turn_queue.put((token, None))
+        except Exception as exc:
+            self._turn_queue.put((token, exc))
+
+    def _turn_drain(self):
+        """Polls for a finished background turn, same idiom as
+        NewGameView's worker/queue/after(120, ...) loop. Runs for the whole
+        life of the view, not just while a turn is in flight -- cheap when
+        the queue is empty, and simpler than starting/stopping it per turn."""
+        try:
+            while True:
+                try:
+                    token, exc = self._turn_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if token != self._turn_token:
+                    continue    # superseded result -- shouldn't happen given
+                                # _end_turn_busy, but never trust a stale one
+                # The worker thread is done touching `world` the moment its
+                # result is on the queue (the put happens after on_end_turn()
+                # returns) -- clear this before _finish_end_turn so its own
+                # refresh()/render() calls aren't caught by render()'s guard.
+                self._turn_in_flight = False
+                self._finish_end_turn(exc)
         finally:
+            self.after(120, self._turn_drain)
+
+    def _finish_end_turn(self, exc):
+        """Back on the main thread: everything _run_end_turn used to do
+        after on_end_turn() returned, plus lowering the busy overlay and
+        releasing the guard. Runs inside try/finally for the same reason
+        _on_end_turn's setup half does -- a failure here must still release
+        the guard rather than wedging End Turn forever."""
+        self._turn_overlay.place_forget()
+        try:
+            if exc is not None:
+                raise exc
+            before, prev_year, movement = self._turn_pending
+            after = self._current_resource_snapshot()
+            self._resource_deltas = {r: after.get(r, 0) - before.get(r, 0)
+                                      for r in set(before) | set(after)}
+            self._report_trade_events()
+            self._report_regional_trade_events()
+            self._log_trade_events()
+
+            new_year = resources.current_year(self.world.turn)
+            if new_year != prev_year:
+                year_deltas = {r: after.get(r, 0) - self._year_start_snapshot.get(r, 0)
+                              for r in set(after) | set(self._year_start_snapshot)}
+                pop_now = self._current_population_total()
+                pop_delta = pop_now - self._year_start_population
+                self._show_year_banner(new_year, year_deltas, pop_delta)
+                self._year_start_snapshot = after
+                self._year_start_population = pop_now
+
+            self.refresh()
+            # After refresh: refresh() renders, and the first animated frame has to
+            # be the one that lands on screen or movers flash at their destination
+            # before setting off back to where they came from.
+            self._start_move_animation(self._movement_tracks(movement))
+            if self.on_turn_settled is not None:
+                self.on_turn_settled()
+        finally:
+            self._turn_pending = None
             # Force the freshly-rebuilt panels to actually paint before we
             # allow another End Turn (so there's never a visible half-built
-            # frame), then hold the guard for a short cooldown. In `finally`
-            # so a rare mid-turn error can never wedge End Turn permanently.
+            # frame), then hold the guard for a short cooldown.
             self.update_idletasks()
             # The guard is held for the whole movement animation as well as the
             # cooldown: ending another turn mid-slide would animate the next
@@ -2821,35 +3321,6 @@ class MapView(tk.Frame):
             if self._move_anim is not None:
                 delay = max(delay, int(_MOVE_ANIM_SECONDS * 1000) + 40)
             self.after(delay, self._clear_end_turn_busy)
-
-    def _run_end_turn(self):
-        before = self._current_resource_snapshot()
-        prev_year = resources.current_year(self.world.turn)
-        self._stop_move_animation()
-        movement = self._movement_snapshot()
-        self.on_end_turn()
-        after = self._current_resource_snapshot()
-        self._resource_deltas = {r: after.get(r, 0) - before.get(r, 0)
-                                  for r in set(before) | set(after)}
-        self._report_trade_events()
-        self._report_regional_trade_events()
-        self._log_trade_events()
-
-        new_year = resources.current_year(self.world.turn)
-        if new_year != prev_year:
-            year_deltas = {r: after.get(r, 0) - self._year_start_snapshot.get(r, 0)
-                          for r in set(after) | set(self._year_start_snapshot)}
-            pop_now = self._current_population_total()
-            pop_delta = pop_now - self._year_start_population
-            self._show_year_banner(new_year, year_deltas, pop_delta)
-            self._year_start_snapshot = after
-            self._year_start_population = pop_now
-
-        self.refresh()
-        # After refresh: refresh() renders, and the first animated frame has to
-        # be the one that lands on screen or movers flash at their destination
-        # before setting off back to where they came from.
-        self._start_move_animation(self._movement_tracks(movement))
 
     def _report_regional_trade_events(self):
         """Same idea as _report_trade_events, for Phase 11's domestic
@@ -5006,12 +5477,32 @@ class MapView(tk.Frame):
         return segments
 
     def render(self):
+        if self._turn_in_flight:
+            # A background turn currently owns `world` (see _run_end_turn) --
+            # nothing on the main thread may read it until the worker hands
+            # it back. The only callers that can reach render() during this
+            # window are the camera-zoom and battle-flash timers, which fire
+            # on their own schedule regardless of user input; both are
+            # cancelled when the turn starts, but this is the actual
+            # correctness guarantee, not that cancellation.
+            return
         if self.globe_active and self.globe is not None:
             if self.globe.failed:
                 self._set_globe(False)      # GL died -> back to the flat map
             else:
                 self._sync_globe()
                 return
+        # GPU flat map: not a player-facing toggle like the globe -- swapped
+        # in for the canvas automatically whenever GL is available, and
+        # dynamically fallen back from (not just checked once at startup)
+        # the same way the globe falls back to the flat map above.
+        if self._ensure_flatgl():
+            if not self._use_flatgl:
+                self._activate_flatgl()
+            self._sync_flatgl()
+            return
+        if self._use_flatgl:
+            self._deactivate_flatgl()
         c = self.canvas
         c.delete("all")
         cw, ch = c.winfo_width(), c.winfo_height()
