@@ -23,6 +23,7 @@ from app.world.world_map import WorldMap
 from app.world import wrap
 from app.world import noise
 from app.world import currents
+from app.world import plates
 from app.world.lexicon import (SPECIES, make_faction_namer, make_region_namer,
                                make_ruler_namer, make_settlement_namer,
                                ruler_title)
@@ -338,10 +339,10 @@ _WATER_FALLOFF = 13.0     # cells; how fast the water bonus decays inland
 # moisture, region/country border cost) needs to be genuinely PERIODIC in x
 # with period `width`, or scrolling the camera across the seam would show a
 # visible discontinuity (an uncorrelated noise value jump) even in the
-# ocean cells that mask the coastline seam (see _pick_continent_centers'
-# margin, which keeps LAND off the seam but doesn't touch the underlying
-# noise field cells themselves, which still get sampled/colored). y never
-# wraps, so y-hashing is untouched.
+# ocean cells that mask the coastline seam (see generate_world's own
+# seam_margin/fade, which keeps LAND off the seam but doesn't touch the
+# underlying noise field cells themselves, which still get sampled/colored).
+# y never wraps, so y-hashing is untouched.
 def _vhash(ix, iy, seed, period_x=None):
     if period_x is not None:
         ix = ix % period_x
@@ -1663,144 +1664,6 @@ class World:
         self.player_faction_idx = None  # index into self.factions, or None
 
 
-def _pick_continent_centers(rng, width, height, n):
-    """`n` continents (4-7, chosen by generate_world -- see its own
-    `_target_n`, drawn once and held fixed across any retries so a retry
-    can't quietly settle for fewer continents than was actually asked for),
-    each a cluster of one or more elliptical blobs, spaced far enough apart
-    that real open ocean forms between them instead of one landmass
-    touching every edge. Returns a flat list of blobs —
-    (cx, cy, radius_x, radius_y, angle) — every one of which shapes the
-    height-field falloff exactly like another continent's blob would; the
-    caller doesn't need to know which blobs share a parent.
-
-    Each continent gets a different band of *distance from the equator*
-    (0 = map's vertical middle/warmest, 1 = pole/coldest — matches
-    classify_climate's latitude_temp = 1 - dist exactly), picked
-    independently for a random north/south side each time. That's
-    deliberate, not just "spread them across different rows": latitude_temp
-    is symmetric around the equator, so two continents merely in different
-    halves of the map (say y=0.25 and y=0.75) sit at the *same* distance
-    from it and would get identical climates. Banding by distance instead
-    guarantees each continent lands at a meaningfully different temperature.
-
-    Two things used to make every continent read as the same shape no
-    matter how the coastline noise warped its edge: every continent shared
-    one fixed ellipse size, and that ellipse was always wide east-west with
-    no rotation. Both are now randomized per continent — independent x/y
-    scale (squat and round through long and thin) and a full-range rotation
-    angle, so the long axis can point anywhere. On top of that, each
-    continent gets 0-3 extra "lobe" blobs clustered around its primary body
-    — their own size, distance and heading — which is what actually
-    produces forks, trailing arms and lopsided coastlines instead of a
-    single ellipse with a rippled edge. The primary blob's own size still
-    sets the placement/separation math and is sized off the map's full
-    width, so a continent stays big enough that the height noise can't
-    easily bridge it to its neighbor; lobes cluster close enough to their
-    parent that they don't upset that spacing in practice, and the existing
-    _has_multiple_landmasses retry catches the rare seed where they do."""
-    # base_radius_x held constant (0.16 * width) through n=3, the range this
-    # was tuned at; above that, more continents have to fit in the same
-    # map, so it shrinks -- roughly 0.16 at n=3 down to ~0.07 at n=7 -- or
-    # every additional continent past 3 would mostly just make placement
-    # retry into the crowded/overlapping fallback instead of actually
-    # producing more separate landmasses.
-    base_radius_x = width * 0.16 * min(1.0, 3.0 / n)
-
-    # Each continent is assigned a hemisphere (alternating for variety) AND
-    # a distance-from-equator SLOT within that hemisphere's OWN band count,
-    # not a slice of one shared 0..1 walk split across both hemispheres.
-    # That distinction matters once n gets past 3: splitting a single 0..1
-    # range across n sequential, alternating-side bands means bands 1..n-2
-    # all land in a thin strip hugging the equator on alternating sides --
-    # nominally "opposite hemispheres" but barely separated in actual y,
-    # since none of them ever reach far toward either pole. Giving each
-    # hemisphere its own independent 0..1 spread (roughly n/2 slots each)
-    # is what actually spreads continents from equator to pole on BOTH
-    # sides, which is what the height-per-band formula below assumes.
-    north_count = (n + 1) // 2
-    south_count = n // 2
-    base_radius_y = height * 0.30 / max(north_count, south_count, 1)
-
-    placed = []   # (x, y, radius_x, radius_y) of each continent's PRIMARY
-                  # blob only -- what the spacing/separation check uses
-    blobs = []    # every blob (primary + lobes) that actually shapes the
-                  # terrain -- what generate_world's falloff loop consumes
-
-    slot_by_side = {1.0: 0, -1.0: 0}
-    for band in range(n):
-        # Alternate north/south by band (not randomly) so adjacent bands
-        # land on opposite sides of the equator, maximizing their actual
-        # separation instead of risking two bands both landing north and
-        # crowding each other (the best-of-K scoring below still finds the
-        # least-bad spot either way, but this cuts down how often it has to).
-        side = 1.0 if band % 2 == 0 else -1.0
-        side_count = north_count if side > 0 else south_count
-        slot = slot_by_side[side]
-        slot_by_side[side] += 1
-        d_lo = slot / side_count
-        d_hi = (slot + 1) / side_count
-
-        radius_x = base_radius_x * rng.uniform(0.70, 1.35)
-        radius_y = base_radius_y * rng.uniform(0.70, 1.35)
-        margin_x = min(radius_x * 1.15, width * 0.35)
-        margin_y = radius_y * 1.1
-
-        # Best-of-K candidate placement, not "accept the first spot that
-        # clears a threshold, or give up and place blind": with only 2-3
-        # continents there was so much free room that a random spot cleared
-        # min_norm_dist almost immediately, so a plain accept-or-retry loop
-        # never really had to work for it. At n up to 7 the map is
-        # genuinely crowded well before the last couple of continents place,
-        # and a threshold-and-retry approach degrades catastrophically right
-        # when it matters most: once every candidate in 500 tries fails the
-        # bar, it gives up and places completely blind, ignoring every
-        # already-placed continent entirely. Scoring every candidate by its
-        # actual minimum normalized distance to what's already down, and
-        # keeping the best one seen, always returns the least-crowded spot
-        # this band could find instead of an all-or-nothing threshold.
-        best_score, best_xy = -1.0, None
-        for _ in range(60):
-            dist = rng.uniform(d_lo, d_hi)          # 0=equator, 1=pole
-            y = (0.5 + side * dist / 2.0) * height
-            y = max(margin_y, min(height - margin_y, y))
-            x = rng.uniform(margin_x, width - margin_x)
-            if not placed:
-                best_xy = (x, y)
-                break
-            # Wrap-aware even though margin_x already keeps every center's
-            # own falloff off the seam (so two continents can never
-            # actually touch through it): this still stops two centers
-            # from being scored "close" purely because the seam happens to
-            # be the short way around between them, which a flat (x-ox)
-            # distance alone wouldn't catch. Averaged against each already-
-            # placed continent's OWN radius now that sizes vary, so a big
-            # continent and a small one still get a sensible amount of
-            # space between them either way round.
-            score = min((wrap.dx_wrap(ox, x, width) / ((radius_x + orx) / 2)) ** 2
-                        + ((y - oy) / ((radius_y + ory) / 2)) ** 2
-                        for ox, oy, orx, ory in placed)
-            if score > best_score:
-                best_score, best_xy = score, (x, y)
-        x, y = best_xy
-        placed.append((x, y, radius_x, radius_y))
-
-        angle = rng.uniform(0.0, math.pi)   # ellipse is symmetric past pi
-        blobs.append((x, y, radius_x, radius_y, angle))
-
-        for _ in range(rng.randint(0, 3)):
-            lobe_dir = rng.uniform(0.0, 2 * math.pi)
-            lobe_dist = rng.uniform(0.35, 0.95)
-            lx = x + math.cos(lobe_dir) * radius_x * lobe_dist
-            ly = y + math.sin(lobe_dir) * radius_y * lobe_dist
-            lobe_rx = radius_x * rng.uniform(0.35, 0.75)
-            lobe_ry = radius_y * rng.uniform(0.35, 0.75)
-            lobe_angle = rng.uniform(0.0, math.pi)
-            blobs.append((lx, ly, lobe_rx, lobe_ry, lobe_angle))
-
-    return blobs
-
-
 def _has_multiple_landmasses(land, width, height, land_cells, min_count=2):
     """True if the land mask splits into at least `min_count` *substantial*
     (>=3% of total land) connected components — real separate continents,
@@ -1899,9 +1762,33 @@ def _capital_has_nearby_farmland(world, x, y, mseed, land_set, coast_d):
     return total > 0 and hits / total >= _CAPITAL_MIN_FOOD_CELL_FRACTION
 
 
+# How much the fine-detail noise layer moves the plate-driven height field,
+# relative to the noise's own natural spread once recentered on 0. A starting
+# point, not measured yet -- too high and it drowns the plate structure back
+# into the old "shape is mostly noise" look this rework exists to get away
+# from; too low and coastlines lose the local irregularity (fjords, small
+# bays) that kept the OLD system from looking like smooth ellipses. Tune
+# against dev/coastline_metrics.py's irregularity number.
+DETAIL_AMPLITUDE = 0.6
+
+
+def _pick_n_plates(rng, width, height):
+    """How many plates to grow for a map this size. Scales with map AREA
+    (not width alone) since plate territory is a 2D thing -- a Large map has
+    ~2.8x Standard's cells, and one flat plate count for every size either
+    looks sparse on Large or overcrowded on Small. Starting point (see
+    HANDOFF.md §9): the actual plate-count-to-continent-count relationship
+    is an open empirical question, tune this against dev/coastline_metrics.py
+    before trusting it, not by eye."""
+    area_ratio = (width * height) / (1100 * 660)
+    base = 11 * math.sqrt(area_ratio)
+    return max(6, round(base * rng.uniform(0.85, 1.15)))
+
+
 def generate_world(width=1100, height=660, seed=None, n_factions=14,
                     player_species=None, player_name=None, player_color=None,
-                    player_ruler=None, _attempt=0, _target_n=None):
+                    player_ruler=None, _attempt=0, _target_n=None,
+                    _n_plates=None):
     """Generate a world. If `player_species`/`player_name` are given, faction
     0 is forced to that species and given that exact name (instead of a
     random roll) and `world.player_faction_idx` is set to 0, so a "New Game"
@@ -1911,99 +1798,67 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     a chosen colour so the political map stays readable.
 
     `_attempt` is internal — caps the retries below so a run of unlucky
-    seeds can never recurse forever. `_target_n` is also internal: the
-    continent count (see _pick_continent_centers) is drawn once, on the
-    first attempt, and then held fixed across any retries -- otherwise a
-    retry would re-roll it along with everything else, and a seed that
-    asked for 7 continents could quietly settle for whatever lower count
-    first came up clean instead of actually retrying toward 7."""
+    seeds can never recurse forever. `_target_n` and `_n_plates` are also
+    internal, and drawn once on the first attempt then held fixed across any
+    retries -- otherwise a retry would re-roll them along with everything
+    else, and a seed that asked for a given landmass/plate count could
+    quietly settle for whatever lower count first came up clean instead of
+    actually retrying toward it. `_target_n` is now ONLY the retry bar ("how
+    many separate landmasses is acceptable") -- plate count and the
+    continent count that results from it are no longer the same knob (see
+    HANDOFF.md §9); `_n_plates` is the one that actually shapes the world."""
     rng = random.Random(seed)
     nseed = rng.randint(0, 2 ** 31 - 1)
     if _target_n is None:
         _target_n = rng.randint(4, 7)
+    if _n_plates is None:
+        _n_plates = _pick_n_plates(rng, width, height)
     world = World(width, height)
     world.seed = nseed if seed is None else seed
 
-    # 1. height field: several octaves of DOMAIN-WARPED value noise + falloff
-    #    from the *nearest* of 2-3 continent centers (see
-    #    _pick_continent_centers), so the map is multiple separate landmasses
-    #    ringed by ocean rather than one blob glued to the middle of the map.
-    #
-    #    Domain warping is what fixes the "sponge" look a previous version of
-    #    this shipped with: plain value noise is ISOTROPIC (no preferred
-    #    direction at any scale), so its zero-crossings are smooth round
-    #    blobs, and thresholding smooth round blobs against a smooth
-    #    elliptical falloff produces continents that are wide, flat-edged
-    #    ellipses with a small ripple on top -- no fjords, no peninsulas,
-    #    nothing a coastline is not physically capable of being. Warping the
-    #    SAMPLE COORDINATES by a separate, lower-frequency noise field before
-    #    evaluating the height octaves breaks that isotropy: the same octaves
-    #    now trace twisted, elongated shapes instead of round ones. Applied to
-    #    the octaves only, never to the falloff term below, so a continent
-    #    still lands roughly where its center was placed (climate banding in
-    #    _pick_continent_centers depends on that) -- only its outline warps.
+    # 1. height field: PLATE-DRIVEN (see app/world/plates.py) -- this is what
+    #    replaced _pick_continent_centers + a falloff from the nearest of a
+    #    handful of placed ellipses. Continental plates get a land-biased
+    #    base elevation, oceanic plates a sea-biased one, and every plate
+    #    boundary stamps a falloff bump or dip of its own sign and reach:
+    #    mountain ranges at collisions, rifts at divergent continental
+    #    boundaries, island-arc/ridge bumps elsewhere, plus hotspot island
+    #    chains -- so a coastline or a mountain range now has an actual
+    #    geological reason to be where it is, rather than continents
+    #    "poofing up out of nowhere" (the user's own framing when this rework
+    #    was first raised).
+    plate_seed = rng.randint(0, 2 ** 31 - 1)
+    pl = plates.generate_plates(width, height, seed=plate_seed,
+                                n_plates=_n_plates)
+    v = plates.height_contribution(pl)
+
+    # Fine-detail noise on top -- same domain-warped octaves the old blob
+    # system used for its own texture layer, kept for exactly the reason it
+    # was built: plain value noise is ISOTROPIC (no preferred direction at
+    # any scale), so warping the SAMPLE COORDINATES by a separate,
+    # lower-frequency noise field is what turns smooth round texture into
+    # twisted, elongated local detail (small bays, minor irregularities)
+    # instead of a ripple on an otherwise perfect edge. Amplitude scaled well
+    # down from the old system's, where this noise WAS the primary shape --
+    # here the plate structure already supplies that, and detail noise only
+    # needs to add local texture on top of it without erasing the geology.
     octaves = [(0.028, 1.0), (0.060, 0.5), (0.130, 0.25), (0.260, 0.07)]
     height_octaves = _periodic_octaves(width, octaves)
-    blobs = _pick_continent_centers(rng, width, height, _target_n)
-
-    # Warp field: two octaves each for x and y, at a wavelength comparable to
-    # the coarsest height octave so it bends whole stretches of coastline
-    # rather than just adding another texture layer. Independent seeds for
-    # warp_x vs warp_y -- sharing one would correlate them into a uniform
-    # shear (everything leans the same way) instead of genuine twisting.
     warp_octaves_spec = [(0.018, 1.0), (0.040, 0.22)]
     warp_octaves = _periodic_octaves(width, warp_octaves_spec)
-    # Amplitude in CELLS, not a fraction of noise amplitude: ~5% of map width
-    # is enough to turn an ellipse into a recognizably irregular coastline
-    # without dissolving the "each continent stays its own landmass"
-    # structure the rest of the pipeline (climate, capital spacing) counts
-    # on -- true at n=3, the range this was tuned at, but a FIXED map-wide
-    # amplitude stops scaling down with continent size the way radius
-    # already does (_pick_continent_centers' own base_radius_x), so at
-    # n=7 (continents under half the n=3 size) this alone was enough to
-    # reliably bridge neighbors into one blob. Same min(1.0, 3.0/n) shrink
-    # as base_radius_x, so warp intensity stays proportional to continent
-    # size instead of overwhelming it.
-    warp_amp = width * 0.05 * min(1.0, 3.0 / _target_n)
+    warp_amp = width * 0.05
     warp_x = (noise.fbm_grid(width, height, nseed + 101, warp_octaves)
               - 0.5) * 2.0 * warp_amp
     warp_y = (noise.fbm_grid(width, height, nseed + 202, warp_octaves)
               - 0.5) * 2.0 * warp_amp
+    detail = noise.fbm_grid(width, height, nseed, height_octaves,
+                            warp_x=warp_x, warp_y=warp_y)
+    # Detail noise as generated is centered around ~0.5*sum(amps); recenter
+    # to 0 so it adds texture symmetrically rather than uniformly raising
+    # the whole field (which would just shift sea_level, not add texture).
+    v = v + DETAIL_AMPLITUDE * (detail - detail.mean())
 
-    v = noise.fbm_grid(width, height, nseed, height_octaves,
-                       warp_x=warp_x, warp_y=warp_y)
-
-    # Falloff from the nearest blob (a continent's primary body or one of its
-    # lobes -- see _pick_continent_centers) -- wrap-aware (see the note this
-    # used to carry: two blobs near opposite edges of the map must compute
-    # comparable "distance to land" through the seam, or ocean depth shading
-    # shows a visible discontinuity at x=0/width right where the wrap makes
-    # it a real seam rather than a map edge nobody sees both sides of at
-    # once). Each blob now carries its own size AND rotation, so the wrap-
-    # aware x/y deltas are rotated into the blob's own local frame before
-    # being weighted by its (possibly very different from its neighbors')
-    # radii -- previously every blob shared one axis-aligned ellipse, which
-    # is exactly what made every continent read as the same shape.
     xs = np.arange(width, dtype=np.float64)
-    ys = np.arange(height, dtype=np.float64).reshape(-1, 1)
-    best_d2 = None
-    for ccx, ccy, brx, bry, bangle in blobs:
-        ddx = ((xs - ccx + width / 2) % width) - width / 2
-        ddy = ys - ccy
-        ca, sa = math.cos(bangle), math.sin(bangle)
-        lx = ddx * ca + ddy * sa
-        ly = -ddx * sa + ddy * ca
-        d2 = lx * lx / (brx * brx) + ly * ly / (bry * bry)
-        best_d2 = d2 if best_d2 is None else np.minimum(best_d2, d2)
-    # Softened from a flat 0.85x: at that strength the falloff so dominated
-    # the region right around a continent's nominal edge that the (now
-    # warped) noise barely got a vote in where the coast actually fell,
-    # which was the other half of the sponge look -- an ellipse with ripples,
-    # not a noise-shaped landmass. 0.55 lets noise decide the boundary in the
-    # zone that matters (d2 near 1) while still pushing cells far past any
-    # continent firmly underwater, so landmasses stay separated.
-    v = v - 0.55 * best_d2
-
     seam_margin = max(6, round(width * 0.03))
     seam_d = np.minimum(xs, width - xs)
     fade = np.clip(seam_d / seam_margin, 0.0, 1.0)
@@ -2027,24 +1882,29 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
         return generate_world(width, height, rng.random(), n_factions,
                               player_species, player_name, player_color,
                               player_ruler, _attempt=_attempt + 1,
-                              _target_n=_target_n)
+                              _target_n=_target_n, _n_plates=_n_plates)
     # Tolerate one incidental merge (_target_n - 1) rather than demanding
     # the full requested count survive noise-bridging every single time --
-    # with up to 7 continents landing fairly close together, a strict "all
-    # of them" bar would retry far more often than a real geological map
-    # would ever need to look "wrong".
-    if (land_cells and _attempt < 6
+    # a strict "all of them" bar would retry far more often than a real
+    # geological map would ever need to look "wrong". Capped higher than the
+    # "no land at all" check above (12 vs 6): that one is an extremely rare
+    # degenerate seed, but continental plates fully fusing into one
+    # supercontinent was observed for real during Phase 2 measurement (a
+    # plain "no land" retry cap of 6 exhausted itself on one seed and
+    # returned a single-landmass world) -- worth the extra ~15-20s/attempt
+    # on an unlucky seed rather than shipping a world with no separate
+    # continents at all.
+    if (land_cells and _attempt < 12
             and not _has_multiple_landmasses(land, width, height, land_cells,
                                              min_count=max(2, _target_n - 1))):
-        # too many of the intended continents got noise-bridged together --
-        # see _pick_continent_centers/_has_multiple_landmasses -- retry with
-        # a fresh layout (same _target_n, so a retry can't quietly settle
-        # for fewer continents than actually asked for) rather than
-        # accepting a badly-collapsed one.
+        # too many of the intended landmasses got bridged together -- retry
+        # with a fresh plate layout (same _target_n/_n_plates, so a retry
+        # can't quietly settle for fewer than actually asked for) rather
+        # than accepting a badly-collapsed one.
         return generate_world(width, height, rng.random(), n_factions,
                               player_species, player_name, player_color,
                               player_ruler, _attempt=_attempt + 1,
-                              _target_n=_target_n)
+                              _target_n=_target_n, _n_plates=_n_plates)
 
     # 1b. ocean currents, and the coastline they carve. Run only once the
     #     pass-0 layout above has already passed the sanity checks (empty

@@ -26,14 +26,19 @@ reliably produce 6-7 real, separate landmasses instead of "constantly mostly
 2", cut river/lake density, and fixed a movement-animation timing bug.
 Everything is released and the working tree is clean.
 
-**In progress: tectonic-plate-driven worldgen.** Phase 1 (plates + boundary
-classification, no height-field integration) is built and validated —
-`app/world/plates.py`, `dev/plate_shot.py`, `dev/test_plates.py`, all passing,
-**zero call sites from anywhere else in `app/`** (confirmed by grep before
-committing) — so the shipping game is completely unaffected so far. All five
-open questions from the original handoff are answered. See **§9** for the
-full state: what's built, what the answers were, and what Phase 2 (height
-integration) still needs.
+**In progress: tectonic-plate-driven worldgen — Phase 2 is now WIRED IN and
+LIVE.** `generate_world` builds its height field from `app/world/plates.py`
+now, not the old blob system (which is deleted, not just unused). This is
+**NOT RELEASED** and not on any tag yet, but it is the code path every new
+world in this working tree actually goes through — the "zero call sites"
+safety net from Phase 1 no longer applies. Full regression suite + a fresh
+14-faction/100-turn simulation both run clean. Land% lands exactly on the
+40% target every time; landmass count runs higher than the old system's
+tuned 6-7 (currently ~10 on average, down from ~11.5 before an in-session
+tuning pass, not fully converged); mountain ranges visually confirmed as
+real connected curves, not scattered blobs; river/lake density measurably
+shifted from the `v0.3.6_1` baseline and has not yet been re-tuned. See
+**§9** for the full state, what was measured, and what's still open.
 
 **The one thing to know before touching anything else:** the signature units are
 working and legible but **not balanced**, and the release notes say so out loud.
@@ -409,132 +414,141 @@ It generates a real (Small) world, so it's the slowest harness in `dev/`.
 
 ---
 
-## 9. Tectonic-plate-driven worldgen — Phase 1 done, Phase 2 not started
+## 9. Tectonic-plate-driven worldgen — Phase 2 wired in, NOT RELEASED, NOT fully tuned
 
-Replacing "placed elliptical blobs + noise" (the current continent system,
-tuned to its likely ceiling in `v0.3.6_1`) with plates that give geology an
-actual reason: mountain ranges at collisions, rifts at divergent boundaries,
-island chains from hotspots. The user's own framing when this was first
-raised: continents currently "poof up out of nowhere."
+Replaced "placed elliptical blobs + noise" (the old continent system) with a
+plate model that gives geology an actual reason: mountain ranges at
+collisions, rifts at divergent boundaries, island chains from hotspots. The
+user's own framing when this was first raised: continents used to "poof up
+out of nowhere."
 
-**All five open questions from the original handoff are now answered:**
+**Status:** `generate_world` builds its height field from
+`app/world/plates.py` now. `_pick_continent_centers` (the old blob-placement
+function) is **deleted**, not just unused — confirmed by grep there are no
+remaining call sites, only historical mentions in comments. This is live in
+the working tree, has NOT been released, and needs a further tuning pass
+(see "What's still open" below) before it should be considered done.
 
-1. **Scope: hotspots included now**, not deferred to follow-up. Built.
-2. **Plate count is its own dial**, separate from continent count — not
-   derived from a target continent count the way the old blob system worked.
-3. **Lobes are retired.** Plate-boundary geometry provides the shape variety
-   instead; nothing from the old system carries forward.
-4. **Quality over a perf ceiling.** No hard time budget was set.
-5. **All world sizes use plates** — no size keeps the old blob system.
+### Phase 1 (recap — geometry and boundary classification)
 
-### What's built (Phase 1: plates + boundary classification, NO height integration)
+Built and validated standalone before any height-field code was written:
+plate assignment (wrap-aware nearest-seed over a domain-warped coordinate
+grid — the same trick the old blob falloff used, reused rather than a
+Dijkstra flood fill, which was benchmarked at 1.5-3.2s and would have worked
+but was slower and a second mechanism to maintain), six-way boundary
+classification from each pair's relative drift projected onto a locally
+estimated normal, and hotspot island chains biased onto oceanic plates.
 
-`app/world/plates.py` — self-contained, takes raw `width/height/seed`,
-returns a `Plates` object. **Does not read or write anything on a `World`,
-and nothing in `app/` calls it** (verified by grep before every commit) — it
-can be built, rendered and thrown away with zero risk to the shipping game.
+**One real bug found and fixed before Phase 2 could even start measuring
+anything sensibly:** `FRACTION_CONTINENTAL` was a per-plate coin flip, and
+rendering a few more `plate_shot.py` seeds (as instructed, before touching
+height) turned up a seed with 1 continental plate out of 16 — a world with
+almost no land. Fixed to a fixed COUNT of continental plates (which plates
+are continental is still random), with `dev/test_plates.py` now asserting
+the per-seed count, not just a multi-seed average that a few unlucky rolls
+can hide.
 
-- **Plate assignment**: wrap-aware nearest-seed assignment over a
-  domain-warped coordinate grid — the SAME trick `generate_world`'s own
-  continent falloff already uses (warp the sample coordinates with a
-  low-frequency noise field before evaluating something smooth on them),
-  reused here rather than the Dijkstra flood-fill (`_grow_weighted`) the
-  original plan suggested. That was a real, measured decision, not a
-  shortcut: a whole-map wrap-aware Dijkstra was benchmarked first (1.5s at
-  Standard/726k cells, 3.2s at Large/1.35M cells — both actually affordable
-  given the "quality first" answer), but the vectorised coordinate-warp
-  version is faster still (well under 1s even at Large, 24 plates) AND is
-  the same move this codebase already made once, rather than a second
-  mechanism to maintain.
-- **Boundary classification** is fully vectorised: a local normal is
-  estimated per boundary cell from which of its 4 neighbors differ (NOT a
-  straight line between plate centroids, which would be wrong for anything
-  but two circular plates), the two plates' relative drift is projected onto
-  that normal vs. its tangent, and the split ratio decides
-  convergent/divergent/transform. Combined with each plate's
-  continental/oceanic kind, six outcomes: `CONVERGENT_CC` (big range),
-  `CONVERGENT_SUBDUCTION` (trench + coastal range), `CONVERGENT_OO` (island
-  arc), `DIVERGENT_CC` (rift), `DIVERGENT_OTHER` (mid-ocean ridge),
-  `TRANSFORM` (texture only, no real elevation change).
-- **Hotspots** (in scope per the user's answer): a handful of points fixed in
-  absolute space, biased 85% onto oceanic plates (the geologically real case
-  for a visible island chain — how Hawaii actually formed). As a plate drifts
-  over one, the chain trails in the direction the plate CAME from (opposite
-  its own drift), with strength decaying down the chain — older links are
-  weaker/more eroded. Wrap-aware in x.
-- Every boundary cell is recorded from the LOWER-id plate's side only, once
-  per boundary point rather than twice (once per side) — deliberate, so
-  Phase 2's height integration doesn't double-apply uplift at every point.
-  Documented inline where it's easy to mistake for a bug.
+### Phase 2 (this session): height-field integration
 
-**Validated, not assumed** — the explicit Phase 1 checkpoint from the
-original plan (§9 as it stood before this pass): `dev/plate_shot.py` renders
-plate id (continental=warm hue, oceanic=cool), drift arrows, boundary cells
-coloured by classification, and hotspot chains, standalone, at any
-seed/plate-count/size. Rendered at all three size presets (760×456/10
-plates, 1100×660/16, 1500×900/24) — organic non-Voronoi boundaries, plausible
-mix of both plate kinds, visible curved island chains, all six boundary
-kinds present with sane relative counts. `dev/test_plates.py` (all passing)
-asserts: determinism from a seed, the seam is a real wrap (not a false
-boundary) while the poles are NOT wrapped (hand-built grids, not hoping a
-random seed happens to touch an edge), continental fraction lands near
-`FRACTION_CONTINENTAL` across many seeds, every boundary kind is reachable,
-a collision's classified kind always matches the two plates' actual
-continental/oceanic combination, hotspot chains decay monotonically and stay
-wrapped, and Large-size generation stays under 3s (measured: ~1s).
+`plates.height_contribution(pl)` returns a raw, unnormalised elevation
+field that drops into `generate_world`'s existing normalise/threshold/retry
+pipeline unchanged:
 
-### What Phase 2 (height-field integration) still needs — not started
+- **Base elevation by plate kind** — continental plates land-biased, oceanic
+  sea-biased. `FRACTION_CONTINENTAL` is **0.40, not "Earth's real ~29%"** —
+  deliberate, see the tuning note below.
+- **Per-boundary-kind falloff bumps**, via a capped multi-source distance
+  transform (`_capped_distance`) seeded from that boundary kind's cells:
+  `CONVERGENT_CC` (big range, both sides), `CONVERGENT_OO` (island arc),
+  `DIVERGENT_CC` (rift), `DIVERGENT_OTHER` (mid-ocean ridge). `TRANSFORM`
+  gets no elevation term at all — texture only, as Phase 1 already
+  documented.
+- **`CONVERGENT_SUBDUCTION` is asymmetric**, and it's the one subtle piece:
+  a single distance field from the union of subduction boundary cells
+  reaches both sides equally (two adjacent cells across a boundary are one
+  step apart either way), and then each CELL's own plate kind decides
+  whether it gets the coastal range (+, continental side) or the trench
+  (−, oceanic side) — no per-boundary-point attribute lookup needed.
+- **Hotspot chains are stamped directly** as circular bumps
+  (`_stamp_hotspots`), amplitude scaled by each link's age-based `strength`
+  (already computed in Phase 1) — the same wrap-aware
+  squared-distance-in-a-local-frame trick the old blob falloff used, just
+  circular since an island has no preferred long axis.
+- **Fine-detail noise is kept**, same domain-warped octaves as before, but
+  at a much smaller relative amplitude (`DETAIL_AMPLITUDE`) — plate
+  structure now supplies the primary shape; noise only adds local texture
+  (small bays, minor irregularity) on top, which is exactly the role Phase
+  2's own plan called for.
+- **A distance-transform bug found and fixed by rendering, not assumed
+  away:** the first version of `_capped_distance` dilated over 4 neighbors
+  only (N/S/E/W), which produces Manhattan distance — visible as diamond/
+  starburst artifacts wherever two boundaries' falloffs overlapped. Switched
+  to 8-neighbor dilation (matching `_NEIGH8`'s existing convention
+  elsewhere in this file); the artifacts are gone in the rendered output.
 
-This is the next real chunk of work, and it replaces
-`_pick_continent_centers` + the blob-falloff term in `generate_world`, not
-just adds to it:
+### What was measured (dev/coastline_metrics.py + a fresh biome render)
 
-1. **Height composition**: `base_elevation(plate.kind) + boundary_effect
-   (distance to nearest boundary cell, weighted by that boundary's `kind`
-   and `strength`) + existing fine-detail noise/warp` (unchanged role,
-   smaller relative amplitude). Threshold at the sea-level percentile
-   exactly as today (~40% land), so every downstream system that assumes
-   that contract keeps holding.
-2. **Distance-to-boundary field**: `_bfs_distance`-shaped problem (cheap
-   distance transform from a set of cells) but should almost certainly be
-   done vectorised given everything else in this pass was — a per-boundary-
-   cell-type distance field (or one distance field plus a "nearest
-   boundary's kind/strength" lookup) feeding the uplift/rift falloff width.
-3. **Re-measure the baseline `v0.3.6_1` already established**: continent
-   count (target was 6-7; what plate-count-to-continent-count relationship
-   actually produces that is an open empirical question now that plate count
-   is its own dial), land % (~40%), river/lake density (~1.7-2.2% river,
-   ~0.1-2.6% lake — see the "Reliably get 6-7 continents" commit for the
-   exact measurement methodology).
-4. **Mountain-range shape check**: verify convergent boundaries actually read
-   as elongated ranges following the boundary's own curve on the biome
-   overlay, not blobs — same "render and eyeball it" discipline as
-   `plate_shot.py` already used for the geometry alone.
-5. **Downstream re-verification**: does a real mountain RANGE (as opposed to
-   the current threshold-triggered scattered "mountain" biome) ever wall off
-   a faction's entire starting region? Does road pathfinding
-   (`_ROAD_ELEV_PEN` etc.) still behave sanely against a genuine mountain
-   WALL rather than scattered peaks? Full regression suite
-   (`dev/test_*.py`) plus a fresh multi-faction world-gen + 100-turn
-   simulation, the same pattern used to verify every worldgen change so far.
-6. **Re-tune `currents.py`'s erosion/carving** against plate-driven
-   coastlines if they erode differently than blob-driven ones did.
-7. Island-chain links currently exist only as `(x, y, strength)` points in
-   `Plates.hotspot_chains` — Phase 2 needs to decide how `strength` actually
-   becomes an island (a small elevation bump above sea level with some
-   probability/size scaling, presumably) and where the plate's own drift
-   speed factors into inter-island spacing (currently a fixed
-   `HOTSPOT_STEP_FRAC` of map width, not scaled by the plate's actual
-   `speed`).
+| | result |
+|---|---|
+| Land % | **exactly 40.0%** on every seed tested — the percentile threshold contract holds perfectly |
+| Landmass count | averaged **~10.3** across 12 seeds after tuning (down from ~11.5 before it, real per-seed variance 1-19 observed) — **above** the old blob system's tuned 6-7 target, not yet converged |
+| Coastline irregularity | 12.6-47.3 (a circle scores ~3.5) — clearly organic, not sponge-like, comparable to or better than the old tuned system |
+| Mountain-range shape | **visually confirmed**: a real connected curved range along a continent's edge in the biome-grid render (`dev/shots/phase2_biome_s9.png`), not a scattered threshold-triggered blob |
+| River/lake density | **shifted from the `v0.3.6_1` baseline** (1.7-2.2% river / 0.1-2.6% lake): now measuring 0.6-0.8% river, 0.7-4.5% lake across 3 seeds. **Not yet re-tuned** — flagged, not fixed |
+| Generation time | Small ~8.3s, Standard ~15.7s, Large ~27-70s (one seed hit the raised retry cap) — comparable to the pre-plates baseline; the New Game screen already generates in the background, so this doesn't block anything |
+| Full regression suite | **all passing** — `dev/test_plates.py`, `dev/test_tuning.py`, `dev/test_new_game.py` (which calls `generate_world` for real), plus every saved-world harness (`test_succession`, `test_elim`, `test_battle_death`, `test_commander_gate`, `test_move_anim`) |
+| Fresh downstream check | 14-faction world + 100-turn simulation: no crash, no negative resource entries, all 14 factions still alive, population grew normally. Capital placement's existing farmland-radius requirement (`_capital_has_nearby_farmland`) already structurally excludes tiny archipelago islands from hosting a capital, since a small island has no non-coastal interior cells — confirmed by reading, not just by the sim not crashing |
+
+**Two tuning changes made during this pass, in response to the landmass-count
+measurement** (both in `app/world/plates.py`): `FRACTION_CONTINENTAL` raised
+0.32 → 0.40 (continental plate AREA now roughly matches the game's own 40%
+land target rather than real Earth's ~29%, so the sea-level threshold sits
+close to the kind boundary and needs less scattered oceanic-bump land to
+fill the remaining quota), and `BASE_CONTINENTAL`/`BASE_OCEANIC` widened
+0.55 → 0.75 (a bigger gap between the two kinds' base elevation makes
+boundary bumps less likely to accidentally cross it). `AMP_CONVERGENT_OO`/
+`AMP_DIVERGENT_OTHER` were also cut (0.55→0.40, 0.25→0.15) as a secondary
+measure. The retry cap for "not enough separate landmasses" was raised from
+6 to 12 attempts after a seed exhausted the old cap and shipped a
+near-single-landmass world — cheap insurance given "quality over a perf
+ceiling" was already the explicit decision for this rework (§ history above).
+
+### What's still open
+
+1. **Landmass count is not converged.** ~10.3 average against a 6-7 target,
+   with real per-seed variance (one seed produced just 1-2 substantial
+   landmasses even after the retry-cap raise). This is exactly the "open
+   empirical question" the original Phase 2 plan flagged — plate count,
+   `FRACTION_CONTINENTAL`, and the boundary amplitudes all interact, and
+   this session's tuning moved the number in the right direction without
+   fully closing it. Whoever picks this up next should treat it as its own
+   dedicated tuning pass, the same way `v0.3.6_1`'s continent-count fix was
+   — not something to guess at inside a larger change.
+2. **River/lake density needs re-tuning** against plate-driven terrain's
+   different elevation-gradient character. Not investigated further this
+   session beyond measuring the shift.
+3. **`currents.py`'s erosion/carving** was not specifically re-verified
+   against plate-driven coastlines (nothing crashed, but "does it still look
+   right" wasn't checked the way the mountain-range shape was).
+4. **`_pick_n_plates`'s formula** (`11 * sqrt(area_ratio)`, ±15% jitter) is a
+   starting point chosen alongside the other tuning in this pass, not
+   independently measured across all three world sizes — only Standard was
+   used for the landmass-count measurement above.
+5. Faction/capital placement's farmland check was **read**, not stress-tested
+   against an adversarial world — worth a wider seed sweep if capitals ever
+   start clustering unexpectedly on a future map.
 
 ### Where to start (for whoever picks this up)
 
-Read `app/world/plates.py` in full (self-contained, ~300 lines) and
-`dev/plate_shot.py`/`dev/test_plates.py` alongside it. Then read
-`_pick_continent_centers` and the height-field section of `generate_world`
-(`worldgen.py`, continent placement + the domain-warp/falloff block
-immediately after it) — that's what Phase 2 replaces. Render a few more
-`plate_shot.py` outputs at different seeds/plate counts before writing any
-height-integration code; the same "measure/render, don't assume" discipline
-that got Phase 1 here should decide the uplift falloff shape and width too,
-not a guessed constant.
+`dev/coastline_metrics.py` is the tool — it already reports landmass count,
+land%, coastline irregularity and mean width, and renders a real preview PNG
+per seed via the actual New Game preview renderer, all against the live
+`generate_world` path with zero changes needed. Run it across a wider seed
+sample (15-20+) before changing anything, since per-seed variance here is
+large enough that 5 seeds is not enough to trust a mean. The knobs, in
+`app/world/plates.py`: `FRACTION_CONTINENTAL`, `BASE_CONTINENTAL`/
+`BASE_OCEANIC`, the six `AMP_*` boundary amplitudes, `BOUNDARY_FALLOFF_FRAC`;
+in `worldgen.py`: `_pick_n_plates`'s formula and `DETAIL_AMPLITUDE`. Re-render
+`dev/plate_shot.py` alongside `coastline_metrics.py` when tuning plate count
+or the continental fraction specifically, since those affect the plate
+geometry itself, not just the height composition on top of it.

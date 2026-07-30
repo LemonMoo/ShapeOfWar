@@ -1,12 +1,11 @@
-"""Tectonic plates: geometry and boundary classification.
+"""Tectonic plates: geometry, boundary classification, and the height-field
+contribution built from them.
 
-STATUS: Phase 1 of the plate-driven worldgen rework (see HANDOFF.md §9).
-Plate assignment and boundary classification ONLY -- nothing here touches
-the height field, and nothing in generate_world calls this yet. The
-phasing this project has used for every other worldgen rework is
-investigate -> build one verifiable piece -> measure/render -> move on;
-this module is that first piece. Validate with dev/plate_shot.py before
-Phase 2 (height integration) is attempted.
+STATUS: Phase 2 of the plate-driven worldgen rework (see HANDOFF.md §9).
+Phase 1 (plate assignment + boundary classification, this module's top half)
+is done and was validated standalone with dev/plate_shot.py before any of
+what follows was written. Phase 2 (height_contribution, below) is wired into
+generate_world in place of _pick_continent_centers + the blob falloff term.
 
 Model (per HANDOFF.md §9's proposed model, refined during implementation):
 
@@ -62,10 +61,19 @@ DIVERGENT_CC = "divergent_cc"                     # both continental: rift valle
 DIVERGENT_OTHER = "divergent_other"                # either side oceanic: mid-ocean ridge
 TRANSFORM = "transform"                           # sliding past: texture only
 
-# Roughly Earth's real continental fraction. A knob, not a law -- nothing
-# downstream depends on this being astronomically accurate, only on there
-# being a believable mix of both kinds.
-FRACTION_CONTINENTAL = 0.32
+# NOT "Earth's real land fraction" (~29%) -- deliberately close to the GAME's
+# own ~40% land target instead (see generate_world's sea-level percentile).
+# Land% is a fixed percentile cutoff over cell values regardless of this
+# number, so it is always exactly 40% either way -- what this controls is
+# HOW FRAGMENTED that 40% is. If continental plate AREA already covers close
+# to the target land fraction, the sea-level threshold sits almost exactly at
+# the continental/oceanic boundary and needs only a little oceanic-bump land
+# to fill the remainder; measured too low (0.32) it forced far more of the
+# 40% quota to come from scattered oceanic-boundary bumps, which -- being
+# necessarily disconnected from any continental body -- showed up as many
+# more separate small landmasses than intended (9-19 across 15 seeds against
+# the ~6-7 this project already tuned the old blob system to).
+FRACTION_CONTINENTAL = 0.40
 
 # A boundary cell is classified by the RATIO of how much of the relative
 # drift is along the normal (opening/closing) vs along the tangent
@@ -370,3 +378,192 @@ def generate_plates(width, height, seed=None, n_plates=16, n_hotspots=None):
     hotspot_chains = _place_hotspots(py_rng, plates, width, n_hotspots)
 
     return Plates(width, height, plate_id, plates, boundaries, hotspot_chains)
+
+
+# --- Phase 2: height-field contribution ---------------------------------------
+# Falloff radius for how far a boundary's effect reaches, as a FRACTION of map
+# width -- scaled like the old blob system's own radii, so the relative shape
+# doesn't change between Small/Standard/Large.
+BOUNDARY_FALLOFF_FRAC = 0.045
+
+# Per-kind elevation amplitudes. Signed: positive raises, negative lowers.
+# Absolute scale doesn't matter -- generate_world min-max normalises the
+# whole field before thresholding at the sea-level percentile, exactly as it
+# did for the old blob system's own `v` -- only the RELATIVE size of these
+# against each other and against BASE_CONTINENTAL/BASE_OCEANIC matters.
+# Starting points, not measured yet: see HANDOFF.md §9 for what still needs
+# re-measuring (land %, continent count, mountain-range shape) before these
+# are treated as settled.
+AMP_CONVERGENT_CC = 1.35          # the big range: two continents colliding
+AMP_SUBDUCTION_RANGE = 1.05       # coastal range on the continental side
+AMP_SUBDUCTION_TRENCH = -0.85     # trench on the oceanic side of the same boundary
+# Cut from 0.55/0.25 (first pass): oceanic-oceanic boundaries are common (most
+# plates are oceanic), and at the original amplitudes enough arcs/ridges
+# poked above sea level as their own SEPARATE small landmasses that measured
+# landmass count ran 9-14 against the ~6-7 target this project already tuned
+# the old blob system to (see dev/coastline_metrics.py). Some archipelago
+# island-chain effect from these is still real and desired -- an oceanic
+# arc/ridge occasionally breaking the surface is exactly the point -- just
+# not enough of them to read as a dozen extra "continents".
+AMP_CONVERGENT_OO = 0.40          # island arc
+AMP_DIVERGENT_CC = -0.65          # rift valley
+AMP_DIVERGENT_OTHER = 0.15        # mid-ocean ridge
+
+# Base elevation bias by plate kind -- this is what makes continental plates
+# LAND-biased and oceanic ones SEA-biased at all, before any boundary or
+# fine-detail noise is added on top.
+BASE_CONTINENTAL = 0.75
+BASE_OCEANIC = -0.75
+
+# Hotspot islands: a small radial bump per chain link, scaled by that link's
+# age-based strength (see _place_hotspots) -- a fresh vent (strength 1) is a
+# real island; the oldest, weakest links in a chain barely break the surface.
+HOTSPOT_BUMP_AMP = 0.9
+HOTSPOT_BUMP_RADIUS_FRAC = 0.012
+
+
+_DILATE_OFFSETS = ((-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0),
+                   (-1, 1), (0, 1), (1, 1))
+
+
+def _shift_bool(mask, dx, dy):
+    """mask shifted so result[y, x] = mask[y + dy, x + dx] -- the neighbor at
+    offset (dx, dy)'s own value, brought to this cell. Same convention
+    _neighbor_diff already uses. Wraps in x (cylinder topology); the y edge
+    that would otherwise wrap to the opposite pole is cleared to False
+    instead -- there is nothing beyond the map's top/bottom to grow into."""
+    shifted = np.roll(mask, (-dy, -dx), axis=(0, 1))
+    if dy == 1:
+        shifted[-1, :] = False
+    elif dy == -1:
+        shifted[0, :] = False
+    return shifted
+
+
+def _capped_distance(seed_mask, max_radius):
+    """Multi-source distance transform, wrap-aware in x (matching the map's
+    cylinder topology) and NOT wrap-aware in y (no north-south wrap anywhere
+    in this game -- see wrap.py's own docstring), capped at max_radius: cells
+    farther than that from any True seed cell get exactly max_radius back,
+    which callers treat as "no effect" via their own falloff reaching 0
+    there.
+
+    Capping is deliberate, not just a speed trick: a boundary's geological
+    influence is bounded (a real mountain range's effect doesn't taper for a
+    thousand miles either), so this only ever runs max_radius dilation
+    passes instead of however many it would take to flood the whole map --
+    the same reasoning _grow_plate_ids' domain-warp trick uses to avoid a
+    literal flood fill in the first place.
+
+    Dilates over all 8 neighbors, not 4 -- a first version used only N/S/E/W
+    and it showed: the falloff came out as visible diamonds (Manhattan
+    distance) radiating from anywhere two boundaries' effects overlapped,
+    especially near the several boundaries that meet close together at a
+    triple junction. Diagonal steps make it read as roughly circular
+    instead, the same fix a real distance transform always needs over a grid
+    -- see dev/plate_shot.py's rendered output for the before/after."""
+    if not seed_mask.any():
+        return np.full(seed_mask.shape, max_radius, dtype=np.int32)
+    dist = np.where(seed_mask, 0, max_radius).astype(np.int32)
+    frontier = seed_mask
+    for step in range(1, max_radius + 1):
+        grown = frontier
+        for dx, dy in _DILATE_OFFSETS:
+            grown = grown | _shift_bool(frontier, dx, dy)
+        newly = grown & (dist > step)
+        if not newly.any():
+            break
+        dist[newly] = step
+        frontier = newly
+    return dist
+
+
+def _falloff(dist, max_radius):
+    """1 at distance 0, 0 at max_radius, smoothstepped -- a boundary's effect
+    fades out rather than cutting off sharply at its falloff radius."""
+    t = np.clip(1.0 - dist / max_radius, 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _boundary_mask(boundaries, kinds, height, width):
+    ys = [b.y for b in boundaries if b.kind in kinds]
+    xs = [b.x for b in boundaries if b.kind in kinds]
+    mask = np.zeros((height, width), dtype=bool)
+    if ys:
+        mask[ys, xs] = True
+    return mask
+
+
+def _stamp_hotspots(field, pl, width, height):
+    """Add each hotspot chain link's island bump directly to the field --
+    the same wrap-aware squared-distance-in-a-local-frame technique
+    generate_world's own (retiring) blob falloff already used, just circular
+    rather than elliptical since an island has no preferred long axis the
+    way a whole continent's placement does."""
+    if not pl.hotspot_chains:
+        return field
+    xs = np.arange(width, dtype=np.float64)
+    ys = np.arange(height, dtype=np.float64).reshape(-1, 1)
+    radius = max(2.0, width * HOTSPOT_BUMP_RADIUS_FRAC)
+    for _plate_id, links in pl.hotspot_chains:
+        for lx, ly, strength in links:
+            ddx = ((xs - lx + width / 2) % width) - width / 2
+            ddy = ys - ly
+            d2 = (ddx * ddx + ddy * ddy) / (radius * radius)
+            field = field + HOTSPOT_BUMP_AMP * strength * np.clip(1.0 - d2, 0.0, None)
+    return field
+
+
+def height_contribution(pl):
+    """The plate-driven base of the height field, as a raw (height, width)
+    float array -- NOT normalised or thresholded, exactly like the blob
+    system's own `v` before generate_world's final min-max/sea-level step,
+    so it drops into that same pipeline unchanged.
+
+    Composition: each plate's own kind sets a base land/sea bias; every
+    boundary type (except TRANSFORM, which is texture only -- see the class
+    docstring) stamps a falloff bump or dip of its own sign and reach.
+    Subduction is the one asymmetric case: which side of it a cell is on is
+    decided by that CELL's own plate kind, not by which side the specific
+    boundary record happened to be kept from (see Boundary's own docstring
+    for why only one side is stored per point) -- a single distance field
+    from the union of subduction boundary cells already reaches both sides
+    equally, since two adjacent cells across a boundary are one step apart
+    either way."""
+    width, height = pl.width, pl.height
+    max_radius = max(3, round(width * BOUNDARY_FALLOFF_FRAC))
+
+    kind_lookup = np.array([1 if p.kind == CONTINENTAL else 0 for p in pl.plates])
+    own_continental = kind_lookup[pl.plate_id] == 1
+
+    field = np.where(own_continental, BASE_CONTINENTAL, BASE_OCEANIC)
+
+    cc_mask = _boundary_mask(pl.boundaries, {CONVERGENT_CC}, height, width)
+    if cc_mask.any():
+        field = field + AMP_CONVERGENT_CC * _falloff(
+            _capped_distance(cc_mask, max_radius), max_radius)
+
+    oo_mask = _boundary_mask(pl.boundaries, {CONVERGENT_OO}, height, width)
+    if oo_mask.any():
+        field = field + AMP_CONVERGENT_OO * _falloff(
+            _capped_distance(oo_mask, max_radius), max_radius)
+
+    rift_mask = _boundary_mask(pl.boundaries, {DIVERGENT_CC}, height, width)
+    if rift_mask.any():
+        field = field + AMP_DIVERGENT_CC * _falloff(
+            _capped_distance(rift_mask, max_radius), max_radius)
+
+    ridge_mask = _boundary_mask(pl.boundaries, {DIVERGENT_OTHER}, height, width)
+    if ridge_mask.any():
+        field = field + AMP_DIVERGENT_OTHER * _falloff(
+            _capped_distance(ridge_mask, max_radius), max_radius)
+
+    sub_mask = _boundary_mask(pl.boundaries, {CONVERGENT_SUBDUCTION}, height, width)
+    if sub_mask.any():
+        sub_falloff = _falloff(_capped_distance(sub_mask, max_radius), max_radius)
+        field = field + np.where(own_continental,
+                                 AMP_SUBDUCTION_RANGE * sub_falloff,
+                                 AMP_SUBDUCTION_TRENCH * sub_falloff)
+
+    field = _stamp_hotspots(field, pl, width, height)
+    return field
