@@ -12,6 +12,11 @@ Select All battle button/hotkey, and MOBA-style right-click commander/troop
 control in battle (`Unit.move_point`/`manual_target`, bypasses the
 commander's screening safety net on an explicit player order).
 
+**In progress, unreleased: a regional weather system.** Phase 0 (event
+generation only, standalone, zero call sites) is built and validated. See
+**§10** for the full phasing plan, what's measured, and what Phases 1-4
+still need.
+
 ---
 
 ## 0. Read this first
@@ -564,3 +569,96 @@ in `worldgen.py`: `_pick_n_plates`'s formula and `DETAIL_AMPLITUDE`. Re-render
 `dev/plate_shot.py` alongside `coastline_metrics.py` when tuning plate count
 or the continental fraction specifically, since those affect the plate
 geometry itself, not just the height composition on top of it.
+
+---
+
+## 10. Regional weather — Phase 0 done, Phases 1-4 not started
+
+Several design-question rounds preceded any code, same as the plate rework.
+Decided: per-region (not world-wide), multi-turn events (not per-turn
+flicker), correlated with each region's existing static `dominant_climate`,
+occasional rather than constant, two severity tiers (Mild/Severe), four
+kinds (Drought/Storm/Blizzard/Fog). Also decided, for the LATER phases:
+weather affects crop yield during the Growing/Plant stage (not a direct
+Harvest-turn multiplier), logistics gets a genuine LIVE per-turn slowdown
+(not just a dispatch-time roll), battle gets real combat effects (its own
+project — battle has zero terrain hooks today) with NO tournament-rigor
+requirement for v1 (the user's own call, explicitly not the recommended
+option), and presentation is both an alert/badge AND a map/globe visual
+overlay.
+
+### Phasing
+
+1. **Weather core** (done) — event generation only, no wiring.
+2. **Economy** (not started) — Growing/Plant-stage weather modifies the
+   eventual Harvest; surfaces through the existing alert pipe.
+3. **Logistics** (not started) — a genuinely new live per-turn slowdown
+   mechanism (today `turn_progress` is a flat `+= 1` and commander/ship
+   movement is a flat cells-per-turn; neither varies turn-to-turn at all),
+   built generically, then hung with weather.
+4. **Battle** (not started) — its own project per the user's explicit
+   answer; do at least a basic sanity tournament pass even though full
+   rigor wasn't required, so nothing ships silently unplayable.
+5. **Visual** (not started) — map/globe overlay, deliberately last so it's
+   built against settled mechanics rather than redone when tuning changes
+   what needs showing.
+
+### Phase 0: what's built and measured
+
+`app/world/weather.py` — self-contained, takes raw `climate`/`rng` (no
+World dependency, same reasoning `plates.py` took raw width/height/seed).
+`WeatherEvent(kind, severity, duration)`; `advance(event, climate, rng)` is
+the one-region-one-turn step; `advance_all` does every region at once from
+a `{region_id: climate}` map, representing a clear region by simply having
+no key rather than an explicit `None` entry.
+
+**A real tuning miss, caught by rendering before anything downstream could
+be built against it:** the first pass at `EVENT_CHANCE_PER_TURN = 0.03`
+measured **24.3%** of region-turns under some weather across a real
+1451-region world — a constant background condition, not an occasional
+event. The number that actually matters isn't "how likely is at least one
+event this season", it's the steady-state fraction of time spent under
+one, which for this renewal process is `p*D / (1 + p*D)` (D = average
+duration, ~11 turns). Retuned to **0.007**, targeting ~7%; measured
+**7.0%**. This is a first tuning pass, not settled — re-measure once Phase
+2 gives it a real gameplay consequence to weigh against, the same caveat
+every other freshly-tuned constant in this project carries.
+
+Climate correlation confirmed by both the debug render and
+`dev/test_weather.py`: arid → Drought dominant (~52-58% of that climate's
+events across seeds), humid → Storm (~54-58%), cold → Blizzard (~53%), Fog
+reaches every climate (no lean, by design). Severity lands near
+`SEVERE_CHANCE` (0.25).
+
+**A second real bug, this time in the debug tool itself, also caught before
+it could mislead anyone:** `dev/weather_shot.py`'s first version froze a
+"snapshot" of active events as bare `WeatherEvent` references. `advance()`
+mutates an active event's `turns_left` IN PLACE and keeps returning the
+SAME object — so every "snapshotted" event kept drifting for the rest of
+the simulation, and by the time the run finished, every single one reported
+`turns_left=0` regardless of when it was actually captured. Fixed with
+`WeatherEvent.copy()`, an independent frozen copy; `dev/test_weather.py`
+asserts on this directly (`test_snapshot_copy_is_independent`) so the same
+mistake can't recur in whatever future caller needs a frozen snapshot (a
+save summary, a UI card).
+
+`dev/weather_shot.py path/to/world.pkl [seed] [turns]` loads a real
+generated world purely for its regions' real `dominant_climate` values
+(nothing else about the world is touched), simulates, reports frequency/
+duration/correlation numbers, and renders one snapshot turn as a political
+thumbnail (reusing `app.ui.world_preview.render_world`, the same renderer
+the New Game screen uses) with every active event marked by kind (D/S/B/F
+letter) and severity (white=Mild, red=Severe).
+
+### Where to start (for whoever picks this up)
+
+Read `app/world/weather.py` in full (small, self-contained) and
+`dev/test_weather.py`/`dev/weather_shot.py` alongside it. Phase 1 (economy)
+is the natural next step — it's the smallest, most contained wire-in (a
+multiplier at the point `_crop_yield_core` already computes yield, gated by
+`crop_stage`'s existing Growing/Plant check) and it's what the existing
+alert pipe (`starving`/`food_shortage`) was built to carry, so surfacing a
+drought's consequence costs nothing new there either. Do NOT start Phase 2
+(logistics) or Phase 3 (battle) before Phase 1 is wired, measured and
+committed on its own — same phasing discipline as every other multi-part
+rework in this project.
