@@ -3,7 +3,7 @@
 Python/Tkinter desktop 4X strategy game. Single developer, turn-based, procedurally
 generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 
-**Last release: v0.3.6_1** ("More Continents, Less Water, Smoother Movement").
+**Last release: v0.3.7** ("Mountains and Coastlines Have a Reason Now").
 Check `gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting
 this line — this repo ships fast, sometimes several releases in one day.
 
@@ -26,18 +26,21 @@ reliably produce 6-7 real, separate landmasses instead of "constantly mostly
 2", cut river/lake density, and fixed a movement-animation timing bug.
 Everything is released and the working tree is clean.
 
-**In progress: tectonic-plate-driven worldgen — Phase 2 is now WIRED IN and
-LIVE.** `generate_world` builds its height field from `app/world/plates.py`
-now, not the old blob system (which is deleted, not just unused). This is
-**NOT RELEASED** and not on any tag yet, but it is the code path every new
-world in this working tree actually goes through — the "zero call sites"
-safety net from Phase 1 no longer applies. Full regression suite + a fresh
-14-faction/100-turn simulation both run clean. Land% lands exactly on the
-40% target every time; landmass count runs higher than the old system's
-tuned 6-7 (currently ~10 on average, down from ~11.5 before an in-session
-tuning pass, not fully converged); mountain ranges visually confirmed as
-real connected curves, not scattered blobs; river/lake density measurably
-shifted from the `v0.3.6_1` baseline and has not yet been re-tuned. See
+**v0.3.7 shipped tectonic-plate-driven worldgen** (Phase 1 + Phase 2).
+`generate_world` builds its height field from `app/world/plates.py` now, not
+the old blob system (which is deleted, not just unused) — real mountain
+ranges at plate collisions, rifts at divergent boundaries, subduction
+trenches, hotspot island chains. Land% lands exactly on the 40% target every
+time; landmass count runs higher than the old system's tuned 6-7 (currently
+~10 on average, down from ~11.5 before an in-session tuning pass, not fully
+converged); mountain ranges visually confirmed as real connected curves, not
+scattered blobs; river/lake density measurably shifted from the `v0.3.6_1`
+baseline and has not yet been re-tuned. Both known gaps are stated plainly
+in the release notes and in-game changelog, same transparency precedent as
+the unbalanced signature-units release. **This is a real first-pass release,
+not a finished tuning pass** — whoever picks up the remaining tuning should
+treat it as its own dedicated session, the same way `v0.3.6_1`'s
+continent-count fix was. See
 **§9** for the full state, what was measured, and what's still open.
 
 **The one thing to know before touching anything else:** the signature units are
@@ -414,7 +417,7 @@ It generates a real (Small) world, so it's the slowest harness in `dev/`.
 
 ---
 
-## 9. Tectonic-plate-driven worldgen — Phase 2 wired in, NOT RELEASED, NOT fully tuned
+## 9. Tectonic-plate-driven worldgen — RELEASED in v0.3.7, NOT fully tuned
 
 Replaced "placed elliptical blobs + noise" (the old continent system) with a
 plate model that gives geology an actual reason: mountain ranges at
@@ -425,9 +428,13 @@ out of nowhere."
 **Status:** `generate_world` builds its height field from
 `app/world/plates.py` now. `_pick_continent_centers` (the old blob-placement
 function) is **deleted**, not just unused — confirmed by grep there are no
-remaining call sites, only historical mentions in comments. This is live in
-the working tree, has NOT been released, and needs a further tuning pass
-(see "What's still open" below) before it should be considered done.
+remaining call sites, only historical mentions in comments. Shipped in
+**v0.3.7** ("Mountains and Coastlines Have a Reason Now") with the known
+tuning gaps below stated plainly in the release notes and in-game
+changelog — this was a deliberate "ship the real first pass, be upfront
+about what's still rough" call, not an oversight. Still needs a further
+tuning pass (see "What's still open" below) before it should be considered
+settled.
 
 ### Phase 1 (recap — geometry and boundary classification)
 
