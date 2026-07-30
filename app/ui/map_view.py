@@ -2268,6 +2268,16 @@ class MapView(tk.Frame):
             return 1
         return 0
 
+    # Temporary diagnostic (see _log_flatgl_timing): a reported stutter on
+    # the GPU flat map that GPU usage stays flat through (~10% -- i.e. NOT
+    # a rendering/driver cost) and that the globe, sharing this same
+    # moderngl/pyopengltk plumbing, never shows -- meaning it's CPU-bound
+    # and specific to something in this method's own Python-side work,
+    # not yet reproduced on dev hardware. Logs a per-step breakdown for
+    # any frame slow enough to explain a felt hitch, so the next data point
+    # comes from the machine that actually shows it. Remove once found.
+    _FLATGL_LOG_THRESHOLD_MS = 20.0
+
     def _sync_flatgl(self):
         """The GPU flat map's equivalent of _sync_globe: push the same
         terrain raster, fog mask, and line/marker/label content the Tk
@@ -2279,8 +2289,11 @@ class MapView(tk.Frame):
         cw, ch = g.winfo_width(), g.winfo_height()
         if cw <= 1 or ch <= 1:
             return
+        t_start = time.perf_counter()
         self._ensure_base()
+        t_base = time.perf_counter()
         self._ensure_fog_overlay()
+        t_fog = time.perf_counter()
         fog_active = self._fog_is_active() and self._fog_overlay_img is not None
         vx0, vy0, vx1, vy1 = self._fit_aspect(self.view, cw / ch)
         scale = cw / (vx1 - vx0)
@@ -2288,12 +2301,38 @@ class MapView(tk.Frame):
         self._canvas_wh = (cw, ch)
         self._view_center_x = (vx0 + vx1) / 2
         g.set_map(self._base_img, self._fog_overlay_img if fog_active else None)
+        t_set_map = time.perf_counter()
         g.set_view(vx0, vy0, vx1, vy1)
         level = self._flat_level()
-        g.set_lines(self._map_lines(level, scale=scale))
-        g.set_markers(self._flat_markers(level))
-        g.set_labels(self._map_labels(level, region_names=False) + self._flat_labels_extra())
+        lines = self._map_lines(level, scale=scale)
+        t_lines_build = time.perf_counter()
+        g.set_lines(lines)
+        t_lines_set = time.perf_counter()
+        markers = self._flat_markers(level)
+        t_markers_build = time.perf_counter()
+        g.set_markers(markers)
+        t_markers_set = time.perf_counter()
+        labels = self._map_labels(level, region_names=False) + self._flat_labels_extra()
+        t_labels_build = time.perf_counter()
+        g.set_labels(labels)
+        t_labels_set = time.perf_counter()
         g.render_now()
+        t_render = time.perf_counter()
+        total_ms = (t_render - t_start) * 1000
+        if total_ms > self._FLATGL_LOG_THRESHOLD_MS:
+            self._log_flatgl_timing(
+                total_ms,
+                ensure_base=(t_base - t_start) * 1000,
+                ensure_fog=(t_fog - t_base) * 1000,
+                set_map=(t_set_map - t_fog) * 1000,
+                lines_build=(t_lines_build - t_set_map) * 1000,
+                lines_set=(t_lines_set - t_lines_build) * 1000,
+                markers_build=(t_markers_build - t_lines_set) * 1000,
+                markers_set=(t_markers_set - t_markers_build) * 1000,
+                labels_build=(t_labels_build - t_markers_set) * 1000,
+                labels_set=(t_labels_set - t_labels_build) * 1000,
+                render_now=(t_render - t_labels_set) * 1000,
+                n_lines=len(lines), n_markers=len(markers), n_labels=len(labels))
         if self.mode == "political":
             self._flat_legend.place(x=12, y=12)
             # tk.Canvas overrides tkraise/lift to mean tag_raise (a canvas
@@ -2303,6 +2342,24 @@ class MapView(tk.Frame):
             tk.Misc.tkraise(self._flat_legend)
         else:
             self._flat_legend.place_forget()
+
+    def _log_flatgl_timing(self, total_ms, **steps):
+        """Append one line to flatgl_timing.log next to the exe (see
+        app.core.save._app_root -- same reasoning: __file__ isn't writable/
+        persistent from inside a PyInstaller --onefile temp dir). Best-
+        effort only -- a diagnostic tool must never itself crash the frame
+        it's trying to explain."""
+        try:
+            from app.core.save import _app_root
+            import datetime
+            path = _app_root() / "flatgl_timing.log"
+            parts = " ".join(f"{k}={v:.1f}" for k, v in steps.items())
+            line = (f"{datetime.datetime.now().isoformat(timespec='milliseconds')} "
+                   f"total={total_ms:.1f}ms {parts}\n")
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line)
+        except Exception:
+            pass
 
     def _sync_globe(self):
         """Push the flat map's own raster, fog, overlays and markers at the
