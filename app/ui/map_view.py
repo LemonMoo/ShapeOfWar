@@ -34,6 +34,9 @@ from app.world import trade
 from app.world import expansion
 from app.world import commander
 from app.world import buildings
+# Sector names as the player sees them, shared with the build menu so the two
+# surfaces can never drift into calling the same thing different names.
+from app.ui.build_menu import SECTOR_LABEL
 from app.ui import gl_globe
 from app.ui import gl_flatmap
 from app.ui.gl_flatmap import (SHAPE_CIRCLE, SHAPE_TRIANGLE, SHAPE_SQUARE,
@@ -4561,9 +4564,27 @@ class MapView(tk.Frame):
             self._build_entry_card(v, player)
 
         yield_ = resources.village_projected_annual_yield(wd, v)
-        body = self._card("PRODUCTION", f"{len(yield_)} goods/yr",
+        report = resources.village_labor_report(wd, v)
+        body = self._card("PRODUCTION", f"labour: {report['policy']}",
                           key="production", default_open=False)
         if body is not None:
+            # The labour split first, then the annual figures it produces.
+            # Which ceiling binds is the thing a player needs to understand
+            # before any of the per-good numbers below mean anything: a
+            # village short of hands and a village working all the land there
+            # is want completely different responses.
+            self._kv(body, "Workforce", f"{report['workforce']:,} adults")
+            for row in report["sectors"]:
+                self._kv(body,
+                         SECTOR_LABEL.get(row["sector"], row["sector"].title()),
+                         f"{row['output']:,} of {row['potential']:,}",
+                         fg={"hands": theme.WARN,
+                             "season": theme.MUTED}.get(row["limited_by"], theme.GOOD))
+            if own:
+                widgets.button(body, "Set labour…",
+                               lambda n=v: self._open_build_menu(n),
+                               compact=True).pack(fill="x", pady=(6, 4))
+            tk.Frame(body, bg=theme.LINE, height=1).pack(fill="x", pady=(4, 6))
             for res_name, amount in sorted(yield_.items(), key=lambda kv: -kv[1]):
                 self._kv(body, res_name, f"{amount:,}/yr")
 

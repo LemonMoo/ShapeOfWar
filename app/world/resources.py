@@ -1342,6 +1342,58 @@ def set_labor_policy(village, policy):
         village.labor_policy = policy
 
 
+# Scopes a labor order can be given at. Per-village exists because a village
+# sitting on a gold seam is genuinely a different case from its neighbours; the
+# wider two exist because a realm can hold hundreds of villages and an order
+# that has to be given three hundred times is not a lever, it is a chore.
+LABOR_SCOPES = ("village", "region", "realm")
+
+
+def apply_labor_policy(world, village, policy, scope="village"):
+    """Set `policy` on this village, on every village in its region, or on
+    every village in its realm. Returns how many villages actually changed.
+
+    Never touches another faction's villages, whatever the scope -- the scope
+    widens which of YOUR villages an order reaches, and is not a way to give
+    orders to someone else's."""
+    if policy not in LABOR_POLICIES or scope not in LABOR_SCOPES:
+        return 0
+    if scope == "village":
+        targets = [village]
+    else:
+        fac_idx = village.faction_idx
+        targets = [v for v in world.villages if v.faction_idx == fac_idx]
+        if scope == "region":
+            targets = [v for v in targets if v.region_id == village.region_id]
+    changed = 0
+    for target in targets:
+        if labor_policy(target) != policy:
+            set_labor_policy(target, policy)
+            # The allocation is cached per (turn, season) -- a policy change
+            # inside a turn has to invalidate it or the panel keeps showing,
+            # and the turn keeps producing, the old split.
+            if hasattr(target, "_labor_cache"):
+                del target._labor_cache
+            changed += 1
+    return changed
+
+
+def labor_policy_available(world, village, policy):
+    """Is `policy` a meaningful order at this village? A named sector focus is
+    only offered where that sector has something to work -- ordering a
+    landlocked village to fish is accepted by the model (it falls through to
+    Auto rather than idling) but showing it as a choice would be a lie."""
+    if policy not in LABOR_POLICIES:
+        return False
+    sector = LABOR_POLICY_SECTOR.get(policy)
+    if sector is None:
+        return True     # Auto and Balanced always apply
+    season_any = any(
+        _village_terrain_potential(world, village, s)[1].get(sector, 0) > 0
+        for s in SEASONS)
+    return season_any
+
+
 def village_workforce(village):
     """Hands available to work this turn. Adults, matching what Food
     consumption already scales off (FOOD_PER_CAPITA) -- so "how many people
@@ -1591,11 +1643,19 @@ def village_labor_report(world, village, season=None):
             "sector": sector,
             "potential": round(potential),
             "output": round(potential * factor),
-            "workers": round(workforce * shares.get(sector, 0.0)),
+            "workers": potential * factor / LABOR_OUTPUT_PER_WORKER.get(sector, 1.0),
             "factor": factor,
             "limited_by": "hands" if factor < 0.999 else "land",
         })
-    return {"policy": labor_policy(village), "workforce": workforce, "sectors": rows}
+    # Hands with nothing left to do, because every sector this village can work
+    # has already hit its terrain ceiling. Worth stating outright: it is the
+    # only case where changing the labour policy genuinely does nothing, and
+    # without saying so the buttons look broken rather than unnecessary.
+    idle = max(0, round(workforce - sum(r["workers"] for r in rows)))
+    for row in rows:
+        row["workers"] = round(row["workers"])
+    return {"policy": labor_policy(village), "workforce": workforce,
+            "sectors": rows, "idle": idle}
 
 
 # --- Fishing: renewable, water-body-size-scaled -- deliberately its own

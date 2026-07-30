@@ -26,6 +26,7 @@ from app.ui import theme
 from app.ui import widgets
 from app.world import buildings as B
 from app.world import construction
+from app.world import resources
 
 
 _CARD_W = 300
@@ -41,7 +42,7 @@ _PRIORITY = {
     "blocked": (theme.LINE, "UNAVAILABLE"),
 }
 
-_SECTOR_LABEL = {"farming": "Fields", "forestry": "Woods",
+SECTOR_LABEL = {"farming": "Fields", "forestry": "Woods",
                  "mining": "Mines", "fishing": "Water"}
 
 # Which of the three ceilings is holding a sector back, in plain words. This
@@ -69,39 +70,104 @@ class BuildMenuWindow(tk.Toplevel):
         self.node = node
         self.nation = nation
         self.on_change = on_change
+        # Used to check the node is actually this player's before offering it
+        # any orders. The constructor is handed the faction OBJECT, and every
+        # ownership check in the game is by index.
+        self.nation_idx = (world.factions.index(nation)
+                           if nation in world.factions else -1)
+        # How wide the next labour order reaches. Sticky across re-renders on
+        # purpose: setting the scope once and then trying several policies is
+        # the natural way to use this, and resetting it every click would make
+        # the wider scopes almost unusable.
+        self._scope = "village"
 
         kind = (node.kind.capitalize() if hasattr(node, "kind") else "Village")
         self.title(f"{node.name} — {kind}")
-        self.geometry("1000x700")
         self.minsize(700, 480)
-        self.configure(bg=theme.BG)
+        # No OS titlebar or border: the game draws its own chrome in its own
+        # style, so a grey Windows frame around a parchment-and-leather panel
+        # is exactly the seam we are trying not to have. The cost is that
+        # everything the window manager used to provide has to be provided
+        # here -- a border, a way to move it, a way to close it, and focus --
+        # which is what the rest of this method and _begin_drag/_drag are for.
+        self.overrideredirect(True)
+        # The frame itself: one flat rule around the whole window, drawn as the
+        # Toplevel's own background showing through a 1px inset.
+        self.configure(bg=theme.LINE)
         self.transient(master)
+        self._place_over(master)
+
+        self._shell = tk.Frame(self, bg=theme.BG)
+        self._shell.pack(fill="both", expand=True, padx=1, pady=1)
 
         self._build_chrome()
         self._render()
         self.bind("<Escape>", lambda e: self.destroy())
         self.bind_all("<MouseWheel>", self._on_wheel)
         self.bind("<Destroy>", self._on_destroy)
+        # An undecorated window is not given focus by the window manager, so
+        # Escape would do nothing until something inside it were clicked.
+        self.after_idle(self._take_focus)
+
+    def _place_over(self, master):
+        """Centre on the game window. With no OS frame there is no sensible
+        default position -- an undecorated window placed by the window manager
+        lands in the top-left corner of the screen."""
+        width, height = 1000, 700
+        try:
+            master.update_idletasks()
+            mw, mh = master.winfo_width(), master.winfo_height()
+            mx, my = master.winfo_rootx(), master.winfo_rooty()
+            if mw > 1 and mh > 1:
+                width = max(700, min(width, mw - 60))
+                height = max(480, min(height, mh - 60))
+                x, y = mx + (mw - width) // 2, my + (mh - height) // 2
+                self.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
+                return
+        except tk.TclError:
+            pass
+        self.geometry(f"{width}x{height}")
+
+    def _take_focus(self):
+        try:
+            self.lift()
+            self.focus_force()
+        except tk.TclError:
+            pass   # already destroyed
 
     # --- chrome ----------------------------------------------------------
     def _build_chrome(self):
-        top = tk.Frame(self, bg=theme.PANEL)
+        top = tk.Frame(self._shell, bg=theme.PANEL)
         top.pack(fill="x")
         kind = (self.node.kind.capitalize() if hasattr(self.node, "kind") else "Village")
-        tk.Label(top, text=self.node.name, bg=theme.PANEL, fg=theme.ACCENT,
-                 font=theme.FONT_TITLE).pack(side="left", padx=14, pady=8)
-        tk.Label(top, text=kind, bg=theme.PANEL, fg=theme.MUTED,
-                 font=theme.FONT).pack(side="left", pady=8)
+        title = tk.Label(top, text=self.node.name, bg=theme.PANEL, fg=theme.ACCENT,
+                         font=theme.FONT_TITLE)
+        title.pack(side="left", padx=14, pady=8)
+        subtitle = tk.Label(top, text=kind, bg=theme.PANEL, fg=theme.MUTED,
+                            font=theme.FONT)
+        subtitle.pack(side="left", pady=8)
         widgets.button(top, "Close (Esc)", self.destroy).pack(side="right", padx=10, pady=8)
+        # The header IS the titlebar now. Bound on the header and its labels
+        # rather than on the whole window, so dragging still means dragging and
+        # a click on a card is still a click on a card.
+        for wdg in (top, title, subtitle):
+            wdg.bind("<Button-1>", self._begin_drag)
+            wdg.bind("<B1-Motion>", self._drag)
+            wdg.configure(cursor="fleur")
 
-        self._msg = tk.Label(self, text="", bg=theme.BG, fg=theme.ACCENT,
+        self._msg = tk.Label(self._shell, text="", bg=theme.BG, fg=theme.ACCENT,
                              font=theme.FONT_BOLD, anchor="w", padx=16)
 
-        outer = tk.Frame(self, bg=theme.BG)
+        outer = tk.Frame(self._shell, bg=theme.BG)
         outer.pack(fill="both", expand=True)
         self._canvas = tk.Canvas(outer, bg=theme.BG, highlightthickness=0)
         self._canvas.pack(side="left", fill="both", expand=True)
-        bar = tk.Scrollbar(outer, orient="vertical", command=self._canvas.yview)
+        # Styled rather than left default: with the OS frame gone, a stock grey
+        # Tk scrollbar is the only thing left in the window that isn't ours.
+        bar = tk.Scrollbar(outer, orient="vertical", command=self._canvas.yview,
+                           width=12, borderwidth=0, relief="flat",
+                           highlightthickness=0, troughcolor=theme.METER_TRACK,
+                           bg=theme.PANEL_ALT, activebackground=theme.ACCENT)
         bar.pack(side="right", fill="y")
         self._canvas.configure(yscrollcommand=bar.set)
 
@@ -118,6 +184,16 @@ class BuildMenuWindow(tk.Toplevel):
         if cols != getattr(self, "_cols", None):
             self._cols = cols
             self._render()
+
+    def _begin_drag(self, event):
+        self._drag_from = (event.x_root - self.winfo_x(),
+                           event.y_root - self.winfo_y())
+
+    def _drag(self, event):
+        origin = getattr(self, "_drag_from", None)
+        if origin is None:
+            return
+        self.geometry(f"+{event.x_root - origin[0]}+{event.y_root - origin[1]}")
 
     def _on_wheel(self, event):
         self._canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
@@ -187,11 +263,12 @@ class BuildMenuWindow(tk.Toplevel):
                      fg=theme.MUTED, font=theme.FONT_SMALL, anchor="w"
                      ).pack(fill="x", padx=12, pady=(0, 10))
             return
+        self._render_labor_orders(box, report)
 
         for row in report["sectors"]:
             line = tk.Frame(box, bg=theme.PANEL)
             line.pack(fill="x", padx=12, pady=2)
-            tk.Label(line, text=_SECTOR_LABEL.get(row["sector"], row["sector"].title()),
+            tk.Label(line, text=SECTOR_LABEL.get(row["sector"], row["sector"].title()),
                      bg=theme.PANEL, fg=theme.INK, font=theme.FONT_SMALL,
                      width=8, anchor="w").pack(side="left")
             tk.Label(line, text=f"{row['workers']:,} hands", bg=theme.PANEL,
@@ -209,6 +286,72 @@ class BuildMenuWindow(tk.Toplevel):
                      fg=theme.MUTED, font=theme.FONT_SMALL,
                      anchor="w").pack(side="left")
         tk.Frame(box, bg=theme.PANEL, height=8).pack()
+
+    def _render_labor_orders(self, box, report):
+        """Where the player actually decides what this village works on.
+
+        Only offered where the village is your own and the order means
+        something: a sector focus is hidden when that sector has nothing to
+        work in any season (resources.labor_policy_available). The model
+        tolerates an impossible order -- it falls through to Auto rather than
+        idling the village -- but offering one as a CHOICE would be a lie about
+        what the button does.
+
+        The scope buttons matter as much as the policy ones. A realm can hold
+        several hundred villages, and an order that has to be given three
+        hundred times is a chore rather than a lever."""
+        if self.node.faction_idx != self.nation_idx:
+            return
+        if report.get("idle"):
+            tk.Label(box,
+                     text=f"{report['idle']:,} of these hands have nothing left "
+                          f"to do — every sector here is already working all "
+                          f"the land there is. More land or more buildings will "
+                          f"help; moving the labour about will not.",
+                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_SMALL,
+                     anchor="w", justify="left", wraplength=900
+                     ).pack(fill="x", padx=12, pady=(4, 0))
+        row = tk.Frame(box, bg=theme.PANEL)
+        row.pack(fill="x", padx=12, pady=(6, 0))
+        tk.Label(row, text="Put the hands on:", bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_SMALL, anchor="w").pack(side="left", padx=(0, 6))
+        current = report["policy"]
+        for policy in resources.LABOR_POLICIES:
+            if not resources.labor_policy_available(self.world, self.node, policy):
+                continue
+            widgets.button(row, policy, lambda p=policy: self._set_labor(p),
+                           kind="active" if policy == current else "default",
+                           compact=True).pack(side="left", padx=2)
+
+        scope_row = tk.Frame(box, bg=theme.PANEL)
+        scope_row.pack(fill="x", padx=12, pady=(4, 8))
+        tk.Label(scope_row, text="Apply to:", bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_SMALL, anchor="w").pack(side="left", padx=(0, 6))
+        for scope, label in (("village", "This village"),
+                             ("region", "Every village in this region"),
+                             ("realm", "Every village in the realm")):
+            widgets.button(scope_row, label, lambda s=scope: self._set_scope(s),
+                           kind="active" if self._scope == scope else "default",
+                           compact=True).pack(side="left", padx=2)
+
+    def _set_scope(self, scope):
+        self._scope = scope
+        self._render()
+
+    def _set_labor(self, policy):
+        changed = resources.apply_labor_policy(self.world, self.node, policy,
+                                               scope=self._scope)
+        where = {"village": self.node.name,
+                 "region": "this region",
+                 "realm": "the realm"}[self._scope]
+        if changed:
+            self._notice(f"{policy}: {changed} village"
+                         f"{'s' if changed != 1 else ''} in {where} reassigned.")
+        else:
+            self._notice(f"Every village in {where} was already set to {policy}.")
+        self._render()
+        if self.on_change:
+            self.on_change()
 
     def _render_settlement_production(self, box, report):
         running = [r for r in report["recipes"] if r["rate"] > 0]
@@ -314,6 +457,13 @@ class BuildMenuWindow(tk.Toplevel):
         ).pack(fill="x", padx=10, pady=(0, 10))
 
     # --- actions ---------------------------------------------------------
+    def _notice(self, message):
+        """The one-line result bar under the title. Packed on first use rather
+        than up front so the window has no empty strip before anything has
+        happened."""
+        self._msg.config(text=message)
+        self._msg.pack(fill="x", pady=(6, 2))
+
     def _start(self, option):
         if option.building == "shipyard":
             message = construction.start_shipyard(self.world, self.nation, self.node)
@@ -321,8 +471,7 @@ class BuildMenuWindow(tk.Toplevel):
             message = construction.start_storage_building(
                 self.world, self.nation, self.node, option.building)
         self._render()
-        self._msg.config(text=message)
-        self._msg.pack(fill="x", pady=(6, 2))
+        self._notice(message)
         if self.on_change:
             self.on_change()
 

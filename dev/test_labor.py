@@ -274,6 +274,75 @@ R.set_labor_policy(v, "Auto")
 clear_cache(v)
 print("  ok    policy survives a pickle round-trip; an unknown policy is refused")
 
+print("\n--- an order reaches a village, a region, or a realm ---")
+pidx = w.player_faction_idx if w.player_faction_idx is not None else 0
+mine = [x for x in w.villages if x.faction_idx == pidx]
+assert mine, "the player faction owns no villages in this world"
+target_v = mine[0]
+before_all = {x.id: R.labor_policy(x) for x in mine}
+foreign = [x for x in w.villages if x.faction_idx >= 0 and x.faction_idx != pidx]
+foreign_before = {x.id: R.labor_policy(x) for x in foreign}
+try:
+    # A policy change must invalidate the cached allocation, or the turn keeps
+    # producing on the old split for the rest of this turn.
+    R.apply_labor_policy(w, target_v, "Auto")
+    R.village_labor_state(w, target_v, season)
+    assert hasattr(target_v, "_labor_cache")
+    R.apply_labor_policy(w, target_v, "Balanced")
+    assert not hasattr(target_v, "_labor_cache"), (
+        "a policy change left a stale allocation cached")
+    print("  ok    a policy change invalidates the cached allocation")
+
+    same_region = [x for x in mine if x.region_id == target_v.region_id]
+    changed = R.apply_labor_policy(w, target_v, "Forestry", scope="region")
+    assert all(R.labor_policy(x) == "Forestry" for x in same_region), same_region
+    outside = [x for x in mine if x.region_id != target_v.region_id]
+    assert not any(R.labor_policy(x) == "Forestry" for x in outside
+                   if before_all[x.id] != "Forestry"), "region scope leaked outside"
+    print(f"  ok    region scope: {changed} villages, none outside the region")
+
+    changed = R.apply_labor_policy(w, target_v, "Balanced", scope="realm")
+    assert all(R.labor_policy(x) == "Balanced" for x in mine)
+    assert all(R.labor_policy(x) == foreign_before[x.id] for x in foreign), (
+        "realm scope reached another faction's villages")
+    print(f"  ok    realm scope: {changed} villages, {len(foreign)} foreign "
+          f"villages untouched")
+
+    assert R.apply_labor_policy(w, target_v, "Balanced", scope="realm") == 0, (
+        "re-applying the same policy should report nothing changed")
+    assert R.apply_labor_policy(w, target_v, "nonsense", scope="realm") == 0
+    assert R.apply_labor_policy(w, target_v, "Auto", scope="nonsense") == 0
+    print("  ok    a no-op, an unknown policy and an unknown scope all change nothing")
+finally:
+    for x in mine:
+        R.apply_labor_policy(w, x, before_all[x.id])
+
+print("\n--- an impossible focus is never offered as a choice ---")
+landlocked = [x for x in w.villages if x.faction_idx >= 0
+              and not (getattr(x, "fish_yield", 0) or 0)]
+assert landlocked
+assert not R.labor_policy_available(w, landlocked[0], "Fishing")
+assert R.labor_policy_available(w, landlocked[0], "Auto")
+assert R.labor_policy_available(w, landlocked[0], "Balanced")
+# Out of season is not "impossible": a farming village in Winter must still be
+# orderable to farm, or the order would vanish for half of every year.
+seasonal = None
+for x in w.villages:
+    if x.faction_idx < 0:
+        continue
+    by_season = {s: R._village_terrain_potential(w, x, s)[1].get("farming", 0)
+                 for s in R.SEASONS}
+    if max(by_season.values()) > 0 and min(by_season.values()) <= 0:
+        seasonal = x
+        break
+if seasonal is not None:
+    assert R.labor_policy_available(w, seasonal, "Farming"), (
+        "a farming order vanished out of season")
+    print(f"  ok    {landlocked[0].name} cannot be ordered to fish; "
+          f"{seasonal.name} can still be ordered to farm out of season")
+else:
+    print(f"  ok    {landlocked[0].name} cannot be ordered to fish")
+
 print("\n--- the panel report agrees with what is produced ---")
 rep = R.village_labor_report(w, v, season)
 produced = yield_for(v)

@@ -29,6 +29,7 @@ except tk.TclError as exc:
     sys.exit(0)
 
 from app.ui import build_menu
+from app.ui import theme
 from app.world import buildings as B
 from app.world import construction
 from app.world import resources as R
@@ -177,6 +178,157 @@ finally:
     w.storage_projects = [p for p in construction._storage_projects(w)
                           if not (p.node_kind == "village" and p.node_id == village.id)]
     village.resources = orig
+
+print("\n--- labour orders ---")
+win = build_menu.BuildMenuWindow(_root, w, village, nation)
+win.update_idletasks()
+windows.append(win)
+joined = " | ".join(texts(win))
+assert "Put the hands on:" in joined, joined[:400]
+assert "Apply to:" in joined, joined[:400]
+policy_btns = {str(b.cget("text")): b for b in buttons(win)
+               if str(b.cget("text")) in R.LABOR_POLICIES}
+assert "Auto" in policy_btns and "Balanced" in policy_btns, sorted(policy_btns)
+# A sector focus is only offered where that sector has something to work.
+for policy, btn in policy_btns.items():
+    assert R.labor_policy_available(w, village, policy), (
+        f"{policy} was offered at {village.name} but has nothing to work")
+for policy in R.LABOR_POLICIES:
+    if not R.labor_policy_available(w, village, policy):
+        assert policy not in policy_btns, (
+            f"{policy} is impossible here but was offered anyway")
+print(f"  ok    offered {sorted(policy_btns)}; "
+      f"hid {sorted(set(R.LABOR_POLICIES) - set(policy_btns))}")
+
+before_policy = R.labor_policy(village)
+try:
+    target = next(p for p in policy_btns if p != before_policy)
+    policy_btns[target].invoke()
+    win.update_idletasks()
+    assert R.labor_policy(village) == target, (before_policy, target)
+    # The re-render legitimately repopulates the allocation cache -- what
+    # matters is that it repopulated it from the NEW policy. (That
+    # apply_labor_policy invalidates it at all is asserted at the model level,
+    # in dev/test_labor.py.)
+    cached = R.village_labor_state(w, village, w.season)[0]
+    fresh = R.village_labor_factors(
+        w, village, *R._village_terrain_potential(w, village, w.season)[1:])
+    assert cached == fresh, (cached, fresh)
+    assert "reassigned" in " | ".join(texts(win)), texts(win)[:8]
+    print(f"  ok    clicking {target} set the policy; the cached split agrees "
+          f"with it")
+
+    # The active policy is the highlighted button after a re-render.
+    live = {str(b.cget("text")): b for b in buttons(win)
+            if str(b.cget("text")) in R.LABOR_POLICIES}
+    assert str(live[target].cget("bg")) == theme.ACCENT, live[target].cget("bg")
+    print(f"  ok    {target} renders as the active choice")
+finally:
+    R.apply_labor_policy(w, village, before_policy)
+
+print("\n--- an order can be given to a whole region or realm at once ---")
+region_villages = [v for v in w.villages
+                   if v.region_id == village.region_id and v.faction_idx == pidx]
+before = {v.id: R.labor_policy(v) for v in w.villages if v.faction_idx == pidx}
+foreign = [v for v in w.villages if v.faction_idx >= 0 and v.faction_idx != pidx]
+foreign_before = {v.id: R.labor_policy(v) for v in foreign}
+try:
+    win = build_menu.BuildMenuWindow(_root, w, village, nation)
+    win.update_idletasks()
+    windows.append(win)
+    scope_btn = next(b for b in buttons(win)
+                     if "Every village in this region" in str(b.cget("text")))
+    scope_btn.invoke()
+    win.update_idletasks()
+    target = next(p for p in R.LABOR_POLICIES
+                  if p != R.labor_policy(village)
+                  and R.labor_policy_available(w, village, p))
+    next(b for b in buttons(win) if str(b.cget("text")) == target).invoke()
+    win.update_idletasks()
+    assert all(R.labor_policy(v) == target for v in region_villages), (
+        "a region-scope order missed some of its own villages")
+    print(f"  ok    region scope set {len(region_villages)} villages to {target}")
+
+    realm_btn = next(b for b in buttons(win)
+                     if "Every village in the realm" in str(b.cget("text")))
+    realm_btn.invoke()
+    win.update_idletasks()
+    other = next(p for p in R.LABOR_POLICIES
+                 if p != target and R.labor_policy_available(w, village, p))
+    next(b for b in buttons(win) if str(b.cget("text")) == other).invoke()
+    win.update_idletasks()
+    mine = [v for v in w.villages if v.faction_idx == pidx]
+    assert all(R.labor_policy(v) == other for v in mine), "realm scope missed some"
+    assert all(R.labor_policy(v) == foreign_before[v.id] for v in foreign), (
+        "a realm-scope order reached another faction's villages")
+    print(f"  ok    realm scope set {len(mine)} villages to {other}, and left "
+          f"{len(foreign)} foreign villages alone")
+finally:
+    for v in w.villages:
+        if v.faction_idx == pidx and v.id in before:
+            R.apply_labor_policy(w, v, before[v.id])
+
+print("\n--- a settlement is offered no labour orders ---")
+win = build_menu.BuildMenuWindow(_root, w, settlement, nation)
+win.update_idletasks()
+windows.append(win)
+assert "Put the hands on:" not in " | ".join(texts(win)), (
+    "a settlement has no workforce model and must not be offered labour orders")
+print("  ok    settlement window has no labour row")
+
+print("\n--- the window draws its own chrome, not the OS's ---")
+win = build_menu.BuildMenuWindow(_root, w, village, nation)
+win.update_idletasks()
+windows.append(win)
+assert win.overrideredirect(), "the OS titlebar/border is still on"
+# Everything the window manager used to supply has to be supplied here.
+assert win.cget("bg") == theme.LINE, "no border rule drawn"
+close = [b for b in buttons(win) if "Close" in str(b.cget("text"))]
+assert close, "an undecorated window with no close button is a trap"
+# The header has to be draggable, or the window can never be moved again.
+header = win._shell.winfo_children()[0]
+assert "<Button-1>" in header.bind(), "the header is not a titlebar"
+assert "<B1-Motion>" in header.bind(), "the header cannot be dragged"
+# Asserted on the REQUESTED geometry, not winfo_x/y: this root is withdrawn,
+# so the window is never mapped and winfo_x stays 0 however it is moved.
+before = win.geometry()
+win._begin_drag(type("E", (), {"x_root": 500, "y_root": 400})())
+win._drag(type("E", (), {"x_root": 640, "y_root": 490})())
+win.update_idletasks()
+after = win.geometry()
+assert after != before, (before, after)
+assert after.endswith("+140+90"), after
+print(f"  ok    undecorated, own border and close button; header drags "
+      f"{before} -> {after}")
+# Placement: an undecorated window gets no default position from the window
+# manager, so it must ask for one. Checked against a stub parent rather than
+# the real geometry -- this root is withdrawn and reports 1x1 until mapped.
+class _Stub:
+    def update_idletasks(self):
+        pass
+
+    def winfo_width(self):
+        return 1600
+
+    def winfo_height(self):
+        return 900
+
+    def winfo_rootx(self):
+        return 100
+
+    def winfo_rooty(self):
+        return 50
+
+
+win._place_over(_Stub())
+# Only the POSITION is readable here: geometry() reports the actual size of an
+# unmapped window (1x1), not the requested one. The size floor is minsize.
+_, x, y = win.geometry().split("+")
+assert (int(x), int(y)) == (400, 150), (
+    f"not centred on a 1600x900 parent at (100,50): +{x}+{y}")
+assert win.minsize() == (700, 480), win.minsize()
+print(f"  ok    centres at +{x}+{y} on a 1600x900 parent at (100,50); "
+      f"minimum {win.minsize()[0]}x{win.minsize()[1]}")
 
 print("\n--- one window per node, re-opening raises it ---")
 first = build_menu.open_for(_root, w, village, nation)
