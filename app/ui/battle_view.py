@@ -13,6 +13,7 @@ import math
 import tkinter as tk
 
 from app.ui import theme
+from app.ui import widgets
 from app.ui import gl_battle
 from app.battle import orders
 from app.battle.shapes import draw_shape
@@ -90,11 +91,11 @@ class BattleView(tk.Frame):
         # the globally-bound continue handler.
         self.over_banner = tk.Frame(self, bg="#000000")
         self.over_title = tk.Label(self.over_banner, text="", bg="#000000",
-                                   fg="#ffffff", font=("Segoe UI", 18, "bold"))
+                                   fg="#ffffff", font=theme.FONT_TITLE)
         self.over_title.pack(pady=(10, 2), padx=40)
         self.over_sub = tk.Label(self.over_banner, text="Click anywhere to continue...",
                                  bg="#000000", fg=theme.MUTED,
-                                 font=("Segoe UI", 11, "bold"))
+                                 font=theme.FONT_BOLD)
         self.over_sub.pack(pady=(0, 10))
 
         self._build_panel()
@@ -158,25 +159,17 @@ class BattleView(tk.Frame):
                              wraplength=270, anchor="w")
         self.info.pack(anchor="w", padx=14)
         self.plan_hint = tk.Label(p, text="", bg=theme.PANEL, fg=theme.ACCENT,
-                                  font=("Segoe UI", 9, "bold"), justify="left",
+                                  font=theme.FONT_SMALL_BOLD, justify="left",
                                   wraplength=270, anchor="w")
         self.plan_hint.pack(anchor="w", padx=14, pady=(4, 0))
 
         controls = tk.Frame(p, bg=theme.PANEL)
         controls.pack(fill="x", padx=14, pady=12)
-        self.toggle_btn = tk.Button(controls, text="Start / Pause", command=self.toggle,
-                                    bg="#232a36", fg=theme.INK,
-                                    activebackground=theme.ACCENT, relief="flat",
-                                    font=theme.FONT)
+        self.toggle_btn = widgets.button(controls, "Start / Pause", self.toggle)
         self.toggle_btn.pack(side="left", padx=2)
-        tk.Button(controls, text="Step", command=self.step_once, bg="#232a36",
-                  fg=theme.INK, activebackground=theme.ACCENT,
-                  relief="flat", font=theme.FONT).pack(side="left", padx=2)
+        widgets.button(controls, "Step", self.step_once).pack(side="left", padx=2)
 
-        self.speed_btn = tk.Button(controls, text="Speed 1x",
-                                   command=self._cycle_speed, bg="#232a36",
-                                   fg=theme.INK, activebackground=theme.ACCENT,
-                                   relief="flat", font=theme.FONT)
+        self.speed_btn = widgets.button(controls, "Speed 1x", self._cycle_speed)
         self.speed_btn.pack(side="left", padx=2)
 
         # Per-type quick-select: click a unit, rubber-band a box over several,
@@ -187,7 +180,7 @@ class BattleView(tk.Frame):
         # carries a live "selected / alive" count so it also doubles as a
         # roster readout, not just a selector.
         tk.Label(p, text="Select (click a unit, drag a box, or a button below):",
-                bg=theme.PANEL, fg=theme.MUTED, font=("Segoe UI", 9)
+                bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_SMALL
                 ).pack(anchor="w", padx=14, pady=(0, 2))
         self.select_frame = tk.Frame(p, bg=theme.PANEL)
         self.select_frame.pack(fill="x", padx=14, pady=(0, 4))
@@ -198,13 +191,16 @@ class BattleView(tk.Frame):
         # give once the lines meet is not much of an order.
         self.orders_frame = tk.Frame(p, bg=theme.PANEL)
         self.orders_frame.pack(fill="x", padx=14, pady=(8, 0))
-        tk.Label(self.orders_frame, text="ORDERS", bg=theme.PANEL, fg=theme.MUTED,
-                 font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        tk.Label(self.orders_frame, text="ORDERS", bg=theme.PANEL, fg=theme.ACCENT,
+                 font=theme.FONT_HEADER).pack(anchor="w")
         self.order_hint = tk.Label(self.orders_frame, text="", bg=theme.PANEL,
-                                   fg=theme.MUTED, font=("Segoe UI", 8),
+                                   fg=theme.MUTED, font=theme.FONT_SMALL,
                                    justify="left", wraplength=270, anchor="w")
         self.order_hint.pack(anchor="w", pady=(0, 3))
 
+        # Live-phase orders, not folded behind a click: these are given under
+        # time pressure mid-fight, unlike the map's leisurely detail panels,
+        # so every stance/fire button stays one click away at all times.
         self._order_buttons = {}
         for label, hot, kind, value in (
                 ("Hold Here", "H", "stance", orders.STANCE_HOLD),
@@ -214,16 +210,13 @@ class BattleView(tk.Frame):
                 ("Charge & Regroup", "R", "stance", orders.STANCE_CYCLE_CHARGE),
                 ("Fire at Will", "F", "fire", True),
                 ("Hold Fire", "X", "fire", False)):
-            btn = tk.Button(self.orders_frame, text=f"{label}  ({hot})",
-                            command=lambda k=kind, v=value: self._issue_order(k, v),
-                            bg="#232a36", fg=theme.INK,
-                            activebackground=theme.ACCENT, relief="flat",
-                            font=("Segoe UI", 8), anchor="w")
+            btn = widgets.button(self.orders_frame, f"{label}  ({hot})",
+                                  lambda k=kind, v=value: self._issue_order(k, v))
             btn.pack(fill="x", pady=1)
             self._order_buttons[(kind, value)] = btn
 
         self.log = tk.Label(p, text="", bg=theme.PANEL, fg=theme.MUTED,
-                            font=("Consolas", 8), justify="left",
+                            font=theme.FONT_LOG, justify="left",
                             wraplength=270, anchor="nw")
         self.log.pack(anchor="w", padx=14, pady=8, fill="both")
 
@@ -270,7 +263,7 @@ class BattleView(tk.Frame):
             else:
                 ok = any(value in orders.allowed_stances(t) for t in types)
             btn.config(state="normal" if ok else "disabled",
-                       fg=theme.INK if ok else "#4a5260")
+                       fg=theme.INK if ok else theme.LINE)
         if not units:
             self.order_hint.config(text="No units selected.")
         else:
@@ -360,10 +353,9 @@ class BattleView(tk.Frame):
         for i, type_key in enumerate(self._select_types):
             label = UNIT_TYPES.get(type_key, {}).get("name", type_key.capitalize())
             hot = str(i + 1)
-            btn = tk.Button(self.select_frame, text=f"{label} ({hot})",
-                            command=lambda k=type_key: self._select_type(k),
-                            bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                            relief="flat", font=("Segoe UI", 8))
+            btn = widgets.button(self.select_frame, f"{label} ({hot})",
+                                  lambda k=type_key: self._select_type(k),
+                                  compact=True)
             btn.pack(side="left", padx=1)
             self._select_buttons[type_key] = (btn, label)
         # Separate from the per-type buttons (own key, own colour) rather than
@@ -371,10 +363,8 @@ class BattleView(tk.Frame):
         # it's the complement of all of them, and it's the one selection that
         # also grabs the Commander -- nothing else does, since he has no type
         # button of his own (see _plannable_units, which never excludes him).
-        self.select_all_btn = tk.Button(
-            self.select_frame, text="All (0)", command=self._select_all,
-            bg="#2d3648", fg=theme.INK, activebackground=theme.ACCENT,
-            relief="flat", font=("Segoe UI", 8, "bold"))
+        self.select_all_btn = widgets.button(
+            self.select_frame, "All (0)", self._select_all, kind="accent", compact=True)
         self.select_all_btn.pack(side="left", padx=(6, 1))
         self._update_select_counts()
 
@@ -789,10 +779,10 @@ class BattleView(tk.Frame):
     # only for units actually carrying an order, so a default-stance army costs
     # nothing extra to draw.
     _ORDER_CUE = {
-        orders.STANCE_HOLD: "#7fd6ff",
-        orders.STANCE_CHARGE: "#ff9b57",
-        orders.STANCE_SHIELD_WALL: "#9fe0a8",
-        orders.STANCE_CYCLE_CHARGE: "#ffd166",
+        orders.STANCE_HOLD: theme.ORDER_CUE_HOLD,
+        orders.STANCE_CHARGE: theme.ORDER_CUE_CHARGE,
+        orders.STANCE_SHIELD_WALL: theme.ORDER_CUE_SHIELD_WALL,
+        orders.STANCE_CYCLE_CHARGE: theme.ORDER_CUE_CYCLE_CHARGE,
     }
 
     def _draw_order_cue(self, c, u):
@@ -825,10 +815,10 @@ class BattleView(tk.Frame):
         frac = max(0.0, min(1.0, u.hp / u.max_hp))
         bw, by = r * 2.2, u.y - r - 12
         c.create_rectangle(u.x - bw / 2, by, u.x + bw / 2, by + 4,
-                           fill="#11151b", outline="")
+                           fill=theme.METER_TRACK, outline="")
         if frac > 0:
-            colour = ("#59c17a" if frac > 0.5 else
-                      "#d9a441" if frac > 0.25 else "#e2604a")
+            colour = (theme.GOOD if frac > 0.5 else
+                      theme.WARN if frac > 0.25 else theme.BAD)
             c.create_rectangle(u.x - bw / 2, by, u.x - bw / 2 + bw * frac, by + 4,
                                fill=colour, outline="")
 
@@ -933,7 +923,7 @@ class BattleView(tk.Frame):
         w, h = c.winfo_width(), c.winfo_height()
         if w <= 1 or h <= 1:
             return
-        c.create_line(w / 2, 0, w / 2, h, fill="#1c222c")
+        c.create_line(w / 2, 0, w / 2, h, fill=theme.LINE)
 
         if not self.battle:
             return
@@ -942,7 +932,7 @@ class BattleView(tk.Frame):
             x_min, x_max = self.battle.zone_bounds(0)
             c.create_line(x_max, 0, x_max, h, fill=theme.ACCENT, dash=(4, 3))
             c.create_text(10, 8, text="PLANNING PHASE — drag your units into position",
-                         fill=theme.ACCENT, font=("Segoe UI", 11, "bold"), anchor="nw")
+                         fill=theme.ACCENT, font=theme.FONT_BOLD, anchor="nw")
 
         # Level of detail: the per-soldier sword/shield glyphs are two extra
         # canvas items each, one of them ROTATED text, and they measure at
@@ -998,6 +988,6 @@ class BattleView(tk.Frame):
             c.create_rectangle(0, h / 2 - 26, w, h / 2 + 26,
                                fill="#000000", stipple="gray50", outline="")
             c.create_text(w / 2, h / 2, text=msg, fill="#ffffff",
-                          font=("Segoe UI", 18, "bold"))
+                          font=theme.FONT_TITLE)
             c.create_text(w / 2, h - 22, text="Click any button to continue...",
-                          fill=theme.MUTED, font=("Segoe UI", 11, "bold"))
+                          fill=theme.MUTED, font=theme.FONT_BOLD)

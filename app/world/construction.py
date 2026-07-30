@@ -17,7 +17,7 @@ from app.world.worldgen import (OCEAN, Settlement, SETTLEMENT_TYPES,
                                 SETTLEMENT_TAX_INCOME, _roll_population, _path_dijkstra,
                                 _elev_cost, _SEA_COAST_REACH, _site_score,
                                 _too_close_any, _mark_occupied_both,
-                                _nearest_ocean_cell, _sea_cost)
+                                _nearest_ocean_cell, _sea_cost, road_cells)
 from app.world.lexicon import make_settlement_namer
 from app.world.resources import (seed_prosperity, _SETTLEMENT_STORAGE_RESOURCES,
                                  settlement_storage_capacity)
@@ -503,8 +503,10 @@ def _path_between(world, origin, dest_pos, faction_idx=None, allow_fallback=True
     xs = wrap.bbox_span_wrap(origin[0], dest_pos[0], world.w, _BBOX_PAD)
     land_cellset = {(x, y) for y in range(by0, by1) for x in xs
                      if world.owner[y][x] != OCEAN}
+    roads = road_cells(world)
     path = _path_dijkstra(land_cellset,
-                          lambda c: _elev_cost(world, world.base_cost, c, faction_idx),
+                          lambda c: _elev_cost(world, world.base_cost, c,
+                                               faction_idx, roads=roads),
                           origin, dest_pos, world.w)
     if path is not None:
         return path

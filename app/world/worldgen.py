@@ -1065,8 +1065,10 @@ def _local_road_path(world, a, b, faction_idx=None, allow_fallback=True):
     xs = wrap.bbox_span_wrap(a[0], b[0], world.w, _ROAD_BBOX_PAD)
     cellset = {(x, y) for y in range(ry0, ry1) for x in xs
                if world.owner[y][x] != OCEAN}
+    roads = road_cells(world)
     path = _path_dijkstra(cellset,
-                          lambda c: _elev_cost(world, world.base_cost, c, faction_idx),
+                          lambda c: _elev_cost(world, world.base_cost, c,
+                                               faction_idx, roads=roads),
                           a, b, world.w)
     if path is not None:
         return path
@@ -1579,12 +1581,18 @@ def _elev_cost(world, base_cost, cell, faction_idx=None, friendly_idxs=None, roa
     shouldn't matter at all (a scout can walk anywhere).
 
     `roads`, when given (the set from road_cells), makes cells an existing
-    road already runs through much cheaper, so traffic follows the network
-    rather than striking off cross-country. Opt-in per caller rather than
-    always-on: goods and travellers should use the roads, but road
-    CONSTRUCTION itself must keep pathing on raw terrain, or every new road
-    would snap onto whatever was built first instead of taking its own
-    honest line."""
+    road already runs through much cheaper, so a new route follows the
+    network rather than striking off cross-country right beside it. Opt-in
+    per caller (still None for open-country movement like a scout or a
+    commander with no road to speak of) but every road/route CONSTRUCTION
+    site passes it now: two roads converging on the same corridor should
+    share it and split only where they actually diverge, the same way real
+    roads do, rather than being drawn as two independent, needlessly
+    parallel lines a few cells apart. The search box every caller already
+    builds around its two endpoints (see _local_road_path/_path_between's
+    own bbox padding) keeps this from pulling a route wildly off course
+    toward some unrelated road on the far side of the map -- only a road
+    that's already roughly on the way is ever cheap to reach."""
     x, y = cell
     cost = base_cost[y][x]
     over = world.height[y][x] - _ROAD_ELEV_START

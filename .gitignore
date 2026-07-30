@@ -27,6 +27,13 @@ Thumbs.db
 /game_version.txt
 /ShapesOfWar.exe.download
 
+# Local "have I seen this changelog" state (per-player, not source).
+/changelog_seen.json
+
+# Diagnostic tripwire log from map_view.py's _log_flatgl_timing (see
+# shapes_of_war_flatgl_content_cache) -- runtime output, not source.
+/flatgl_timing.log
+
 # Packaged build output (the exe is distributed via GitHub Releases, not the repo)
 /ShapesOfWar.zip
 

@@ -20,6 +20,43 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 62,
+        "title": "Village View Is Just Zooming In Now",
+        "items": [
+            "NEW: villages now appear and become clickable simply by zooming in close on a region -- no more double-clicking a region and hoping it registers",
+        ],
+    },
+    {
+        "version": 61,
+        "title": "New Roads Merge Into Existing Ones",
+        "items": [
+            "FIXED: newly built roads and dirt paths cut their own line right beside an existing road instead of joining it -- they now prefer sharing an existing road's route and only split off where they actually diverge",
+        ],
+    },
+    {
+        "version": 60,
+        "title": "The Battle Screen Got the Same Facelift",
+        "items": [
+            "NEW: the battle panel, order buttons and unit-select buttons now match the rest of the parchment/gold HUD",
+        ],
+    },
+    {
+        "version": 59,
+        "title": "The Rest of the HUD Matches Now Too",
+        "items": [
+            "NEW: the resource bar, alerts, treasury and trade log now use the same parchment/gold styling as the realm panel, instead of the old dark-blue chrome",
+            "NEW: the Treasury popup is now foldable sections (TOTAL, WHERE IT IS, WHERE IT CAME FROM, RECENT TURNS) instead of one long printout",
+        ],
+    },
+    {
+        "version": 58,
+        "title": "The Realm and Region Panels Got a New Look",
+        "items": [
+            "NEW: a fantasy-themed HUD facelift -- warmer parchment colors, a gold accent, bigger readable text, and taller buttons",
+            "NEW: the faction and region panels now use the same foldable SUMMARY cards as settlements and villages, instead of one long paragraph of stats",
+        ],
+    },
+    {
         "version": 57,
         "title": "GPU Flat Map Was Hiding All Your HUD Panels",
         "items": [

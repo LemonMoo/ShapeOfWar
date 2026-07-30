@@ -22,6 +22,7 @@ import numpy as np
 from PIL import Image, ImageTk
 
 from app.ui import theme
+from app.ui import widgets
 from app.world.world_map import Stance
 from app.world.worldgen import OCEAN
 from app.world.territory import bordering_regions, naval_reachable_regions
@@ -51,6 +52,14 @@ _LABEL_FONT = ("Segoe UI", 8, "bold")
 _DRAG_THRESHOLD_PX = 4   # movement past this on a press+move counts as a drag, not a click
 _ZOOM_STEP = 0.9         # view-span multiplier per wheel notch
 _MIN_ZOOM_CELLS = 6      # closest allowed zoom (world-cells across the short viewport edge)
+_VILLAGE_REVEAL_SPAN = 26   # world-cells across the shorter viewport edge -- below
+                            # this, villages become visible/clickable within region
+                            # view (see MapView._villages_visible). Was previously a
+                            # separate click-triggered "village view" mode; region
+                            # side (~14 cells average) plus room for a couple of
+                            # neighboring regions' worth of villages (~7-10 cells
+                            # apart) landed on this as a reasonable starting point --
+                            # tune by feel if it reveals villages too early/late.
 
 _END_TURN_COOLDOWN_MS = 220   # min gap between End Turns -- the side panels fully
                               # rebuild each turn, so back-to-back turns faster than
@@ -335,7 +344,7 @@ _LOW_STOCK_THRESHOLD = 200
 _ALERTS_PANEL_W = 260
 _TREASURY_W = 300
 _LEFT_PANEL_W = 200
-_RIGHT_PANEL_W = 320
+_RIGHT_PANEL_W = 360
 _EDGE_TAB_W = 14
 
 _VILLAGE_LABEL_LIMIT = 24
@@ -438,9 +447,10 @@ class MapView(tk.Frame):
         # `_end_turn_busy` is still set at that point.
         self._turn_in_flight = False
         self.selected = None            # selected faction (world view)
-        self.zoom_faction = None        # faction we've zoomed into (region view)
+        self.zoom_faction = None        # faction we've zoomed into (region view --
+                                         # villages become visible/clickable once
+                                         # zoomed in close, see _villages_visible)
         self.selected_region = None
-        self.zoom_region = None         # region we've zoomed into (village view)
         self.selected_settlement = None
         self.selected_village = None
         self.selected_commander = None
@@ -501,6 +511,7 @@ class MapView(tk.Frame):
         # resource bar until the next End Turn overwrites them.
         self._resource_deltas = {}
         self._panel_cards_open = {}
+        self._treasury_cards_open = {}
 
         # Year-rollover banner (see _show_year_banner): the player faction's
         # resource snapshot as of the start of the current in-game year,
@@ -565,22 +576,22 @@ class MapView(tk.Frame):
         self._move_tracks = ()       # [(mover, t -> (x, y)), ...]
         self._anim_pos = {}          # id(mover) -> its position this frame
 
-        self.bottom_msg = tk.Label(self, text="", bg="#0d1017", fg=theme.INK,
+        self.bottom_msg = tk.Label(self, text="", bg=theme.CANVAS, fg=theme.INK,
                                    font=("Segoe UI", 13, "bold"), padx=18, pady=10)
 
         # Year-rollover banner (see _show_year_banner) — a big top-of-screen
         # announcement, MMO-zone-reveal style, for the once-a-year moment a
         # new year actually begins; distinct from bottom_msg's small
         # one-line event banners above.
-        self.year_banner = tk.Frame(self, bg="#0d1017",
+        self.year_banner = tk.Frame(self, bg=theme.CANVAS,
                                     highlightbackground=theme.ACCENT,
                                     highlightthickness=2)
         self.year_title_lbl = tk.Label(self.year_banner, text="",
-                                       bg="#0d1017", fg=theme.INK,
+                                       bg=theme.CANVAS, fg=theme.INK,
                                        font=("Segoe UI", 30, "bold"))
         self.year_title_lbl.pack(padx=32, pady=(16, 2))
         self.year_summary_lbl = tk.Label(self.year_banner, text="",
-                                         bg="#0d1017", fg=theme.MUTED,
+                                         bg=theme.CANVAS, fg=theme.MUTED,
                                          font=("Segoe UI", 11), justify="center",
                                          wraplength=560)
         self.year_summary_lbl.pack(padx=32, pady=(0, 18))
@@ -633,7 +644,6 @@ class MapView(tk.Frame):
         self.selected = None
         self.zoom_faction = None
         self.selected_region = None
-        self.zoom_region = None
         self.selected_settlement = None
         self.selected_village = None
         self.selected_commander = None
@@ -951,43 +961,43 @@ class MapView(tk.Frame):
         self._trade_log_expanded = set()   # {(turn, tab, group_label), ...} currently expanded
         self._trade_log_scroll_pending = False   # see _scroll_trade_log_to_end
 
-        self.trade_log_frame = tk.Frame(self.canvas, bg="#0d1017",
+        self.trade_log_frame = tk.Frame(self.canvas, bg=theme.CANVAS,
                                         highlightbackground=theme.LINE,
                                         highlightthickness=1, height=self._TRADE_LOG_HEIGHT)
-        body = tk.Frame(self.trade_log_frame, bg="#0d1017")
+        body = tk.Frame(self.trade_log_frame, bg=theme.CANVAS)
         body.pack(side="left", fill="both", expand=True)
         header = tk.Frame(body, bg=theme.PANEL)
         header.pack(fill="x")
         close = tk.Label(header, text="✕", bg=theme.PANEL, fg=theme.MUTED,
-                         font=("Segoe UI", 8), cursor="hand2")
+                         font=theme.FONT_SMALL, cursor="hand2")
         close.pack(side="left", padx=(8, 4), pady=4)
         close.bind("<Button-1>", lambda e: self._toggle_trade_log())
-        tk.Label(header, text="TRADE LOG", bg=theme.PANEL, fg=theme.MUTED,
-                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=(0, 8), pady=4)
+        tk.Label(header, text="TRADE LOG", bg=theme.PANEL, fg=theme.ACCENT,
+                 font=theme.FONT_HEADER).pack(side="left", padx=(0, 8), pady=4)
         # The tab that reopens it once closed.
-        self._trade_log_btn = tk.Label(self, text="TRADE LOG", bg="#232a36",
-                                       fg=theme.MUTED, font=("Segoe UI", 8, "bold"),
+        self._trade_log_btn = tk.Label(self, text="TRADE LOG", bg=theme.PANEL_ALT,
+                                       fg=theme.MUTED, font=theme.FONT_SMALL,
                                        padx=8, pady=4, cursor="hand2")
         self._trade_log_btn.bind("<Button-1>", lambda e: self._toggle_trade_log())
         tabs = tk.Frame(header, bg=theme.PANEL)
         tabs.pack(side="right", padx=6)
         self._trade_log_tab_btns = {}
         for tab_id, label in self._TRADE_LOG_TABS:
-            btn = tk.Button(tabs, text=label, font=("Segoe UI", 8),
+            btn = tk.Button(tabs, text=label, font=theme.FONT_SMALL,
                             relief="flat", bd=0, cursor="hand2",
                             command=lambda t=tab_id: self._set_trade_log_tab(t))
             btn.pack(side="left", padx=2, pady=2)
             self._trade_log_tab_btns[tab_id] = btn
 
-        rows_area = tk.Frame(body, bg="#0d1017")
+        rows_area = tk.Frame(body, bg=theme.CANVAS)
         rows_area.pack(fill="both", expand=True, padx=(6, 0), pady=(4, 6))
-        canvas = tk.Canvas(rows_area, bg="#0d1017", highlightthickness=0)
+        canvas = tk.Canvas(rows_area, bg=theme.CANVAS, highlightthickness=0)
         vbar = tk.Scrollbar(rows_area, orient="vertical", command=canvas.yview)
         canvas.pack(side="left", fill="both", expand=True)
         vbar.pack(side="right", fill="y")
         canvas.configure(yscrollcommand=vbar.set)
         self._trade_log_canvas = canvas
-        self._trade_log_rows_frame = tk.Frame(canvas, bg="#0d1017")
+        self._trade_log_rows_frame = tk.Frame(canvas, bg=theme.CANVAS)
         window = canvas.create_window((0, 0), window=self._trade_log_rows_frame, anchor="nw")
         self._trade_log_rows_frame.bind(
             "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
@@ -1062,9 +1072,9 @@ class MapView(tk.Frame):
     def _refresh_trade_log_tab_styles(self):
         for tab_id, btn in self._trade_log_tab_btns.items():
             active = tab_id == self._trade_log_tab
-            btn.config(bg=theme.ACCENT if active else "#0d1017",
-                      fg="#0d1017" if active else theme.MUTED,
-                      activebackground=theme.ACCENT if active else "#1b2029")
+            btn.config(bg=theme.ACCENT if active else theme.CANVAS,
+                      fg=theme.ACCENT_INK if active else theme.MUTED,
+                      activebackground=theme.ACCENT if active else theme.PANEL)
 
     def _payment_desc(self, payment, value, sign=0):
         """Render a trade payment (a [(resource, qty), ...] list, real
@@ -1285,8 +1295,8 @@ class MapView(tk.Frame):
 
         entries = [e for e in self._trade_log_entries if e["tab"] == self._trade_log_tab]
         if not entries:
-            tk.Label(frame, text="No trades yet.", bg="#0d1017", fg=theme.MUTED,
-                     font=("Segoe UI", 8), anchor="w").pack(fill="x", padx=4, pady=4)
+            tk.Label(frame, text="No trades yet.", bg=theme.CANVAS, fg=theme.MUTED,
+                     font=theme.FONT_SMALL, anchor="w").pack(fill="x", padx=4, pady=4)
             self._scroll_trade_log_to_end()
             return
 
@@ -1309,8 +1319,8 @@ class MapView(tk.Frame):
         for g in groups:
             if g["turn"] != last_turn:
                 last_turn = g["turn"]
-                tk.Label(frame, text=f"Turn {g['turn']}", bg="#0d1017", fg=theme.ACCENT,
-                         font=("Segoe UI", 8, "bold"), anchor="w"
+                tk.Label(frame, text=f"Turn {g['turn']}", bg=theme.CANVAS, fg=theme.ACCENT,
+                         font=theme.FONT_SMALL_BOLD, anchor="w"
                          ).pack(fill="x", padx=4, pady=(6, 1))
             color = {"income": theme.GOOD, "cost": theme.BAD,
                     "muted": theme.MUTED}[g["kind"]]
@@ -1323,8 +1333,8 @@ class MapView(tk.Frame):
                 color = theme.MUTED
             if len(g["items"]) == 1:
                 tag = "  (barter — no coin)" if no_coin and g["kind"] != "muted" else ""
-                tk.Label(frame, text="  " + g["items"][0]["text"] + tag, bg="#0d1017",
-                         fg=color, font=("Segoe UI", 8), anchor="w", justify="left"
+                tk.Label(frame, text="  " + g["items"][0]["text"] + tag, bg=theme.CANVAS,
+                         fg=color, font=theme.FONT_SMALL, anchor="w", justify="left"
                          ).pack(fill="x", padx=4)
                 continue
 
@@ -1339,14 +1349,14 @@ class MapView(tk.Frame):
                          f"this turn ({'-' if g['kind'] == 'cost' else '+'}"
                          f"{total_value:,}g total)")
             arrow = "▾" if expanded else "▸"
-            row = tk.Label(frame, text=f"  {arrow} {total_desc}", bg="#0d1017", fg=color,
-                           font=("Segoe UI", 8), anchor="w", justify="left", cursor="hand2")
+            row = tk.Label(frame, text=f"  {arrow} {total_desc}", bg=theme.CANVAS, fg=color,
+                           font=theme.FONT_SMALL, anchor="w", justify="left", cursor="hand2")
             row.pack(fill="x", padx=4)
             row.bind("<Button-1>", lambda e, k=g["key"]: self._toggle_trade_log_group(k))
             if expanded:
                 for it in g["items"]:
-                    tk.Label(frame, text="      " + it["text"], bg="#0d1017", fg=color,
-                             font=("Segoe UI", 8), anchor="w", justify="left"
+                    tk.Label(frame, text="      " + it["text"], bg=theme.CANVAS, fg=color,
+                             font=theme.FONT_SMALL, anchor="w", justify="left"
                              ).pack(fill="x", padx=4)
 
         self._scroll_trade_log_to_end()
@@ -1387,7 +1397,7 @@ class MapView(tk.Frame):
 
     # --- alerts ------------------------------------------------------------
     _ALERTS_MAX_VISIBLE = 8
-    _ALERT_WARN_COLOR = "#e0a030"
+    _ALERT_WARN_COLOR = theme.WARN
 
     def _build_alerts_panel(self):
         """A persistent top-left panel listing every current problem at one
@@ -1401,26 +1411,26 @@ class MapView(tk.Frame):
         entirely (via place_forget) when there's nothing wrong."""
         self._alerts_open = True
         self._alerts_expanded = set()
-        self.alerts_frame = tk.Frame(self, bg="#1a0d0d",
+        self.alerts_frame = tk.Frame(self, bg=theme.ALERT_BG,
                                      highlightbackground=theme.BAD,
                                      highlightthickness=1, width=_ALERTS_PANEL_W)
         header = tk.Frame(self.alerts_frame, bg=theme.PANEL)
         header.pack(fill="x")
         self._alerts_header_lbl = tk.Label(
             header, text="ALERTS", bg=theme.PANEL, fg=theme.BAD,
-            font=("Segoe UI", 8, "bold"))
+            font=theme.FONT_HEADER)
         self._alerts_header_lbl.pack(side="left", padx=8, pady=4)
         close = tk.Label(header, text="✕", bg=theme.PANEL, fg=theme.MUTED,
-                         font=("Segoe UI", 8), cursor="hand2")
+                         font=theme.FONT_SMALL, cursor="hand2")
         close.pack(side="right", padx=8)
         close.bind("<Button-1>", lambda e: self._toggle_alerts())
-        self._alerts_rows_frame = tk.Frame(self.alerts_frame, bg="#1a0d0d")
+        self._alerts_rows_frame = tk.Frame(self.alerts_frame, bg=theme.ALERT_BG)
         self._alerts_rows_frame.pack(fill="both", expand=True, padx=4, pady=(2, 6))
 
         # Badge that takes the panel's place once it's dismissed, so alerts can
         # always be brought back and their count stays visible meanwhile.
-        self._alerts_btn = tk.Label(self, text="⚠", bg="#1a0d0d", fg=theme.BAD,
-                                    font=("Segoe UI", 9, "bold"), cursor="hand2",
+        self._alerts_btn = tk.Label(self, text="⚠", bg=theme.ALERT_BG, fg=theme.BAD,
+                                    font=theme.FONT_BOLD, cursor="hand2",
                                     padx=8, pady=4,
                                     highlightbackground=theme.BAD, highlightthickness=1)
         self._alerts_btn.bind("<Button-1>", lambda e: self._toggle_alerts())
@@ -1496,8 +1506,8 @@ class MapView(tk.Frame):
             arrow = "▾" if expanded else "▸"
             head = tk.Label(self._alerts_rows_frame,
                             text=f"{arrow} {len(items)}   {label}",
-                            bg="#1a0d0d", fg=colour, anchor="w", justify="left",
-                            font=("Segoe UI", 8, "bold"), cursor="hand2",
+                            bg=theme.ALERT_BG, fg=colour, anchor="w", justify="left",
+                            font=theme.FONT_SMALL_BOLD, cursor="hand2",
                             wraplength=_ALERTS_PANEL_W - 24)
             head.pack(fill="x", pady=1)
             head.bind("<Button-1>", lambda e, k=kind: self._toggle_alert_group(k))
@@ -1507,15 +1517,15 @@ class MapView(tk.Frame):
                 row = tk.Button(self._alerts_rows_frame,
                                 text="    " + a["node"].name,
                                 command=lambda n=a["node"]: self._jump_to_alert_node(n),
-                                bg="#1a0d0d", fg=theme.MUTED, activebackground="#2a1515",
+                                bg=theme.ALERT_BG, fg=theme.MUTED, activebackground=theme.ALERT_BG_HOVER,
                                 activeforeground=colour, relief="flat", anchor="w",
-                                justify="left", font=("Segoe UI", 8),
+                                justify="left", font=theme.FONT_SMALL,
                                 cursor="hand2", bd=0, highlightthickness=0)
                 row.pack(fill="x")
             extra = len(items) - self._ALERTS_MAX_VISIBLE
             if extra > 0:
                 tk.Label(self._alerts_rows_frame, text=f"    + {extra} more",
-                         bg="#1a0d0d", fg=theme.MUTED, font=("Segoe UI", 8),
+                         bg=theme.ALERT_BG, fg=theme.MUTED, font=theme.FONT_SMALL,
                          anchor="w").pack(fill="x")
         self.alerts_frame.place(relx=0.0, rely=0.0, anchor="nw",
                                 x=_LEFT_PANEL_W if not getattr(self, "_left_collapsed", False)
@@ -1552,11 +1562,11 @@ class MapView(tk.Frame):
             btn.lift()
 
     def _jump_to_alert_node(self, node):
-        """Navigate straight to an alerted settlement/village and select it
-        -- reuses the same zoom-level machinery a normal click-through
-        would (_enter_region_view/_enter_village_view both zoom to the
-        owning faction's whole bbox, not a specific point, so getting to
-        the right ZOOM LEVEL is all "jumping" here actually means)."""
+        """Navigate straight to an alerted settlement/village and select it.
+        A settlement is visible at the region-view zoom _enter_region_view
+        already lands on; a village needs the camera pulled in tighter than
+        that -- close enough to cross the _villages_visible threshold --
+        since villages only appear/are clickable once actually zoomed in."""
         wd = self.world
         faction = wd.factions[node.faction_idx]
         self._enter_region_view(faction)
@@ -1564,8 +1574,10 @@ class MapView(tk.Frame):
             self.selected_settlement = node
             self._show_settlement(node)
         else:                       # Village
-            region = wd.regions[node.region_id]
-            self._enter_village_view(region)
+            vx, vy = node.pos
+            span = _VILLAGE_REVEAL_SPAN * 0.7
+            self._start_zoom([vx - span / 2, vy - span / 2,
+                              vx + span / 2, vy + span / 2])
             self.selected_village = node
             self._show_village(node)
         self.render()
@@ -1589,10 +1601,10 @@ class MapView(tk.Frame):
 
         head = tk.Frame(rb, bg=theme.PANEL)
         head.pack(fill="x", padx=12, pady=(14, 6))
-        tk.Label(head, text="RESOURCES", bg=theme.PANEL, fg=theme.MUTED,
-                 font=("Segoe UI", 8, "bold")).pack(side="left")
+        tk.Label(head, text="RESOURCES", bg=theme.PANEL, fg=theme.ACCENT,
+                 font=theme.FONT_HEADER).pack(side="left")
         tk.Label(head, text="◀", bg=theme.PANEL, fg=theme.MUTED, cursor="hand2",
-                 font=("Segoe UI", 8)).pack(side="right")
+                 font=theme.FONT_SMALL).pack(side="right")
         for wdg in (head,) + tuple(head.winfo_children()):
             wdg.bind("<Button-1>", lambda e: self._toggle_left_panel())
 
@@ -1710,17 +1722,19 @@ class MapView(tk.Frame):
         return out[:5]
 
     def _draw_resource_header(self, text):
-        tk.Label(self._resource_rows, text=text, bg=theme.PANEL, fg=theme.MUTED,
-                 font=("Segoe UI", 7, "bold"), anchor="w").pack(fill="x", pady=(8, 1))
+        tk.Label(self._resource_rows, text=text, bg=theme.PANEL, fg=theme.WARN,
+                 font=theme.FONT_SMALL_BOLD,
+                 anchor="w").pack(fill="x", pady=(8, 1))
 
     def _draw_resource_group_header(self, group, total, expanded, count):
-        row = tk.Frame(self._resource_rows, bg=theme.PANEL, cursor="hand2")
+        row = tk.Frame(self._resource_rows, bg=theme.PANEL_ALT, cursor="hand2")
         row.pack(fill="x", pady=1)
         arrow = "▾" if expanded else "▸"
-        tk.Label(row, text=f"{arrow} {group}", bg=theme.PANEL, fg=theme.INK,
-                 font=("Segoe UI", 9, "bold"), anchor="w").pack(side="left")
-        tk.Label(row, text=_fmt_amount(total), bg=theme.PANEL, fg=theme.MUTED,
-                 font=("Segoe UI", 9)).pack(side="right", padx=(0, 6))
+        tk.Label(row, text=f"{arrow} {group}", bg=theme.PANEL_ALT, fg=theme.INK,
+                 font=theme.FONT_SMALL_BOLD, anchor="w",
+                 padx=4).pack(side="left")
+        tk.Label(row, text=_fmt_amount(total), bg=theme.PANEL_ALT, fg=theme.MUTED,
+                 font=theme.FONT_SMALL).pack(side="right", padx=(0, 6))
         for wdg in (row,) + tuple(row.winfo_children()):
             wdg.bind("<Button-1>", lambda e, g=group: self._toggle_resource_group(g))
 
@@ -1736,15 +1750,16 @@ class MapView(tk.Frame):
         if warn:
             fg = theme.WARN
         tk.Label(row, text=("   " if indent else "") + resource, bg=theme.PANEL,
-                 fg=fg, font=("Segoe UI", 9, "bold") if gold else ("Segoe UI", 9),
-                 anchor="w").pack(side="left")
+                 fg=fg, font=theme.FONT_SMALL_BOLD if gold
+                 else theme.FONT_SMALL, anchor="w").pack(side="left")
         if delta:
             colour = theme.GOOD if delta > 0 else theme.BAD
             sign = "+" if delta > 0 else "-"
             tk.Label(row, text=f"{sign}{_fmt_amount(abs(delta))}", bg=theme.PANEL,
-                     fg=colour, font=("Segoe UI", 9, "bold")).pack(side="right")
+                     fg=colour, font=theme.FONT_SMALL_BOLD
+                     ).pack(side="right")
         tk.Label(row, text=_fmt_amount(amount), bg=theme.PANEL, fg=theme.MUTED,
-                 font=("Segoe UI", 9)).pack(side="right", padx=(0, 6))
+                 font=theme.FONT_SMALL).pack(side="right", padx=(0, 6))
         if gold:
             for wdg in (row,) + tuple(row.winfo_children()):
                 wdg.bind("<Button-1>", lambda e: self.toggle_treasury())
@@ -1754,7 +1769,7 @@ class MapView(tk.Frame):
             # is out on a caravan's return leg, and some is held back by the
             # trade reserve. Click through for the real accounting.
             tk.Label(row, text="ⓘ", bg=theme.PANEL, fg=theme.ACCENT,
-                     font=("Segoe UI", 8)).pack(side="right", padx=(0, 2))
+                     font=theme.FONT_SMALL).pack(side="right", padx=(0, 2))
 
     # --- treasury ------------------------------------------------------------
     def _build_treasury_panel(self):
@@ -1772,12 +1787,12 @@ class MapView(tk.Frame):
                      highlightthickness=1, width=_TREASURY_W)
         self.treasury_frame = f
 
-        head = tk.Frame(f, bg="#232a36", cursor="fleur")
+        head = tk.Frame(f, bg=theme.PANEL_ALT, cursor="fleur")
         head.pack(fill="x")
-        tk.Label(head, text="TREASURY", bg="#232a36", fg=theme.ACCENT,
-                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=8, pady=4)
-        close = tk.Label(head, text="\u2715", bg="#232a36", fg=theme.MUTED,
-                         font=("Segoe UI", 8), cursor="hand2")
+        tk.Label(head, text="TREASURY", bg=theme.PANEL_ALT, fg=theme.ACCENT,
+                 font=theme.FONT_HEADER).pack(side="left", padx=8, pady=4)
+        close = tk.Label(head, text="\u2715", bg=theme.PANEL_ALT, fg=theme.MUTED,
+                         font=theme.FONT_SMALL, cursor="hand2")
         close.pack(side="right", padx=8)
         close.bind("<Button-1>", lambda e: self.close_treasury())
         # Drag by the header, clamped so it can never leave the game window.
@@ -1854,13 +1869,14 @@ class MapView(tk.Frame):
         for w in body.winfo_children():
             w.destroy()
 
-        def header(text):
-            tk.Label(body, text=text, bg=theme.PANEL, fg=theme.MUTED,
-                     font=("Segoe UI", 7, "bold")).pack(anchor="w", padx=12, pady=(10, 2))
+        def section(title, key, default_open=True):
+            return widgets.card(body, self._treasury_cards_open, key, title,
+                                 default_open=default_open,
+                                 on_toggle=self._refresh_treasury)
 
-        def line(text, fg=None, bold=False):
-            tk.Label(body, text=text, bg=theme.PANEL, fg=fg or theme.INK,
-                     font=("Segoe UI", 9, "bold") if bold else ("Segoe UI", 8),
+        def line(parent, text, fg=None, bold=False):
+            tk.Label(parent, text=text, bg=theme.PANEL, fg=fg or theme.INK,
+                     font=theme.FONT_BOLD if bold else theme.FONT_SMALL,
                      justify="left", anchor="w", wraplength=_TREASURY_W - 26
                      ).pack(anchor="w", padx=12)
 
@@ -1869,46 +1885,53 @@ class MapView(tk.Frame):
         settlements = [s for s in wd.settlements if s.faction_idx == fac_idx]
         spendable = sum(trade._spendable_gold(s) for s in settlements)
 
-        header("TOTAL")
-        line(f"{total:,} gold", bold=True)
-        line(f"{spendable:,} available for trade", theme.MUTED)
-        line(f"{total - spendable:,} held back "
-             f"({trade.GOLD_TRADE_RESERVE:,}/settlement reserve, plus village coin)",
-             theme.MUTED)
-        if transit:
-            line(f"{transit:,} in transit \u2014 sold, still on the road home",
-                 theme.WARN)
+        sec = section("TOTAL", "total")
+        if sec is not None:
+            line(sec, f"{total:,} gold", bold=True)
+            line(sec, f"{spendable:,} available for trade", theme.MUTED)
+            line(sec, f"{total - spendable:,} held back "
+                 f"({trade.GOLD_TRADE_RESERVE:,}/settlement reserve, plus village coin)",
+                 theme.MUTED)
+            if transit:
+                line(sec, f"{transit:,} in transit \u2014 sold, still on the road home",
+                     theme.WARN)
 
-        header("WHERE IT IS")
-        holders = sorted(((getattr(s, "resources", None) or {}).get("Gold", 0), s.name)
-                         for s in settlements)
-        for amount, name in reversed(holders[-6:]):
-            line(f"  {name}: {amount:,}", theme.MUTED)
-        village_gold = total - sum(a for a, _ in holders)
-        if village_gold:
-            line(f"  villages: {village_gold:,} (cannot pay for trade)", theme.MUTED)
+        sec = section("WHERE IT IS", "where", default_open=False)
+        if sec is not None:
+            holders = sorted(((getattr(s, "resources", None) or {}).get("Gold", 0), s.name)
+                             for s in settlements)
+            for amount, name in reversed(holders[-6:]):
+                line(sec, f"  {name}: {amount:,}", theme.MUTED)
+            village_gold = total - sum(a for a, _ in holders)
+            if village_gold:
+                line(sec, f"  villages: {village_gold:,} (cannot pay for trade)", theme.MUTED)
 
         ledger = resources.gold_ledger(wd, fac_idx)
-        header("WHERE IT CAME FROM")
-        if not ledger:
-            line("  Nothing recorded yet \u2014 end a turn.", theme.MUTED)
-        else:
-            agg = {}
-            for entry in ledger:
-                for cause, value in entry.items():
-                    if cause not in ("turn", "net"):
-                        agg[cause] = agg.get(cause, 0) + value
-            line(f"  over the last {len(ledger)} turns:", theme.MUTED)
-            for cause, value in sorted(agg.items(), key=lambda kv: -abs(kv[1])):
-                line(f"    {value:+,}  {cause}",
-                     theme.GOOD if value > 0 else theme.BAD)
-                line(f"        {self._TREASURY_CAUSE_HELP.get(cause, '')}", theme.MUTED)
-            line(f"    {sum(agg.values()):+,}  net", None, bold=True)
-            header("RECENT TURNS")
-            for entry in ledger[-6:]:
-                causes = "  ".join(f"{k} {v:+,}" for k, v in entry.items()
-                                   if k not in ("turn", "net"))
-                line(f"  turn {entry['turn']}: {entry['net']:+,}   {causes}", theme.MUTED)
+        sec = section("WHERE IT CAME FROM", "sources")
+        if sec is not None:
+            if not ledger:
+                line(sec, "  Nothing recorded yet \u2014 end a turn.", theme.MUTED)
+            else:
+                agg = {}
+                for entry in ledger:
+                    for cause, value in entry.items():
+                        if cause not in ("turn", "net"):
+                            agg[cause] = agg.get(cause, 0) + value
+                line(sec, f"  over the last {len(ledger)} turns:", theme.MUTED)
+                for cause, value in sorted(agg.items(), key=lambda kv: -abs(kv[1])):
+                    line(sec, f"    {value:+,}  {cause}",
+                         theme.GOOD if value > 0 else theme.BAD)
+                    line(sec, f"        {self._TREASURY_CAUSE_HELP.get(cause, '')}", theme.MUTED)
+                line(sec, f"    {sum(agg.values()):+,}  net", None, bold=True)
+
+        if ledger:
+            sec = section("RECENT TURNS", "recent", default_open=False)
+            if sec is not None:
+                for entry in ledger[-6:]:
+                    causes = "  ".join(f"{k} {v:+,}" for k, v in entry.items()
+                                       if k not in ("turn", "net"))
+                    line(sec, f"  turn {entry['turn']}: {entry['net']:+,}   {causes}",
+                         theme.MUTED)
 
         # Default dock: just left of the side panel, near the top -- out of the
         # way of both the alerts overlay and the trade log.
@@ -1981,13 +2004,13 @@ class MapView(tk.Frame):
         # it's hidden by default for every other panel type.
         self.prosperity_frame = tk.Frame(p, bg=theme.PANEL)
         tk.Label(self.prosperity_frame, text="Prosperity", bg=theme.PANEL,
-                 fg=theme.MUTED, font=("Segoe UI", 8, "bold")).pack(anchor="w")
+                 fg=theme.MUTED, font=theme.FONT_SMALL_BOLD).pack(anchor="w")
         self._prosperity_canvas = tk.Canvas(self.prosperity_frame, height=14,
                                             bg=theme.PANEL, highlightthickness=0)
         self._prosperity_canvas.pack(fill="x", pady=(2, 2))
         self._prosperity_pct_lbl = tk.Label(self.prosperity_frame, text="",
                                             bg=theme.PANEL, fg=theme.MUTED,
-                                            font=("Segoe UI", 8))
+                                            font=theme.FONT_SMALL)
         self._prosperity_pct_lbl.pack(anchor="w")
 
         # Storage meter — a settlement/village-only bar (see
@@ -1997,13 +2020,13 @@ class MapView(tk.Frame):
         # own, not shared with _draw_prosperity_bar.
         self.storage_frame = tk.Frame(p, bg=theme.PANEL)
         tk.Label(self.storage_frame, text="Storage", bg=theme.PANEL,
-                 fg=theme.MUTED, font=("Segoe UI", 8, "bold")).pack(anchor="w")
+                 fg=theme.MUTED, font=theme.FONT_SMALL_BOLD).pack(anchor="w")
         self._storage_canvas = tk.Canvas(self.storage_frame, height=14,
                                          bg=theme.PANEL, highlightthickness=0)
         self._storage_canvas.pack(fill="x", pady=(2, 2))
         self._storage_pct_lbl = tk.Label(self.storage_frame, text="",
                                          bg=theme.PANEL, fg=theme.MUTED,
-                                         font=("Segoe UI", 8))
+                                         font=theme.FONT_SMALL)
         self._storage_pct_lbl.pack(anchor="w")
 
         self.rel_header = tk.Label(p, text="RELATIONSHIPS", bg=theme.PANEL,
@@ -2020,38 +2043,21 @@ class MapView(tk.Frame):
         # screen no matter how much detail the selection has.
         foot = tk.Frame(self._panel, bg=theme.PANEL)
         foot.pack(side="bottom", fill="x")
-        tk.Button(foot, text="Compendium (F1)", command=self.open_compendium,
-                  bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                  relief="flat", font=theme.FONT).pack(side="bottom", fill="x",
-                                                       padx=14, pady=(0, 6))
-        self.view_btn = tk.Button(foot, text="View: Political", command=self._toggle_mode,
-                                  bg="#232a36", fg=theme.INK,
-                                  activebackground=theme.ACCENT, relief="flat",
-                                  font=theme.FONT)
+        widgets.button(foot, "Compendium (F1)", self.open_compendium
+                       ).pack(side="bottom", fill="x", padx=14, pady=(0, 6))
+        self.view_btn = widgets.button(foot, "View: Political", self._toggle_mode)
         self.view_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 8))
-        self.globe_btn = tk.Button(foot, text="Globe", command=self.toggle_globe,
-                                   bg="#232a36", fg=theme.INK,
-                                   activebackground=theme.ACCENT, relief="flat",
-                                   font=theme.FONT)
+        self.globe_btn = widgets.button(foot, "Globe", self.toggle_globe)
         self.globe_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 4))
-        self.currents_btn = tk.Button(foot, text="Currents: Off",
-                                      command=self._toggle_currents,
-                                      bg="#232a36", fg=theme.INK,
-                                      activebackground=theme.ACCENT, relief="flat",
-                                      font=theme.FONT)
+        self.currents_btn = widgets.button(foot, "Currents: Off", self._toggle_currents)
         self.currents_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 4))
 
-        tk.Button(foot, text="End Turn", command=self._on_end_turn,
-                  bg=theme.ACCENT, fg="#06121f", activebackground=theme.ACCENT,
-                  relief="flat", font=theme.FONT_BOLD).pack(side="bottom", fill="x",
-                                                            padx=14, pady=(4, 6))
+        widgets.button(foot, "End Turn", self._on_end_turn, kind="accent"
+                       ).pack(side="bottom", fill="x", padx=14, pady=(4, 6))
         self.turn_lbl = tk.Label(foot, text="", bg=theme.PANEL, fg=theme.MUTED,
                                  font=theme.FONT_BOLD)
         self.turn_lbl.pack(side="bottom", padx=14, pady=(8, 0))
-        self.back_btn = tk.Button(foot, text="← Back to World",
-                                  command=self._exit_region_view, bg="#232a36",
-                                  fg=theme.INK, activebackground=theme.ACCENT,
-                                  relief="flat", font=theme.FONT)
+        self.back_btn = widgets.button(foot, "← Back to World", self._exit_region_view)
         self._panel_foot = foot
         # back_btn is packed only while zoomed in.
 
@@ -2136,12 +2142,12 @@ class MapView(tk.Frame):
 
     def _build_edge_tabs(self):
         """The slim strips that remain when a side panel is folded away."""
-        self._left_tab = tk.Frame(self, bg="#232a36", cursor="hand2")
-        tk.Label(self._left_tab, text="▶", bg="#232a36", fg=theme.ACCENT,
-                 font=("Segoe UI", 9)).place(relx=0.5, rely=0.5, anchor="center")
-        self._right_tab = tk.Frame(self, bg="#232a36", cursor="hand2")
-        tk.Label(self._right_tab, text="◀", bg="#232a36", fg=theme.ACCENT,
-                 font=("Segoe UI", 9)).place(relx=0.5, rely=0.5, anchor="center")
+        self._left_tab = tk.Frame(self, bg=theme.PANEL_ALT, cursor="hand2")
+        tk.Label(self._left_tab, text="▶", bg=theme.PANEL_ALT, fg=theme.ACCENT,
+                 font=theme.FONT_SMALL).place(relx=0.5, rely=0.5, anchor="center")
+        self._right_tab = tk.Frame(self, bg=theme.PANEL_ALT, cursor="hand2")
+        tk.Label(self._right_tab, text="◀", bg=theme.PANEL_ALT, fg=theme.ACCENT,
+                 font=theme.FONT_SMALL).place(relx=0.5, rely=0.5, anchor="center")
         for frame, cb in ((self._left_tab, self._toggle_left_panel),
                           (self._right_tab, self._toggle_right_panel)):
             for wdg in (frame,) + tuple(frame.winfo_children()):
@@ -2284,12 +2290,11 @@ class MapView(tk.Frame):
         """0/1/2 for world/region/village view -- the flat map's own
         three-tier zoom state expressed as the same int _map_lines/
         _map_labels already take from the globe's altitude-derived
-        zoom_level."""
-        if self.zoom_region is not None:
-            return 2
-        if self.zoom_faction is not None:
-            return 1
-        return 0
+        zoom_level. Level 2 is now a zoom-scale threshold (see
+        _villages_visible) rather than a separate clicked-into mode."""
+        if self.zoom_faction is None:
+            return 0
+        return 2 if self._villages_visible() else 1
 
     # Temporary diagnostic (see _log_flatgl_timing): kept through this round
     # of investigation to confirm the caching fix below actually removes
@@ -2429,8 +2434,10 @@ class MapView(tk.Frame):
         the globe's own terms: paths become segment strips on the sphere,
         markers become billboards, names become glyph quads. The three zoom
         levels are read off the camera's ALTITUDE (globe.zoom_level) rather
-        than from self.zoom_faction/zoom_region -- on the globe, flying closer
-        IS drilling down, so there is no separate view state to enter."""
+        than from self.zoom_faction/_villages_visible -- on the globe, flying
+        closer IS drilling down, so there is no separate view state to
+        enter (same reasoning the flat map's own _villages_visible now
+        follows: zoom depth alone decides the level)."""
         wd = self.world
         self._ensure_base()
         self._ensure_fog_overlay()
@@ -3613,6 +3620,24 @@ class MapView(tk.Frame):
         return (player is not None and self.zoom_faction is not None
                 and self.zoom_faction is not player)
 
+    def _villages_visible(self):
+        """True once zoomed in close enough, within a faction's own
+        territory, that villages should appear and be clickable.
+
+        Replaces the old separate "village view" mode (entered by clicking
+        an already-selected region a second time — confusing since the
+        camera didn't actually move, and a settlement/village marker under
+        that second click could silently intercept it instead). Now it's
+        purely a function of how far zoomed in the free camera already is,
+        so panning/wheel-zooming across the threshold reveals villages on
+        its own, with no separate click step to get wrong. Foreign browsing
+        never reaches this regardless of zoom -- diplomacy actions only, no
+        drilling into a rival's villages."""
+        if self.zoom_faction is None or self._zoom_is_foreign():
+            return False
+        vx0, vy0, vx1, vy1 = self.view
+        return min(vx1 - vx0, vy1 - vy0) <= _VILLAGE_REVEAL_SPAN
+
     def _do_diplomacy(self, action_fn, nation, region=None):
         """Run a diplomacy action, show its flavor message on the bottom
         banner, and refresh whatever panel is currently displaying it."""
@@ -3640,48 +3665,21 @@ class MapView(tk.Frame):
         # treasury number any more.
         gold = construction._faction_settlement_stock(nation, "Gold", self.world)
         if own or player is None:
-            zoom_hint = "\nClick again to zoom in."
+            zoom_hint = "Click again to zoom in."
         elif self.world.world_map.get_relationship(player.id, nation.id)["stance"] == Stance.ENEMY:
-            zoom_hint = "\nClick again to attack."
+            zoom_hint = "Click again to attack."
         else:
-            zoom_hint = "\nClick again to inspect its regions."
+            zoom_hint = "Click again to inspect its regions."
         # The monarch leads the panel: a realm is a name and whoever sits its
-        # throne, and for a rival it is who you are actually at war with.
+        # throne -- the header stays short (name/ruler/species), everything
+        # else moves into the SUMMARY card below so this doesn't read as one
+        # long paragraph of stats.
         crown = ruler_label(nation)
         self.info.config(
             fg=theme.INK,
             text=f"{nation.name}\n"
                  + (f"{crown}\n" if crown else "")
-                 + f"Species: {nation.meta['species']} "
-                 f"— {nation.meta['trait']}\n"
-                 f"Military {s['military']} · Morale {s['morale']} · "
-                 f"Gold {gold:,}\n"
-                 f"Avg fertility {nation.meta['fertility']}%\n"
-                 f"Population {self._total_population(nation):,}\n"
-                 f"{self._settle_counts(nation)}\n"
-                 f"{n_regions} regions.{zoom_hint}")
-        # Commander status: it decides whether this realm can attack or claim
-        # at all, so it belongs on the realm's own panel rather than only
-        # surfacing as a refusal when you try something.
-        if own:
-            fac_idx = self.world.factions.index(nation)
-            waiting = commander.commander_respawn_turns(self.world, fac_idx)
-            if waiting:
-                lines_extra = ("\n\nNo commander — a successor takes the field "
-                               f"in {waiting} turn{'s' if waiting != 1 else ''}. "
-                               "Your realm cannot attack or claim until then.")
-            elif commander.faction_commanders(self.world, fac_idx):
-                lines_extra = ""
-            else:
-                lines_extra = "\n\nNo commander. Your realm cannot attack or claim."
-            if lines_extra:
-                self.info.config(fg=theme.WARN,
-                                 text=self.info.cget("text") + lines_extra)
-        # The realm panel used to print s['resources'] here -- the national
-        # pool, which holds nothing any more now goods live per-node. It read
-        # "RESOURCES: None yet." while the sidebar beside it listed thirty
-        # resources. The sidebar is the real, node-summed figure, so this
-        # doesn't duplicate it: it points at it instead.
+                 + f"{nation.meta['species']} — {nation.meta['trait']}")
 
         self.rel_header.config(text="RELATIONSHIPS")
         for w in self.rel_frame.winfo_children():
@@ -3704,6 +3702,37 @@ class MapView(tk.Frame):
         for w in self.actions.winfo_children():
             w.destroy()
 
+        body = self._card("SUMMARY")
+        if body is not None:
+            self._kv(body, "Military", f"{s['military']}")
+            self._kv(body, "Morale", f"{s['morale']}")
+            self._kv(body, "Gold", f"{gold:,}")
+            self._kv(body, "Avg fertility", f"{nation.meta['fertility']}%")
+            self._kv(body, "Population", f"{self._total_population(nation):,}")
+            self._kv(body, "Settlements", self._settle_counts(nation))
+            self._kv(body, "Regions", f"{n_regions}")
+
+        # Commander status decides whether this realm can attack or claim at
+        # all -- always visible, never folded, since it's actionable/blocking
+        # rather than background stats.
+        if own:
+            fac_idx = self.world.factions.index(nation)
+            waiting = commander.commander_respawn_turns(self.world, fac_idx)
+            if waiting:
+                tk.Label(self.actions, text="No commander — a successor takes "
+                         f"the field in {waiting} turn{'s' if waiting != 1 else ''}. "
+                         "Your realm cannot attack or claim until then.",
+                         bg=theme.PANEL, fg=theme.WARN, font=theme.FONT,
+                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 8))
+            elif not commander.faction_commanders(self.world, fac_idx):
+                tk.Label(self.actions, text="No commander. Your realm cannot "
+                         "attack or claim.",
+                         bg=theme.PANEL, fg=theme.WARN, font=theme.FONT,
+                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 8))
+
+        tk.Label(self.actions, text=zoom_hint, bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_SMALL).pack(anchor="w", pady=(0, 10))
+
         if player is None:
             # No player nation on this world (sandbox/legacy save) — keep the
             # old behavior of managing any faction directly.
@@ -3713,66 +3742,60 @@ class MapView(tk.Frame):
                          fg=theme.MUTED, font=theme.FONT).pack(anchor="w")
             for r in enemies:
                 other = r["other"]
-                tk.Button(self.actions, text=f"Attack {other.name}",
-                          command=lambda o=other, n=nation: self.on_attack(n, o),
-                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                          relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+                widgets.button(self.actions, f"Attack {other.name}",
+                                lambda o=other, n=nation: self.on_attack(n, o)
+                                ).pack(fill="x", pady=2)
         elif own:
             tk.Label(self.actions, text="This is your realm. Select a rival "
                      "nation on the map to consider attacking it.",
                      bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w")
+                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w")
         else:
             rel = self.world.world_map.get_relationship(player.id, nation.id)
             if rel["stance"] == Stance.ENEMY:
                 player_idx = self.world.factions.index(player)
                 target_idx = self.world.factions.index(nation)
                 if bordering_regions(self.world, player_idx, target_idx):
-                    tk.Button(self.actions, text=f"Attack {nation.name}",
-                              command=lambda n=nation: self._begin_attack_setup(n),
-                              bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                              relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+                    widgets.button(self.actions, f"Attack {nation.name}",
+                                    lambda n=nation: self._begin_attack_setup(n)
+                                    ).pack(fill="x", pady=2)
                 elif naval_reachable_regions(self.world, player_idx, target_idx):
-                    tk.Button(self.actions, text=f"Naval Attack on {nation.name}",
-                              command=lambda n=nation: self._begin_attack_setup(n, naval=True),
-                              bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                              relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+                    widgets.button(self.actions, f"Naval Attack on {nation.name}",
+                                    lambda n=nation: self._begin_attack_setup(n, naval=True)
+                                    ).pack(fill="x", pady=2)
                 else:
                     tk.Label(self.actions, text=f"No route to {nation.name} — you'd "
                              "need a shared border or a coastal port.",
                              bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                             justify="left", wraplength=260).pack(anchor="w")
+                             justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w")
             else:
                 standing = rel.get("standing", 0)
                 tk.Label(self.actions, text=f"You are {rel['stance']} with "
                          f"{nation.name}. Standing: {standing}",
                          bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                         justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
 
                 can_act = diplomacy.can_act_this_turn(self.world, player, nation)
-                tk.Button(self.actions, text="Improve Relations",
-                          command=lambda n=nation: self._do_diplomacy(
-                              diplomacy.improve_relations, n),
-                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                          relief="flat", font=theme.FONT,
-                          state="normal" if can_act else "disabled").pack(fill="x", pady=2)
+                widgets.button(self.actions, "Improve Relations",
+                                lambda n=nation: self._do_diplomacy(
+                                    diplomacy.improve_relations, n),
+                                state="normal" if can_act else "disabled"
+                                ).pack(fill="x", pady=2)
                 if not can_act:
                     tk.Label(self.actions, text="Already acted with them this turn.",
                              bg=theme.PANEL, fg=theme.MUTED,
-                             font=("Segoe UI", 8)).pack(anchor="w")
+                             font=theme.FONT_SMALL).pack(anchor="w")
 
                 if standing <= diplomacy.WAR_THRESHOLD:
-                    tk.Button(self.actions, text=f"Declare War on {nation.name}",
-                              command=lambda n=nation: self._do_diplomacy(
-                                  diplomacy.declare_war, n),
-                              bg="#3a1f1f", fg=theme.BAD, activebackground=theme.ACCENT,
-                              relief="flat", font=theme.FONT).pack(fill="x", pady=(8, 2))
+                    widgets.button(self.actions, f"Declare War on {nation.name}",
+                                    lambda n=nation: self._do_diplomacy(
+                                        diplomacy.declare_war, n),
+                                    kind="danger").pack(fill="x", pady=(8, 2))
                 if standing >= diplomacy.ALLY_THRESHOLD and rel["stance"] != Stance.ALLY:
-                    tk.Button(self.actions, text=f"Form Alliance with {nation.name}",
-                              command=lambda n=nation: self._do_diplomacy(
-                                  diplomacy.form_alliance, n),
-                              bg="#1f3a24", fg=theme.GOOD, activebackground=theme.ACCENT,
-                              relief="flat", font=theme.FONT).pack(fill="x", pady=(8, 2))
+                    widgets.button(self.actions, f"Form Alliance with {nation.name}",
+                                    lambda n=nation: self._do_diplomacy(
+                                        diplomacy.form_alliance, n),
+                                    kind="success").pack(fill="x", pady=(8, 2))
 
                 self._show_trade_route_status(player, nation)
 
@@ -3792,7 +3815,7 @@ class MapView(tk.Frame):
         if key in wd.trade_routes_by_pair:
             tk.Label(self.actions, text="Trade route established.",
                      bg=theme.PANEL, fg=theme.GOOD, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 2))
             return
 
         project = next((p for p in wd.trade_route_projects
@@ -3801,7 +3824,7 @@ class MapView(tk.Frame):
             tk.Label(self.actions, text=f"Trade route under construction: "
                      f"{project.built_cells}/{project.total_cells} cells",
                      bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 2))
             return
 
         pending = next((p for p in getattr(wd, "incoming_trade_proposals", [])
@@ -3815,7 +3838,7 @@ class MapView(tk.Frame):
                      f"{diplomacy.TRADE_STANDING_THRESHOLD} before you can "
                      "propose a trade route.",
                      bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 2))
             return
 
         decline_until = getattr(wd, "trade_route_decline_until", {}).get(key, -1)
@@ -3823,22 +3846,21 @@ class MapView(tk.Frame):
             tk.Label(self.actions, text=f"{nation.name} recently declined a trade "
                      "proposal — try again later.",
                      bg=theme.PANEL, fg=theme.BAD, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 2))
             return
 
         if not trade.route_path_possible(wd, player_idx, target_idx):
             tk.Label(self.actions, text=f"No land or sea connection exists "
                      f"to {nation.name}'s capital — a route isn't possible.",
                      bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 2))
             return
 
         self._show_trade_complementarity(player_idx, target_idx, nation)
 
-        tk.Button(self.actions, text=f"Propose Trade Route with {nation.name}",
-                  command=lambda: self._do_propose_trade_route(player_idx, target_idx),
-                  bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                  relief="flat", font=theme.FONT).pack(fill="x", pady=(8, 2))
+        widgets.button(self.actions, f"Propose Trade Route with {nation.name}",
+                        lambda: self._do_propose_trade_route(player_idx, target_idx)
+                        ).pack(fill="x", pady=(8, 2))
 
     def _show_trade_complementarity(self, viewer_idx, other_idx, nation):
         """What `nation` brings to the table that the player doesn't already
@@ -3854,24 +3876,22 @@ class MapView(tk.Frame):
             lines.append("Could produce: " + ", ".join(summary["access"]))
         text = "\n".join(lines) if lines else "Nothing you don't already have access to."
         tk.Label(self.actions, text=text, bg=theme.PANEL, fg=theme.MUTED,
-                 font=("Segoe UI", 8), justify="left",
-                 wraplength=260).pack(anchor="w", pady=(4, 2))
+                 font=theme.FONT_SMALL, justify="left",
+                 wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(4, 2))
 
     def _show_incoming_trade_proposal(self, player_idx, target_idx, nation):
         tk.Label(self.actions, text=f"{nation.name} proposes a trade route with you.",
                  bg=theme.PANEL, fg=theme.INK, font=theme.FONT,
-                 justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+                 justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 2))
         self._show_trade_complementarity(player_idx, target_idx, nation)
         row = tk.Frame(self.actions, bg=theme.PANEL)
         row.pack(fill="x", pady=(2, 2))
-        tk.Button(row, text="Accept", command=lambda: self._do_respond_trade_proposal(
-                      target_idx, player_idx, accept=True),
-                  bg="#1f3a24", fg=theme.GOOD, activebackground=theme.ACCENT,
-                  relief="flat", font=theme.FONT).pack(side="left", fill="x", expand=True, padx=(0, 3))
-        tk.Button(row, text="Decline", command=lambda: self._do_respond_trade_proposal(
-                      target_idx, player_idx, accept=False),
-                  bg="#3a1f1f", fg=theme.BAD, activebackground=theme.ACCENT,
-                  relief="flat", font=theme.FONT).pack(side="left", fill="x", expand=True, padx=(3, 0))
+        widgets.button(row, "Accept", lambda: self._do_respond_trade_proposal(
+                           target_idx, player_idx, accept=True), kind="success"
+                       ).pack(side="left", fill="x", expand=True, padx=(0, 3))
+        widgets.button(row, "Decline", lambda: self._do_respond_trade_proposal(
+                           target_idx, player_idx, accept=False), kind="danger"
+                       ).pack(side="left", fill="x", expand=True, padx=(3, 0))
 
     def _do_respond_trade_proposal(self, from_idx, player_idx, accept):
         if accept:
@@ -3933,41 +3953,56 @@ class MapView(tk.Frame):
             f"{biome.capitalize()} ({round(100 * count / total_cells)}%)"
             for biome, count in sorted(region.biome_counts.items(),
                                        key=lambda kv: -kv[1])) or "Unclassified"
-        lines = [f"{region.name}", f"Region of {country.name}",
-                 f"Area {s['area']} · Fertility {s['fertility']}%",
-                 f"Biome: {biome_line}",
-                 f"Climate: {region.dominant_climate.capitalize()}",
-                 f"This turn's yield: {_format_resources(region.resources)}"]
-        sts = [wd.settlements[i] for i in getattr(region, "meta_settlements", [])]
-        if sts:
-            lines.append("Settlements: " + ", ".join(
-                f"{st.name} ({st.kind})" for st in sts))
-        else:
-            lines.append("No settlements.")
 
         is_foreign = self._zoom_is_foreign()
-        if is_foreign:
-            lines.append("Foreign territory — consider hostile action below.")
-        else:
-            lines.append(f"{n_villages} villages — click again to zoom in.")
-        self.info.config(fg=theme.INK, text="\n".join(lines))
+        self.info.config(fg=theme.INK,
+                          text=f"{region.name}\nRegion of {country.name}"
+                               + ("\nForeign territory" if is_foreign else ""))
 
         for w in self.actions.winfo_children():
             w.destroy()
+
+        body = self._card("SUMMARY")
+        if body is not None:
+            self._kv(body, "Area", f"{s['area']}")
+            self._kv(body, "Fertility", f"{s['fertility']}%")
+            self._kv(body, "Biome", biome_line)
+            self._kv(body, "Climate", region.dominant_climate.capitalize())
+            self._kv(body, "This turn's yield", _format_resources(region.resources))
+
+        sts = [wd.settlements[i] for i in getattr(region, "meta_settlements", [])]
+        body = self._card("SETTLEMENTS", f"{len(sts)}", key="settlements")
+        if body is not None:
+            if sts:
+                for st in sts:
+                    self._kv(body, st.name, st.kind.capitalize())
+            else:
+                tk.Label(body, text="No settlements.", bg=theme.PANEL,
+                         fg=theme.MUTED, font=theme.FONT_SMALL).pack(anchor="w")
+
+        if is_foreign:
+            tk.Label(self.actions, text="Foreign territory — consider hostile "
+                     "action below.", bg=theme.PANEL, fg=theme.MUTED,
+                     font=theme.FONT_SMALL, justify="left",
+                     wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 10))
+        else:
+            tk.Label(self.actions, text=f"{n_villages} villages — click again "
+                     "to zoom in.", bg=theme.PANEL, fg=theme.MUTED,
+                     font=theme.FONT_SMALL).pack(anchor="w", pady=(0, 10))
+
         if is_foreign:
             player = self._player_faction()
             can_act = diplomacy.can_act_this_turn(self.world, player, country)
             for label, fn in (("Fabricate Claim on Region", diplomacy.fabricate_claim),
                               ("Terrorize Locals", diplomacy.terrorize_locals)):
-                tk.Button(self.actions, text=label,
-                          command=lambda f=fn: self._do_diplomacy(f, country, region),
-                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                          relief="flat", font=theme.FONT,
-                          state="normal" if can_act else "disabled").pack(fill="x", pady=2)
+                widgets.button(self.actions, label,
+                                lambda f=fn: self._do_diplomacy(f, country, region),
+                                state="normal" if can_act else "disabled"
+                                ).pack(fill="x", pady=2)
             if not can_act:
                 tk.Label(self.actions, text="Already acted against them this turn.",
                          bg=theme.PANEL, fg=theme.MUTED,
-                         font=("Segoe UI", 8)).pack(anchor="w")
+                         font=theme.FONT_SMALL).pack(anchor="w")
         elif self._player_faction() is not None:
             # Claiming wildland only ever hands out villages (and, still
             # area-scaled, a Castle) now — a City or Town has to be built
@@ -3981,7 +4016,7 @@ class MapView(tk.Frame):
                 tk.Label(self.actions, text=f"{project.kind.capitalize()} under "
                          f"construction: {elapsed}/{project.total_turns} turns{note}",
                          bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                         justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
             building_kinds = {p.kind for p in projects_here}
             for kind in ("city", "town", "castle"):
                 if kind in building_kinds:
@@ -3993,11 +4028,10 @@ class MapView(tk.Frame):
                          text=f"{kind.capitalize()} — Cost: {_format_resources(cost)}\n"
                               f"Build time: {turns} turns",
                          bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
-                         justify="left", wraplength=260).pack(anchor="w", pady=(4, 2))
-                tk.Button(self.actions, text=f"Build {kind.capitalize()}...",
-                          command=lambda r=region, k=kind: self._begin_settlement_placement(r, k),
-                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                          relief="flat", font=theme.FONT).pack(fill="x", pady=(0, 8))
+                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(4, 2))
+                widgets.button(self.actions, f"Build {kind.capitalize()}...",
+                                lambda r=region, k=kind: self._begin_settlement_placement(r, k)
+                                ).pack(fill="x", pady=(0, 8))
 
     def _show_wildland_region(self, region):
         """UNCLAIMED land: wildland garrison strength, claim cost/time/odds,
@@ -4032,13 +4066,13 @@ class MapView(tk.Frame):
         if region not in expansion.claimable_frontier(wd, faction_idx):
             tk.Label(self.actions, text="Not adjacent to your territory yet.",
                      bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w")
+                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w")
             return
         if wd.turn < region.claim_cooldown_until_turn:
             tk.Label(self.actions, text="The locals are still wary after "
                      "repelling your last attempt — try again later.",
                      bg=theme.PANEL, fg=theme.BAD, font=theme.FONT,
-                     justify="left", wraplength=260).pack(anchor="w")
+                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w")
             return
         project = next((p for p in wd.claim_projects if p.region_id == region.id), None)
         if project is not None:
@@ -4046,24 +4080,23 @@ class MapView(tk.Frame):
                 tk.Label(self.actions, text="The expansion crew has arrived "
                          "— fight the wildland garrison to claim this land.",
                          bg=theme.PANEL, fg=theme.INK, font=theme.FONT,
-                         justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
-                tk.Button(self.actions, text="Fight for the Territory",
-                          command=lambda p=project: self._do_wildland_battle(p),
-                          bg="#3a1f1f", fg=theme.BAD, activebackground=theme.ACCENT,
-                          relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
+                widgets.button(self.actions, "Fight for the Territory",
+                                lambda p=project: self._do_wildland_battle(p),
+                                kind="danger").pack(fill="x", pady=2)
             else:
                 elapsed = project.total_turns - project.turns_left
                 tk.Label(self.actions, text=f"Expansion under way: "
                          f"{elapsed}/{project.total_turns} turns",
                          bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                         justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
             return
         cost = expansion.claim_cost(region, sea_only)
         afford = construction.can_afford(player, cost, self.world)
         tk.Label(self.actions, text=f"Cost: {_format_resources(cost)}\n"
                  f"Build time: {expansion.claim_turns(region)} turns",
                  bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
-                 justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+                 justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
         # The claim is meant to pay for itself in coin -- show that up front, or
         # the cost reads as pure expenditure and nobody expands early.
         spoils = expansion.claim_spoils(self.world, region)
@@ -4077,11 +4110,10 @@ class MapView(tk.Frame):
                 line += f"\n(net {net:+,} Gold on the claim)"
             tk.Label(self.actions, text=line, bg=theme.PANEL, fg=theme.GOOD,
                      font=theme.FONT, justify="left",
-                     wraplength=260).pack(anchor="w", pady=(0, 6))
-        tk.Button(self.actions, text="Claim Territory",
-                  command=lambda cnty=region: self._do_claim(cnty),
-                  bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
-                  relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+                     wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
+        widgets.button(self.actions, "Claim Territory",
+                        lambda cnty=region: self._do_claim(cnty)
+                        ).pack(fill="x", pady=2)
 
     def _do_claim(self, region):
         player = self._player_faction()
@@ -4128,7 +4160,7 @@ class MapView(tk.Frame):
         else:
             color = theme.GOOD
         c.delete("all")
-        c.create_rectangle(0, 0, w, h, fill="#11151b", outline="")
+        c.create_rectangle(0, 0, w, h, fill=theme.METER_TRACK, outline="")
         if frac > 0:
             c.create_rectangle(0, 0, w * frac, h, fill=color, outline="")
         self._prosperity_pct_lbl.config(text=f"{value:.0f} / 100")
@@ -4162,7 +4194,7 @@ class MapView(tk.Frame):
         else:
             color = theme.GOOD
         c.delete("all")
-        c.create_rectangle(0, 0, w, h, fill="#11151b", outline="")
+        c.create_rectangle(0, 0, w, h, fill=theme.METER_TRACK, outline="")
         if display_frac > 0:
             c.create_rectangle(0, 0, w * display_frac, h, fill=color, outline="")
         caption = f"{stored:,} / {capacity:,}"
@@ -4185,28 +4217,12 @@ class MapView(tk.Frame):
     def _card(self, title, subtitle=None, key=None, default_open=True):
         """A titled, foldable section in the selection panel. Returns the frame
         to build the body into, or None when the card is folded shut."""
-        if key is None:
-            key = title
-        open_cards = self._panel_cards_open
-        expanded = open_cards.get(key, default_open)
-        head = tk.Frame(self.actions, bg=theme.PANEL, cursor="hand2")
-        head.pack(fill="x", pady=(10, 2))
-        tk.Label(head, text=("▾ " if expanded else "▸ ") + title, bg=theme.PANEL,
-                 fg=theme.INK, font=("Segoe UI", 8, "bold"),
-                 anchor="w").pack(side="left")
-        if subtitle:
-            tk.Label(head, text=subtitle, bg=theme.PANEL, fg=theme.MUTED,
-                     font=("Segoe UI", 8), anchor="e").pack(side="right")
-        for wdg in (head,) + tuple(head.winfo_children()):
-            wdg.bind("<Button-1>", lambda e, k=key: self._toggle_panel_card(k))
-        if not expanded:
-            return None
-        body = tk.Frame(self.actions, bg=theme.PANEL)
-        body.pack(fill="x")
-        return body
+        key = key or title
+        return widgets.card(self.actions, self._panel_cards_open, key, title,
+                             subtitle, default_open,
+                             on_toggle=lambda: self._toggle_panel_card(key))
 
     def _toggle_panel_card(self, key):
-        self._panel_cards_open[key] = not self._panel_cards_open.get(key, True)
         node = self.selected_village or self.selected_settlement
         if node is not None:
             (self._show_village if node is self.selected_village
@@ -4215,31 +4231,12 @@ class MapView(tk.Frame):
     def _kv(self, parent, label, value, fg=None):
         """One aligned label/value row -- the replacement for cramming figures
         into a wrapped sentence."""
-        row = tk.Frame(parent, bg=theme.PANEL)
-        row.pack(fill="x")
-        tk.Label(row, text=label, bg=theme.PANEL, fg=theme.MUTED,
-                 font=("Segoe UI", 8), anchor="w").pack(side="left")
-        tk.Label(row, text=value, bg=theme.PANEL, fg=fg or theme.INK,
-                 font=("Segoe UI", 8), anchor="e").pack(side="right")
+        widgets.kv(parent, label, value, fg)
 
     def _bar_row(self, parent, label, used, cap, warn_at=0.85):
         """A compact labelled meter -- used/cap plus a fill bar, so four
         storage pools read as four bars instead of four sentences."""
-        frac = (used / cap) if cap else 0
-        colour = (theme.BAD if frac > 1.0 else
-                  theme.WARN if frac > warn_at else theme.GOOD)
-        row = tk.Frame(parent, bg=theme.PANEL)
-        row.pack(fill="x", pady=(3, 0))
-        tk.Label(row, text=label, bg=theme.PANEL, fg=theme.MUTED,
-                 font=("Segoe UI", 8), anchor="w").pack(side="left")
-        tk.Label(row, text=f"{used:,} / {cap:,}", bg=theme.PANEL, fg=colour,
-                 font=("Segoe UI", 8), anchor="e").pack(side="right")
-        meter = tk.Canvas(parent, height=5, bg="#11151b", highlightthickness=0)
-        meter.pack(fill="x", pady=(1, 2))
-        meter.update_idletasks()
-        width = max(1, meter.winfo_width())
-        meter.create_rectangle(0, 0, width * min(1.0, frac), 5,
-                               fill=colour, outline="")
+        widgets.bar_row(parent, label, used, cap, warn_at)
 
     def _storage_pool_lines(self, node):
         """One line per typed storage pool (see resources.STORAGE_POOLS) --
@@ -4336,14 +4333,14 @@ class MapView(tk.Frame):
         current = resources.herd_policy(village)
         tk.Label(parent, text="Herd policy — how hard to cull in Autumn:",
                  bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                 justify="left", wraplength=260).pack(anchor="w", pady=(8, 2))
+                 justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 2))
         row = tk.Frame(parent, bg=theme.PANEL)
         row.pack(fill="x", pady=2)
         for policy in resources.HERD_POLICIES:
             active = policy == current
             tk.Button(row, text=policy,
                       command=lambda p=policy, v=village: self._do_set_herd_policy(v, p),
-                      bg=theme.ACCENT if active else "#232a36",
+                      bg=theme.ACCENT if active else theme.PANEL_ALT,
                       fg="#06121f" if active else theme.INK,
                       activebackground=theme.ACCENT, relief="flat",
                       font=theme.FONT).pack(side="left", expand=True, fill="x", padx=1)
@@ -4379,7 +4376,7 @@ class MapView(tk.Frame):
                          text=f"{label} (tier {project.to_tier}) under "
                               f"construction: {elapsed}/{project.total_turns} turns",
                          bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                         justify="left", wraplength=260).pack(anchor="w", pady=(0, 6))
+                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
 
         # Pool buildings, then the Preserving House, then the herd buildings.
         # The Barn appears in both the pool list (it holds the feed pool) and
@@ -4434,10 +4431,10 @@ class MapView(tk.Frame):
                           f"{effect}",
                      bg=theme.PANEL, fg=theme.INK if afford else theme.BAD,
                      font=theme.FONT, justify="left",
-                     wraplength=260).pack(anchor="w", pady=(6, 2))
+                     wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(6, 2))
             tk.Button(parent, text=f"{verb} {label}",
                       command=lambda n=node, b=building: self._do_build_storage(n, b),
-                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                      bg=theme.PANEL_ALT, fg=theme.INK, activebackground=theme.ACCENT,
                       relief="flat", font=theme.FONT).pack(fill="x", pady=2)
 
     def _do_build_storage(self, node, building):
@@ -4602,7 +4599,7 @@ class MapView(tk.Frame):
                      wraplength=_RIGHT_PANEL_W - 46).pack(anchor="w", pady=(6, 2))
             tk.Button(parent, text="Build Shipyard",
                       command=lambda s=st: self._do_build_shipyard(s),
-                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                      bg=theme.PANEL_ALT, fg=theme.INK, activebackground=theme.ACCENT,
                       relief="flat", font=theme.FONT).pack(fill="x", pady=2)
         self._build_storage_actions(st, player, parent)
 
@@ -4748,7 +4745,7 @@ class MapView(tk.Frame):
         if cmd.ship_turns_left is None:
             tk.Button(self.actions, text="Move",
                       command=lambda: self._begin_commander_move(cmd),
-                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                      bg=theme.PANEL_ALT, fg=theme.INK, activebackground=theme.ACCENT,
                       relief="flat", font=theme.FONT).pack(fill="x", pady=2)
             if aboard is None and commander.can_build_ship(wd, cmd):
                 shipyard = commander.shipyard_at(wd, cmd.faction_idx, cmd.pos)
@@ -4766,19 +4763,19 @@ class MapView(tk.Frame):
                     tk.Label(self.actions, text=cost_text,
                              bg=theme.PANEL, fg=theme.INK if afford else theme.BAD,
                              font=theme.FONT, justify="left",
-                             wraplength=260).pack(anchor="w", pady=(0, 4))
+                             wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 4))
                 tk.Button(self.actions, text=label,
                           command=lambda: self._do_build_ship(cmd),
-                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                          bg=theme.PANEL_ALT, fg=theme.INK, activebackground=theme.ACCENT,
                           relief="flat", font=theme.FONT).pack(fill="x", pady=2)
             if beached is not None:
                 tk.Button(self.actions, text="Board Ship",
                           command=lambda: self._do_board_ship(cmd),
-                          bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                          bg=theme.PANEL_ALT, fg=theme.INK, activebackground=theme.ACCENT,
                           relief="flat", font=theme.FONT).pack(fill="x", pady=2)
                 tk.Button(self.actions, text="Dismantle Ship",
                           command=lambda: self._do_dismantle_ship(cmd),
-                          bg="#232a36", fg=theme.BAD, activebackground=theme.ACCENT,
+                          bg=theme.PANEL_ALT, fg=theme.BAD, activebackground=theme.ACCENT,
                           relief="flat", font=theme.FONT).pack(fill="x", pady=2)
 
     def _begin_commander_move(self, cmd):
@@ -4790,7 +4787,7 @@ class MapView(tk.Frame):
             w.destroy()
         tk.Button(self.actions, text="Cancel",
                   command=lambda: self._cancel_commander_move(cmd),
-                  bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                  bg=theme.PANEL_ALT, fg=theme.INK, activebackground=theme.ACCENT,
                   relief="flat", font=theme.FONT).pack(fill="x", pady=2)
 
     def _cancel_commander_move(self, cmd):
@@ -4855,21 +4852,24 @@ class MapView(tk.Frame):
         self.back_btn.pack_forget()
 
     def _enter_region_view(self, faction):
+        """Zooms into one faction's territory. Villages aren't a separate
+        mode any more -- they simply become visible/clickable once the free
+        camera is zoomed in close enough (see _villages_visible), so this
+        is the only "entered" state between here and the world view."""
         self.zoom_faction = faction
-        self.zoom_region = None
         self.selected_region = None
         self.selected_village = None
         self.selected_settlement = None
         self._base_key = None
         self.title_lbl.config(text="Regions")
         self.info.config(fg=theme.MUTED,
-                         text=f"{faction.name}\nClick a region to inspect it.")
+                         text=f"{faction.name}\nClick a region to inspect it. "
+                              "Zoom in close to see its villages.")
         self._enter_ui("REGION", "← Back to World", self._exit_region_view)
         self._start_zoom(self._padded_rect(faction.meta["bbox"]))
 
     def _exit_region_view(self):
         self.zoom_faction = None
-        self.zoom_region = None
         self.selected_region = None
         self.selected_village = None
         self.selected_settlement = None
@@ -4878,32 +4878,6 @@ class MapView(tk.Frame):
         if self.selected:
             self._show_faction(self.selected)
         self._start_zoom(self._world_view_rect())
-
-    def _enter_village_view(self, region):
-        """Zooms to the whole faction's territory (not just `region`'s bbox)
-        since village view shows every village the faction owns, across all
-        its regions — `region` is kept only so "Back to Region" returns to
-        the region you actually clicked through."""
-        self.zoom_region = region
-        self.selected_village = None
-        self.selected_settlement = None
-        self._base_key = None
-        self.title_lbl.config(text="Villages")
-        self.info.config(fg=theme.MUTED,
-                         text=f"{self.zoom_faction.name}\nClick a village to inspect it.")
-        self._enter_ui("VILLAGE", "← Back to Region", self._exit_village_view)
-        self._start_zoom(self._padded_rect(self.zoom_faction.meta["bbox"]))
-
-    def _exit_village_view(self):
-        self.zoom_region = None
-        self.selected_village = None
-        self.selected_settlement = None
-        self._base_key = None
-        self.title_lbl.config(text="Regions")
-        self._enter_ui("REGION", "← Back to World", self._exit_region_view)
-        if self.selected_region:
-            self._show_region(self.selected_region)
-        self._start_zoom(self._padded_rect(self.zoom_faction.meta["bbox"]))
 
     # --- attack targeting ----------------------------------------------------
     def _begin_attack_setup(self, enemy, naval=False):
@@ -5018,7 +4992,7 @@ class MapView(tk.Frame):
         for w in self.actions.winfo_children():
             w.destroy()
         tk.Button(self.actions, text="Cancel", command=self._cancel_settlement_placement,
-                  bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                  bg=theme.PANEL_ALT, fg=theme.INK, activebackground=theme.ACCENT,
                   relief="flat", font=theme.FONT).pack(fill="x", pady=2)
         self.render()
 
@@ -5214,14 +5188,12 @@ class MapView(tk.Frame):
         x0, y0, x1, y1 = self.view
         w = (x1 - x0) * factor
         h = (y1 - y0) * factor
-        if self.zoom_region is not None:
-            # Village view is meant to be the deepest zoom level -- cap
-            # zoom-out to (roughly) the faction's own territory, the same
-            # extent _enter_village_view already zooms to on entry, so the
-            # free camera can't wheel its way back out to seeing the whole
-            # world while nominally still "in" village view. "Back to
-            # Region"/"Back to World" are the correct way to go wider than
-            # that.
+        if self._villages_visible():
+            # Close enough to see villages is meant to be the deepest zoom
+            # level -- cap zoom-out to (roughly) the faction's own
+            # territory so the free camera can't wheel its way straight
+            # back out to seeing the whole world from here. "Back to
+            # World" is the correct way to go wider than that.
             bx0, by0, bx1, by1 = self.zoom_faction.meta["bbox"]
             max_span = max(bx1 - bx0, by1 - by0) * 1.3
         else:
@@ -5353,9 +5325,22 @@ class MapView(tk.Frame):
                 self._show_faction(faction)
                 self.render()
 
-        elif self.zoom_region is None:
-            # --- LEVEL 1: region view (zoomed into a country) -------------
+        else:
+            # --- FACTION VIEW: zoomed into a country's regions, with ------
+            # villages joining in as clickable markers once zoomed in close
+            # enough (see _villages_visible) -- no separate mode any more.
             zf = wd.factions.index(self.zoom_faction)
+            if self._villages_visible():
+                for v in wd.villages:
+                    if v.faction_idx != zf:
+                        continue
+                    sx, sy = self.world_to_screen(v.pos[0] + 0.5, v.pos[1] + 0.5)
+                    hit_r = self._marker_radius(_VILLAGE_STYLE["base"]) + 4
+                    if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= hit_r ** 2:
+                        self.selected_village = v
+                        self._show_village(v)
+                        self.render()
+                        return
             # settlement markers take priority over region selection
             for sid in self.zoom_faction.meta.get("settlements", []):
                 st = wd.settlements[sid]
@@ -5386,43 +5371,10 @@ class MapView(tk.Frame):
                 else:
                     self._exit_region_view()
                 return
-            # Foreign browsing stops at the region level (diplomacy actions
-            # only) — no drilling into a foreign nation's villages.
-            if not self._zoom_is_foreign() and region is self.selected_region:
-                self._enter_village_view(region)  # 2nd click -> village view
-            else:                                 # 1st click -> select region
-                self.selected_region = region
-                self._base_key = None
-                self._show_region(region)
-                self.render()
-
-        else:
-            # --- LEVEL 2: village view (zoomed to the whole faction) ------
-            zf = wd.factions.index(self.zoom_faction)
-            for v in wd.villages:
-                if v.faction_idx != zf:
-                    continue
-                sx, sy = self.world_to_screen(v.pos[0] + 0.5, v.pos[1] + 0.5)
-                hit_r = self._marker_radius(_VILLAGE_STYLE["base"]) + 4
-                if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= hit_r ** 2:
-                    self.selected_village = v
-                    self._show_village(v)
-                    self.render()
-                    return
-            for sid in self.zoom_faction.meta.get("settlements", []):
-                st = wd.settlements[sid]
-                sx, sy = self.world_to_screen(st.pos[0] + 0.5, st.pos[1] + 0.5)
-                hit_r = self._marker_radius(_SETTLE_STYLE[st.kind]["base"]) + 4
-                if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= hit_r ** 2:
-                    self.selected_settlement = st
-                    self._show_settlement(st)
-                    self.render()
-                    return
-            cid = wd.region_grid[gy][gx]
-            if cid < 0 or wd.regions[cid].faction_idx != zf:
-                self._exit_village_view()         # clicked away -> zoom out
-            # else: clicked empty land still within the faction's own
-            # territory (any region) — no-op, stay in village view
+            self.selected_region = region
+            self._base_key = None
+            self._show_region(region)
+            self.render()
 
     def _on_right_click(self, event):
         """QoL: right-click sends the currently-selected Commander toward
@@ -5982,7 +5934,7 @@ class MapView(tk.Frame):
         bx, by = x + r * 0.75, y - r * 0.75
         br = max(4, r * 0.55)
         c.create_polygon(bx, by - br, bx + br, by + br, bx - br, by + br,
-                         fill=color, outline="#1a0d0d", width=1)
+                         fill=color, outline=theme.ALERT_BG, width=1)
         # The "!" is a text item -- the most expensive kind the canvas has --
         # and below a handful of pixels it renders as an unreadable smudge on
         # top of an already-unmistakable coloured triangle. Zoomed out over a
@@ -5991,7 +5943,7 @@ class MapView(tk.Frame):
         # actually read. The triangle itself still shows at every zoom, so an
         # alert is never silently hidden.
         if br >= _ALERT_BADGE_GLYPH_MIN_R:
-            c.create_text(bx, by + br * 0.35, text="!", fill="#1a0d0d",
+            c.create_text(bx, by + br * 0.35, text="!", fill=theme.ALERT_BG,
                           font=("Segoe UI", max(6, int(br)), "bold"))
 
     def _fog_clip_runs(self, cells):
@@ -6366,10 +6318,10 @@ class MapView(tk.Frame):
                                         dash=dash, bridge=is_stone)
 
     def _draw_villages(self, c, screen):
-        """Small dots for villages — only shown in village view, which now
-        covers every village the zoomed faction owns (not just the region
-        last clicked through — see _enter_village_view). Names are skipped
-        past a village-count threshold to avoid label soup.
+        """Small dots for villages — only shown once zoomed in close enough
+        within a faction's own territory (see _villages_visible), covering
+        every village the zoomed faction owns, not just one region. Names
+        are skipped past a village-count threshold to avoid label soup.
 
         Both the markers and the name threshold are viewport-relative: a
         developed realm can own hundreds of villages, and drawing (and
@@ -6379,7 +6331,7 @@ class MapView(tk.Frame):
         the label rule behave the way a player expects -- names appear once
         you're close enough to read them, instead of being switched off
         forever by a realm-wide village count."""
-        if self.zoom_region is None:
+        if not self._villages_visible():
             return
         wd = self.world
         style = _VILLAGE_STYLE
@@ -6410,8 +6362,8 @@ class MapView(tk.Frame):
 
     def _draw_labels(self, c, screen):
         wd = self.world
-        if self.zoom_region is not None:
-            return   # village view: region/faction name labels aren't useful here
+        if self._villages_visible():
+            return   # zoomed to village level: region/faction name labels aren't useful here
         if self.zoom_faction is not None:
             # Realm view used to label every single region. With a developed
             # realm that's dozens of names stacked over the terrain, and it
