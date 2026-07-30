@@ -20,6 +20,14 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 50,
+        "title": "Sea Lanes Instead of Roads Through the Ocean",
+        "items": [
+            "FIXED: a new settlement on a different landmass from your other cities could get a literal road drawn straight through the sea -- it now gets a real sea lane instead, and existing saves get repaired automatically",
+            "Drought, storms, and blizzards can now dent a region's crop yields for a while, flagged with a new alert",
+        ],
+    },
+    {
         "version": 49,
         "title": "Take Direct Command of Your Commander",
         "items": [
