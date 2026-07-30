@@ -276,11 +276,34 @@ rep = R.village_labor_report(w, v, season)
 produced = yield_for(v)
 for row in rep["sectors"]:
     assert row["output"] <= row["potential"], row
-    if row["sector"] != "fishing":
+    assert row["limited_by"] in ("hands", "land", "season"), row
+    if row["limited_by"] == "season":
+        assert row["output"] == 0 and row["workers"] == 0 and row["potential"] > 0, row
+    elif row["sector"] != "fishing":
         assert abs(row["output"] - sector_total(produced, row["sector"])) <= 2, (
             row, sector_total(produced, row["sector"]))
 assert rep["workforce"] == R.village_workforce(v)
 print(f"  ok    report matches production across {len(rep['sectors'])} sectors")
+
+# A farming village out of season must still show its fields rather than
+# appearing to have none -- half the year would otherwise look like a bug.
+farmer = None
+for x in w.villages:
+    if x.faction_idx < 0:
+        continue
+    by_season = {s: R._village_terrain_potential(w, x, s)[1].get("farming", 0)
+                 for s in R.SEASONS}
+    idle = [s for s, p in by_season.items() if p <= 0]
+    if idle and max(by_season.values()) > 0:
+        farmer, dead_season = x, idle[0]
+        break
+assert farmer is not None, "no village has an out-of-season gap in this world"
+rows = {r["sector"]: r for r in R.village_labor_report(w, farmer, dead_season)["sectors"]}
+assert "farming" in rows, (
+    f"{farmer.name} has farmland but no Fields row in {dead_season}")
+assert rows["farming"]["limited_by"] == "season" and rows["farming"]["potential"] > 0
+print(f"  ok    {farmer.name} in {dead_season}: fields still listed, "
+      f"{rows['farming']['potential']} potential, out of season")
 
 print("\n--- a real turn still runs ---")
 before_pop = sum(n.population for n in list(w.settlements) + list(w.villages))

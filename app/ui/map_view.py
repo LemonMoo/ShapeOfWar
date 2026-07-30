@@ -33,6 +33,7 @@ from app.world import construction
 from app.world import trade
 from app.world import expansion
 from app.world import commander
+from app.world import buildings
 from app.ui import gl_globe
 from app.ui import gl_flatmap
 from app.ui.gl_flatmap import (SHAPE_CIRCLE, SHAPE_TRIANGLE, SHAPE_SQUARE,
@@ -40,6 +41,7 @@ from app.ui.gl_flatmap import (SHAPE_CIRCLE, SHAPE_TRIANGLE, SHAPE_SQUARE,
 from app.world import wrap
 from app.world.nation import is_eliminated, ruler_label
 from app.ui.compendium import CompendiumWindow
+from app.ui import build_menu
 
 _FLASH_COLOR = (255, 236, 120)   # bright gold — region gained
 _FLASH_FAIL_COLOR = (232, 74, 62)  # bright red — region attack failed
@@ -4280,26 +4282,6 @@ class MapView(tk.Frame):
                                  f"= {space:,} space)")
         return lines
 
-    _HERD_EFFECT_TEXT = {
-        ("pasture", "capacity"): "herd capacity ×{v:g}",
-        ("stable", "capacity"): "Horse capacity ×{v:g}",
-        ("barn", "feed"): "Winter fodder need ×{v:g}",
-        ("barn", "death"): "livestock deaths ×{v:g}",
-        ("slaughterhouse", "yield"): "Meat & Leather per head ×{v:g}",
-    }
-
-    def _herd_building_effect_lines(self, building, to_tier):
-        """Plain-language effect lines for a herd building at `to_tier` -- the
-        multipliers alone ("0.75") say nothing about what they act on."""
-        lines = []
-        for effect, table in resources.HERD_BUILDING_EFFECTS.get(building, {}).items():
-            if to_tier >= len(table):
-                continue
-            text = self._HERD_EFFECT_TEXT.get((building, effect))
-            if text:
-                lines.append(text.format(v=table[to_tier]))
-        return lines
-
     def _herd_lines(self, village):
         """Herd, capacity, Winter feed position and this village's policy.
         Livestock had no representation in the UI at all before this -- the
@@ -4359,97 +4341,6 @@ class MapView(tk.Frame):
         out += [b for b in resources.HERD_BUILDINGS if b not in out]
         return out
 
-    def _build_storage_actions(self, node, player, parent=None):
-        """Build/upgrade buttons for all three storage buildings at `node`.
-        Shared by the Settlement and Village panels -- villages can build
-        these too now (smaller and cheaper, see construction.py), which is
-        the whole point of the phase: they were the most overflowing nodes
-        on the map with no lever of their own."""
-        parent = parent if parent is not None else self.actions
-        wd = self.world
-        node_kind = "settlement" if hasattr(node, "kind") else "village"
-        for project in getattr(wd, "storage_projects", []):
-            if project.node_kind == node_kind and project.node_id == node.id:
-                label = project.building.replace("_", " ").title()
-                elapsed = project.total_turns - project.turns_left
-                tk.Label(parent,
-                         text=f"{label} (tier {project.to_tier}) under "
-                              f"construction: {elapsed}/{project.total_turns} turns",
-                         bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
-
-        # Pool buildings, then the Preserving House, then the herd buildings.
-        # The Barn appears in both the pool list (it holds the feed pool) and
-        # the herd list (it shelters the animals), so this dedupes rather than
-        # offering it twice.
-        buildings = [resources.STORAGE_BUILDING_BY_POOL[p]
-                     for p in resources.STORAGE_POOLS]
-        buildings.append(resources.PRESERVING_HOUSE)
-        for herd_building in resources.HERD_BUILDINGS:
-            if herd_building not in buildings:
-                buildings.append(herd_building)
-        for building in buildings:
-            to_tier = construction.storage_next_tier(wd, node, building)
-            if to_tier is None:
-                continue
-            cost = construction.storage_build_cost(node, building, to_tier)
-            if cost is None:
-                continue
-            afford = construction.can_afford(player, cost, wd)
-            label = building.replace("_", " ").title()
-            verb = "Upgrade" if to_tier > 1 else "Build"
-            if building == resources.PRESERVING_HOUSE:
-                table = (resources.VILLAGE_PRESERVING_CAP_MULT if node_kind == "village"
-                         else resources.PRESERVING_CAP_MULT)
-                rate = int(resources.CONVERSION_RATE_CAP * table[to_tier])
-                salt_costs = ", ".join(
-                    f"{out} {resources.SALT_PER_PRESERVED[out]:g}"
-                    for out in resources.PRESERVATION_RECIPES
-                    if out in resources.SALT_PER_PRESERVED)
-                effect = (f"Cures Fish→Smoked Fish, Milk→Cheese, "
-                          f"Meat→Salted Meat\n"
-                          f"up to {rate:,}/turn\n"
-                          f"Salt burned per unit: {salt_costs}")
-            else:
-                parts = []
-                pool = resources.STORAGE_POOL_BY_BUILDING.get(building)
-                if pool is not None:
-                    table = (resources.VILLAGE_STORAGE_TIER_BONUS if node_kind == "village"
-                             else resources.STORAGE_TIER_BONUS).get(building, [0])
-                    if to_tier < len(table):
-                        added = table[to_tier] - table[to_tier - 1]
-                        current_cap = resources.node_pool_capacity(node, pool)
-                        parts.append(f"+{added:,} {pool} space "
-                                     f"({current_cap:,} → {current_cap + added:,})")
-                parts.extend(self._herd_building_effect_lines(building, to_tier))
-                effect = "\n".join(parts)
-            tk.Label(parent,
-                     text=f"{verb} {label} → tier {to_tier}\n"
-                          f"Cost: {_format_resources(cost)}\n"
-                          f"Build time: "
-                          f"{construction.storage_build_turns(node, building, to_tier)} turns\n"
-                          f"{effect}",
-                     bg=theme.PANEL, fg=theme.INK if afford else theme.BAD,
-                     font=theme.FONT, justify="left",
-                     wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(6, 2))
-            tk.Button(parent, text=f"{verb} {label}",
-                      command=lambda n=node, b=building: self._do_build_storage(n, b),
-                      bg=theme.PANEL_ALT, fg=theme.INK, activebackground=theme.ACCENT,
-                      relief="flat", font=theme.FONT).pack(fill="x", pady=2)
-
-    def _do_build_storage(self, node, building):
-        player = self._player_faction()
-        if player is None:
-            return
-        msg = construction.start_storage_building(self.world, player, node, building)
-        self.show_bottom_message(msg)
-        if hasattr(node, "kind"):
-            self._show_settlement(node)
-        else:
-            self._show_village(node)
-        self._update_resource_bar()
-        self.render()
-
     def _show_settlement(self, st):
         """Settlement panel, in the same folding-card idiom as the village one
         (see _card / _show_village).
@@ -4503,14 +4394,7 @@ class MapView(tk.Frame):
                 self._kv(body, "Built", " \u00b7 ".join(built))
 
         if own:
-            options = sum(1 for b in self._buildable_at(st)
-                          if construction.storage_next_tier(wd, st, b) is not None)
-            if construction.can_build_shipyard(wd, st):
-                options += 1
-            body = self._card("BUILD", f"{options} available", key="build",
-                              default_open=False)
-            if body is not None:
-                self._build_settlement_actions(st, player, body)
+            self._build_entry_card(st, player)
 
         making = self._settlement_conversions(st)
         body = self._card("INDUSTRY", f"{len(making)} running", key="production",
@@ -4574,41 +4458,61 @@ class MapView(tk.Frame):
                     out.append((output, source, min(have, cure_cap)))
         return out
 
-    def _build_settlement_actions(self, st, player, parent):
-        """Shipyard plus the storage/preserving buildings, in one card."""
-        wd = self.world
-        project = next((p for p in wd.shipyard_projects
-                        if p.settlement_id == st.id), None)
-        if project is not None:
-            elapsed = project.total_turns - project.turns_left
-            tk.Label(parent,
-                     text=f"Shipyard under construction: "
-                          f"{elapsed}/{project.total_turns} turns",
-                     bg=theme.PANEL, fg=theme.MUTED, font=("Segoe UI", 8),
-                     justify="left", wraplength=_RIGHT_PANEL_W - 46
-                     ).pack(anchor="w", pady=(0, 6))
-        elif construction.can_build_shipyard(wd, st):
-            afford = construction.can_afford(player, construction.SHIPYARD_COST, wd)
-            tk.Label(parent,
-                     text="Build Shipyard\n"
-                          f"Cost: {_format_resources(construction.SHIPYARD_COST)}\n"
-                          f"Build time: {construction.SHIPYARD_BUILD_TURNS} turns\n"
-                          "Commanders here launch free, faster ships",
-                     bg=theme.PANEL, fg=theme.INK if afford else theme.BAD,
-                     font=("Segoe UI", 8), justify="left",
-                     wraplength=_RIGHT_PANEL_W - 46).pack(anchor="w", pady=(6, 2))
-            tk.Button(parent, text="Build Shipyard",
-                      command=lambda s=st: self._do_build_shipyard(s),
-                      bg=theme.PANEL_ALT, fg=theme.INK, activebackground=theme.ACCENT,
-                      relief="flat", font=theme.FONT).pack(fill="x", pady=2)
-        self._build_storage_actions(st, player, parent)
+    def _build_entry_card(self, node, player):
+        """The BUILD card, for a Settlement or a Village alike: what this place
+        most needs, and the way in to the build menu itself.
 
-    def _do_build_shipyard(self, st):
+        This used to be the whole build UI -- a vertical stack of a label and a
+        button per building, in a 360px column. That is the wrong shape for a
+        build menu, which is a thing you scan and compare across, and it also
+        gave no answer to the question that actually matters ("which of these
+        does this place need?"). Both moved to app/ui/build_menu.py, which has
+        room for real cards, and app/world/buildings.py, which does the
+        judging. What is left here is a summary and a door."""
+        wd = self.world
+        options = buildings.build_options(wd, node, player)
+        startable = [o for o in options if o.buildable]
+        urgent = [o for o in options if o.priority == "urgent"]
+        in_progress = [o for o in options if o.in_progress]
+
+        subtitle = f"{len(startable)} available"
+        if urgent:
+            subtitle = f"{len(urgent)} needed · {subtitle}"
+        body = self._card("BUILD", subtitle, key="build", default_open=True)
+        if body is None:
+            return
+
+        for option in in_progress:
+            elapsed, total = option.in_progress
+            self._kv(body, f"{option.label} building", f"{elapsed}/{total} turns",
+                     fg=theme.WARN)
+        for option in (urgent or options)[:3]:
+            if option.priority in ("urgent", "useful") and option.reason:
+                tk.Label(body, text=f"• {option.label}: {option.reason}",
+                         bg=theme.PANEL,
+                         fg=theme.BAD if option.priority == "urgent" else theme.WARN,
+                         font=theme.FONT_SMALL, anchor="w", justify="left",
+                         wraplength=_RIGHT_PANEL_W - 60).pack(fill="x", pady=(4, 0))
+        widgets.button(body, "Open Build Menu…",
+                       lambda n=node: self._open_build_menu(n),
+                       kind="accent" if urgent else "default").pack(fill="x", pady=(8, 2))
+
+    def _open_build_menu(self, node):
         player = self._player_faction()
-        msg = construction.start_shipyard(self.world, player, st)
-        self.show_bottom_message(msg)
-        if self.selected_settlement is st:
-            self._show_settlement(st)
+        if player is None:
+            return
+        build_menu.open_for(self.winfo_toplevel(), self.world, node, player,
+                            on_change=self._after_build_menu_change)
+
+    def _after_build_menu_change(self):
+        """Something was started from the build menu: bring the map's own
+        panels back in step. The menu never touches them itself -- it is a
+        view, and this is the one hook back."""
+        if self.selected_settlement is not None:
+            self._show_settlement(self.selected_settlement)
+        elif self.selected_village is not None:
+            self._show_village(self.selected_village)
+        self._update_resource_bar()
         self.render()
 
     def _show_village(self, v):
@@ -4654,12 +4558,7 @@ class MapView(tk.Frame):
             self._kv(body, "Needs per turn", _format_resources(needs))
 
         if own:
-            options = sum(1 for b in self._buildable_at(v)
-                          if construction.storage_next_tier(wd, v, b) is not None)
-            body = self._card("BUILD", f"{options} available", key="build",
-                              default_open=False)
-            if body is not None:
-                self._build_storage_actions(v, player, body)
+            self._build_entry_card(v, player)
 
         yield_ = resources.village_projected_annual_yield(wd, v)
         body = self._card("PRODUCTION", f"{len(yield_)} goods/yr",

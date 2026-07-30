@@ -1486,7 +1486,15 @@ def village_labor_state(world, village, season):
 
 def village_labor_report(world, village, season=None):
     """What the labor panel shows: per sector, the land's offer, the hands on
-    it, what actually comes in, and which of the two ceilings is binding.
+    it, what actually comes in, and which of the three ceilings is binding --
+    "hands", "land", or "season".
+
+    A sector with nothing to offer THIS season is still listed, with its own
+    best season's potential and `limited_by == "season"`. Dropping those rows
+    was tried first and reads as a bug: crops only harvest in their own season
+    (see GROWTH_CYCLE), so for half the year a farming village showed no
+    Fields row at all and looked like it had no farmland.
+
     Read-only, and deliberately recomputed rather than read off
     village_labor_state's cache -- the panel wants a live answer against
     current storage, while the cache deliberately freezes one allocation
@@ -1496,10 +1504,30 @@ def village_labor_report(world, village, season=None):
     factors = village_labor_factors(world, village, potentials, by_sector_resource)
     workforce = village_workforce(village)
     shares = _labor_shares(village, potentials, by_sector_resource)
+
+    # Only farming is season-gated, and only when it is idle right now, so the
+    # extra terrain sampling this costs is paid on a panel open and never in
+    # the turn loop.
+    dormant = {}
+    if potentials.get("farming", 0) <= 0:
+        for other in SEASONS:
+            if other == season:
+                continue
+            peak = _village_terrain_potential(world, village, other)[1].get("farming", 0)
+            if peak > dormant.get("farming", 0):
+                dormant["farming"] = peak
+
     rows = []
     for sector in PRODUCTION_SECTORS:
         potential = potentials.get(sector, 0)
         if potential <= 0:
+            asleep = dormant.get(sector, 0)
+            if asleep <= 0:
+                continue
+            rows.append({
+                "sector": sector, "potential": round(asleep), "output": 0,
+                "workers": 0, "factor": 0.0, "limited_by": "season",
+            })
             continue
         factor = factors.get(sector, 0.0)
         rows.append({
