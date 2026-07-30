@@ -21,6 +21,12 @@ redesign, fixed new roads drawing redundantly parallel to existing ones
 instead of merging into them, and replaced the clunky click-to-enter
 "village view" mode with a pure zoom-scale threshold. See **§13**.
 
+**A large, unreleased economy rework landed after v0.3.9_4 and is the thing
+to read first if you are picking this up: see §14 (what shipped) and §15
+(the plan for finishing it).** Five commits, all on `master`, none released.
+Nothing below §14 has been invalidated by it, but the economy sections
+(§10's weather Phase 2 especially) should be read alongside it.
+
 **Two things worth doing before anything else touches this area:**
 1. `_VILLAGE_REVEAL_SPAN` (map_view.py, currently `26`) is a first-pass
    estimate, not a playtested number — see §13.3.
@@ -1118,3 +1124,281 @@ Verified: full regression suite, plus a throwaway script exercising
 real village marker, `_jump_to_alert_node` on a village, the foreign-
 browsing guard, and clicking an ocean cell to confirm `_exit_region_view`
 still fires correctly.
+
+---
+
+## 14. The economy rework (unreleased) — labour, buildings, coin, cartography
+
+Five commits on `master`, none released. Driven by one reported symptom —
+"storage just ends up piling up and spoiling" — which turned out not to be a
+storage problem at all.
+
+**Read `dev/storage_audit.py` first.** It is the tool the whole rework is
+measured against, and it takes a saved world or `--fresh <seed> <turns>`.
+Every number quoted below came out of it and can be reproduced.
+
+### 14.0 The measurement that reframed everything
+
+Fresh 10-faction world, 120 turns, before any of this:
+
+| | household | durable | other | feed |
+|---|---|---|---|---|
+| mean fill | 0.39 | 0.53 | 0.02 | 0.21 |
+| p90 fill | **0.91** | **0.99** | 0.07 | 0.74 |
+| production silently throttled away | **53.6%** | **33.1%** | 0.5% | 37.8% |
+
+774,581 units destroyed in 120 turns, plus ~639,000 more that were never
+produced at all because `storage_throttle` deleted them at source. Neither
+number was ever shown to the player.
+
+The cause was a single ratio: **potential production ran ~50x total demand.**
+One village adult harvested 2.58 units of food a turn and ate 0.005. Storage
+was not failing — it was the organ absorbing an unbounded surplus, invisibly.
+
+### 14.1 Phase 14: finite village labour (commit `907658b`)
+
+Terrain no longer says what a village produces; it says what it COULD. A
+village's `adults` are a finite workforce split across the sectors its land
+offers (farming/forestry/mining/fishing), and each sector produces
+`min(terrain potential, workers * LABOR_OUTPUT_PER_WORKER)`.
+
+- `LABOR_OUTPUT_PER_WORKER` is **the** calibration knob for total output.
+- `LABOR_SECTOR_RESERVE` (0.05) staffs every live sector enough to work what
+  it has before the policy splits the rest. Without it, weighting by tonnage
+  erases rare resources entirely — a village with 300 units of farming
+  potential gave a gold seam a 0.0007 share.
+- Under `Auto`, a full pool pulls hands OFF the sector filling it
+  (`LABOR_PRESSURE_FLOOR`). This is what finally makes storage pressure mean
+  something instead of deleting goods in silence.
+- Seasons emerge for free: crops only harvest in season, so hands move to the
+  woods over Winter with no seasonal rule written anywhere.
+
+Result: household throttle-loss 53.6% → 2.1%, durable 33.1% → 20.8%, total
+destroyed 774,581 → 445,220. **A/B with the limit disabled**
+(`dev/labor_ab.py`, same seed): population +1,547, villages +70, gold +1,048,
+dead stock −15%. It is a net gain, not a nerf.
+
+One real bug the harness caught: single-pass spillover leaked labour, because
+a sector receiving spare hands can hit its own ceiling too. Redistribution now
+repeats. `dev/test_labor.py` asserts it as a property across every village.
+
+### 14.2 The buildable menu (commit `bde386a`)
+
+Measured: **one granary and one warehouse across 651 nodes** on the turn-561
+world. The buildings existed and were unreachable in practice.
+
+- `app/world/buildings.py` — the model. `build_options(world, node, nation)`
+  returns `BuildOption` cards with a priority (urgent/useful/idle/blocked) and
+  a human reason drawn from that node's own production and storage pressure,
+  plus cost, turns and effects. **This is game logic, not UI** — it is testable
+  without a widget tree and `run_storage_ai` reasons about the same question.
+  It never spends anything.
+- `app/ui/build_menu.py` — a Toplevel card grid, needs-first, with tier pips
+  and a PRODUCTION header. The old in-panel build UI is gone; the side panel
+  keeps a summary and a door.
+- **First real Tk widget-tree harnesses in the project**:
+  `dev/test_build_menu.py` and `dev/test_panels.py` — the gap §13.1 flagged.
+  Both exit 0 with a message where there is no display.
+
+Two Tk traps, both noted in source: `padx`/`pady` take a scalar in a widget
+constructor and only accept the `(before, after)` tuple in `pack`/`grid`; and
+mouse-wheel scrolling must be bound on the toplevel or it dies whenever the
+pointer is over a card.
+
+### 14.3 Coin (commit `b93f216`)
+
+Gold was a real produced resource that produced almost none. A fresh world at
+turn 120 had mined ZERO Gold Ore and minted zero; the only coin in the game
+was the starting reserve draining at −77/turn. **Four separate broken links**,
+each invisible alone — this is the section's methodology lesson: they were only
+findable by walking the whole chain from seam to vault.
+
+1. **Rounding deleted the resource.** The yield cores rounded every resource to
+   an int per village per turn, so anything under half a unit became zero
+   forever. Gold Ore/Gems/Tin take a 0.0488 share of a mountain against
+   Iron/Coal/Stone's 0.2439. Yields are floats now and `_deliver_village_yield`
+   carries the fraction on the village.
+2. **Labour weighted by tonnage** — fixed by `LABOR_SECTOR_RESERVE` (§14.1).
+3. **Priority-list starvation, in TWO places.** `run_local_logistics` and
+   `trade.run_sell_to_city` each move one resource per node per turn off a
+   fixed list. Local logistics dispatched 1,155 shipments over 20 turns of
+   which exactly ONE was Gold Ore; sell-to-city moved 11,102 Coal and zero ore
+   because "Coal" sorts before "Gold Ore". Both now use
+   `resources.rotate_for_turn` — a pure function of the turn, so determinism is
+   unchanged. **Any future "scan a fixed list, dispatch first match, break"
+   loop needs this.**
+4. **`run_sell_to_city` could not see villages**, and 82 of 85 ore-bearing
+   regions have no settlement at all.
+
+Plus `GOLD_ORE_YIELD_PER_CELL` (lifted out of the general mining rate, which
+was cut for sink-less goods — ore's whole purpose is to be consumed), and two
+buildings: **Gold Mine** (village, gated on a real seam via `has_gold_seam`)
+and **Mint** (settlement, tiered throughput plus better refining at the top;
+tier 0 is 1.0 so no existing save regresses).
+
+Measured across three seeds at 120 turns: seed 123 mints 6,811 and ends −1,632
+instead of −9,288; seed 7 mints 4,453; seed 42 is a genuinely gold-poor world
+and mints none, which is correct for a scarce geographic resource, not a bug.
+
+### 14.4 Labour orders (commit `2494e09`)
+
+`apply_labor_policy(world, village, policy, scope)` with scope
+`village`/`region`/`realm`, never reaching another faction's villages. It
+clears the per-`(turn, season)` allocation cache — without that, a policy set
+mid-turn leaves the panel showing, and the turn producing, the old split.
+`labor_policy_available` hides a focus with nothing to work (out of season is
+deliberately still offered). `village_labor_report` reports idle hands, so a
+village where every sector is already land-limited says so rather than letting
+the buttons look broken.
+
+The build window also drops the OS titlebar (`overrideredirect`) and supplies
+its own border, draggable header, focus, centring and themed scrollbar.
+
+### 14.5 The Cartographer's Guild (commit `b90cc42`)
+
+A Guild does **not** generate knowledge — it multiplies what the realm already
+gathers by moving about. This follows what cartographers actually did (Casa de
+la Contratación, VOC ships' logs, portolan charts compiled from merchants'
+bearings), and it is a better rule than the obvious invention.
+
+- Every reveal `vision.py` already does for your own agents widens by
+  `CARTOGRAPHER_TRAFFIC_BONUS` (+4/+8/+13 by tier); caravans additionally
+  report the whole route travelled, not just where they stand.
+- The bonus is the realm's **best** Guild, not the sum.
+- Unaided it surveys only `CARTOGRAPHER_LOCAL_RADIUS` (9/14/20) at 0.3–0.6
+  cells/turn, hard-capped. Paper doubles that and is deliberately never
+  required (the Preserving-House-and-Stone trap).
+- Measured: a tier-3 Guild dropped into the benchmark world reveals 0.19% of
+  the map before surveying anything. `dev/test_cartographer.py` asserts that
+  negative claim directly — "buying this must not hand you a map" is the
+  property a later small change is most likely to break.
+
+Also: the New Game preview now shows only your own starting zone
+(`render_world(..., hide_rivals=True)`, the default; dev tools pass `False`),
+and `land_summary` no longer names the nearest rival.
+
+### 14.6 Regression suite
+
+**18 scripts, all passing.** New this session: `test_labor`, `test_buildings`,
+`test_build_menu`, `test_panels`, `test_gold`, `test_cartographer`. The ones
+that take a world take it as `argv[1]` (default `dev/worlds/dev560.pkl`).
+
+---
+
+## 15. Finishing the economy rework — the plan
+
+The user approved a five-phase plan and picked all four player levers. Phases
+1 and 4 shipped (§14.1, §14.4). **Phases 2, 3 and 5 remain, in that order**,
+plus the rest of the Cartographer (§15.4).
+
+### 15.1 Phase 2 — real demand sinks (NEXT: measured, not started)
+
+Durables still pile up: p90 fill 0.91, 20.8% of durable production still
+thrown away. Measured on a fresh world at turn 80 (scratch probe, easy to
+rebuild — sum `_deliver_village_yield` output by `storage_class` over 20 turns
+and diff node stocks):
+
+    made/turn   978.6 durable units      net accumulation  +722.5/turn
+
+**Only ~26% of durable production is consumed by anything.** Wood is the bulk
+(Logs 301 + Softwood 289 + Hardwood 140 per turn).
+
+The plan — continuous consumption so durables have somewhere to go:
+
+- **Fabric upkeep.** Population consumes timber per turn — houses rot, roofs
+  need rethatching. Pool Logs/Softwood/Hardwood/Planks the way `_FOOD_SOURCES`
+  is pooled, so any of them covers the need.
+- **Building maintenance.** Every built tier costs upkeep per turn. This is
+  what gives the build decision ongoing weight instead of being a one-off.
+- **Add it to `settlement_needs`.** The important implementation note:
+  `settlement_needs` already drives `_consume_node_needs`, `node_alerts`, and
+  logistics' `_node_wants`/`_node_surplus`. A new need plugs into consumption,
+  the alert pipe AND automatic redistribution in one move.
+- Shortfall consequence: prosperity penalty via the existing
+  `_SHORTAGE_PROSPERITY_PENALTY` machinery. **Do not** degrade building tiers —
+  irreversible-feeling and untested.
+
+**Size the sink against ~700/turn net accumulation**, targeting absorption of
+most but not all of it. Total population on that world was 34,085, so roughly
+0.012–0.02 timber per person per turn is the right starting order.
+
+**CRITICAL — do not add sinks for goods that are not actually produced.**
+Measured on the same world: Iron 0.2/turn, Copper 0.1, Coal 0.2, Tin 0.0. A
+Stone or Iron upkeep would starve the map instantly. Only wood is genuinely
+overproduced. Verify with the probe before choosing any resource.
+
+### 15.2 Phase 3 — market sink + sell-surplus policy
+
+- Supply-driven pricing: a city's price for a good falls as its stock rises.
+  `trade.unit_price` and `_regional_unit_price` already exist to build on, and
+  `run_sell_to_city`'s own comment notes the surplus factor already half does
+  this.
+- Per-good player sell policy: what a node auto-sells, and at what threshold.
+- This is also where **stockpile targets / rationing** belongs — the fourth
+  lever the user picked, still unbuilt. A target reserve per good is the same
+  concept as a sell threshold seen from the other side.
+
+### 15.3 Phase 5 — storage as a cost curve, spoilage retune
+
+- Replace `STORAGE_THROTTLE_FLOOR = 0.0` with a soft floor so production
+  continues wastefully rather than vanishing silently. The throttle is now much
+  less active (2.1% household), so this is safe to revisit.
+- Fish + Smoked Fish are still **34% of everything destroyed** (74,529 +
+  74,809 over 120 turns). The Preserving House is the existing answer and the
+  build menu now surfaces it; re-measure before adding anything new.
+- Re-check pool sizing: `other` sits at 2–4% of capacity and `feed` at 8–21%
+  while `durable` p90 is 0.91. Space is allocated to pools with nothing to hold.
+
+### 15.4 Cartographer — B, C and D remain
+
+The user approved all four mechanics. **A shipped** (traffic compilation),
+along with the small local survey. Still to build:
+
+- **B — commissioned surveys.** Pay gold and supplies; a surveyor party walks
+  outward over N turns revealing its path, and can be lost in wild or hostile
+  country. Needs a new expedition object with a turn hook (mirror
+  `RoadProject`/`ShipyardProject`) and a UI entry point. Recommend
+  auto-targeting the nearest unexplored frontier for v1 — the decision the user
+  wanted is *whether and when to pay*, which auto-targeting preserves — with
+  compass-direction aiming as a refinement.
+- **C — coast before interior.** Surveys from a coastal settlement (more with a
+  shipyard) travel further and faster along coastline.
+  `construction._is_coastal` already exists.
+- **D — Charts as a tradeable good.** A new resource made from Paper at a
+  settlement with a Guild; tradeable and giftable, and acquiring a faction's
+  charts reveals what they know. Touches the resource registry, `RECIPES`,
+  trade and diplomacy — treat it as its own phase.
+
+### 15.5 Standing findings worth acting on
+
+- **`Settlement.tax_income` is a dead stat.** Rolled at founding, read only for
+  prosperity valuation, generating no gold since the Currency overhaul moved
+  coin onto minting. Either wire it up or delete it.
+- **Mining is structurally broken by village placement.** Villages are sited on
+  farmland; mountain is 4.5% of the map; only 4 of 185 villages had a single
+  mountain cell in catchment. The entire Mining tier (Iron, Coal, Copper, Tin)
+  is therefore near-zero, which means Tools/Weapons/Shields effectively cannot
+  be made. `BASELINE_INDUSTRY_FLOOR` masks this for Logs and Stone only. This
+  is probably the largest remaining economic hole, and it is a *supply* problem
+  rather than a demand one — likely needs mining villages/camps that can be
+  sited on mountain, or a settlement-level extraction path.
+- **Prosperity is flatlined near 0–2** across every node on both A/B runs. Not
+  investigated. `_prosperity_target`/`_update_prosperity` are the entry points.
+- **The balance lab has no economy section.** All 217 levers in
+  `app/core/tuning.py` are battle-side, so every number in this rework is
+  source-only and cannot be tuned live. Adding a `resources` section is cheap
+  and would pay for itself immediately, given how much of §15 is tuning.
+
+### 15.6 How to work on this
+
+Same discipline the rest of the project runs on, and it earned its keep here:
+
+- **Measure before and after with `dev/storage_audit.py`**, and A/B by
+  disabling the new thing (`dev/labor_ab.py` is the template — it raises
+  `LABOR_OUTPUT_PER_WORKER` so the limit never binds, rather than adding a
+  flag).
+- **Walk whole chains, not units.** All four coin faults were invisible in
+  isolation; only "can a unit of ore get from the seam to the vault" found
+  them. `dev/test_gold.py` is written that way deliberately.
+- Run the full 18-script suite after every change. Everything currently
+  passes; there are no known-failing tests to work around.
