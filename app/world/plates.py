@@ -344,9 +344,21 @@ def generate_plates(width, height, seed=None, n_plates=16, n_hotspots=None):
     seeds = _scatter_seeds(py_rng, width, height, n_plates)
     plate_id = _grow_plate_ids(width, height, seeds, py_rng, seed_val)
 
+    # A fixed COUNT of continental plates, not a per-plate coin flip. A coin
+    # flip at n_plates=16 landed as low as 1 continental plate in testing --
+    # a world with almost no land -- and Phase 2 needs the continental
+    # fraction to be a stable knob to tune against, not something that can
+    # occasionally vanish on an unlucky seed. Which plates are continental is
+    # still random; only the COUNT is fixed.
+    n_continental = max(1, min(n_plates - 1,
+                               round(n_plates * FRACTION_CONTINENTAL)))
+    order = list(range(n_plates))
+    py_rng.shuffle(order)
+    continental_ids = set(order[:n_continental])
+
     plates = []
     for i, (sx, sy) in enumerate(seeds):
-        kind = CONTINENTAL if py_rng.random() < FRACTION_CONTINENTAL else OCEANIC
+        kind = CONTINENTAL if i in continental_ids else OCEANIC
         angle = py_rng.uniform(0.0, 2 * math.pi)
         speed = py_rng.uniform(0.4, 1.0)
         plates.append(Plate(i, kind, sx, sy, angle, speed))

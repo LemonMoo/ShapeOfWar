@@ -54,16 +54,27 @@ def test_basic_shape():
 
 def test_continental_fraction():
     print("\n--- continental fraction ---")
-    # Sampled across many plates/seeds, not one roll -- FRACTION_CONTINENTAL
-    # is a per-plate coin flip, so a single small sample is noisy.
+    # Sampled across many seeds to check the AVERAGE lands near the target...
     kinds = []
+    per_seed_counts = []
     for seed in range(30):
-        pl = P.generate_plates(300, 200, seed=seed, n_plates=20)
+        pl = P.generate_plates(300, 200, seed=seed, n_plates=16)
         kinds.extend(p.kind for p in pl.plates)
+        per_seed_counts.append(sum(1 for p in pl.plates if p.kind == P.CONTINENTAL))
     frac = kinds.count(P.CONTINENTAL) / len(kinds)
     check("continental fraction lands near the target",
           abs(frac - P.FRACTION_CONTINENTAL) < 0.05,
           f"{frac:.3f} vs target {P.FRACTION_CONTINENTAL}")
+    # ...and every INDIVIDUAL seed does too, not just the average. A per-plate
+    # coin flip was tried first and produced a seed with 1 continental plate
+    # out of 16 -- a world with almost no land -- which the average alone
+    # would never catch (a few unlucky low rolls wash out in 30 seeds' worth
+    # of mean). The count is fixed now (see generate_plates), so every seed
+    # should land within one plate of the same target.
+    target = max(1, min(15, round(16 * P.FRACTION_CONTINENTAL)))
+    check("no single seed starves continental plates",
+          all(abs(c - target) <= 1 for c in per_seed_counts),
+          f"target {target}, saw {sorted(set(per_seed_counts))}")
 
 
 def test_seam_wrap():
