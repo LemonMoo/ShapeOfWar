@@ -3,9 +3,14 @@
 Python/Tkinter desktop 4X strategy game. Single developer, turn-based, procedurally
 generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 
-**Last release: v0.3.7** ("Mountains and Coastlines Have a Reason Now").
+**Last release: v0.3.7_1** ("Take Direct Command of Your Commander").
 Check `gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting
 this line — this repo ships fast, sometimes several releases in one day.
+Shipped after v0.3.7: a fix for settlement-less regions never getting a road
+into the rest of the kingdom (`_bridge_region_to_kingdom` in worldgen.py), a
+Select All battle button/hotkey, and MOBA-style right-click commander/troop
+control in battle (`Unit.move_point`/`manual_target`, bypasses the
+commander's screening safety net on an explicit player order).
 
 ---
 
