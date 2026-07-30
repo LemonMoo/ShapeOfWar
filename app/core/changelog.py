@@ -20,6 +20,15 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 47,
+        "title": "More Continents, Less Water, Smoother Movement",
+        "items": [
+            "MANY MORE CONTINENTS. World-gen was effectively stuck at 2-3 continents no matter the seed -- raising the target alone actually made it worse, since the placement math (how far apart continents land, how strong the coastline noise is relative to their size) was quietly tuned for exactly that range. Both are fixed: continent count now regularly lands at 6-7, spread across real, separate landmasses at meaningfully different latitudes instead of clustering near the equator",
+            "Less water within the land itself -- river and lake density both cut moderately (rivers need more upstream drainage before counting, lakes need a deeper basin), per feedback that coastlines/interiors were carrying a bit more water than made sense",
+            "FIXED: commander and caravan movement animations flashing forward to their destination, snapping back to their starting point, and only then actually animating -- a real timing bug (the turn's final positions could get painted to screen a frame before the animation's own starting frame did), not a visual style choice. Movement now reads as one clean, continuous slide",
+        ],
+    },
+    {
         "version": 46,
         "title": "Physical Villages, Sane Formations, No More Runaway Renaming",
         "items": [
