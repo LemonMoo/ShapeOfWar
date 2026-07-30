@@ -101,6 +101,10 @@ def load_game(save_id):
     # Saves predating rulers have realms with nobody on the throne.
     from app.world.nation import ensure_rulers
     ensure_rulers(world)
+    # Saves predating the sea-lane fix may have a fake straight road drawn
+    # across open ocean between two landmasses -- repair or drop it.
+    from app.world.worldgen import repair_ocean_crossing_roads
+    repair_ocean_crossing_roads(world)
     return world
 
 

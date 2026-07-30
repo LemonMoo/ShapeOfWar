@@ -197,8 +197,52 @@ def test_no_fake_road_across_ocean():
           "(the exact reported bug)", not fake_roads, str(fake_roads[:3]))
 
 
+def test_migration_repairs_existing_saves():
+    print("\n--- migration: repairs a save with a pre-existing fake road ---")
+    from app.world import worldgen
+
+    world = generate_world(width=1400, height=840, seed=17, n_factions=6,
+                           player_species="Humans", player_name="SeaTest")
+    faction = world.factions[0]
+    capital = faction.meta["capital"]
+    home = _landmass(world, capital)
+    region = _find_other_landmass_region(world, home, 0)
+    if region is None:
+        print("  (skipped: seed 17 didn't produce a usable second landmass)")
+        return
+    region.faction_idx = 0
+    for (x, y) in region.cells:
+        world.owner[y][x] = 0
+    target = next(c for c in region.cells if world.owner[c[1]][c[0]] != OCEAN)
+
+    # Plant exactly what the OLD (pre-fix) code would have produced: a
+    # straight "stone" segment from the real capital straight through
+    # whatever ocean lies between it and the new landmass.
+    check("the injected segment genuinely crosses ocean (a valid repro of "
+          "the old bug, not a false positive)",
+          _crosses_ocean(world, capital, target))
+    world.roads_by_region.setdefault(region.id, []).append(
+        (capital, target, "stone"))
+
+    counts = worldgen.repair_ocean_crossing_roads(world)
+    check("the migration found and acted on it", counts["repaired"] + counts["dropped"] >= 1,
+          str(counts))
+
+    segs = world.roads_by_region.get(region.id, [])
+    fake_roads = [(a, b) for a, b, t in segs
+                 if t in ("stone", "dirt") and _crosses_ocean(world, a, b)]
+    check("no ocean-crossing stone/dirt segment survives the repair",
+          not fake_roads, str(fake_roads[:3]))
+
+    counts2 = worldgen.repair_ocean_crossing_roads(world)
+    check("re-running the migration on an already-repaired world is a no-op "
+          "(version-guarded, same pattern as migrate_legacy_overflow)",
+          counts2 == {"repaired": 0, "dropped": 0}, str(counts2))
+
+
 def main():
     test_no_fake_road_across_ocean()
+    test_migration_repairs_existing_saves()
     print("\nSEA BRIDGE TEST " + ("FAILED: " + ", ".join(FAILURES)
                                   if FAILURES else "PASSED"))
     return 1 if FAILURES else 0

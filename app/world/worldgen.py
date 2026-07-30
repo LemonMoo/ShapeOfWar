@@ -1099,6 +1099,58 @@ def _local_sea_lane(world, a, b):
     return [a] + sea_path + [b]
 
 
+def _segment_crosses_ocean(world, a, b):
+    ax, ay = a
+    bx, by = b
+    steps = max(abs(bx - ax), abs(by - ay), 1)
+    for i in range(steps + 1):
+        x = round(ax + (bx - ax) * i / steps)
+        y = round(ay + (by - ay) * i / steps)
+        if world.owner[y][x] == OCEAN:
+            return True
+    return False
+
+
+ROAD_MIGRATION_VERSION = 1   # bump if a future road-repair pass needs to re-run
+
+
+def repair_ocean_crossing_roads(world):
+    """One-time migration for saves written before construction.
+    _find_road_path/_bridge_region_to_kingdom stopped faking a straight
+    road across open water whenever no land route existed: any "stone" or
+    "dirt" segment whose straight line crosses an OCEAN cell can ONLY be
+    that old bug -- a real Dijkstra-routed road never touches open water
+    at all -- so it's an unambiguous signature to repair by, no guesswork
+    needed about which segments are affected.
+
+    Replaces each one with a genuine sea lane where a coastal connection
+    actually exists between its two endpoints, or simply drops it where
+    none does -- the same policy a brand new connection follows today
+    (see _find_road_path's own docstring). Versioned like
+    resources.migrate_legacy_overflow: idempotent, and cheap to skip
+    entirely on saves already repaired or created after the fix."""
+    if getattr(world, "_road_migration_version", 0) >= ROAD_MIGRATION_VERSION:
+        return {"repaired": 0, "dropped": 0}
+    world._road_migration_version = ROAD_MIGRATION_VERSION
+
+    counts = {"repaired": 0, "dropped": 0}
+    for segs in world.roads_by_region.values():
+        new_segs = []
+        for a, b, tier in segs:
+            if tier in ("stone", "dirt") and _segment_crosses_ocean(world, a, b):
+                sea_path = _local_sea_lane(world, a, b)
+                if sea_path:
+                    new_segs.extend((p1, p2, "sea")
+                                    for p1, p2 in zip(sea_path, sea_path[1:]))
+                    counts["repaired"] += 1
+                else:
+                    counts["dropped"] += 1
+                continue
+            new_segs.append((a, b, tier))
+        segs[:] = new_segs
+    return counts
+
+
 def _init_village_fields(world):
     """Shared water-distance field + occupancy hash for village placement,
     cached on `world` — same "compute once, reuse per-claim later" pattern
