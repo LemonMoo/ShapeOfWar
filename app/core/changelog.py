@@ -20,6 +20,15 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 48,
+        "title": "Mountains and Coastlines Have a Reason Now",
+        "items": [
+            "WORLD GENERATION IS TECTONIC NOW. Continents used to be placed shapes with noise smeared on top -- there was no reason a mountain range or a coastline was where it was. The map is now built from actual moving plates: mountain ranges rise where two plates collide, rifts open where they pull apart, coastal trenches and ranges form where an ocean plate slides under a continent, and island chains trail away from volcanic hotspots the same way the real Hawaiian islands formed",
+            "Land is still exactly 40% of the map, every time -- that contract didn't change",
+            "NOTE: this is a first pass, not a finished tuning. Some worlds come out more fragmented into small islands than intended, and river/lake density has shifted a bit from last release and hasn't been re-tuned yet. Both are being worked on -- the geology itself (where mountains and coasts actually form, and why) is the part that's done and solid",
+        ],
+    },
+    {
         "version": 47,
         "title": "More Continents, Less Water, Smoother Movement",
         "items": [
