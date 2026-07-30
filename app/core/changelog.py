@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 55,
+        "title": "Flat Map Stops Rebuilding Itself While You Pan",
+        "items": [
+            "FIXED: dragging/zooming the flat map was rebuilding every road, marker and label from scratch on every single frame, even though panning alone never changes any of it -- that content is now cached and only rebuilt when something actually changes",
+        ],
+    },
+    {
         "version": 54,
         "title": "Fixed a Real Stutter on Large, Developed Saves",
         "items": [

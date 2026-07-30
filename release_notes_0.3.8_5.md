@@ -1,0 +1,3 @@
+## v0.3.8_5 - Flat Map Stops Rebuilding Itself While You Pan
+
+- FIXED: dragging/zooming the flat map was rebuilding every road, marker and label from scratch on every single frame, even though panning alone never changes any of it. That content is now cached and only rebuilt when something that actually affects it changes (a turn passing, a selection, entering/exiting a zoom level, etc.) -- this is likely the real fix for the reported stutter, since it's the one concrete difference between the flat map's per-frame work and the globe's (which never rebuilds this content on a pure camera drag). The diagnostic timing log (`flatgl_timing.log`) is still active in this build to confirm.

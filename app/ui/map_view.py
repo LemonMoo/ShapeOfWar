@@ -548,6 +548,18 @@ class MapView(tk.Frame):
         self._flatgl = None
         self._flatgl_tried = False
         self._use_flatgl = False
+        # Cached _map_lines/_flat_markers/(_map_labels+_flat_labels_extra)
+        # output -- see _sync_flatgl's own comment on why rebuilding these
+        # from scratch on every single pan/zoom frame (the previous
+        # behaviour) is pure waste: none of that content depends on the
+        # camera's PAN position at all (only _wrap_x, applied inside
+        # gl_flatmap's own set_lines/set_markers/set_labels, cares about
+        # that), and _flat_content_signature captures everything that
+        # actually does change it.
+        self._flat_content_sig = None
+        self._flat_lines_cache = []
+        self._flat_markers_cache = []
+        self._flat_labels_cache = []
         # End-turn movement animation state (see _start_move_animation).
         self._move_anim = None       # pending `after` id, or None when idle
         self._move_tracks = ()       # [(mover, t -> (x, y)), ...]
@@ -617,6 +629,7 @@ class MapView(tk.Frame):
     # --- world binding -----------------------------------------------------
     def set_world(self, world):
         self.world = world
+        self._flat_content_sig = None   # force a rebuild -- see _sync_flatgl
         self.selected = None
         self.zoom_faction = None
         self.selected_region = None
@@ -2268,15 +2281,34 @@ class MapView(tk.Frame):
             return 1
         return 0
 
-    # Temporary diagnostic (see _log_flatgl_timing): a reported stutter on
-    # the GPU flat map that GPU usage stays flat through (~10% -- i.e. NOT
-    # a rendering/driver cost) and that the globe, sharing this same
-    # moderngl/pyopengltk plumbing, never shows -- meaning it's CPU-bound
-    # and specific to something in this method's own Python-side work,
-    # not yet reproduced on dev hardware. Logs a per-step breakdown for
-    # any frame slow enough to explain a felt hitch, so the next data point
-    # comes from the machine that actually shows it. Remove once found.
+    # Temporary diagnostic (see _log_flatgl_timing): kept through this round
+    # of investigation to confirm the caching fix below actually removes
+    # the rebuild cost rather than just hiding it. Logs a per-step
+    # breakdown for any frame slow enough to explain a felt hitch.
     _FLATGL_LOG_THRESHOLD_MS = 20.0
+
+    def _flat_content_signature(self, level, scale):
+        """Everything that can actually change what _map_lines/_flat_markers/
+        _map_labels produce -- deliberately NOT including self.view (pan
+        position): none of those three read the camera's position at all,
+        only gl_flatmap's own _wrap_x does (applied at GPU-buffer-pack
+        time, inside set_lines/set_markers/set_labels themselves), so
+        panning alone can reuse the exact same content forever. `scale` IS
+        included because _flat_markers sizes markers off it to hold a
+        constant screen size -- zooming genuinely does change that output,
+        panning doesn't change scale at all.
+
+        Cheap to compute (attribute reads, no iteration over world data),
+        so comparing it every frame to decide whether a rebuild is needed
+        costs nothing next to the rebuild itself."""
+        wd = self.world
+        hint = self._placement_hint_cells
+        return (
+            wd.turn, getattr(wd, "territory_version", 0), level, round(scale, 3),
+            self.mode, self.selected_settlement, self.selected_village,
+            self.selected_commander, self.attack_mode, id(self._attack_frontier),
+            self.building_mode, tuple(hint) if hint else None,
+        )
 
     def _sync_flatgl(self):
         """The GPU flat map's equivalent of _sync_globe: push the same
@@ -2304,16 +2336,37 @@ class MapView(tk.Frame):
         t_set_map = time.perf_counter()
         g.set_view(vx0, vy0, vx1, vy1)
         level = self._flat_level()
-        lines = self._map_lines(level, scale=scale)
-        t_lines_build = time.perf_counter()
+
+        # A pure pan (or a re-render with nothing at all changed) reuses
+        # last frame's content wholesale -- see _flat_content_signature and
+        # this method's docstring on why that's exactly correct, not an
+        # approximation. Flash/move-animation are time-varying and can't be
+        # captured by a static signature, so they always force a rebuild
+        # while active (both are already short-lived, bounded animations,
+        # not something a player spends a sustained drag inside).
+        sig = self._flat_content_signature(level, scale)
+        animating = self._flash_region is not None or self._move_anim is not None
+        if animating or sig != self._flat_content_sig:
+            self._flat_content_sig = sig
+            lines = self._map_lines(level, scale=scale)
+            t_lines_build = time.perf_counter()
+            markers = self._flat_markers(level)
+            t_markers_build = time.perf_counter()
+            labels = self._map_labels(level, region_names=False) + self._flat_labels_extra()
+            t_labels_build = time.perf_counter()
+            self._flat_lines_cache = lines
+            self._flat_markers_cache = markers
+            self._flat_labels_cache = labels
+        else:
+            lines = self._flat_lines_cache
+            markers = self._flat_markers_cache
+            labels = self._flat_labels_cache
+            t_lines_build = t_markers_build = t_labels_build = t_set_map
+
         g.set_lines(lines)
         t_lines_set = time.perf_counter()
-        markers = self._flat_markers(level)
-        t_markers_build = time.perf_counter()
         g.set_markers(markers)
         t_markers_set = time.perf_counter()
-        labels = self._map_labels(level, region_names=False) + self._flat_labels_extra()
-        t_labels_build = time.perf_counter()
         g.set_labels(labels)
         t_labels_set = time.perf_counter()
         g.render_now()
