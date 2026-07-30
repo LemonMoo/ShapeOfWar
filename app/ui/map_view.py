@@ -4335,6 +4335,64 @@ class MapView(tk.Frame):
         self.show_bottom_message(f"{village.name}'s herd policy set to {policy}.")
         self._show_village(village)
 
+    def _build_stockpile_card(self, node, own):
+        """STOCKPILE -- how much of each good this node holds back before
+        logistics/trade may carry any more of it away (Phase 3, see
+        resources.apply_stockpile_target).
+
+        Only lists goods this node actually holds AND that a target can
+        legally apply to (resources.stockpile_eligible): the survival and
+        upkeep goods run on their own reserve formulas, and offering a
+        lever there that silently does nothing would be worse than not
+        offering one at all. Default-closed and skipped entirely when
+        there's nothing eligible, so an early village with three crops in
+        the barn doesn't get an empty card."""
+        if not own:
+            return
+        stock = {r: a for r, a in (getattr(node, "resources", {}) or {}).items()
+                 if a and resources.stockpile_eligible(r)}
+        if not stock:
+            return
+        set_count = sum(1 for r in stock if resources.stockpile_target(node, r) is not None)
+        body = self._card("STOCKPILE",
+                          f"{set_count} set" if set_count else "default",
+                          key="stockpile", default_open=False)
+        if body is None:
+            return
+        tk.Label(body, text="How much to hold back before trading the rest away. "
+                 "Applies to this place only.",
+                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_SMALL,
+                 justify="left", wraplength=_RIGHT_PANEL_W - 60
+                 ).pack(anchor="w", pady=(2, 6))
+        for res_name in sorted(stock, key=lambda r: -stock[r]):
+            current = resources.stockpile_target(node, res_name)
+            label = next((name for name, frac in resources.STOCKPILE_PRESETS
+                          if frac == current), "Default")
+            row = tk.Frame(body, bg=theme.PANEL)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=f"{res_name}  {stock[res_name]:,}", bg=theme.PANEL,
+                     fg=theme.MUTED, font=theme.FONT_SMALL,
+                     anchor="w").pack(side="left")
+            widgets.button(row, label,
+                           lambda n=node, r=res_name: self._cycle_stockpile_target(n, r),
+                           kind="active" if current is not None else "default",
+                           compact=True).pack(side="right")
+
+    def _cycle_stockpile_target(self, node, resource):
+        """Step this resource to the next preset -- a cycle rather than a
+        dropdown because the choices are few and coarse (see
+        resources.STOCKPILE_PRESETS)."""
+        presets = resources.STOCKPILE_PRESETS
+        current = resources.stockpile_target(node, resource)
+        idx = next((i for i, (_, frac) in enumerate(presets) if frac == current), 0)
+        name, frac = presets[(idx + 1) % len(presets)]
+        resources.set_stockpile_target(node, resource, frac)
+        self.show_bottom_message(f"{node.name}: {resource} stockpile set to {name}.")
+        if hasattr(node, "kind"):
+            self._show_settlement(node)
+        else:
+            self._show_village(node)
+
     def _buildable_at(self, node):
         """Every building this node could ever put up -- pool buildings, the
         Preserving House, and the herd buildings, deduped (the Barn is both a
@@ -4430,6 +4488,8 @@ class MapView(tk.Frame):
         if body is not None:
             for res_name, amount in sorted(stock.items(), key=lambda kv: -kv[1]):
                 self._kv(body, res_name, f"{amount:,}")
+
+        self._build_stockpile_card(st, own)
 
     def _settlement_conversions(self, st):
         """[(output, input, units/turn), ...] this settlement can actually run
@@ -4606,6 +4666,8 @@ class MapView(tk.Frame):
         if body is not None:
             for res_name, amount in sorted(stock.items(), key=lambda kv: -kv[1]):
                 self._kv(body, res_name, f"{amount:,}")
+
+        self._build_stockpile_card(v, own)
 
         herds = getattr(v, "herds", None)
         if herds and any(herds.values()):

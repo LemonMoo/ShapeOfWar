@@ -43,6 +43,7 @@ from app.world.worldgen import (OCEAN, UNCLAIMED, _path_dijkstra, _nearest_ocean
 from app.world.resources import (RESOURCES, BASE_VALUE_BY_TIER, RESOURCE_SPAWN,
                                  _storage_cap, _clamp_to_storage,
                                  settlement_needs, _FOOD_SOURCES, _LUXURY_GOODS,
+                                 _TIMBER_SOURCES,
                                  _SETTLEMENT_STORAGE_RESOURCES,
                                  settlement_storage_capacity, _node_storage_capacity,
                                  node_space_used,
@@ -103,6 +104,8 @@ def _settlement_needs_total(nation, resource, world):
             total += needs["Clothes"]
         elif resource in _LUXURY_GOODS:
             total += needs["Luxury"]
+        elif resource in _TIMBER_SOURCES:
+            total += needs["Timber"]
     return total
 
 

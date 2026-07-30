@@ -1394,6 +1394,130 @@ def labor_policy_available(world, village, policy):
     return season_any
 
 
+# --- Player stockpile policy (Phase 3 of the economy pass, see
+# HANDOFF.md S15.2) -- the fourth lever, alongside labour policy: how much
+# of a given good a node should hold back before local logistics, regional
+# trade or sell-to-city is allowed to carry any more of it away. A LOWER
+# target sells/ships more aggressively (less held back); a HIGHER one
+# hoards. Deliberately does NOT invent a new "sell for gold" mechanic of
+# its own -- gold in this game only ever comes from minting or a real
+# trading partner's treasury (see the Currency section above), so this
+# works purely by loosening/tightening the reserve every domestic logistics
+# tier already reads through _node_surplus, the same shared choke point
+# _consume_from_pool's callers already go through. A faction with no
+# domestic surplus to redistribute still can't conjure anything from this
+# -- that's correct, not a gap.
+#
+# Scoped to ordinary discretionary goods only (the generic reserve branch
+# in _node_surplus) -- deliberately NOT Food/Firewood/Clothes/Luxury/Timber,
+# which already have their own carefully-tuned survival/upkeep reserve
+# formulas; letting a stockpile-target misclick starve a village's own
+# population would be a much worse failure mode than a sub-optimal Iron
+# trade. Stored per-node (mirrors labor_policy) as a plain
+# {resource: fraction} dict -- absent, or missing a given resource, means
+# "use the built-in flat LOCAL_SURPLUS_RESERVE," so setting no policy
+# changes nothing.
+STOCKPILE_SCOPES = ("village", "region", "realm")
+
+# Presets the UI offers, rather than a free-text fraction: the useful
+# decisions here are coarse ("get rid of it" / "sit on it"), and a spinbox
+# accurate to two decimal places would imply a precision the underlying
+# greedy first-match logistics does not actually have. None means "no
+# policy" -- fall through to the built-in flat default.
+STOCKPILE_PRESETS = (
+    ("Default", None),
+    ("Sell all", 0.0),
+    ("Keep some", 0.25),
+    ("Keep half", 0.5),
+    ("Hoard", 0.9),
+)
+
+
+def stockpile_eligible(resource):
+    """Can a stockpile target apply to `resource` at all?
+
+    Mirrors _node_surplus's branch structure: everything with its own
+    survival/upkeep reserve formula (Food/Luxury/Timber pools, Firewood,
+    Clothes, Fodder) is deliberately excluded, so a UI never offers a lever
+    that silently does nothing -- and, more importantly, so a misclick can
+    never starve a village. Kept next to the policy itself rather than in
+    the UI so the two can't drift apart."""
+    if resource in _FOOD_SOURCES or resource in _LUXURY_GOODS:
+        return False
+    if resource in _TIMBER_SOURCES:
+        return False
+    if resource in ("Firewood", "Clothes", "Fodder"):
+        return False
+    return storage_class(resource) is not None
+
+
+def stockpile_target(node, resource):
+    """Fraction (0..1) of `resource`'s own storage pool capacity this node
+    should hold back as a reserve, or None if the player hasn't set one --
+    falls through to the built-in default in that case (see _node_surplus)."""
+    targets = getattr(node, "stockpile_target", None)
+    if not targets:
+        return None
+    return targets.get(resource)
+
+
+def set_stockpile_target(node, resource, fraction):
+    """fraction=None clears the override, back to the built-in default."""
+    targets = getattr(node, "stockpile_target", None)
+    if targets is None:
+        targets = {}
+        node.stockpile_target = targets
+    if fraction is None:
+        targets.pop(resource, None)
+    else:
+        targets[resource] = max(0.0, min(1.0, fraction))
+
+
+def stockpile_reserve(node, resource):
+    """The actual item-count reserve a stockpile target implies, converted
+    from the pool-capacity fraction via this resource's own bulk (Phase 2
+    capacities are SPACE, not item count -- see node_pool_capacity/
+    resource_bulk). None if no target is set, so the caller knows to fall
+    back to its own default rather than treating an unset policy as a
+    target of zero."""
+    target = stockpile_target(node, resource)
+    if target is None:
+        return None
+    pool = storage_class(resource)
+    if pool is None:
+        return None
+    cap = node_pool_capacity(node, pool)
+    bulk = resource_bulk(resource) or 1.0
+    return (target * cap) / bulk
+
+
+def apply_stockpile_target(node, resource, fraction, scope="village", world=None):
+    """Set a stockpile target for `resource` on this node, every node of
+    its kind in its region, or every node of its kind in its realm -- same
+    scope shape as apply_labor_policy, and the same rule: never reaches
+    another faction's nodes regardless of scope. `world` is required for
+    anything wider than "village" scope (needs the full village/settlement
+    list to find siblings). Returns how many nodes actually changed."""
+    if scope not in STOCKPILE_SCOPES:
+        return 0
+    if scope == "village":
+        targets = [node]
+    else:
+        if world is None:
+            return 0
+        is_village = not hasattr(node, "kind")
+        pool = world.villages if is_village else world.settlements
+        targets = [n for n in pool if n.faction_idx == node.faction_idx]
+        if scope == "region":
+            targets = [n for n in targets if n.region_id == node.region_id]
+    changed = 0
+    for target in targets:
+        if stockpile_target(target, resource) != fraction:
+            set_stockpile_target(target, resource, fraction)
+            changed += 1
+    return changed
+
+
 def village_workforce(village):
     """Hands available to work this turn. Adults, matching what Food
     consumption already scales off (FOOD_PER_CAPITA) -- so "how many people
@@ -2457,6 +2581,33 @@ CLOTHES_PER_CAPITA = 0.0003          # per total population -- "slowly"
 # per-capita rate at all). A bit above Clothes' own rate: everyone enjoys
 # a bit of Wine or Jewelry, not just a wealthy few.
 LUXURY_PER_CAPITA = 0.0008           # per total population
+# Phase 2 of the post-storage-rework economy pass (see HANDOFF.md S15.1):
+# durable goods (mostly timber) were piling up almost untouched -- only
+# ~26% of durable production was consumed by anything at all, measured via
+# dev/storage_audit.py. This is the population side of the new sink: roofs
+# need rethatching, tool handles and cart frames wear out, fences get
+# replaced -- ordinary wear a settlement's population puts on everything
+# built from wood, whether or not it just built something new. See
+# BUILDING_MAINTENANCE_PER_TIER below for the other half (what's actually
+# BUILT costs upkeep too).
+#
+# Measured with dev/storage_audit.py against a fixed saved world (not
+# --fresh -- the turn loop itself turned out to have real run-to-run
+# variance even from an identical starting world and seed, most likely
+# unordered set/dict iteration somewhere feeding a shared, unseeded
+# random() stream; several repeated trials per configuration were needed
+# to see a signal through that noise). An initial 0.008/0.4 pass only
+# moved durable throttle-loss 21.9% -> 19.9% against a disabled-sink
+# baseline; doubled to 0.016/0.8 here, which moved it further to ~17.8%
+# with no measurable change to household/other/feed suppression (still
+# ~3.5-4% each, same as baseline) -- i.e. this is hitting durable
+# specifically, as intended, not spilling into pools that were already
+# fine. Durable mean pool fill also dropped from ~0.38-0.40 to ~0.35-0.36.
+# Still a first-pass estimate, same caveat as FOOD_PER_CAPITA's own
+# "closest existing reference point" -- re-check with the audit tool
+# (3+ trials per configuration, same fixed world, given the noise above)
+# before moving it further.
+TIMBER_UPKEEP_PER_CAPITA = 0.016     # per total population
 
 STARVATION_SEVERITY = 0.05   # max fraction of population lost/turn under total famine
 FREEZE_SEVERITY = 0.02       # max fraction lost/turn under total winter fuel shortage
@@ -2472,7 +2623,8 @@ FREEZE_GRACE_TURNS = 8        # same idea as STARVATION_GRACE_TURNS, for an
                               # two dangers, but still leaves real room (a
                               # season is TURNS_PER_SEASON turns long) before
                               # a supply hiccup starts costing population.
-_SHORTAGE_PROSPERITY_PENALTY = {"Food": 8.0, "Firewood": 5.0, "Clothes": 2.0}
+_SHORTAGE_PROSPERITY_PENALTY = {"Food": 8.0, "Firewood": 5.0, "Clothes": 2.0,
+                                "Timber": 2.0}
 
 # A region with zero Forest-biome cells can never produce Firewood locally
 # (see compute_industry_yield's biome gate) -- and if that region is also
@@ -2560,6 +2712,12 @@ _FOOD_SOURCES = _FOOD_PRODUCTS + _RAW_FOOD_CROPS
 # treatment _FOOD_SOURCES already gets via _consume_from_pool.
 _LUXURY_GOODS = [name for name, spec in RESOURCES.items()
                 if spec["category"] == "Luxury Goods"]
+# The Timber upkeep sink (see TIMBER_UPKEEP_PER_CAPITA/
+# BUILDING_MAINTENANCE_PER_TIER) can be paid from raw wood or the milled
+# form -- a settlement with a Sawmill and no Logs on hand shouldn't be
+# unable to re-thatch a roof just because its wood is one conversion step
+# further along. Same pooled-consumption treatment _FOOD_SOURCES gets.
+_TIMBER_SOURCES = ["Planks", "Hardwood", "Softwood", "Logs"]
 
 
 def _population_scaled_need(headcount, per_capita):
@@ -2577,21 +2735,27 @@ def _population_scaled_need(headcount, per_capita):
 
 
 def settlement_needs(settlement, season):
-    """{"Food": ..., "Firewood": ..., "Clothes": ..., "Luxury": ...} --
-    this settlement's (or village's -- see _population_scaled_need)
-    per-turn needs. The single source of truth for the per-capita formulas
-    above: reused by advance_settlement_consumption (actual draining),
-    settlement_needs_value (prosperity), trade's safety-reserve calc,
-    local logistics' surplus/need matching (Phase 10), and the settlement
-    info panel (see app/ui/map_view.py). Firewood is omitted entirely
-    outside Winter -- it isn't needed then at all. Luxury (Phase 13) is
-    the one entry here that's never survival-critical -- see
-    _consume_node_needs for how it's actually treated differently."""
+    """{"Food": ..., "Firewood": ..., "Clothes": ..., "Luxury": ...,
+    "Timber": ...} -- this settlement's (or village's -- see
+    _population_scaled_need) per-turn needs. The single source of truth
+    for the per-capita formulas above: reused by
+    advance_settlement_consumption (actual draining), settlement_needs_value
+    (prosperity), trade's safety-reserve calc, local logistics' surplus/need
+    matching (Phase 10), and the settlement info panel (see
+    app/ui/map_view.py). Firewood is omitted entirely outside Winter -- it
+    isn't needed then at all. Luxury (Phase 13) is the one entry here
+    that's never survival-critical -- see _consume_node_needs for how it's
+    actually treated differently. Timber (Phase 2 of the economy pass) is
+    population upkeep plus whatever this node has built (see
+    _building_maintenance_need) -- unlike the others it's never zero for a
+    node with any buildings at all, even at zero population."""
     needs = {"Food": _population_scaled_need(settlement.adults, FOOD_PER_CAPITA)}
     if season == "Winter":
         needs["Firewood"] = _population_scaled_need(settlement.population, FIREWOOD_PER_CAPITA_WINTER)
     needs["Clothes"] = _population_scaled_need(settlement.population, CLOTHES_PER_CAPITA)
     needs["Luxury"] = _population_scaled_need(settlement.population, LUXURY_PER_CAPITA)
+    needs["Timber"] = (_population_scaled_need(settlement.population, TIMBER_UPKEEP_PER_CAPITA)
+                       + _building_maintenance_need(settlement))
     return needs
 
 
@@ -2602,13 +2766,18 @@ def settlement_needs_value(settlement, season):
     uses tier 3 directly (every Food Product shares that tier, so which
     one actually gets eaten doesn't change the value) rather than naming
     one specific resource the way the old figure named Grain. Luxury
-    (Phase 13) uses tier 5 the same way, for the same reason."""
+    (Phase 13) uses tier 5 the same way, for the same reason. Timber prices
+    off Logs specifically -- the most raw of its four pooled sources
+    (_TIMBER_SOURCES spans tiers 2-4, unlike Food/Luxury where every member
+    shares one tier) -- as the simplest representative price, same spirit
+    as Food/Luxury's tier shortcut."""
     needs = settlement_needs(settlement, season)
     value = needs["Food"] * BASE_VALUE_BY_TIER[3]
     if "Firewood" in needs:
         value += resource_value("Firewood", needs["Firewood"])
     value += resource_value("Clothes", needs["Clothes"])
     value += needs["Luxury"] * BASE_VALUE_BY_TIER[5]
+    value += resource_value("Logs", needs["Timber"])
     return value
 
 
@@ -2766,6 +2935,20 @@ def _consume_node_needs(node, season, world):
         deficit = (clothes_needed - clothes_had) / clothes_needed
         node.prosperity = max(0.0, node.prosperity
                              - _SHORTAGE_PROSPERITY_PENALTY["Clothes"] * deficit)
+
+    # Timber upkeep (Phase 2 of the economy pass) -- same shape as Clothes:
+    # a shortfall costs prosperity only, never population. Deliberately NOT
+    # a starvation-style mechanic (no grace-period counter, no alert,
+    # no "degrade the building" consequence -- see HANDOFF.md S15.1's
+    # explicit "do not degrade building tiers" call) since going without
+    # maintenance for a while is a quality problem, not a survival one.
+    timber_needed = needs["Timber"]
+    if timber_needed > 0:
+        timber_had = _consume_from_pool(res, _TIMBER_SOURCES, timber_needed)
+        if timber_had < timber_needed:
+            deficit = (timber_needed - timber_had) / timber_needed
+            node.prosperity = max(0.0, node.prosperity
+                                 - _SHORTAGE_PROSPERITY_PENALTY["Timber"] * deficit)
 
     # Luxury (Phase 13) -- "these improve prosperity instead of survival."
     # The mirror image of the three shortage penalties above: fulfillment
@@ -3839,6 +4022,45 @@ def cartographer_traffic_bonus(world, fac_idx):
     return CARTOGRAPHER_TRAFFIC_BONUS[faction_cartographer_tier(world, fac_idx)]
 
 
+# --- Building maintenance (Phase 2 of the post-storage-rework economy pass,
+# see TIMBER_UPKEEP_PER_CAPITA above and HANDOFF.md S15.1) -------------------
+# Every built tier of every building costs a small, ongoing Timber-family
+# upkeep -- what gives the build decision ongoing weight instead of being a
+# one-off cost. Priced in Timber specifically, not whatever the building was
+# actually built FROM (Stone, Iron...), because Timber is the one durable
+# good genuinely overproduced relative to demand; see dev/storage_audit.py
+# and the module-level caveat on TIMBER_UPKEEP_PER_CAPITA about not sizing
+# this against goods that aren't actually oversupplied.
+# See TIMBER_UPKEEP_PER_CAPITA for how this was tuned (0.4 -> 0.8) and the
+# measurement caveat about this simulation's real run-to-run noise.
+BUILDING_MAINTENANCE_PER_TIER = 0.8   # Timber-equivalent units/turn per built tier
+
+# Every building name maintenance applies to. resources.py can't import
+# buildings.py (buildings.py imports FROM here), so this is its own small
+# copy of buildings.py's _all_buildings ordering rather than a shared list
+# -- keep the two in sync by hand if a new building type is ever added.
+# `barn` is both a storage-pool building (STORAGE_BUILDING_BY_POOL) and a
+# herd building (HERD_BUILDINGS); deduplicated the same way _all_buildings
+# does, so it isn't charged twice.
+_MAINTAINED_BUILDINGS = list(STORAGE_BUILDING_BY_POOL.values()) + [PRESERVING_HOUSE]
+for _herd_building in HERD_BUILDINGS:
+    if _herd_building not in _MAINTAINED_BUILDINGS:
+        _MAINTAINED_BUILDINGS.append(_herd_building)
+_MAINTAINED_BUILDINGS += [GOLD_MINE, MINT, CARTOGRAPHER]
+del _herd_building
+
+
+def _building_maintenance_need(node):
+    """Timber-equivalent upkeep this node owes for everything it has built.
+    Tier 0 (nothing built) costs nothing. The Shipyard is a flat boolean,
+    not tiered (storage_tier knows nothing about it), so it's charged one
+    tier's worth if present rather than via the tier table."""
+    total = sum(storage_tier(node, b) for b in _MAINTAINED_BUILDINGS)
+    if getattr(node, "has_shipyard", False):
+        total += 1
+    return total * BUILDING_MAINTENANCE_PER_TIER
+
+
 def advance_cartographers(world):
     """One turn of the local survey at every Guild, burning Paper where there
     is any to burn.
@@ -4114,13 +4336,19 @@ _LOCAL_PRODUCTION_INPUTS = {i for output, options in RECIPES.items()
                            if i in _SETTLEMENT_STORAGE_RESOURCES}
 
 # Checked in this order when a node looks for something to ship out --
-# survival needs (Food/Firewood/Clothes) go first so a node with several
-# surplus resources always tries to cover someone's starvation/freezing
-# risk before it bothers with ordinary production-input traffic, not
-# whichever happened to be first in a plain, unordered resource set.
-_LOCAL_SHIPMENT_SURVIVAL = list(_FOOD_SOURCES) + ["Firewood", "Clothes"]
+# survival/upkeep needs (Food/Firewood/Clothes/Timber) go first so a node
+# with several surplus resources always tries to cover someone's
+# starvation/freezing/maintenance risk before it bothers with ordinary
+# production-input traffic, not whichever happened to be first in a plain,
+# unordered resource set. Timber's four pooled sources (_TIMBER_SOURCES)
+# are also real production inputs elsewhere (Weapons/Shields/Furniture) --
+# being in this list only changes shipment PRIORITY, it doesn't stop
+# _node_wants' production-input branch from wanting them too.
+_LOCAL_SHIPMENT_SURVIVAL = (list(_FOOD_SOURCES) + ["Firewood", "Clothes"]
+                           + list(_TIMBER_SOURCES))
 _LOCAL_SHIPMENT_INDUSTRIAL = sorted(_SETTLEMENT_STORAGE_RESOURCES
-                                    - set(_FOOD_SOURCES) - {"Firewood", "Clothes"})
+                                    - set(_FOOD_SOURCES) - {"Firewood", "Clothes"}
+                                    - set(_TIMBER_SOURCES))
 _LOCAL_SHIPMENT_PRIORITY = _LOCAL_SHIPMENT_SURVIVAL + _LOCAL_SHIPMENT_INDUSTRIAL
 
 
@@ -4206,6 +4434,13 @@ def _node_surplus(node, resource, needs):
         reserve = max(LOCAL_SURPLUS_RESERVE, needs.get("Luxury", 0) * LOCAL_RESERVE_BUFFER_TURNS)
         spare_total = max(0, total_luxury - reserve)
         return min(stock, spare_total)
+    if resource in _TIMBER_SOURCES:
+        total_timber = sum(res.get(t, 0) for t in _TIMBER_SOURCES)
+        if total_timber <= 0:
+            return 0
+        reserve = max(LOCAL_SURPLUS_RESERVE, needs.get("Timber", 0) * LOCAL_RESERVE_BUFFER_TURNS)
+        spare_total = max(0, total_timber - reserve)
+        return min(stock, spare_total)
     if resource == "Firewood":
         reserve = max(needs.get("Firewood", 0) * LOCAL_RESERVE_BUFFER_TURNS,
                      LOCAL_HOUSEHOLD_SURPLUS_RESERVE)
@@ -4219,7 +4454,12 @@ def _node_surplus(node, resource, needs):
         reserve = max(round(village_winter_fodder_need(node) * FODDER_STOCK_BUFFER),
                      LOCAL_SURPLUS_RESERVE)
     else:
-        reserve = LOCAL_SURPLUS_RESERVE
+        # Phase 3's player stockpile policy (see apply_stockpile_target)
+        # only ever touches THIS branch -- ordinary discretionary goods,
+        # never the survival/upkeep resources handled above, each of which
+        # already has its own carefully-tuned reserve formula.
+        custom = stockpile_reserve(node, resource)
+        reserve = custom if custom is not None else LOCAL_SURPLUS_RESERVE
     return max(0, stock - reserve)
 
 
@@ -4247,6 +4487,13 @@ def _node_wants(kind, node, resource, needs):
     if resource in _LUXURY_GOODS:
         total_luxury = sum(res.get(l, 0) for l in _LUXURY_GOODS)
         return needs.get("Luxury", 0) > 0 and total_luxury < needs.get("Luxury", 0) * LOCAL_RESERVE_BUFFER_TURNS
+    if resource in _TIMBER_SOURCES:
+        total_timber = sum(res.get(t, 0) for t in _TIMBER_SOURCES)
+        wants_timber = (needs.get("Timber", 0) > 0
+                       and total_timber < needs.get("Timber", 0) * LOCAL_RESERVE_BUFFER_TURNS)
+        wants_input = (kind == "settlement" and resource in _LOCAL_PRODUCTION_INPUTS
+                      and res.get(resource, 0) < LOCAL_NEED_THRESHOLD)
+        return wants_timber or wants_input
     if resource == "Firewood":
         return (needs.get("Firewood", 0) > 0
                and res.get("Firewood", 0) < needs.get("Firewood", 0) * LOCAL_RESERVE_BUFFER_TURNS)
