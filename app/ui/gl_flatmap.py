@@ -200,6 +200,18 @@ class GLFlatMapFrame(OpenGLFrame):
         self._marker_count = 0
         self._glyphs = np.zeros(0, dtype="f4")
         self._glyph_count = 0
+        # Repack cache for set_lines/set_markers/set_labels -- see their own
+        # comments. `_wrap_bucket()` is which "copy" of the world-wrap the
+        # current camera is closest to; it only changes when the camera
+        # actually crosses the seam, which ordinary panning almost never
+        # does, so most frames can skip re-wrapping and re-packing entirely
+        # and just keep last frame's buffer as-is.
+        self._lines_src = None
+        self._lines_wrap_bucket = None
+        self._markers_src = None
+        self._markers_wrap_bucket = None
+        self._labels_src = None
+        self._labels_wrap_bucket = None
 
     # --- lifecycle --------------------------------------------------------
     @property
@@ -333,9 +345,37 @@ class GLFlatMapFrame(OpenGLFrame):
         k = round((self._view_center_x - x) / w)
         return x + k * w
 
+    def _wrap_bucket(self):
+        """Which world-wrap 'copy' the camera is currently closest to, as a
+        plain integer -- changes only when the camera actually crosses the
+        seam (world_w away from wherever it started), which ordinary
+        panning within an explored area essentially never does. Used by
+        set_lines/set_markers/set_labels to skip re-wrapping and re-packing
+        entirely on a frame where nothing that could change the result --
+        neither the content nor this bucket -- has changed. A coarser
+        approximation than re-checking every individual point's own
+        _wrap_x result, but a safe one: every point _wrap_x is ever asked
+        to place is drawn from the current viewport, which is never wider
+        than the world itself, so they all round to the same bucket (or an
+        adjacent one right at the seam, corrected the moment the bucket
+        itself changes)."""
+        return round(self._view_center_x / max(1, self._world_w))
+
     def set_lines(self, paths):
         """paths: [(cells, (r,g,b), width_px, dash), ...] -- the exact shape
-        MapView._map_lines already builds (shared with the globe)."""
+        MapView._map_lines already builds (shared with the globe).
+
+        Skips the rebuild entirely when both `paths` (checked by identity,
+        not equality -- MapView._sync_flatgl hands back the exact same
+        cached list object when nothing changed, see its own content cache)
+        and the wrap bucket are unchanged from the last call: panning alone
+        changes neither, so this is the common case during a drag, not an
+        edge case."""
+        bucket = self._wrap_bucket()
+        if paths is self._lines_src and bucket == self._lines_wrap_bucket:
+            return
+        self._lines_src = paths
+        self._lines_wrap_bucket = bucket
         segs = []
         for cells, color, width, dash in paths:
             if len(cells) < 2:
@@ -362,7 +402,14 @@ class GLFlatMapFrame(OpenGLFrame):
         -- see MapView._flat_markers for how `size` is derived so a marker
         reads at the same screen size the Tk canvas already draws it at, and
         for the SHAPE_* constants (module-level here) each marker kind maps
-        to."""
+        to.
+
+        Same identity+wrap-bucket skip as set_lines -- see its docstring."""
+        bucket = self._wrap_bucket()
+        if marks is self._markers_src and bucket == self._markers_wrap_bucket:
+            return
+        self._markers_src = marks
+        self._markers_wrap_bucket = bucket
         n = len(marks)
         need = max(1, n) * _SHAPE_STRIDE
         if self._markers.size < need:
@@ -378,7 +425,14 @@ class GLFlatMapFrame(OpenGLFrame):
 
     def set_labels(self, labels):
         """labels: [(cell_x, cell_y, text, (r,g,b), px, dy), ...] -- the
-        exact shape MapView._map_labels/_flat_labels_extra build."""
+        exact shape MapView._map_labels/_flat_labels_extra build.
+
+        Same identity+wrap-bucket skip as set_lines -- see its docstring."""
+        bucket = self._wrap_bucket()
+        if labels is self._labels_src and bucket == self._labels_wrap_bucket:
+            return
+        self._labels_src = labels
+        self._labels_wrap_bucket = bucket
         atlas = self.atlas
         glyphs = []
         for cx, cy, text, color, px, dy in labels:

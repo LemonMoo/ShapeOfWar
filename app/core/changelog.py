@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 56,
+        "title": "One More Flat Map Panning Cost, Gone",
+        "items": [
+            "FIXED: the GPU flat map was still re-wrapping and re-packing every road/marker/label for the graphics card on every frame, even with last update's caching -- panning almost never actually needs that redone either, so it's now skipped the same way",
+        ],
+    },
+    {
         "version": 55,
         "title": "Flat Map Stops Rebuilding Itself While You Pan",
         "items": [

@@ -1,0 +1,3 @@
+## v0.3.8_6 - One More Flat Map Panning Cost, Gone
+
+- FIXED: even after last update's content caching, the GPU flat map was still re-wrapping and re-packing every road/marker/label into the GPU buffer on every single frame. That world-wrap re-check only actually needs to happen when the camera crosses the map's east-west seam (essentially never during ordinary panning), so it's now skipped the rest of the time too. Panning now measures well under 1ms/frame even at 4K on dev hardware. The diagnostic timing log is still active in this build to confirm the remaining micro-stutter is gone (or to show what's left, if anything).

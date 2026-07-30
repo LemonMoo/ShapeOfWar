@@ -2346,14 +2346,12 @@ class MapView(tk.Frame):
         # not something a player spends a sustained drag inside).
         sig = self._flat_content_signature(level, scale)
         animating = self._flash_region is not None or self._move_anim is not None
-        if animating or sig != self._flat_content_sig:
+        rebuilt = animating or sig != self._flat_content_sig
+        if rebuilt:
             self._flat_content_sig = sig
             lines = self._map_lines(level, scale=scale)
-            t_lines_build = time.perf_counter()
             markers = self._flat_markers(level)
-            t_markers_build = time.perf_counter()
             labels = self._map_labels(level, region_names=False) + self._flat_labels_extra()
-            t_labels_build = time.perf_counter()
             self._flat_lines_cache = lines
             self._flat_markers_cache = markers
             self._flat_labels_cache = labels
@@ -2361,7 +2359,7 @@ class MapView(tk.Frame):
             lines = self._flat_lines_cache
             markers = self._flat_markers_cache
             labels = self._flat_labels_cache
-            t_lines_build = t_markers_build = t_labels_build = t_set_map
+        t_content = time.perf_counter()
 
         g.set_lines(lines)
         t_lines_set = time.perf_counter()
@@ -2378,12 +2376,11 @@ class MapView(tk.Frame):
                 ensure_base=(t_base - t_start) * 1000,
                 ensure_fog=(t_fog - t_base) * 1000,
                 set_map=(t_set_map - t_fog) * 1000,
-                lines_build=(t_lines_build - t_set_map) * 1000,
-                lines_set=(t_lines_set - t_lines_build) * 1000,
-                markers_build=(t_markers_build - t_lines_set) * 1000,
-                markers_set=(t_markers_set - t_markers_build) * 1000,
-                labels_build=(t_labels_build - t_markers_set) * 1000,
-                labels_set=(t_labels_set - t_labels_build) * 1000,
+                rebuilt=1.0 if rebuilt else 0.0,
+                content_build=(t_content - t_set_map) * 1000,
+                lines_set=(t_lines_set - t_content) * 1000,
+                markers_set=(t_markers_set - t_lines_set) * 1000,
+                labels_set=(t_labels_set - t_markers_set) * 1000,
                 render_now=(t_render - t_labels_set) * 1000,
                 n_lines=len(lines), n_markers=len(markers), n_labels=len(labels))
         if self.mode == "political":
