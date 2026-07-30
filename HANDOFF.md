@@ -3,30 +3,37 @@
 Python/Tkinter desktop 4X strategy game. Single developer, turn-based, procedurally
 generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 
-**Last release: v0.3.7_2** ("Sea Lanes Instead of Roads Through the Ocean").
-Check `gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting
-this line — this repo ships fast, sometimes several releases in one day.
+**Last release: v0.3.9_4** ("Fantasy HUD Redesign, Road Merging, Zoom-Based
+Village View"). Check `gh release list --repo LemonMoo/ShapeOfWar --limit 5`
+before trusting this line — this repo ships fast, sometimes several releases
+in one day. Working tree is clean; the release commit is pushed to
+`master` and the exe is attached to the GitHub release.
 
-Shipped after v0.3.7: v0.3.7_1 added a fix for settlement-less regions never
-getting a road into the rest of the kingdom (`_bridge_region_to_kingdom` in
-worldgen.py), a Select All battle button/hotkey, and MOBA-style right-click
-commander/troop control in battle (`Unit.move_point`/`manual_target`,
-bypasses the commander's screening safety net on an explicit player order).
-v0.3.7_2 fixed a related but separate bug — a new settlement founded on a
-DIFFERENT landmass from every other settlement a faction owned got a literal
-straight road drawn across open ocean to its nearest existing city, since
-both `construction._find_road_path` and `_bridge_region_to_kingdom` silently
-fell back to a straight two-point segment whenever no land route existed.
-Both now try a real sea lane instead (new "sea" road tier, its own
-rendering) or skip the connector entirely rather than fake one; existing
-saves are repaired automatically on load (`worldgen.repair_ocean_crossing_
-roads`, wired into `save.load_game`, versioned/idempotent like
-`resources.migrate_legacy_overflow`). See **§11** for the full writeup.
+**Since v0.3.7_2** (§11, the last point this document covered): v0.3.8
+shipped background end-turn processing and a GPU-rendered flat map, which
+then took SEVEN point releases (v0.3.8_1-_7) to actually get smooth and
+correctly layered — see **§12** for the full saga, including two
+methodology lessons (a false lead confirmed-in-isolation, and a whole class
+of bug invisible to the verification method being used) worth reading
+before debugging anything else GL-related in this codebase. v0.3.9 through
+v0.3.9_4 (this session) shipped a full fantasy/medieval HUD visual
+redesign, fixed new roads drawing redundantly parallel to existing ones
+instead of merging into them, and replaced the clunky click-to-enter
+"village view" mode with a pure zoom-scale threshold. See **§13**.
+
+**Two things worth doing before anything else touches this area:**
+1. `_VILLAGE_REVEAL_SPAN` (map_view.py, currently `26`) is a first-pass
+   estimate, not a playtested number — see §13.3.
+2. `flatgl_timing.log` diagnostic instrumentation (`MapView._log_flatgl_timing`,
+   still active) was never actually resolved — the user was asked once
+   whether to strip it or keep it as a standing tripwire and the
+   conversation moved on before it was answered. See §12's closing note.
 
 **In progress, unreleased: Phases 2-4 of the regional weather system**
 (logistics, battle, visual). Phases 0 (event generation) and 1 (economy —
 crop yields, the "weather" alert) are both built, measured, and shipped as
-of v0.3.7_2. See **§10** for the full phasing plan and what's left.
+of v0.3.7_2, and nothing since has touched weather. See **§10** for the
+full phasing plan and what's left.
 
 ---
 
@@ -64,15 +71,35 @@ treat it as its own dedicated session, the same way `v0.3.6_1`'s
 continent-count fix was. See
 **§9** for the full state, what was measured, and what's still open.
 
+**v0.3.8 shipped background end-turn processing and a GPU-rendered flat
+map**, then needed six point releases to actually be smooth and correctly
+layered, then one more (v0.3.8_7) to fix a HUD-hiding bug that shipped
+undetected through the whole thing. **v0.3.9 (this session) shipped a full
+fantasy/medieval HUD visual redesign** across every panel in the game, a
+fix for roads drawing redundantly next to each other instead of merging,
+and replaced click-triggered "village view" with a zoom-scale threshold.
+See **§12** and **§13**.
+
 **The one thing to know before touching anything else:** the signature units are
 working and legible but **not balanced**, and the release notes say so out loud.
 Read §4.1 before moving any number — `dev/balance_lab.py` is the tool for it, and
 the shares are the knob, not the stats.
 
-Release flow, for the next one: bump `APP_VERSION` in `build.bat`, add a
-`CHANGELOG_ENTRIES` entry at the top of `app/core/changelog.py` (never renumber
-the older `version:` integers — that re-flags dismissed entries as NEW for
-existing players), write `release_notes_<x.y.z>.md`, run `build.bat`, then
+Release flow, for the next one — semantic `v0.x.y` tags, decoupled from the
+internal `CHANGELOG_VERSION` integer (see §12/§13's release notes for what
+that looked like in practice): bump `APP_VERSION` in `build.bat` (a small
+fix-batch that doesn't warrant a full `z` bump gets a `v<x.y.z>_<n>`
+sub-bump instead — `n` increments, based off the actual latest published
+release via `gh release list`, not a remembered one), add a
+`CHANGELOG_ENTRIES` entry at the top of `app/core/changelog.py` (never
+renumber the older `version:` integers — that re-flags dismissed entries as
+NEW for existing players), write `release_notes_<x.y.z>.md`, run
+`.\build.bat` from PowerShell directly (a Bash/`cmd /c` invocation of the
+`.bat` has silently no-op'd before — the batch file also ends in `pause`,
+which hangs a non-interactive shell unless stdin is closed), verify the
+stamped version with `(Get-Item dist\ShapesOfWar.exe).VersionInfo` and
+actually launch the exe once before publishing, then
+`git push origin master` and
 `gh release create v<x.y.z> dist/ShapesOfWar.exe --repo LemonMoo/ShapeOfWar
 --title "..." --notes-file release_notes_<x.y.z>.md`.
 
@@ -783,3 +810,311 @@ system. If a similar "two points might be on different landmasses" case
 turns up elsewhere later (e.g. Phase 2's logistics work, if a caravan route
 ever needs to reason about crossing open water), the same `allow_fallback`
 pattern and `_local_sea_lane`/`_sea_lane_between` helpers are the template.
+
+---
+
+## 12. v0.3.8 — background end-turn + GPU flat map, and six releases to make it right
+
+Two features shipped together in v0.3.8, then the GPU flat map specifically
+took **six more point releases** (v0.3.8_1 through _6) before it was
+actually smooth, and a seventh (_7) to fix a HUD-hiding bug that had been
+shipping invisibly the whole time. Read this section before touching
+`gl_flatmap.py`, `_sync_flatgl`, or anything else GL-related — two real
+methodology lessons came out of this that will save real time on the next
+GL bug.
+
+### What shipped in v0.3.8 itself
+
+- **Background end-turn processing**: `advance_turn` now runs on a worker
+  thread (`MapView._turn_queue`/`_turn_token`/`_run_end_turn`/`_turn_worker`/
+  `_turn_drain`) instead of freezing the window every single turn.
+  `_end_turn_busy` guards against mashing End Turn stacking panel rebuilds
+  mid-teardown; `_turn_token` invalidates a stale in-flight result if
+  somehow more than one could ever be running (defensive — `_end_turn_busy`
+  already prevents that, but a stale result must never be able to land
+  regardless). `_turn_in_flight` is the narrower flag `render()` actually
+  gates on, since `_finish_end_turn`'s own post-processing/animation/
+  cooldown still needs to render while `_end_turn_busy` is technically
+  still true.
+- **GPU-rendered flat map** (`app/ui/gl_flatmap.py`, new): an orthographic
+  sibling to `gl_globe.py`, reusing what's projection-agnostic from it
+  (line/marker/text-glyph shaders, the bitmap font atlas) rather than
+  rewriting them — a flat camera is just `u_rot = identity` and an ortho
+  `u_viewproj` built from the same `view` rect the flat map already
+  tracked. `GLFlatMapFrame` swaps in for `self.canvas` the same way the
+  globe swaps in for the canvas (`_activate_flatgl`/`_deactivate_flatgl`),
+  with the Tk/PIL canvas kept as the automatic fallback wherever
+  `gl_flatmap.gl_available()` is false — no new player-facing toggle, same
+  pattern as the globe's own degrade. Picking (`screen_to_cell`) is a
+  direct orthographic inverse, no ray-sphere math needed. Full shape-aware
+  markers (`SHAPE_CIRCLE`/`TRIANGLE`/`SQUARE`/`DIAMOND`/`HULL`), terrain
+  symbols (baked into the base raster instead of drawn as vector polygons
+  every frame — a fixed-density tradeoff against the canvas path's
+  scale-adaptive one, judged acceptable for a purely decorative flourish),
+  and zoom-scaled line widths were all added in the same release, not as
+  later follow-ups.
+
+### The stuttering saga (v0.3.8_1 through _6): five real fixes, one false lead
+
+Triggered by user-submitted screen recordings and `flatgl_timing.log` files
+from a real, large, developed save (`dev/worlds/dev560.pkl`-scale) showing
+the GPU flat map choppy while panning. Every fix below was verified against
+real re-test data from the user's machine, not assumed fixed from theory —
+several plausible-looking hypotheses were tried, measured, and explicitly
+ruled out before landing on the real cause:
+
+1. **v0.3.8_1** — `MapView._map_labels`'s `elif level == 1 and
+   region_names:` let a `False` `region_names` fall through to the
+   `else:` branch (settlement/village names) instead of doing nothing. A
+   correctness bug, not a perf one, but shipped in the same window.
+2. **v0.3.8_2** — `gl_flatmap.GLFlatMapFrame.set_map` was re-uploading the
+   whole terrain texture to the GPU on **every single frame**,
+   unconditionally. Fixed with an identity check
+   (`if map_img is not self._map_img or fog_img is not self._fog_img`)
+   before marking the texture dirty.
+3. **v0.3.8_4 — a real fix that was NOT the actual cause.**
+   `App._prepare_world_gc` (`gc.unfreeze(); gc.collect(); gc.freeze()`,
+   called once per world load) is a genuine optimization — `gc.collect()`
+   on a loaded world measured ~27ms before, ~0ms after — and is still
+   worth keeping. **But the user's re-test showed the identical stutter
+   pattern, unchanged.** This is the single most important methodology
+   note in this whole saga: a mechanism that's confirmed correct **in
+   isolation** is not the same as a confirmed **root cause** — that needs
+   a before/after test against the actual reported symptom. An antivirus
+   hypothesis was also raised and cleanly ruled out the same cheap way
+   (user excluded the folder, no change) before the real cause was found.
+   Full writeup: memory `shapes_of_war_gc_freeze`.
+4. **v0.3.8_5 — the first real fix.** `MapView._sync_flatgl` was rebuilding
+   `_map_lines`/`_flat_markers`/`_map_labels` from scratch on **every**
+   `render()` call, including every single frame of a mouse-drag pan, even
+   though none of those three functions read the camera's pan position at
+   all (only `gl_flatmap.py`'s own `_wrap_x` does, applied later at
+   GPU-buffer-pack time). Fixed with `_flat_content_signature(level,
+   scale)` — a cheap tuple of everything that actually CAN change that
+   output (turn, territory_version, level, scale, mode, selections,
+   attack/building mode) — and `_sync_flatgl` now only rebuilds when that
+   signature changes or a flash/move-animation is actively playing (both
+   time-varying, can't be captured by a static signature). The concrete
+   lead that found this: the globe never had this problem, because its own
+   drag-to-rotate handler calls `render_now()` directly and never touches
+   `_map_lines`/`_map_labels` mid-drag at all. Verified: 20 pure-pan frames
+   now trigger zero rebuilds; a zoom or selection change still triggers
+   exactly one. Full writeup: memory `shapes_of_war_flatgl_content_cache`.
+5. **v0.3.8_6 — the second layer of the same bug.** A user-submitted
+   follow-up `flatgl_timing.log` showed the exact same alternating-
+   magnitude cost signature had just moved one level down: even with the
+   *same* cached Python list handed to `gl_flatmap.py`'s `set_lines`/
+   `set_markers`/`set_labels` every frame, each one still repacked its GPU
+   instance buffer from scratch, because `_wrap_x` needs the current
+   camera position to place points correctly across the world's east-west
+   seam. But the actual wrap DECISION for any given point only changes
+   when the camera crosses that seam, which ordinary panning essentially
+   never does. Fixed with a wrap-bucket cache
+   (`round(view_center_x / world_w)`) per buffer: skip the repack when
+   both the input list (`is` identity) and the bucket are unchanged from
+   last call. **User confirmed after this one: "It's perfectt."** General
+   pattern for any future GL-frame content fed from a cached Python list
+   that still needs per-frame positional wrapping: cache on
+   `(identity, wrap_bucket)`, not identity alone.
+
+### v0.3.8_7 — a completely different, unrelated bug found by accident
+
+While scoping an unrelated UI redesign request, a clarifying question about
+"what's still wrong with the UI" got the answer **"None of the HUD panels
+are displaying."** Root cause: `self._flatgl` (the GPU flat map's Tk
+widget) is created lazily on the very first `render()` call — well after
+`__init__` had already built and raised every side panel. In Tk, a newly
+created/mapped widget joins the **top** of its parent's stacking order by
+default, regardless of when its siblings were last `.lift()`-ed. Since
+`_flatgl` fills the entire `MapView` area, it silently covered the resource
+bar, faction panel, alerts, treasury and trade log the instant the flat map
+activated. Fixed with one line: `self._flatgl.lower()` right after packing
+it, in `_activate_flatgl`.
+
+**Why this shipped undetected through the entire six-release saga above:**
+every visual check used during that whole investigation was
+`ctx.screen.read()` — reading the moderngl framebuffer directly to verify
+GL rendering correctness. That technique can only ever show the GL
+surface's *own* content in isolation; it has **no way to reveal whether
+other Tk sibling widgets are stacked above or below it** in the real
+composited window. This is a structural blind spot, not a one-off miss —
+any future work that layers a new Tk widget as a sibling to existing
+raised/layered UI (especially one created lazily after `__init__`, and
+especially one that fills its whole parent) needs its stacking order
+checked directly (`parent.winfo_children()`, ordered bottom-to-top), not
+assumed correct because the GL surface itself renders fine. Full writeup:
+memory `shapes_of_war_flatgl_zorder`.
+
+**A separate environment note, hit twice this session:** `PIL.ImageGrab`
+(OS-level screenshot) proved **unreliable** for verifying this game's Tk
+window specifically — it repeatedly captured content from unrelated
+applications instead of the target window, even when using
+`win32gui.GetWindowRect()` to compute a precise bounding box. Don't reach
+for it here. Use `ctx.screen.read()` for GL surface content, or direct
+Tk widget/attribute inspection (`winfo_children()`, `.cget(...)`, building
+a real widget tree in a throwaway script and asserting on its state) for
+everything else.
+
+**Still open:** `flatgl_timing.log` diagnostic logging
+(`MapView._log_flatgl_timing`, threshold `_FLATGL_LOG_THRESHOLD_MS = 20.0`)
+is still wired into `_sync_flatgl` as of v0.3.9_4. It was useful — it's how
+every fix in this section got found — but nobody has decided whether it
+should be stripped out now that the investigation is closed, or kept as a
+standing tripwire in case a regression reintroduces per-frame cost. Ask
+the user before removing it or leaving it; it was asked once mid-session
+and the conversation moved to a different topic before it was answered.
+
+---
+
+## 13. v0.3.9 — fantasy HUD redesign, road merging, zoom-based village view
+
+This session. Three separate, sequential user requests, each shipped as its
+own point release with the existing `dev/test_*.py` regression suite run
+after every change (all passing throughout — nothing in this section
+touched game logic beyond the road-pathing cost function in §13.2).
+
+### 13.1 Fantasy/medieval HUD redesign (v0.3.9 → v0.3.9_2)
+
+Full visual redesign across every panel in the game, in four phases, driven
+by two complaints: inconsistent/dated styling, and too much information
+crammed into view at once. Confirmed scope up front: fantasy/medieval
+theme, "show less at once" (fold detail behind clicks) plus bigger text and
+click targets, right-hand faction/region panel as the top priority.
+
+- **Phase A — foundation.** `app/ui/theme.py` went from 3 colors/3 fonts to
+  a full palette: warm parchment/aged-leather colors (`PANEL_ALT`, `CANVAS`,
+  `ACCENT` gold, `ALERT_BG`, `METER_TRACK`, `ORDER_CUE_*`), a serif display
+  font (`Cambria`, built into Windows since Vista — used for
+  `FONT_TITLE`/`FONT_HEADER` only, body text stays sans-serif since serif
+  reads worse at small sizes) plus a bumped-up body font, and sizing
+  constants (`BTN_PAD_Y`, `CARD_HEAD_PAD_Y`) that directly implement
+  "bigger click targets." New `app/ui/widgets.py`: `card`/`kv`/`bar_row`/
+  `button` factory functions, extracted from `MapView`'s own
+  `_card`/`_kv`/`_bar_row` methods (which now just delegate to it) so
+  `battle_view.py` can use the same idiom instead of hand-rolling its own.
+  Deliberately **not** done: a bundled custom TTF font via
+  `ctypes.AddFontResourceExW` (real risk — PyInstaller onefile
+  temp-extraction interaction, silent failure with no fallback — for a
+  marginal gain over Cambria, which is already installed everywhere this
+  game ships) or parchment-texture bitmap backgrounds (Tk widget
+  backgrounds are solid colors only).
+- **Phase B — the right-hand panel.** `_show_faction`/`_show_region` were
+  rewritten from one long paragraph of stats (`self.info.config(text=...)`)
+  into a short header plus foldable `SUMMARY`/`RELATIONSHIPS`/`SETTLEMENTS`
+  cards — the same idiom `_show_settlement`/`_show_village` already used.
+  `_RIGHT_PANEL_W` went 320→360 to give the bigger fonts room; every
+  `wraplength=260` literal across the file (25 of them) now derives from
+  the constant instead.
+- **Phase C — the rest of `map_view.py`.** Resource bar, alerts panel
+  (kept a deliberately distinct `ALERT_BG` red tint rather than unifying
+  with `PANEL_ALT`), treasury popup (its locally-scoped `header()`/`line()`
+  closures — a worse duplicate of `_kv`/`_card` — replaced with real
+  `widgets.card`/`widgets.kv` calls, making the Treasury's TOTAL/WHERE IT
+  IS/WHERE IT CAME FROM/RECENT TURNS sections genuinely foldable), trade
+  log, edge tabs. A global find/replace promoted the two most-repeated
+  stray hex literals (`"#232a36"` → `theme.PANEL_ALT`, 35 uses;
+  `"#0d1017"` → `theme.CANVAS`, 16 uses) across the whole file in one pass.
+- **Phase D — `battle_view.py`.** Same button/card treatment. ORDERS
+  stance/fire buttons deliberately **not** folded by default — those are
+  time-pressured clicks during a live sim tick, unlike the map's leisurely
+  panels. `_ORDER_CUE` moved to `theme.ORDER_CUE_*` constants but kept
+  **distinct** from `GOOD`/`WARN`/`BAD` (a stance cue isn't the same
+  semantic concept as health-bar status, even though the health bar itself
+  does now reference `GOOD`/`WARN`/`BAD` directly since those genuinely are
+  the same concept). `widgets.button` grew a `compact=True` option
+  (smaller font, tighter padding) specifically for the per-unit-type
+  select-button row — the default bigger-click-target sizing measurably
+  overflows a 300px-wide row of 5-6 buttons.
+- Deliberately left un-migrated: genuine battlefield/gameplay-visualization
+  colors in `battle_view.py` (unit selection rings, formation-tool ghost
+  color, projectile/effect colors) — these are game content, not HUD
+  chrome, and restyling them wasn't part of the ask.
+- No dedicated Tk-widget-construction test exists for "does the panel
+  widget tree still build without exceptions" the way there is for globe
+  rendering (`dev/globe_shot.py`) or battle logic. Verification this
+  session used one-off scripts (built in scratch, not committed) that
+  construct a real `MapView`/`BattleView` against `dev/worlds/dev*.pkl`
+  and call every `_show_*`/`render()` method directly. **Worth turning
+  into a real `dev/panel_shot.py`-style script** if UI work continues —
+  the pattern (`MapView(root, world, lambda *a, **k: None, ...)`, then
+  call `_show_faction`/`_show_region`/`_show_settlement`/`_show_village`/
+  `_show_commander` for a real node of each kind) is reusable as-is.
+
+### 13.2 Roads no longer draw redundantly parallel to existing ones (v0.3.9_3)
+
+Reported bug: new roads/dirt paths were frequently drawn as their own line
+right next to an already-existing road instead of merging into it.
+
+**Root cause:** `worldgen._elev_cost` already had an opt-in `roads=`
+parameter (a cell an existing road runs through becomes much cheaper to
+path through — `_ROAD_TRAVEL_MULT = 0.3`) — but it was only ever passed by
+callers moving GOODS (`trade._land_path_between`,
+`resources._local_path`), never by the callers that actually **build**
+new roads (`worldgen._local_road_path`, `construction._path_between`, and
+`expansion.ensure_interregion_roads` via the latter). The exclusion was
+deliberate — a prior comment argued road construction "must keep pathing
+on raw terrain, or every new road would snap onto whatever was built
+first" — but real-world testing showed the opposite outcome was worse:
+independent, needlessly parallel roads a few cells apart.
+
+**Fix:** pass `roads=road_cells(world)` at all three construction call
+sites. Each caller already bounds its search to a padded bounding box
+around the two endpoints (`_ROAD_BBOX_PAD`/`_BBOX_PAD`), so this can't pull
+a route wildly off-course toward some unrelated road on the far side of
+the map — only a road that's already roughly on the way to begin with is
+ever cheap to reach. Verified: full regression suite plus a fresh
+`generate_world` call inspected for sane, non-degenerate road segments.
+
+**Not retroactive.** This only changes how NEW roads are pathed going
+forward — a save with roads already drawn redundantly close together
+before this fix keeps them exactly as they are. If that turns out to
+bother players on existing saves, the natural next step is a repair
+migration in the same shape as §11's `worldgen.repair_ocean_crossing_roads`
+(versioned, idempotent, wired into `save.load_game`) — nothing like that
+exists yet for this specific case.
+
+### 13.3 Village view replaced by a zoom threshold (v0.3.9_4)
+
+Reported complaint: double-clicking a region to enter "village view" felt
+clunky and often didn't seem to register.
+
+**Root cause, found by reading the actual click/zoom code:**
+`_enter_village_view` zoomed the camera to `self.zoom_faction.meta["bbox"]`
+— **the exact same extent `_enter_region_view` already sat at.** Clicking
+through to "village view" changed what was drawn (villages appeared) but
+never actually moved the camera at all, so there was no visible feedback
+that anything had happened. Separately, a settlement/village marker
+sitting under the second click could silently intercept it as a settlement
+selection instead of confirming the region.
+
+**Fix, per explicit user design decision** ("merge into one continuous
+mode" over "keep the separate chrome, just auto-trigger it"): the whole
+discrete "village view" mode is gone. `zoom_region`, `_enter_village_view`,
+`_exit_village_view` are deleted entirely. New `MapView._villages_visible()`
+returns `True` purely from how far zoomed in the free camera already is
+(`min(view_span_x, view_span_y) <= _VILLAGE_REVEAL_SPAN`, currently `26`
+world-cells) while inside a faction's own (non-foreign) territory. Villages
+simply fade into clickability as the player zooms in on their own — no
+click step to get wrong. `_flat_level()` (GPU map), `_draw_villages`/
+`_draw_labels` (Tk canvas fallback), and `_on_click`'s region/village
+hit-testing were all switched from checking `zoom_region is (not) None` to
+calling this one function. Foreign-faction browsing still cannot reach
+village level regardless of zoom (unchanged: diplomacy actions only).
+`_jump_to_alert_node`'s village branch now zooms the camera in tight on the
+specific village's position (`_VILLAGE_REVEAL_SPAN * 0.7` span) rather than
+to the whole faction bbox, since there's no discrete mode left to enter.
+
+**`_VILLAGE_REVEAL_SPAN = 26` is a first-pass estimate, not a playtested
+number.** It was picked from measured geography on a real save (average
+region "diameter" ~14 cells, village nearest-neighbor spacing ~7-10 cells)
+— enough to show a region's own villages plus a bit of its neighbors once
+zoomed in — but nobody has actually played with it yet. If villages
+reveal too early (while still feeling "zoomed out") or too late (having to
+zoom in uncomfortably far), this is the one constant to move; nothing else
+needs to change.
+
+Verified: full regression suite, plus a throwaway script exercising
+`_villages_visible()` at both zoom levels, a simulated click hitting a
+real village marker, `_jump_to_alert_node` on a village, the foreign-
+browsing guard, and clicking an ocean cell to confirm `_exit_region_view`
+still fires correctly.
