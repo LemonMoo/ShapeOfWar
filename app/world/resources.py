@@ -991,8 +991,9 @@ def _crop_yield_core(biome_counts, climate, fertility_frac, season):
             fertility_mult = 1.0 + fert_w * (fertility_frac - 0.5)
             amount = (BASE_CROP_YIELD_PER_CELL * cell_count * share
                      * climate_affinity(crop, climate) * fertility_mult)
-            amount = round(amount)
-            if amount:
+            # Float, like _industry_yield_core -- see _deliver_village_yield for
+            # why per-turn rounding here silently deleted every small yield.
+            if amount > 0:
                 result[crop] = result.get(crop, 0) + amount
     return result
 
@@ -1019,7 +1020,9 @@ def compute_crop_yield(region, season):
     biome_counts = getattr(region, "biome_counts", {})
     climate = getattr(region, "dominant_climate", "temperate")
     fertility_frac = region.stats.get("fertility", 50) / 100.0
-    return _crop_yield_core(biome_counts, climate, fertility_frac, season)
+    return {c: round(a) for c, a in
+            _crop_yield_core(biome_counts, climate, fertility_frac, season).items()
+            if round(a) > 0}
 
 
 # --- Phase 12: industry specialization ---------------------------------------
@@ -1115,12 +1118,37 @@ BASE_MINING_YIELD_PER_CELL = 0.2     # cut a further ~2.5x (was 0.5): still a
                                       # Gems/Stone/ore), none of it survival-
                                       # critical, so the safe place to keep cutting
 
-_RAW_YIELD_OVERRIDE = {"Firewood": FIREWOOD_YIELD_PER_CELL}
+# Gold Ore is the one Mining resource the general rate is badly wrong for, and
+# for a reason that has nothing to do with storage: BASE_MINING_YIELD_PER_CELL
+# was cut hard precisely because Sand/Salt/Stone/ore are a sink-less pile-up,
+# but Gold Ore's entire purpose is to be consumed -- it is the only input to the
+# only source of coin in the game (see the Gold Mine / Mint section below).
+#
+# At the general rate the currency simply did not exist. Measured on a fresh
+# 10-faction world at turn 120: mountain is 4.5% of the map's land, villages are
+# sited on FARMLAND rather than on peaks, so only 4 of 185 villages had a single
+# mountain cell in catchment -- and those four had an ore potential of 0.09 to
+# 0.32 a turn. The map produced ZERO Gold Ore, every Mint had nothing to strike,
+# and the only coin in the game was the starting reserve draining to nothing
+# (-7,500 over 120 turns, all of it construction).
+#
+# Raised so that the handful of villages that DO sit on a seam matter enormously
+# rather than trivially, which is the right shape for a scarce, geographically
+# determined resource: gold comes from the few places that have it, and
+# developing one of those places is a real decision. A 33-cell mountain
+# catchment goes from 0.32 ore a turn to ~4.8, and a tier-2 Gold Mine takes that
+# to ~19 -- which then needs about 38 of that village's hands, taken off the
+# harvest. That trade is the mechanic.
+GOLD_ORE_YIELD_PER_CELL = 3.0
+
+_RAW_YIELD_OVERRIDE = {"Firewood": FIREWOOD_YIELD_PER_CELL,
+                       "Gold Ore": GOLD_ORE_YIELD_PER_CELL}
 
 
 def _raw_yield_per_cell(resource):
     """Per-cell base output for a raw Forestry/Mining resource: a per-resource
-    override (only Firewood, kept high for survival) else the category base."""
+    override (Firewood, kept high for survival; Gold Ore, because it is the
+    only input to the game's only source of coin) else the category base."""
     over = _RAW_YIELD_OVERRIDE.get(resource)
     if over is not None:
         return over
@@ -1153,8 +1181,7 @@ def _industry_yield_core(biome_counts, climate, fertility_frac):
             base = _raw_yield_per_cell(resource)
             amount = (base * cell_count * share
                      * climate_affinity(resource, climate) * fertility_mult)
-            amount = round(amount)
-            if amount:
+            if amount > 0:
                 result[resource] = result.get(resource, 0) + amount
     return result
 
@@ -1176,7 +1203,8 @@ def compute_industry_yield(region, season):
     biome_counts = getattr(region, "biome_counts", {})
     climate = getattr(region, "dominant_climate", "temperate")
     fertility_frac = region.stats.get("fertility", 50) / 100.0
-    result = _industry_yield_core(biome_counts, climate, fertility_frac)
+    result = {r: round(a) for r, a in
+              _industry_yield_core(biome_counts, climate, fertility_frac).items()}
 
     # Every region scrapes together SOME timber and stone, whatever its biome:
     # scrub and deadwood, and rock prised out of the ground. Without this a
@@ -1270,6 +1298,23 @@ LABOR_POLICY_SECTOR = {"Farming": "farming", "Forestry": "forestry",
 # is a trap -- a village ordered to mine would stop growing its own food and
 # starve on a stockpile of ore.
 LABOR_FOCUS_SHARE = 0.70
+
+# Hands every live sector gets before the policy distributes the rest, as a
+# fraction of the workforce and capped by what that sector can actually absorb.
+#
+# Without this, weighting purely by potential meant a small sector got a share
+# proportional to its TONNAGE, which erases rare resources completely: a
+# village with 300 units of farming potential and a gold seam worth 0.2 units a
+# turn gave mining a 0.0007 share -- effectively no one -- so the seam was never
+# worked at all. Measured: a fresh world at turn 120 had produced zero Gold Ore
+# and every Mint in the game had nothing to strike.
+#
+# The reserve costs almost nothing, because a sector that cannot absorb its
+# reserve hands hands them straight back (see village_labor_factors' spillover):
+# fully working that 0.2-unit seam takes 0.1 of a worker. What it buys is the
+# right model -- a village always works the small things it has, and only has to
+# CHOOSE between the things too big to do both.
+LABOR_SECTOR_RESERVE = 0.05
 
 # How hard a full pool pulls hands OFF the sector that fills it, under Auto.
 # This is the feedback loop that makes storage *mean* something: a full
@@ -1388,7 +1433,11 @@ def village_labor_factors(world, village, potentials, by_sector_resource):
         per = LABOR_OUTPUT_PER_WORKER.get(sector, 1.0)
         return potentials[sector] / per if per > 0 else 0.0
 
-    workers = {s: workforce * f for s, f in shares.items()}
+    # Every live sector is staffed enough to work what it has, up to a small
+    # cap, before the policy splits the rest -- see LABOR_SECTOR_RESERVE.
+    reserve = {s: min(ceiling(s), workforce * LABOR_SECTOR_RESERVE) for s in shares}
+    spare_after_reserve = max(0.0, workforce - sum(reserve.values()))
+    workers = {s: reserve[s] + spare_after_reserve * f for s, f in shares.items()}
     for _pass in range(len(workers) + 1):
         spare = 0.0
         hungry = []
@@ -1438,7 +1487,15 @@ def _village_terrain_potential(world, village, season):
             m = weather_mult.get(crop)
             if m is not None:
                 raw[crop] = round(amount * m)
-    for resource, amount in _industry_yield_core(biome_counts, climate, fertility_frac).items():
+    industry = _industry_yield_core(biome_counts, climate, fertility_frac)
+    # The Gold Mine works the seam harder (see GOLD_MINE_YIELD_MULT). Applied
+    # to the LAND's offer, before labor, deliberately: a bigger mine is more
+    # ore to dig, not free ore -- the extra still has to be worked by hands
+    # that would otherwise be in the fields.
+    ore = industry.get("Gold Ore", 0)
+    if ore:
+        industry["Gold Ore"] = round(ore * gold_mine_multiplier(village))
+    for resource, amount in industry.items():
         raw[resource] = raw.get(resource, 0) + amount
 
     by_sector = defaultdict(float)
@@ -3012,6 +3069,16 @@ def storage_max_tier(node, building):
         # Herd buildings are village-only: animals live where the fields are,
         # and a walled city is not a pasture.
         return VILLAGE_HERD_MAX_TIER if village else 0
+    if building == GOLD_MINE:
+        # Village-only, and the seam gate lives in buildings.py rather than
+        # here: this function takes no world, and "is there ore under this
+        # village" needs the terrain grid. This is the node-KIND gate only.
+        return (len(GOLD_MINE_YIELD_MULT) - 1) if village else 0
+    if building == MINT:
+        # Settlement-only: a village has no forge, which is the same reason it
+        # runs no conversion recipe of any kind (see
+        # advance_settlement_production_chains).
+        return 0 if village else len(MINT_RATE_MULT) - 1
     table = VILLAGE_STORAGE_TIER_BONUS if village else STORAGE_TIER_BONUS
     return len(table.get(building, [0])) - 1
 
@@ -3337,13 +3404,17 @@ def compute_village_yield(world, village, season):
     wins. Fish is deliberately excluded from the result even though it
     competes for the same hands -- it's landed at the node directly by
     _produce_fishing, which reads the same cached labor factors, and
-    returning it here too would double-count the catch."""
+    returning it here too would double-count the catch.
+
+    Amounts are FLOATS, deliberately. Rounding here threw away every yield
+    under half a unit, which is every rare seam on the map -- see
+    _deliver_village_yield, which now carries the fraction instead."""
     factors, raw = village_labor_state(world, village, season)
     result = {}
     for resource, amount in raw.items():
         factor = factors.get(production_sector(resource))
-        share = round(amount * factor) if factor is not None else amount
-        if share:
+        share = amount * factor if factor is not None else amount
+        if share > 0:
             result[resource] = share
     return result
 
@@ -3355,15 +3426,36 @@ def _deliver_village_yield(village, resource_amounts, throttle=True):
     already local instead of needing to be split. Returns {resource:
     amount} actually delivered, for prosperity valuation (crediting a
     harvest that was never taken in would be wrong, same reasoning as
-    _route_farm_production's own docstring)."""
+    _route_farm_production's own docstring).
+
+    Fractions CARRY from turn to turn rather than being rounded away, and that
+    is a real fix, not tidiness. Rounding each resource to an int per village
+    per turn silently deleted every yield under half a unit -- which is every
+    rare resource, everywhere. Gold Ore, Gems and Tin all take a 0.0488 share
+    of a mountain's land against Iron/Coal/Stone's 0.2439, so a village whose
+    catchment gave Iron a comfortable 0.98 a turn gave Gold Ore 0.195, and
+    0.195 rounds to zero forever. Measured: a fresh 10-faction world at turn
+    120 had produced ZERO Gold Ore, held zero, and had no village anywhere
+    sitting on a workable seam -- so the Mint had nothing to strike and the
+    only gold in the game was the starting reserve, draining to nothing.
+
+    With a carry, a seam yielding 0.195 a turn delivers one unit every fifth
+    turn or so, which is what a rare seam should look like. The carry lives on
+    the village (plain float dict, pickles fine) so it is deterministic and
+    survives save/load."""
     delivered = {}
     if not resource_amounts:
         return delivered
     if not hasattr(village, "resources"):
         village.resources = {}
+    carry = getattr(village, "_yield_carry", None)
+    if carry is None:
+        carry = village._yield_carry = {}
     for resource, amount in resource_amounts.items():
         factor = storage_throttle(village, resource) if throttle else 1.0
-        share = round(amount * factor)
+        exact = amount * factor + carry.get(resource, 0.0)
+        share = int(exact)
+        carry[resource] = exact - share
         if share:
             village.resources[resource] = village.resources.get(resource, 0) + share
             delivered[resource] = delivered.get(resource, 0) + share
@@ -3418,7 +3510,11 @@ def recompute_region_resources(world, region, season, throttle=True):
                     target.resources[resource] = target.resources.get(resource, 0) + share
                     delivered_total[resource] = delivered_total.get(resource, 0) + share
 
-    region.resources = raw_total
+    # region.resources is a display/transfer figure ("this turn's yield" in the
+    # region panel, territory's transfer-on-conquest), so it rounds here --
+    # the fractional precision only matters on the delivery path above, where
+    # _deliver_village_yield carries it forward instead of discarding it.
+    region.resources = {r: round(a) for r, a in raw_total.items() if round(a) > 0}
     return raw_total, delivered_total
 
 
@@ -3441,6 +3537,8 @@ def advance_settlement_production_chains(world):
                 if world.turn < LUXURY_CONVERSION_MIN_TURN:
                     continue
                 cap = LUXURY_CONVERSION_RATE_CAP
+            elif output == "Gold":
+                cap = int(CONVERSION_RATE_CAP * mint_rate_multiplier(settlement))
             else:
                 cap = CONVERSION_RATE_CAP
             for option in options:
@@ -3451,7 +3549,12 @@ def advance_settlement_production_chains(world):
                     continue
                 for i in inputs:
                     res[i] -= amount
-                res[output] = res.get(output, 0) + amount
+                # Every other recipe is 1:1. The Mint is the one that can beat
+                # that, at its upper tiers, by recovering metal a rough mint
+                # leaves in the slag (see MINT_YIELD_PER_ORE).
+                struck = (round(amount * mint_yield_per_ore(settlement))
+                          if output == "Gold" else amount)
+                res[output] = res.get(output, 0) + struck
                 break
 
 
@@ -3498,6 +3601,89 @@ DEFAULT_SALT_PER_PRESERVED = 0.10
 PRESERVING_CAP_MULT = [0.0, 3.0, 6.0]
 VILLAGE_PRESERVING_CAP_MULT = [0.0, 2.5]
 PRESERVING_HOUSE = "preserving_house"
+
+
+# --- Coin: the Gold Mine and the Mint ---------------------------------------
+# Gold has been a real produced resource since the Currency overhaul -- struck
+# from Gold Ore, not drawn from a flat tax -- but measurement showed the chain
+# was severed at every link and the treasury simply drained. On the turn-561
+# world over 60 turns: the map held 20,439 Gold Ore, minted essentially none of
+# it, destroyed 15,221 of it to overflow decay in village warehouses, and lost
+# 5,625 net Gold.
+#
+# Three separate reasons, all of them structural:
+#
+#   1. Only Settlements run conversion recipes (a village has no forge), and
+#      ZERO of 43 settlements held a single unit of Gold Ore. Every mint in the
+#      world was idle for want of ore while the ore rotted where it was dug.
+#   2. Local logistics could have carried it and effectively never did. It
+#      dispatches ONE shipment per node per turn down a fixed priority list,
+#      and Gold Ore sits at index 38 of 57 -- over 20 turns the map dispatched
+#      1,155 shipments, of which exactly ONE was Gold Ore. Anything low in that
+#      order was permanently starved, ore included. See
+#      _LOCAL_SHIPMENT_PRIORITY, which now rotates.
+#   3. Local logistics is region-locked, and 82 of the 85 ore-bearing regions
+#      have no settlement in them at all -- so for almost all of the map's ore,
+#      no amount of priority would have helped. See trade.run_sell_to_city,
+#      which now sources from Villages too.
+#
+# With the ore actually arriving, the two buildings below are what the player
+# does about it, and they are deliberately a PAIR rather than one building:
+#
+#   Gold Mine   village-only, and only where the village's own land really
+#               holds a seam. It multiplies extraction -- more ore out of the
+#               same ground, at the cost of more hands (Phase 14 labor still
+#               applies, so a bigger mine competes with the harvest).
+#   Mint        settlement-only. Raises how much ore can be struck per turn,
+#               and at the top tiers gets more coin out of each unit of ore
+#               through better refining.
+#
+# Tier 0 of the Mint is 1.0, not 0.0: a settlement without one keeps minting at
+# exactly the base rate it always did, so nothing regresses on an existing
+# save. The same "additive, a node without the building loses nothing" contract
+# the Preserving House above already sets.
+GOLD_MINE = "gold_mine"
+MINT = "mint"
+
+# Ore extraction multiplier by Gold Mine tier. Steep, because the whole point
+# is to make a village that happens to sit on a seam genuinely worth
+# developing -- geography deciding that this village, specifically, is where
+# your coin comes from.
+GOLD_MINE_YIELD_MULT = [1.0, 2.5, 4.0]
+# Multiplier on CONVERSION_RATE_CAP for the Gold recipe specifically.
+MINT_RATE_MULT = [1.0, 3.0, 6.0, 10.0]
+# Coin struck per unit of ore. Above 1.0 at the upper tiers: a great mint
+# recovers metal a rough one leaves in the slag. This is what stops an upgrade
+# being purely "the same thing, faster" -- it makes each unit of a genuinely
+# scarce resource worth more.
+MINT_YIELD_PER_ORE = [1.0, 1.0, 1.15, 1.3]
+
+
+def gold_mine_multiplier(node):
+    """Ore-extraction multiplier from this node's Gold Mine, 1.0 without one."""
+    tier = min(storage_tier(node, GOLD_MINE), len(GOLD_MINE_YIELD_MULT) - 1)
+    return GOLD_MINE_YIELD_MULT[tier]
+
+
+def mint_rate_multiplier(node):
+    tier = min(storage_tier(node, MINT), len(MINT_RATE_MULT) - 1)
+    return MINT_RATE_MULT[tier]
+
+
+def mint_yield_per_ore(node):
+    tier = min(storage_tier(node, MINT), len(MINT_YIELD_PER_ORE) - 1)
+    return MINT_YIELD_PER_ORE[tier]
+
+
+def has_gold_seam(world, village):
+    """Does this village's own catchment actually hold a Gold Ore seam? The
+    "if you can" gate on the Gold Mine -- a village with no ore under it can
+    never build one, however rich its owner. Read off the same terrain sample
+    production itself uses, so the menu can never offer a mine that would
+    produce nothing."""
+    region = world.regions[village.region_id]
+    biome_counts, climate, fertility_frac = village_local_sample(world, village, region)
+    return _industry_yield_core(biome_counts, climate, fertility_frac).get("Gold Ore", 0) > 0
 
 
 def preserving_cap_multiplier(node):
@@ -3753,9 +3939,42 @@ _LOCAL_PRODUCTION_INPUTS = {i for output, options in RECIPES.items()
 # surplus resources always tries to cover someone's starvation/freezing
 # risk before it bothers with ordinary production-input traffic, not
 # whichever happened to be first in a plain, unordered resource set.
-_LOCAL_SHIPMENT_PRIORITY = (list(_FOOD_SOURCES) + ["Firewood", "Clothes"]
-                           + sorted(_SETTLEMENT_STORAGE_RESOURCES - set(_FOOD_SOURCES)
-                                   - {"Firewood", "Clothes"}))
+_LOCAL_SHIPMENT_SURVIVAL = list(_FOOD_SOURCES) + ["Firewood", "Clothes"]
+_LOCAL_SHIPMENT_INDUSTRIAL = sorted(_SETTLEMENT_STORAGE_RESOURCES
+                                    - set(_FOOD_SOURCES) - {"Firewood", "Clothes"})
+_LOCAL_SHIPMENT_PRIORITY = _LOCAL_SHIPMENT_SURVIVAL + _LOCAL_SHIPMENT_INDUSTRIAL
+
+
+def rotate_for_turn(items, turn):
+    """`items` rotated by `turn`, so whatever sat at the back reaches the front
+    regularly instead of never.
+
+    This exists because of a starvation bug that turned up in TWO separate
+    places, and would turn up in a third the next time someone wrote a "scan a
+    fixed list of resources, dispatch the first match, break" loop. Both
+    run_local_logistics and trade.run_sell_to_city move at most one resource
+    per node per turn and both walked a fixed order, so anything low in that
+    order was permanently starved. Measured on the turn-561 world: local
+    logistics dispatched 1,155 shipments over 20 turns of which exactly ONE was
+    Gold Ore (index 38 of 57), and sell-to-city shipped 11,102 Coal and ZERO
+    Gold Ore over 60 turns purely because "Coal" sorts before "Gold Ore". Every
+    Mint on the map stood idle while the ore rotted where it was dug.
+
+    Deliberately a rotation rather than a shuffle or a demand-weighted sort:
+    it is a pure function of the turn number, so a replayed turn moves exactly
+    the same goods and nothing about determinism changes."""
+    items = list(items)
+    if not items:
+        return items
+    offset = turn % len(items)
+    return items[offset:] + items[:offset]
+
+
+def local_shipment_priority(turn):
+    """The order a node checks its surplus in this turn. Survival goods keep
+    the front unconditionally -- covering someone's starvation always beats
+    moving ore -- and the industrial tail rotates (see rotate_for_turn)."""
+    return _LOCAL_SHIPMENT_SURVIVAL + rotate_for_turn(_LOCAL_SHIPMENT_INDUSTRIAL, turn)
 
 
 def _region_logistics_nodes(world, region):
@@ -3951,6 +4170,7 @@ def run_local_logistics(world):
     no player or AI decision involved, matching how the rest of this
     economy already works."""
     world._local_path_budget = LOCAL_PATH_BUDGET_PER_TURN
+    priority = local_shipment_priority(getattr(world, "turn", 0))
     for region in world.regions:
         if region.faction_idx < 0:
             continue
@@ -3977,7 +4197,7 @@ def run_local_logistics(world):
                 continue
             own_needs = needs_by_node[(kind, node.id)]
             dispatched = False
-            for resource in _LOCAL_SHIPMENT_PRIORITY:
+            for resource in priority:
                 surplus = _node_surplus(node, resource, own_needs)
                 if surplus < LOCAL_SHIPMENT_MIN_QUANTITY:
                     continue

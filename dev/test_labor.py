@@ -62,9 +62,12 @@ try:
     print(f"  ok    unlimited hands -> land ceiling  {sector_total(land_bound, 'farming')}")
 
     # Hands effectively worthless -> nothing comes in, however good the land.
+    # Compared against a unit rather than exactly zero: yields are floats now
+    # (see _deliver_village_yield's carry), so this leaves a ~1e-8 residue that
+    # can never accumulate into a delivered unit within any real game.
     R.LABOR_OUTPUT_PER_WORKER.update({k: 1e-9 for k in orig_out})
     hand_bound = yield_for(v)
-    assert sector_total(hand_bound, "farming") == 0, hand_bound
+    assert sector_total(hand_bound, "farming") < 1, hand_bound
     print("  ok    worthless hands -> nothing comes in, however good the land")
 finally:
     R.LABOR_OUTPUT_PER_WORKER.update(orig_out)

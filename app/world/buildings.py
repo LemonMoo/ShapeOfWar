@@ -86,6 +86,7 @@ BUILDING_CATEGORY = {
     "barn": "Livestock", resources.PRESERVING_HOUSE: "Food",
     "pasture": "Livestock", "stable": "Livestock", "slaughterhouse": "Livestock",
     "shipyard": "Naval",
+    resources.GOLD_MINE: "Coin", resources.MINT: "Coin",
 }
 
 BUILDING_BLURB = {
@@ -99,7 +100,18 @@ BUILDING_BLURB = {
     "stable": "More horses, and a stronger mounted arm.",
     "slaughterhouse": "More meat and leather from every animal taken.",
     "shipyard": "Launches free, faster ships from this coastal city.",
+    resources.GOLD_MINE:
+        "Works the seam properly. More ore out of the same ground — "
+        "and more hands out of the fields to do it.",
+    resources.MINT:
+        "Strikes Gold Ore into coin. Upper tiers recover more metal "
+        "from every unit of ore.",
 }
+
+# Ore on hand at a settlement above which a Mint is plainly the bottleneck,
+# and ore produced per turn at a village above which a Gold Mine is worth it.
+URGENT_MINT_ORE = 60
+URGENT_MINE_ORE_FLOW = 3
 
 
 # Plain language for what a herd building's multiplier actually acts on -- the
@@ -280,8 +292,46 @@ def _herd_verdict(world, node, building):
     return "useful", f"{head:,} head to take more from at the Autumn cull.", float(head)
 
 
+def _mint_verdict(world, node):
+    """A Mint is judged on ore actually sitting here, not on how much coin the
+    faction has: the constraint it lifts is throughput against a supply of ore,
+    and a settlement with no ore gains nothing from a better mint."""
+    res = getattr(node, "resources", {}) or {}
+    ore = res.get("Gold Ore", 0)
+    rate = int(resources.CONVERSION_RATE_CAP * resources.mint_rate_multiplier(node))
+    if ore <= 0:
+        return ("idle",
+                "No Gold Ore reaches this settlement — a mint here would stand "
+                "idle.", 0.0)
+    if ore >= URGENT_MINT_ORE and ore > rate:
+        return ("urgent",
+                f"{ore:,} Gold Ore is waiting and this settlement can only "
+                f"strike {rate:,} a turn.", float(ore))
+    if ore > rate:
+        return "useful", f"{ore:,} Gold Ore on hand, {rate:,} struck per turn.", float(ore)
+    return "idle", f"{ore:,} Gold Ore on hand — the mint keeps up as it is.", float(ore)
+
+
+def _gold_mine_verdict(world, node):
+    """A Gold Mine is judged on the seam, not on the stockpile: it changes what
+    comes OUT of the ground, so what matters is whether there is ore under this
+    village at all and how much of it is already being worked."""
+    factors, raw = resources.village_labor_state(world, node, world.season)
+    flow = raw.get("Gold Ore", 0) * factors.get("mining", 0.0)
+    if flow >= URGENT_MINE_ORE_FLOW:
+        return ("useful",
+                f"This seam yields about {flow:.0f} ore a turn. A deeper mine "
+                f"multiplies that.", flow)
+    return ("useful",
+            "There is a gold seam under this village, barely scratched.", 1.0)
+
+
 def _verdict(world, node, building):
     """(priority, reason, score) -- does THIS node want THIS building?"""
+    if building == resources.MINT:
+        return _mint_verdict(world, node)
+    if building == resources.GOLD_MINE:
+        return _gold_mine_verdict(world, node)
     pool = resources.STORAGE_POOL_BY_BUILDING.get(building)
     if building == "barn":
         # The Barn is both the feed store and the shelter. Judge it on
@@ -312,6 +362,23 @@ def _storage_effect_lines(node, building, to_tier):
             added = table[to_tier] - table[to_tier - 1]
             current = resources.node_pool_capacity(node, pool)
             lines.append(f"+{added:,} {pool} space  ({current:,} → {current + added:,})")
+    if building == resources.GOLD_MINE and to_tier is not None:
+        table = resources.GOLD_MINE_YIELD_MULT
+        if to_tier < len(table):
+            now = table[min(resources.storage_tier(node, building), len(table) - 1)]
+            lines.append(f"Gold Ore dug here ×{table[to_tier]:g}  (now ×{now:g})")
+            lines.append("Worked by the same hands as the fields and woods")
+    if building == resources.MINT and to_tier is not None:
+        rates, yields = resources.MINT_RATE_MULT, resources.MINT_YIELD_PER_ORE
+        if to_tier < len(rates):
+            now_rate = int(resources.CONVERSION_RATE_CAP
+                           * rates[min(resources.storage_tier(node, building),
+                                       len(rates) - 1)])
+            lines.append(f"Strikes up to {int(resources.CONVERSION_RATE_CAP * rates[to_tier]):,} "
+                         f"ore per turn  (now {now_rate:,})")
+        if to_tier < len(yields) and yields[to_tier] > 1.0:
+            lines.append(f"{yields[to_tier]:g} coin per unit of ore — less metal "
+                         f"left in the slag")
     if building == resources.PRESERVING_HOUSE and to_tier is not None:
         table = (resources.VILLAGE_PRESERVING_CAP_MULT if node_kind(node) == "village"
                  else resources.PRESERVING_CAP_MULT)
@@ -339,12 +406,17 @@ def _storage_effect_lines(node, building, to_tier):
 def _all_buildings(node):
     """Every building this KIND of node could ever have, in menu order.
     Discovered from construction.py's own tables rather than listed again
-    here, so a new building appears in the menu the turn it is added."""
+    here, so a new building appears in the menu the turn it is added.
+
+    Kind gating only (storage_max_tier takes no world). The Gold Mine's second
+    gate -- is there actually a seam under this village -- is applied in
+    build_options, which does have one."""
     order = [resources.STORAGE_BUILDING_BY_POOL[p] for p in resources.STORAGE_POOLS]
     order.append(resources.PRESERVING_HOUSE)
     for herd_building in resources.HERD_BUILDINGS:
         if herd_building not in order:
             order.append(herd_building)
+    order += [resources.GOLD_MINE, resources.MINT]
     if node_kind(node) == "settlement":
         order.append("shipyard")
     return [b for b in order if resources.storage_max_tier(node, b) > 0
@@ -397,6 +469,14 @@ def build_options(world, node, nation):
     for building in _all_buildings(node):
         if building == "shipyard":
             options.append(_shipyard_option(world, node, nation))
+            continue
+        # A Gold Mine needs a seam under it. Dropped from the list entirely
+        # rather than shown blocked: "you cannot build this because there is no
+        # gold here" is true of nearly every village on the map, and a card
+        # saying so at all of them is noise, not information.
+        if (building == resources.GOLD_MINE
+                and not resources.storage_tier(node, building)
+                and not resources.has_gold_seam(world, node)):
             continue
         current = resources.storage_tier(node, building)
         max_tier = resources.storage_max_tier(node, building)

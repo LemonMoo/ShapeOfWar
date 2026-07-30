@@ -1892,6 +1892,8 @@ CITY_STOCKPILE_CEILING_FRACTION = 0.8
 
 _NONPERISHABLE_RESOURCES = {name for name in _SETTLEMENT_STORAGE_RESOURCES
                             if RESOURCES.get(name, {}).get("spoil_rate", 0) <= 0}
+# Stable base order, rotated per turn at the call site so nothing is starved.
+_SELL_TO_CITY_ORDER = sorted(_NONPERISHABLE_RESOURCES)
 
 
 def _faction_cities(nation, world):
@@ -1906,37 +1908,54 @@ def _nearest_city(st, cities, world):
 
 def run_sell_to_city(world):
     """Called every turn: for each faction with at least one City, match a
-    settlement sitting on non-perishable surplus (the same _node_surplus
-    reserve logic every other logistics tier already uses) to its nearest
-    same-faction City, and dispatch a free RegionalShipment there --
-    greedy first-match, same style as run_regional_trade, and sharing that
-    same MAX_ACTIVE_REGIONAL_SHIPMENTS_PER_SETTLEMENT cap (both tiers pull
-    from the same world.regional_shipments pool, so a settlement's limited
-    outbound slots are shared between genuine domestic trade and this).
-    Returns "sold_to_city" event dicts -- delivery/loss are handled
-    generically by advance_regional_shipments, same as any other
-    RegionalShipment."""
+    node sitting on non-perishable surplus (the same _node_surplus reserve
+    logic every other logistics tier already uses) to its nearest same-faction
+    City, and dispatch a free RegionalShipment there -- greedy first-match,
+    same style as run_regional_trade, and sharing that same
+    MAX_ACTIVE_REGIONAL_SHIPMENTS_PER_SETTLEMENT cap (both tiers pull from the
+    same world.regional_shipments pool, so a node's limited outbound slots are
+    shared between genuine domestic trade and this). Returns "sold_to_city"
+    event dicts -- delivery/loss are handled generically by
+    advance_regional_shipments, same as any other RegionalShipment.
+
+    Villages are sources too, not just Settlements, and that is a fix rather
+    than a widening. Raw Mining/Forestry goods are dug and cut at VILLAGES,
+    which have no forge to use them and, being region-locked, often no
+    settlement in their own region to hand them to either -- so this was the
+    only tier that could ever have moved them, and it could not see them.
+    Measured on the turn-561 world: 82 of the 85 regions holding Gold Ore had
+    no settlement in them at all, every Mint stood idle for want of ore, and
+    15,221 units of that ore were destroyed by overflow decay in the villages
+    that dug it over 60 turns. run_regional_trade already treats a Village as a
+    first-class node (see _faction_regional_nodes) and RegionalShipment already
+    carries origin_kind for exactly this; only this function was still
+    settlement-only."""
     events = []
     season = world.season
     for fac_idx, nation in enumerate(world.factions):
         cities = _faction_cities(nation, world)
         if not cities:
             continue
-        sids = nation.meta.get("settlements", [])
-        settlements = [world.settlements[sid] for sid in sids]
-        needs_by_st = {st.id: settlement_needs(st, season) for st in settlements}
+        nodes = _faction_regional_nodes(world, fac_idx, nation)
+        needs_by_node = {(kind, node.id): settlement_needs(node, season)
+                         for kind, node in nodes}
 
-        for st in settlements:
-            if st.kind == "city":
+        for kind, node in nodes:
+            if kind == "settlement" and node.kind == "city":
                 continue   # a City doesn't sell to itself
-            if _active_regional_shipments(world, st.id) >= MAX_ACTIVE_REGIONAL_SHIPMENTS_PER_SETTLEMENT:
+            if _active_regional_shipments(world, node.id, kind) >= MAX_ACTIVE_REGIONAL_SHIPMENTS_PER_SETTLEMENT:
                 continue
-            own_needs = needs_by_st[st.id]
-            for resource in sorted(_NONPERISHABLE_RESOURCES):
-                surplus = _node_surplus(st, resource, own_needs)
+            own_needs = needs_by_node[(kind, node.id)]
+            # Rotated, not plain sorted (see resources.rotate_for_turn). This
+            # loop ships ONE resource per node per turn and breaks, so a fixed
+            # alphabetical order starved everything after the first few
+            # letters: measured over 60 turns it moved 11,102 Coal and zero
+            # Gold Ore, purely because "Coal" sorts before "Gold Ore".
+            for resource in resources.rotate_for_turn(_SELL_TO_CITY_ORDER, world.turn):
+                surplus = _node_surplus(node, resource, own_needs)
                 if surplus < SELL_TO_CITY_MIN_QUANTITY:
                     continue
-                city = _nearest_city(st, [c for c in cities if c is not st], world)
+                city = _nearest_city(node, [c for c in cities if c is not node], world)
                 if city is None:
                     continue
                 cap = settlement_storage_capacity(city)
@@ -1944,20 +1963,21 @@ def run_sell_to_city(world):
                 if cap <= 0 or stock >= cap * CITY_STOCKPILE_CEILING_FRACTION:
                     continue
                 qty = min(surplus, SELL_TO_CITY_MAX_QUANTITY)
-                transport, path = _regional_route(world, st, city)
+                transport, path = _regional_route(world, node, city)
                 if path is None:
                     continue
 
-                if not hasattr(st, "resources"):
-                    st.resources = {}
-                st.resources[resource] = max(0, st.resources.get(resource, 0) - qty)
+                if not hasattr(node, "resources"):
+                    node.resources = {}
+                node.resources[resource] = max(0, node.resources.get(resource, 0) - qty)
                 world.regional_shipments.append(RegionalShipment(
-                    fac_idx, resource, qty, 0.0, path, st.id, city.id,
+                    fac_idx, resource, qty, 0.0, path, node.id, city.id,
+                    origin_kind=kind, dest_kind="settlement",
                     transport=transport,
                     transit_cells=path_transit_cells(world, path)))
                 events.append({"type": "sold_to_city", "faction_idx": fac_idx,
                               "resource": resource, "quantity": qty,
-                              "origin_name": st.name, "dest_name": city.name})
+                              "origin_name": node.name, "dest_name": city.name})
                 break
 
     return events

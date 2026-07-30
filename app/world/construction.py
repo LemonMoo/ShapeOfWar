@@ -104,13 +104,32 @@ STORAGE_BUILD_COSTS = {
     "barn":           [None, {"Logs": 180, "Stone": 60, "Gold": 110}],
     "stable":         [None, {"Logs": 160, "Stone": 80, "Gold": 140}],
     "slaughterhouse": [None, {"Logs": 140, "Tools": 40, "Gold": 130}],
+    # Coin (see resources.py's Gold Mine / Mint section). The Gold Mine is
+    # village-only and needs a real seam under it; the Mint is settlement-only.
+    # Priced in Tools and timber rather than coin at tier 1 on purpose: these
+    # are what a faction builds to GET gold, so gating the first tier behind a
+    # large pile of gold would make them unreachable to exactly the realms that
+    # need them -- the same trap the Preserving House hit with Stone, where AI
+    # factions were eligible 308 times over 30 turns and could afford it zero.
+    "gold_mine": [
+        None,
+        {"Logs": 200, "Tools": 60, "Gold": 90},
+        {"Planks": 320, "Stone": 300, "Tools": 180, "Gold": 700},
+    ],
+    "mint": [
+        None,
+        {"Stone": 240, "Iron": 90, "Tools": 60, "Gold": 120},
+        {"Stone": 520, "Bricks": 300, "Tools": 200, "Gold": 800},
+        {"Bricks": 900, "Tools": 500, "Glass": 200, "Gold": 2200},
+    ],
 }
 STORAGE_BUILD_TURNS = {"granary": [0, 15, 22, 30],
                        "warehouse": [0, 15, 22, 30],
                        "vault": [0, 18, 28],
                        "preserving_house": [0, 12, 20],
                        "pasture": [0, 8], "barn": [0, 14],
-                       "stable": [0, 12], "slaughterhouse": [0, 10]}
+                       "stable": [0, 12], "slaughterhouse": [0, 10],
+                       "gold_mine": [0, 18, 28], "mint": [0, 16, 26, 36]}
 
 # A village builds smaller and cheaper than a settlement -- but it can build,
 # which it never could before. Villages were over capacity 78% of the time in
