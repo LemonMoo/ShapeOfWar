@@ -572,7 +572,7 @@ geometry itself, not just the height composition on top of it.
 
 ---
 
-## 10. Regional weather — Phase 0 done, Phases 1-4 not started
+## 10. Regional weather — Phases 0-1 done, Phases 2-4 not started
 
 Several design-question rounds preceded any code, same as the plate rework.
 Decided: per-region (not world-wide), multi-turn events (not per-turn
@@ -590,8 +590,8 @@ overlay.
 ### Phasing
 
 1. **Weather core** (done) — event generation only, no wiring.
-2. **Economy** (not started) — Growing/Plant-stage weather modifies the
-   eventual Harvest; surfaces through the existing alert pipe.
+2. **Economy** (done) — Growing/Plant-stage weather modifies the eventual
+   Harvest; surfaces through the existing alert pipe.
 3. **Logistics** (not started) — a genuinely new live per-turn slowdown
    mechanism (today `turn_progress` is a flat `+= 1` and commander/ship
    movement is a flat cells-per-turn; neither varies turn-to-turn at all),
@@ -650,15 +650,53 @@ thumbnail (reusing `app.ui.world_preview.render_world`, the same renderer
 the New Game screen uses) with every active event marked by kind (D/S/B/F
 letter) and severity (white=Mild, red=Severe).
 
+### Phase 1: what's built and measured
+
+`app/world/resources.py` now owns the World-facing side of weather (`import
+app.world.weather as weather` for the raw generation). `advance_weather(world)`
+runs `weather.advance_all` over every faction-owned region's static
+`dominant_climate` (lazily creates `world.region_weather` and a seeded
+`world._weather_rng`), then folds each region's active event into a new
+per-region `region.crop_weather_mult` dict via `_advance_region_crop_weather`
+— one multiplier per crop, nudged down by `_CROP_WEATHER_IMPACT[(kind,
+severity)]` while that crop is in Plant/Growing under an active event, and
+recovered by `CROP_WEATHER_RECOVERY` per turn otherwise, floored at
+`CROP_WEATHER_FLOOR` (0.35) so a bad season is never a wipeout. Wired into
+`advance_turn` right after `world.season` updates, so it runs once per turn
+before yields are produced. `compute_village_yield` applies the multiplier
+to crop amounts only (never industry) right after `_crop_yield_core`.
+`node_alerts` gets a new `"weather"`/`"warning"` entry whenever a village's
+region has an active Drought/Storm/Blizzard (never Fog — it has no crop
+impact, so no alert).
+
+**A real bug, caught before it could ship:** the first version let a crop's
+multiplier recover on any turn that wasn't Plant/Growing-under-weather,
+which includes that same crop's own Harvest stage — since Harvest spans a
+full ~25-turn season, the SAME harvest would read a better yield the later
+within its own Harvest window it happened to be checked. Fixed by freezing
+the multiplier entirely for the whole Harvest stage (`if stage == "Harvest":
+continue`, checked first in the per-crop loop). Verified directly: after a
+full-season severe drought during Growing, the multiplier hit the floor and
+stayed frozen at exactly 0.35 for the entire following Harvest window,
+giving identical yield whether checked at the start or 10 turns in.
+
+`dev/test_weather_economy.py` covers the real `resources.py` integration
+(Phase 0's `dev/test_weather.py` only covers standalone `weather.py`):
+drought measurably cuts a real village's harvest vs. an identical
+undamaged baseline, the harvest-window freeze, cross-season recovery, the
+alert firing for Drought/Storm/Blizzard and staying silent for Fog, and a
+fresh 10-faction, 100-turn simulation with live weather the whole way
+through (no crash, no negative resource stocks). All passing, alongside the
+full existing regression suite (10 scripts).
+
 ### Where to start (for whoever picks this up)
 
-Read `app/world/weather.py` in full (small, self-contained) and
-`dev/test_weather.py`/`dev/weather_shot.py` alongside it. Phase 1 (economy)
-is the natural next step — it's the smallest, most contained wire-in (a
-multiplier at the point `_crop_yield_core` already computes yield, gated by
-`crop_stage`'s existing Growing/Plant check) and it's what the existing
-alert pipe (`starving`/`food_shortage`) was built to carry, so surfacing a
-drought's consequence costs nothing new there either. Do NOT start Phase 2
-(logistics) or Phase 3 (battle) before Phase 1 is wired, measured and
-committed on its own — same phasing discipline as every other multi-part
-rework in this project.
+Phase 2 (logistics) is next. It needs a genuinely new mechanism first, not
+just a weather hook: today `turn_progress` for caravans/shipments is a flat
+`+= 1` per turn and commander/ship movement is a flat cells-per-turn — 
+nothing about travel speed varies turn-to-turn at all yet. Build that
+live-progress-rate mechanism generically, verify it behaves sanely with
+weather OFF first, then hang weather off it the same way Phase 1 hung off
+the existing crop-yield pipe. Do NOT start Phase 3 (battle) before Phase 2
+is wired, measured and committed on its own — same phasing discipline as
+every other multi-part rework in this project.

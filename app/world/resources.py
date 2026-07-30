@@ -29,6 +29,7 @@ from collections import defaultdict
 from app.world.lexicon import SPECIES
 from app.world.worldgen import (OCEAN, _path_dijkstra, _elev_cost, road_cells,
                                 path_transit_cells, _VILLAGE_CATCHMENT_RADIUS)
+from app.world import weather
 from app.world import wrap
 
 # --- the resource registry --------------------------------------------------
@@ -842,6 +843,106 @@ def crop_stage(crop, season):
 
 def is_harvest_season(crop, season):
     return crop_stage(crop, season) == "Harvest"
+
+
+# --- weather Phase 1: crop impact ---------------------------------------------
+# Only the Growing/Plant window can hurt a crop -- a decision made explicitly
+# over the alternative (a straight Harvest-turn multiplier) because that would
+# mean a drought only ever matters if it happens to overlap the ~25-turn
+# window a crop is actually being cut in, out of the full 100-turn year. This
+# way a bad season shows up as a worse eventual harvest regardless of exactly
+# when in the year it struck, which is what "a bad growing season" actually
+# means. See app.world.weather for the event model itself -- this module owns
+# every bit of what weather DOES to a crop, weather.py owns none of it.
+#
+# Per-turn nudge while a crop sits in Plant/Growing under an active event, by
+# (kind, severity). Fog is deliberately absent -- it has no crop effect at
+# all, reserved for a later phase's vision/logistics wiring; showing a "your
+# crops are affected" alert for a weather kind that does nothing yet would be
+# actively misleading. First-pass numbers, not measured -- see HANDOFF.md for
+# what to re-tune once this has a full season's worth of real play behind it.
+_CROP_WEATHER_IMPACT = {
+    (weather.DROUGHT, weather.MILD): -0.015,
+    (weather.DROUGHT, weather.SEVERE): -0.035,
+    (weather.STORM, weather.MILD): -0.008,
+    (weather.STORM, weather.SEVERE): -0.020,
+    (weather.BLIZZARD, weather.MILD): -0.012,
+    (weather.BLIZZARD, weather.SEVERE): -0.030,
+}
+CROP_WEATHER_KINDS = frozenset(k for k, _s in _CROP_WEATHER_IMPACT)
+CROP_WEATHER_RECOVERY = 0.01   # per turn, whenever NOT actively being hurt --
+                              # including Dormant/Harvest, so the land heals
+                              # between growing seasons rather than staying
+                              # scarred from one bad year forever
+CROP_WEATHER_FLOOR = 0.35     # a crop's multiplier never drops below this --
+                              # weather makes a harvest bad, never zero
+
+
+def _advance_region_crop_weather(region, event, season):
+    """One turn's stress/recovery on every crop `region` might be growing,
+    stored as region.crop_weather_mult -- {crop: multiplier}, entries only
+    ever present while below 1.0 (a crop at full health costs nothing to
+    represent, the same reasoning weather.advance_all's clear-region-has-no-
+    key convention uses). Applied at harvest time by compute_village_yield.
+
+    Only a crop currently in Plant or Growing (see GROWTH_CYCLE) can be hurt
+    THIS turn; a crop that isn't -- Dormant, or between plantings -- simply
+    recovers. HARVEST IS FROZEN, deliberately not a third "recovers" case:
+    a crop's own Harvest stage runs for a full season (~25 turns), and if it
+    kept healing turn by turn while being cut, the SAME harvest would read
+    better on turn 20 of it than it did on turn 1 -- one harvest cannot
+    have two different outcomes depending on which turn within it you
+    happen to check. The multiplier is set once Growing/Plant ends and
+    holds steady for the whole window it's actually read in."""
+    mult = getattr(region, "crop_weather_mult", None)
+    if mult is None:
+        mult = region.crop_weather_mult = {}
+    impact = (_CROP_WEATHER_IMPACT.get((event.kind, event.severity))
+             if event is not None else None)
+    for crop in GROWTH_CYCLE:
+        stage = crop_stage(crop, season)
+        if stage == "Harvest":
+            continue     # frozen -- see the docstring above
+        current = mult.get(crop, 1.0)
+        if impact is not None and stage in ("Plant", "Growing"):
+            current = max(CROP_WEATHER_FLOOR, current + impact)
+        else:
+            current = min(1.0, current + CROP_WEATHER_RECOVERY)
+        if current >= 1.0:
+            mult.pop(crop, None)     # back to full health -- stop carrying it
+        else:
+            mult[crop] = current
+
+
+def advance_weather(world):
+    """One turn of regional weather for every OWNED region: rolls/advances
+    each region's WeatherEvent (see app.world.weather) and applies this
+    turn's crop stress/recovery from it. Called from advance_turn, after
+    world.season is set for the turn and before production is computed, so
+    this turn's harvest already reflects whatever weather is active right
+    now rather than lagging a turn behind.
+
+    Unclaimed wildland never rolls weather at all: nothing there has crops
+    or an owner to show an alert to. A later phase's map overlay may want
+    every region to have weather for visual richness; Phase 1 only needs
+    the ones that can actually grow something."""
+    if not hasattr(world, "region_weather"):
+        world.region_weather = {}
+    if not hasattr(world, "_weather_rng"):
+        # An independent stream, not the turn loop's shared `random` module
+        # state -- weather rolling for a large kingdom must not perturb
+        # whatever anything ELSE this turn draws from random.random()
+        # afterward, the same reasoning worldgen's own per-purpose RNGs
+        # (region names, moisture, capital placement...) all get their own.
+        world._weather_rng = random.Random((world.seed or 0) + 774_001)
+    climates = {r.id: r.dominant_climate for r in world.regions
+               if r.faction_idx >= 0}
+    weather.advance_all(climates, world.region_weather, world._weather_rng)
+    for region in world.regions:
+        if region.faction_idx < 0:
+            continue
+        event = world.region_weather.get(region.id)
+        _advance_region_crop_weather(region, event, world.season)
 
 
 _CROPS = [name for name, spec in RESOURCES.items() if spec["category"] == "Crops"]
@@ -2250,6 +2351,25 @@ def node_alerts(node, world):
                                   "propose a trade route or expand toward forested "
                                   "land"})
 
+    # Weather (see app.world.weather / advance_weather). Region-level, not
+    # node-level, but surfaced the same way "no_firewood_source" above
+    # already is -- every node in an affected region shows it, which is
+    # correct: a drought doesn't pick and choose which village in a region
+    # it touches. "warning" regardless of Mild/Severe -- weather is a
+    # stressor, not itself a population-loss event (that's what
+    # starving/freezing above are for; a bad enough harvest may cascade
+    # into one of those separately, on its own alert). Fog is excluded: it
+    # has no crop effect yet (a later phase's vision/logistics wiring), and
+    # an alert for a weather kind that currently does nothing would mislead
+    # rather than inform.
+    event = (getattr(world, "region_weather", None) or {}).get(node.region_id)
+    if event is not None and event.kind in CROP_WEATHER_KINDS:
+        alerts.append({
+            "kind": "weather", "severity": "warning",
+            "message": f"{node.name}'s region is under {event.label.lower()} — "
+                       f"crop yields are down while it lasts ({event.turns_left} "
+                       f"turn{'s' if event.turns_left != 1 else ''} left)"})
+
     # Herds. Losing animals to a Winter you couldn't feed is one of the most
     # consequential things that can happen to a village -- it costs the meat,
     # the milk, the wool and (via faction_horses) the realm's cavalry -- and
@@ -2852,6 +2972,15 @@ def compute_village_yield(world, village, season):
     region = world.regions[village.region_id]
     biome_counts, climate, fertility_frac = village_local_sample(world, village, region)
     result = _crop_yield_core(biome_counts, climate, fertility_frac, season)
+    # Weather (see _advance_region_crop_weather): only CROPS are touched --
+    # a drought doesn't affect what's already been mined or logged, and
+    # _industry_yield_core's own result is merged in below, untouched.
+    weather_mult = getattr(region, "crop_weather_mult", None)
+    if weather_mult:
+        for crop, amount in result.items():
+            m = weather_mult.get(crop)
+            if m is not None:
+                result[crop] = round(amount * m)
     for resource, amount in _industry_yield_core(biome_counts, climate, fertility_frac).items():
         result[resource] = result.get(resource, 0) + amount
     return result
@@ -4338,6 +4467,9 @@ def advance_turn(world):
     same way the old upkeep value used to."""
     world.turn += 1
     world.season = SEASONS[((world.turn - 1) // TURNS_PER_SEASON) % len(SEASONS)]
+    # Weather: rolled/advanced before production, so this turn's harvest
+    # already reflects whatever's active right now (see advance_weather).
+    advance_weather(world)
     # Gold ledger for this turn -- see the section above. Every phase below
     # that can move coin is bracketed by a snapshot, so the breakdown always
     # adds up to the real change with nothing unaccounted for.
