@@ -1205,6 +1205,68 @@ def _place_villages_for_region(world, rng, region, fixed_n=None):
         path = _local_road_path(world, pa, pb, faction_idx=region.faction_idx)
         segs.extend((p1, p2, tier) for p1, p2 in zip(path, path[1:]))
     world.roads_by_region[region.id] = segs
+    _bridge_region_to_kingdom(world, region)
+
+
+def _bridge_region_to_kingdom(world, region):
+    """If `region` has no settlement of its own, connect its local road
+    network to the nearest reachable settlement of the SAME faction, so an
+    all-village region doesn't sit as its own disconnected island.
+
+    The MST built just above only ever includes points from THIS region --
+    it has no way to know a neighboring region's network even exists. Most
+    owned regions never get a settlement of their own (a settlement is the
+    rare case; countryside villages are the common one), so without this,
+    the overwhelming majority of a kingdom's regions never had a single
+    edge linking them to anything outside themselves. That is the reported
+    bug: villages that never route a road into any town at all.
+
+    Prefers a settlement in an ADJACENT region first -- a short, physically
+    sensible bridge, the same reasoning a real farm track would take the
+    nearest market town rather than one three valleys over. Falls back to
+    the faction's nearest settlement anywhere only if no bordering region
+    has one yet -- e.g. a chain of several settlement-less regions claimed
+    in a row on the frontier, where the immediate neighbors are ALSO
+    still just countryside."""
+    if region.meta_settlements or not region.villages:
+        return    # already has its own settlement, or nothing here to bridge
+    faction_idx = region.faction_idx
+    if faction_idx < 0:
+        return
+
+    candidates = [world.settlements[sid]
+                 for rid in _adjacent_region_ids(world, region)
+                 if world.regions[rid].faction_idx == faction_idx
+                 for sid in world.regions[rid].meta_settlements]
+    if not candidates:
+        candidates = [st for st in world.settlements
+                     if st.faction_idx == faction_idx]
+    if not candidates:
+        return    # this faction owns no settlement at all yet (very early game)
+
+    # Nearest to this region's own VILLAGE CLUSTER centroid, not the
+    # region's raw geometric center -- a region can be a large, oddly
+    # shaped area, and the villages are what the bridge actually has to
+    # reach.
+    vxs = [world.villages[vid].pos[0] for vid in region.villages]
+    vys = [world.villages[vid].pos[1] for vid in region.villages]
+    centroid = (sum(vxs) / len(vxs), sum(vys) / len(vys))
+    target = min(candidates,
+                key=lambda st: wrap.dist2_wrap(centroid, st.pos, world.w))
+    nearest_village = min(
+        (world.villages[vid] for vid in region.villages),
+        key=lambda v: wrap.dist2_wrap(v.pos, target.pos, world.w))
+
+    # Dirt tier: this edge touches a village on one end, same rule the MST
+    # above already applies (only settlement-to-settlement earns Stone).
+    # _local_road_path has no notion of "region" at all -- it searches real
+    # land cells in a box around its two endpoints, so it happily paths
+    # straight into a neighboring region's territory the same way it
+    # already bends around a mountain or river.
+    path = _local_road_path(world, nearest_village.pos, target.pos,
+                            faction_idx=faction_idx)
+    segs = world.roads_by_region.setdefault(region.id, [])
+    segs.extend((p1, p2, "dirt") for p1, p2 in zip(path, path[1:]))
 
 
 def _generate_villages(world, rng):
