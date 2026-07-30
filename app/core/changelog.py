@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 52,
+        "title": "GPU Flat Map No Longer Chokes on a Developed Realm",
+        "items": [
+            "FIXED: the new GPU flat map could stutter badly zoomed into a large kingdom -- a labeling bug was rebuilding hundreds of extra settlement/village name glyphs a frame it was never supposed to draw at that zoom",
+        ],
+    },
+    {
         "version": 51,
         "title": "End Turn Stops Freezing the Window",
         "items": [

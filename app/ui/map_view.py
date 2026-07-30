@@ -2281,7 +2281,7 @@ class MapView(tk.Frame):
         level = self._flat_level()
         g.set_lines(self._map_lines(level, scale=scale))
         g.set_markers(self._flat_markers(level))
-        g.set_labels(self._map_labels(level) + self._flat_labels_extra())
+        g.set_labels(self._map_labels(level, region_names=False) + self._flat_labels_extra())
         g.render_now()
         if self.mode == "political":
             self._flat_legend.place(x=12, y=12)
@@ -2562,7 +2562,7 @@ class MapView(tk.Frame):
                         else faction_rgb(cmd.faction_idx)))
         return pins
 
-    def _map_labels(self, level, cull=None):
+    def _map_labels(self, level, cull=None, region_names=True):
         """Names and alert badges, by zoom level: realms at world view,
         regions at region view, settlements and villages at village view.
         Shared by the globe and the GPU flat map, same reasoning as
@@ -2571,7 +2571,20 @@ class MapView(tk.Frame):
         `cull`, when given, is the globe's g.visible_mask (a point-list ->
         bool-array culling test against camera altitude/horizon) -- the flat
         map passes None, since an orthographic GL viewport clips off-screen
-        geometry on its own for free and there is no horizon to test against."""
+        geometry on its own for free and there is no horizon to test against.
+
+        `region_names` gates the level-1 branch below. The globe's own
+        altitude-based hemisphere culling (`cull`) keeps the ON-SCREEN count
+        bounded even for a sprawling kingdom, but the flat map's orthographic
+        camera can put an ENTIRE developed kingdom on screen at once with no
+        such limit -- exactly the "realm view used to label every single
+        region... dozens of names stacked over the terrain" problem
+        _draw_labels' own docstring describes fixing on the canvas years ago
+        (it now shows region names nowhere at all, only nation names at
+        world view). The flat map passes region_names=False to match that
+        already-settled call, rather than reintroducing the clutter (and the
+        real per-frame cost of rebuilding hundreds of text-glyph instances
+        while panning a large realm) that the canvas deliberately dropped."""
         wd = self.world
         out = []
 
@@ -2611,12 +2624,17 @@ class MapView(tk.Frame):
                  for f in kept],
                 15.0, _GLOBE_LABEL_COLOR, -14.0)
         elif level == 1:
-            add([(r.name, (r.center[0] * wd.w, r.center[1] * wd.h))
-                 for r in wd.regions
-                 if r.faction_idx >= 0 and self._is_known(wd.factions[r.faction_idx])
-                 and self._cell_revealed(int(r.center[0] * wd.w),
-                                         int(r.center[1] * wd.h))],
-                12.0, _GLOBE_LABEL_COLOR, -10.0)
+            # region_names=False (the flat map -- see this method's own
+            # docstring) means genuinely nothing at this level, NOT a
+            # fall-through to the settlement/village branch below -- level 1
+            # is its own exclusive case regardless of what it draws.
+            if region_names:
+                add([(r.name, (r.center[0] * wd.w, r.center[1] * wd.h))
+                     for r in wd.regions
+                     if r.faction_idx >= 0 and self._is_known(wd.factions[r.faction_idx])
+                     and self._cell_revealed(int(r.center[0] * wd.w),
+                                             int(r.center[1] * wd.h))],
+                    12.0, _GLOBE_LABEL_COLOR, -10.0)
         else:
             add([(st.name, st.pos) for st in wd.settlements
                  if self._cell_revealed(*st.pos)],
