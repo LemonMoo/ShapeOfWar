@@ -3,19 +3,30 @@
 Python/Tkinter desktop 4X strategy game. Single developer, turn-based, procedurally
 generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 
-**Last release: v0.3.7_1** ("Take Direct Command of Your Commander").
+**Last release: v0.3.7_2** ("Sea Lanes Instead of Roads Through the Ocean").
 Check `gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting
 this line — this repo ships fast, sometimes several releases in one day.
-Shipped after v0.3.7: a fix for settlement-less regions never getting a road
-into the rest of the kingdom (`_bridge_region_to_kingdom` in worldgen.py), a
-Select All battle button/hotkey, and MOBA-style right-click commander/troop
-control in battle (`Unit.move_point`/`manual_target`, bypasses the
-commander's screening safety net on an explicit player order).
 
-**In progress, unreleased: a regional weather system.** Phase 0 (event
-generation only, standalone, zero call sites) is built and validated. See
-**§10** for the full phasing plan, what's measured, and what Phases 1-4
-still need.
+Shipped after v0.3.7: v0.3.7_1 added a fix for settlement-less regions never
+getting a road into the rest of the kingdom (`_bridge_region_to_kingdom` in
+worldgen.py), a Select All battle button/hotkey, and MOBA-style right-click
+commander/troop control in battle (`Unit.move_point`/`manual_target`,
+bypasses the commander's screening safety net on an explicit player order).
+v0.3.7_2 fixed a related but separate bug — a new settlement founded on a
+DIFFERENT landmass from every other settlement a faction owned got a literal
+straight road drawn across open ocean to its nearest existing city, since
+both `construction._find_road_path` and `_bridge_region_to_kingdom` silently
+fell back to a straight two-point segment whenever no land route existed.
+Both now try a real sea lane instead (new "sea" road tier, its own
+rendering) or skip the connector entirely rather than fake one; existing
+saves are repaired automatically on load (`worldgen.repair_ocean_crossing_
+roads`, wired into `save.load_game`, versioned/idempotent like
+`resources.migrate_legacy_overflow`). See **§11** for the full writeup.
+
+**In progress, unreleased: Phases 2-4 of the regional weather system**
+(logistics, battle, visual). Phases 0 (event generation) and 1 (economy —
+crop yields, the "weather" alert) are both built, measured, and shipped as
+of v0.3.7_2. See **§10** for the full phasing plan and what's left.
 
 ---
 
@@ -700,3 +711,75 @@ weather OFF first, then hang weather off it the same way Phase 1 hung off
 the existing crop-yield pipe. Do NOT start Phase 3 (battle) before Phase 2
 is wired, measured and committed on its own — same phasing discipline as
 every other multi-part rework in this project.
+
+## 11. Sea lanes for cross-landmass settlements (v0.3.7_2)
+
+Reported bug, with a screenshot: a faction's first city on a different
+landmass from its other cities showed several straight lines cutting clean
+across open water on the world map — a literal road drawn through the sea.
+
+**Root cause:** two separate call sites shared the same flaw. `construction.
+_find_road_path` (run whenever a new City/Town/Castle is founded, to connect
+it to the faction's nearest existing settlement) and `worldgen._bridge_
+region_to_kingdom` (run at worldgen/expansion time for a settlement-less
+region full of villages) both used a land-only Dijkstra path search that
+fell back to the straight two-point segment whenever it found no route —
+a sensible safety net for a rare local pathfinding hiccup, but exactly what
+happens EVERY time when the two endpoints are on different landmasses. That
+straight fallback got stored as a real `"stone"`/`"dirt"` road segment in
+`world.roads_by_region` and rendered like any other road.
+
+**Fix:** both now refuse that fallback (`_path_between`/`_local_road_path`
+grew an `allow_fallback` param, `False` at these two call sites only — every
+other caller, where the two points are guaranteed to share a landmass by
+construction, keeps the old safety-net behavior). When land genuinely fails,
+each tries a real open-water path instead — `construction._sea_lane_between`
+/ `worldgen._local_sea_lane`, both the same dock-to-dock Dijkstra
+`trade._capital_sea_path` already uses for cross-faction sea trade, just
+standalone (construction.py/worldgen.py can't import trade.py without a
+cycle). `_find_road_path` also now tries every candidate settlement
+nearest-first for land, then again nearest-first for sea, rather than
+committing to a single "nearest overall" origin — a faction's capital is
+often well inland, and the nearest settlement by raw distance isn't
+necessarily the one with a coast. If NEITHER a land nor a sea route exists
+(no coast on either side), the connector is skipped entirely — the
+settlement/region still exists, it just starts unconnected, same as any
+other genuinely isolated case in the game, rather than faking a road again.
+
+New `"sea"` road tier, rendered distinctly (`map_view.py`: dotted, the same
+`_TRADE_SEA_COLOR` sea-trade-route blue, on both the flat map and the
+globe, visible at every zoom like the stone trunk network). A sea lane has
+no construction phase of its own (nothing physical to build across open
+water — `SettlementProject.sea_lane` is folded straight into
+`roads_by_region` the moment the settlement itself finishes, unlike a land
+`RoadProject` which still builds cell-by-cell over `ROAD_CELLS_PER_TURN`).
+
+**Retroactive repair for existing saves:** the code fix only stops NEW fake
+roads; a save from before it can still have one baked in. `worldgen.
+repair_ocean_crossing_roads` scans every road segment for the bug's own
+unambiguous signature — a `"stone"`/`"dirt"` segment whose straight line
+crosses an OCEAN cell, which a real Dijkstra-routed road can never do — and
+replaces it with a genuine sea lane where one exists, or drops it where it
+doesn't. Versioned and idempotent exactly like `resources.migrate_legacy_
+overflow` (`world._road_migration_version`), wired into `save.load_game` so
+every existing save gets repaired automatically the next time it's opened —
+no player action needed.
+
+**Verification:** `dev/test_sea_bridge.py` reproduces the exact scenario
+(two real coastal settlements from a real generated world, on different
+landmasses) end to end — `_find_road_path` returns a real sea path (never a
+straight cut through unrelated terrain), `start_settlement` records a
+`sea_lane` instead of queuing a land `RoadProject`, the finished settlement's
+region carries a `"sea"` tier segment, and a second test plants exactly what
+the OLD code would have produced (a straight `"stone"` segment across real
+ocean) and confirms the migration removes/repairs it and is a no-op on
+re-run. A fresh 150-turn, 10-faction simulation at scale (ordinary AI play,
+no forced scenario) additionally confirmed zero ocean-crossing stone/dirt
+segments occur in practice, and the full existing regression suite (10
+other scripts) still passes.
+
+Nothing left open here — this was a self-contained bug fix, not a phased
+system. If a similar "two points might be on different landmasses" case
+turns up elsewhere later (e.g. Phase 2's logistics work, if a caravan route
+ever needs to reason about crossing open water), the same `allow_fallback`
+pattern and `_local_sea_lane`/`_sea_lane_between` helpers are the template.
