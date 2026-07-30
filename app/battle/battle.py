@@ -353,6 +353,13 @@ class Battle:
         taking = [u for u in units if u.alive and orders.can_take_stance(u, stance)]
         for u in taking:
             u.stance = stance
+            # A fresh stance order is an explicit new command -- it should
+            # supersede an older right-click move/attack the same way a new
+            # right-click supersedes a previous one, not be silently
+            # overridden by whichever order happens to still be pending (see
+            # Unit.move_point/manual_target).
+            u.move_point = None
+            u.manual_target = None
             if stance != orders.STANCE_SHIELD_WALL:
                 u.wall_slot = None
             if stance != orders.STANCE_CYCLE_CHARGE:

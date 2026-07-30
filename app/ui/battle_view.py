@@ -311,7 +311,8 @@ class BattleView(tk.Frame):
                               "left-drag your units into position, or drag a box "
                               f"over several. Keys {hotkeys} (or the buttons "
                               "above) select every living unit of that type at "
-                              "once. Right-drag a line to form the selection up "
+                              "once; 0 selects everyone, Commander included. "
+                              "Right-drag a line to form the selection up "
                               "along it. Space (or \"Deploy Army\") starts the "
                               "fight.")
         self._bind_planning_keys()
@@ -330,8 +331,12 @@ class BattleView(tk.Frame):
         # (_arm_continue), so the battle-over screen isn't taking order presses.
         hotkeys = "/".join(str(i + 1) for i in range(len(self._select_types)))
         self.plan_hint.config(text="Click a unit, drag a box, or a button above "
-                                   f"({hotkeys}) to select troops, then give "
-                                   "orders below. Space pauses so you can think.")
+                                   f"({hotkeys}, 0 for everyone) to select troops, "
+                                   "then give orders below. Right-click a spot to "
+                                   "move the selection there, or an enemy to send "
+                                   "them straight at it -- overrides the "
+                                   "Commander's usual caution. Space pauses so you "
+                                   "can think.")
         self._refresh_order_buttons()
         self._update_toggle_label()
 
@@ -361,6 +366,16 @@ class BattleView(tk.Frame):
                             relief="flat", font=("Segoe UI", 8))
             btn.pack(side="left", padx=1)
             self._select_buttons[type_key] = (btn, label)
+        # Separate from the per-type buttons (own key, own colour) rather than
+        # just another entry in _select_types: "everyone" isn't a unit type,
+        # it's the complement of all of them, and it's the one selection that
+        # also grabs the Commander -- nothing else does, since he has no type
+        # button of his own (see _plannable_units, which never excludes him).
+        self.select_all_btn = tk.Button(
+            self.select_frame, text="All (0)", command=self._select_all,
+            bg="#2d3648", fg=theme.INK, activebackground=theme.ACCENT,
+            relief="flat", font=("Segoe UI", 8, "bold"))
+        self.select_all_btn.pack(side="left", padx=(6, 1))
         self._update_select_counts()
 
     def _update_select_counts(self):
@@ -376,6 +391,11 @@ class BattleView(tk.Frame):
             hot = str(self._select_types.index(type_key) + 1)
             count = f"{selected}/{len(alive)}" if selected else str(len(alive))
             btn.config(text=f"{label} ({hot}) · {count}")
+        if hasattr(self, "select_all_btn"):
+            total = len(units)
+            selected = sum(1 for u in units if u in self.selected_units)
+            count = f"{selected}/{total}" if selected else str(total)
+            self.select_all_btn.config(text=f"All (0) · {count}")
 
     # --- key bindings: per-type select, order hotkeys, Space ---------------
     # Bound for the whole battle, not just planning: orders are given during
@@ -398,6 +418,10 @@ class BattleView(tk.Frame):
         for i, type_key in enumerate(self._select_types):
             self.bind_all(f"<Key-{i + 1}>",
                           lambda e, k=type_key: self._select_type(k), add="+")
+        # 0 for "all" -- the natural complement of the 1-5 per-type keys, and
+        # never collides with them since a real species fields at most 5
+        # distinct selectable types (3 base + Goblins' 2 specials).
+        self.bind_all("<Key-0>", lambda e: self._select_all(), add="+")
         self.bind_all("<space>", self._on_space_deploy, add="+")
         for key, (kind, value) in self._ORDER_KEYS.items():
             self.bind_all(f"<Key-{key}>",
@@ -410,6 +434,7 @@ class BattleView(tk.Frame):
         self._planning_keys_bound = False
         for i in range(len(getattr(self, "_bound_select_keys", ()))):
             self.unbind_all(f"<Key-{i + 1}>")
+        self.unbind_all("<Key-0>")
         self.unbind_all("<space>")
         for key in self._ORDER_KEYS:
             self.unbind_all(f"<Key-{key}>")
@@ -427,6 +452,16 @@ class BattleView(tk.Frame):
             return
         self.selected_units = {u for u in self._plannable_units()
                                if u.type_key == type_key}
+        self._refresh_order_buttons()
+        self.render()
+
+    def _select_all(self):
+        """Select every living army-0 unit, of any type -- including the
+        Commander, who has no per-type button of his own (see
+        _plannable_units, which never filters him out)."""
+        if not self._can_select():
+            return
+        self.selected_units = set(self._plannable_units())
         self._refresh_order_buttons()
         self.render()
 
@@ -523,6 +558,23 @@ class BattleView(tk.Frame):
                 best, best_d2 = u, d2
         return best
 
+    def _any_unit_at(self, x, y):
+        """The nearest LIVING unit under (x, y) from ANY army, own or enemy --
+        used by the live-phase right-click order (see _on_rmb_press) to tell
+        "attack that specific enemy" apart from "move to this empty ground"."""
+        if not self.battle:
+            return None
+        best, best_d2 = None, None
+        for army in self.battle.armies:
+            for u in army.units:
+                if not u.alive:
+                    continue
+                r = u.radius
+                d2 = (u.x - x) ** 2 + (u.y - y) ** 2
+                if d2 <= r * r and (best_d2 is None or d2 < best_d2):
+                    best, best_d2 = u, d2
+        return best
+
     def _on_press(self, event):
         # Selection works during the fight too, not just in planning -- orders
         # are given to whatever is selected, so being unable to select mid-battle
@@ -589,11 +641,44 @@ class BattleView(tk.Frame):
     _SLOT_SPACING = 16   # px between soldiers in a formation (matches deploy grid)
 
     def _on_rmb_press(self, event):
-        if not self.planning or not self.selected_units:
+        if self.planning:
+            if not self.selected_units:
+                return
+            self._formation_line = (event.x, event.y, event.x, event.y)
+            self._formation_slots = self._compute_formation_slots(
+                self.selected_units, event.x, event.y, event.x, event.y)
+            self.render()
             return
-        self._formation_line = (event.x, event.y, event.x, event.y)
-        self._formation_slots = self._compute_formation_slots(
-            self.selected_units, event.x, event.y, event.x, event.y)
+        self._issue_direct_order(event.x, event.y)
+
+    def _issue_direct_order(self, x, y):
+        """MOBA-style right-click order for whatever's currently selected,
+        live-phase only: an enemy under the cursor becomes a pinned attack
+        target (Unit.manual_target), empty ground becomes a move-to point
+        (Unit.move_point) -- both override Battle.choose_target's own
+        scoring and the commander's screening safety net (see
+        Unit._player_directed) for exactly as long as they're active. This
+        is the one place either attribute is ever written, so a save/load or
+        a fresh battle never carries a stale order forward."""
+        if not self.battle or self.battle.over or not self.selected_units:
+            return
+        hit = self._any_unit_at(x, y)
+        mine_sides = {u.faction.side for u in self.selected_units}
+        is_enemy = hit is not None and hit.alive and hit.faction.side not in mine_sides
+        for u in self.selected_units:
+            if not u.alive:
+                continue
+            if is_enemy:
+                u.manual_target = hit
+                u.move_point = None
+            else:
+                u.move_point = (x, y)
+                u.manual_target = None
+        if is_enemy:
+            self._add_log(f"» {len(self.selected_units)} ordered to attack "
+                          f"{hit.faction.name}'s {hit.type['name']}")
+        else:
+            self._add_log(f"» {len(self.selected_units)} ordered to move")
         self.render()
 
     def _on_rmb_drag(self, event):

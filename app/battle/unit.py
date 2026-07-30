@@ -26,6 +26,9 @@ from app.world.lexicon import species_traits
 
 _IMPACT_CHARGE_MIN = 0.5   # momentum above which a couched hit spawns an impact
                            # burst + reads as a real "charge" in the log
+_MOVE_ARRIVE_TOLERANCE = 4.0   # px within a right-click move point that counts
+                               # as "arrived" -- see Unit.update's move_point
+                               # handling
 
 
 class Unit:
@@ -144,6 +147,16 @@ class Unit:
         self.fire_at_will = True     # ranged only; False = holding, building a volley
         self.volley = 0.0            # 0..1 draw strength built up while holding fire
         self.wall_slot = None        # (x, y) this unit's place in a shield wall
+
+        # --- direct control (right-click move/attack during a live battle,
+        # see BattleView) -- generic on any Unit, but in practice only ever
+        # set on the player's own selected units, since nothing else issues
+        # them. Both are pinned overrides: while active they take priority
+        # over Battle.choose_target's scoring, the same way a MOBA's
+        # right-click order overrides a hero's default idle behaviour.
+        self.move_point = None       # (x, y) to walk toward, ignoring choose_target
+        self.manual_target = None    # a specific enemy Unit to fight, never re-scored
+
         # Cavalry cycle-charge state machine: "run" (going in), "withdraw"
         # (pulling out after an impact), see Unit._update_cycle_charge.
         self._cycle_state = "run"
@@ -196,6 +209,18 @@ class Unit:
         """True while this unit refuses to walk toward a distant enemy. It still
         swings at anything that comes within reach."""
         return self.stance in orders.HOLDING_STANCES
+
+    @property
+    def _player_directed(self):
+        """True while an explicit player order is currently overriding this
+        unit's default behaviour: a Charge stance, a right-click move, or a
+        right-click attack on a specific enemy (see move_point/manual_target
+        and BattleView's live-phase right-click handling). Used by
+        _screened to bypass the commander's safety net -- direct control
+        means direct control."""
+        return (self.stance == orders.STANCE_CHARGE
+                or self.move_point is not None
+                or self.manual_target is not None)
 
     @property
     def effective_speed(self):
@@ -320,12 +345,27 @@ class Unit:
             if self._update_cycle_charge(dt, battle):
                 return
 
+        # A manual attack target (right-click an enemy) is PINNED: it skips
+        # the scored retarget entirely and stays the target until it dies or
+        # a fresh order replaces it -- the same way locking an attack in a
+        # MOBA doesn't get second-guessed by the default AI every half
+        # second. Cleared the instant it's no longer valid, so nobody keeps
+        # walking toward a corpse's old position.
+        if self.manual_target is not None:
+            if self.manual_target.alive:
+                self.target = self.manual_target
+            else:
+                self.manual_target = None
+
         # Scored re-target on a throttle (or immediately if the current target
-        # is gone) -- see Battle.choose_target.
-        if self.target is None or not self.target.alive or self._retarget_cd <= 0:
+        # is gone) -- see Battle.choose_target. Skipped entirely while a
+        # manual attack target is pinned above.
+        if self.manual_target is None and (self.target is None
+                                           or not self.target.alive
+                                           or self._retarget_cd <= 0):
             self.target = battle.choose_target(self)
             self._retarget_cd = 0.6
-        if self.target is None:
+        if self.target is None and self.move_point is None:
             return
 
         # Dressing the line: a unit given Shield Wall walks to its assigned slot
@@ -340,10 +380,31 @@ class Unit:
                 self.x += sdx / sdist * move
                 self.y += sdy / sdist * move
 
-        dx = self.target.x - self.x
-        dy = self.target.y - self.y
-        dist = math.hypot(dx, dy) or 1e-6
-        self.facing = (dx / dist, dy / dist)
+        # Where to walk vs. what to actually fight are two different
+        # questions once a manual move order can exist. A right-click move
+        # takes priority for MOVEMENT -- "move here" means move here, not
+        # get dragged off toward whatever's fightable along the way -- but
+        # whether we're close enough to fight is always judged against the
+        # real TARGET, never the clicked ground point.
+        if self.move_point is not None:
+            mx, my = self.move_point
+        else:
+            mx, my = self.target.x, self.target.y
+        mdx, mdy = mx - self.x, my - self.y
+        mdist = math.hypot(mdx, mdy) or 1e-6
+
+        target_dist = (math.hypot(self.target.x - self.x, self.target.y - self.y)
+                      if self.target is not None else None)
+        in_attack_range = target_dist is not None and target_dist <= self.attack_range
+        # Facing always points at a real TARGET when there is one -- the
+        # shield block arc and sword/bow visuals read it, and those care who
+        # you're fighting, not which empty patch of ground you're walking
+        # toward. Only a pure move order with nothing to fight faces travel.
+        if self.target is not None:
+            tdist = target_dist or 1e-6
+            self.facing = ((self.target.x - self.x) / tdist, (self.target.y - self.y) / tdist)
+        else:
+            self.facing = (mdx / mdist, mdy / mdist)
 
         # Holding fire: draw and wait, and the release hits far harder for it.
         # Deliberately only builds while there is something IN RANGE, so the
@@ -351,20 +412,29 @@ class Unit:
         # of range cost nothing at all, which made "open every battle holding
         # fire" a strictly free +150% -- a dominant opening rather than a
         # decision about when to loose.
-        if self._ranged and not self.fire_at_will and dist <= self.attack_range:
+        if self._ranged and not self.fire_at_will and in_attack_range:
             self.volley = min(1.0, self.volley + dt / orders.VOLLEY_FULL_SECONDS)
 
-        if dist > self.attack_range:
+        if not in_attack_range:
+            # Arrived where we were told to go? Stop and clear the order --
+            # the next tick resumes normal auto-target behaviour (unless a
+            # fresh manual order has already been issued by then).
+            if self.move_point is not None and mdist <= _MOVE_ARRIVE_TOLERANCE:
+                self.move_point = None
+                self.charge = 0.0
+                return
             # Holding ground means exactly that: face them, wait, and swing at
             # whatever closes to within reach (Battle.choose_target already
-            # prefers an in-reach enemy for a holding unit).
-            if self.holds_position or not self._screened(dist):
+            # prefers an in-reach enemy for a holding unit). A live manual
+            # order overrides holding position too -- see _player_directed.
+            if ((self.holds_position and not self._player_directed)
+                    or not self._screened(target_dist if target_dist is not None else mdist)):
                 self.charge = 0.0
                 return
             self.advancing = True
             move = self.effective_speed * dt
-            self.x += dx / dist * move
-            self.y += dy / dist * move
+            self.x += mdx / mdist * move
+            self.y += mdy / mdist * move
             # Galloping toward the enemy builds couched-charge momentum. A
             # bogged-down unit is in the attack branch instead, so its charge
             # decays to nothing -- devastating on impact, weak in a grind.
@@ -440,8 +510,21 @@ class Unit:
         himself and his target -- see unit_types.COMMANDER_SCREEN_MIN.
 
         Only ever costs anything for the one commander per army; every other
-        unit short-circuits on the first test."""
+        unit short-circuits on the first test.
+
+        Bypassed entirely under direct player control (see _player_directed):
+        a player who explicitly orders their own commander forward -- a
+        Charge stance, a right-click move, or a right-click attack on a
+        specific enemy -- has knowingly taken the risk screening otherwise
+        exists to prevent. This is safe to key off these alone -- the order
+        AI never sets any of them on a commander (STANCE_CHARGE is excluded
+        by order_ai._is_foot; move_point/manual_target are only ever written
+        by BattleView's live-phase right-click handling), so none of them can
+        ever be something an AI-run army's own commander stumbles into on
+        its own."""
         if not getattr(self, "is_commander", False) or self.target is None:
+            return True
+        if self._player_directed:
             return True
         tx, ty = self.target.x, self.target.y
         ahead = 0
