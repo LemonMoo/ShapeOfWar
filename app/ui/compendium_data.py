@@ -656,20 +656,23 @@ def _prosperity_article():
             "faction's economy is (produced/earned vs. consumed this "
             "turn, faction-wide) — a faction running a deficit drags "
             "every one of its settlements' targets down, not just the "
-            "one running short. A Village's target instead comes from "
-            "the gold-value of its own farm output (it carries no tax of "
-            "its own)."
+            "one running short. A Village's target instead comes from the "
+            "gold-value of what it has actually been delivering, smoothed "
+            "over recent turns so a harvest season and a fallow one do not "
+            "swing it (it carries no tax of its own)."
         ),
-        "THE INSTANT SIDE: SHORTAGES AND LUXURY",
+        "SHORTAGES AND LUXURY",
         (
-            "On top of the slow-moving target, actually running short of "
-            "a survival good docks prosperity immediately, scaled by how "
-            "much of the need went unmet:"
+            "Running short of a survival good lowers the TARGET the meter is "
+            "easing toward, by a fraction of it, scaled by how much of the "
+            "need went unmet. A place that cannot feed or warm its people "
+            "cannot be prosperous, however much it produces:"
         ),
         "\n".join([
-            f"  Food shortage:     −{R._SHORTAGE_PROSPERITY_PENALTY['Food']:.1f} x deficit fraction (and starvation — see below)",
-            f"  Firewood shortage: −{R._SHORTAGE_PROSPERITY_PENALTY['Firewood']:.1f} x deficit fraction, Winter only (and freezing)",
-            f"  Clothes shortage:  −{R._SHORTAGE_PROSPERITY_PENALTY['Clothes']:.1f} x deficit fraction",
+            f"  Food shortage:     −{R.PROSPERITY_SHORTAGE_WEIGHT['Food']:.0%} of the target at total famine (and starvation — see below)",
+            f"  Firewood shortage: −{R.PROSPERITY_SHORTAGE_WEIGHT['Firewood']:.0%}, Winter only (and freezing)",
+            f"  Clothes shortage:  −{R.PROSPERITY_SHORTAGE_WEIGHT['Clothes']:.0%}",
+            f"  Timber shortage:   −{R.PROSPERITY_SHORTAGE_WEIGHT['Timber']:.0%} (homes and buildings going unmaintained)",
         ]),
         (
             "A Food or Firewood shortfall costs population too, but not "
@@ -727,9 +730,9 @@ def _prosperity_article():
         (
             "Luxury Goods (Wine, Beer, Jewelry, Furniture, Fine Clothes, "
             "Books, Candles — see the Luxury Economy article) are the "
-            "mirror image: meeting the need gives a direct "
-            f"+{R.LUXURY_PROSPERITY_BONUS:.1f} x fulfillment-fraction "
-            "BONUS to prosperity. Going without is simply a non-event — "
+            "mirror image: meeting the need raises the target by up to "
+            f"+{R.LUXURY_PROSPERITY_BONUS:.0%}, scaled by how much of it is "
+            "met. Going without is simply a non-event — "
             "never a penalty, never a population consequence. These "
             "aren't survival goods; they're exactly what the name says."
         ),
@@ -1433,9 +1436,9 @@ def _luxury_article():
             "Luxury Goods satisfy a settlement/village's Luxury need "
             "(see Prosperity) — a small per-capita demand, pooled across "
             "all seven (any one of them satisfies it, fully "
-            "interchangeably). Meeting it gives prosperity a real, "
-            f"direct bonus (+{R.LUXURY_PROSPERITY_BONUS:.1f} at full "
-            "fulfillment); going without is simply a non-event, never a "
+            "interchangeably). Meeting it raises the prosperity target by "
+            f"up to +{R.LUXURY_PROSPERITY_BONUS:.0%} at full "
+            "fulfillment; going without is simply a non-event, never a "
             "penalty and never a population consequence, unlike Food/"
             "Firewood/Clothes. That's the entire distinction between a "
             "luxury and a survival good in this game."

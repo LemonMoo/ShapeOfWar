@@ -2688,8 +2688,36 @@ FREEZE_GRACE_TURNS = 8        # same idea as STARVATION_GRACE_TURNS, for an
                               # two dangers, but still leaves real room (a
                               # season is TURNS_PER_SEASON turns long) before
                               # a supply hiccup starts costing population.
-_SHORTAGE_PROSPERITY_PENALTY = {"Food": 8.0, "Firewood": 5.0, "Clothes": 2.0,
-                                "Timber": 2.0}
+# How much of a node's prosperity each unmet need takes away, as a FRACTION of
+# what its economy would otherwise support. Scaled 0..1 and multiplied into the
+# target (see _prosperity_condition), not subtracted from the meter.
+#
+# That distinction is the whole fix, and the old version is worth recording
+# because the failure was arithmetic rather than tuning. These used to be
+# absolute points taken off the meter every turn -- Food 8.0, Firewood 5.0,
+# Clothes 2.0, Timber 2.0 -- while _update_prosperity moves the meter by
+# (target - current) * PROSPERITY_EASE, i.e. 1% of the remaining gap. Two
+# processes on completely different scales, and the slow one loses: at
+# equilibrium (target - P) * 0.01 == penalty, so P settles at
+# target - 100 * penalty. EVERY POINT OF PER-TURN PENALTY COST 100 POINTS OF A
+# 100-POINT METER.
+#
+# So a node missing 1% of its Clothes lost 2 points of meter, and a node with
+# no Clothes at all -- which was every node in the game, since Clothes were
+# zero world-wide until the logistics chain was repaired -- took 2.0/turn and
+# was pinned at 0 forever no matter how rich it was. Measured on a turn-161
+# save: a village whose economy justified 10.71 sat at 0.404, and a settlement
+# whose target was a maxed 100.0 sat at 1.3.
+#
+# As a fraction of the target the numbers say something a player could actually
+# reason about: total famine is worth all of your prosperity, a winter with no
+# fuel most of it, no clothes or no upkeep a quarter each.
+PROSPERITY_SHORTAGE_WEIGHT = {"Food": 1.0, "Firewood": 0.6, "Clothes": 0.25,
+                              "Timber": 0.25}
+# Kept under the old name for the Compendium, which prints these to explain the
+# mechanic, and for dev/test_timber_upkeep.py's "is this a survival need"
+# check. Same meaning, new units.
+_SHORTAGE_PROSPERITY_PENALTY = PROSPERITY_SHORTAGE_WEIGHT
 
 # A region with zero Forest-biome cells can never produce Firewood locally
 # (see compute_industry_yield's biome gate) -- and if that region is also
@@ -2746,7 +2774,11 @@ def _firewood_scrounge_fraction(world, node):
 # was. Cut down so sustained full fulfillment alone takes roughly a year
 # to meaningfully move the needle, consistent with the ~230-turn/90%-
 # closure timescale the base eased mechanism already uses.
-LUXURY_PROSPERITY_BONUS = 0.3
+# Fully-supplied luxuries lift the prosperity target by this fraction -- the
+# mirror image of the shortage weights above, and on the same scale for the
+# same reason (it used to be an absolute +0.3/turn added to the meter, which
+# fought the easing exactly as the penalties did, just in the other direction).
+LUXURY_PROSPERITY_BONUS = 0.25
 
 _FOOD_PRODUCTS = [name for name, spec in RESOURCES.items()
                  if spec["category"] == "Food Products" and spec["edible"]]
@@ -2952,18 +2984,28 @@ def _grow_population(node):
 
 
 def _consume_node_needs(node, season, world):
-    """Draw Food/Firewood/Clothes/Luxury for one population-owning node
+    """Draw Food/Firewood/Clothes/Luxury/Timber for one population-owning node
     (Settlement or Village -- both share the same population/adults/
     resources shape) from its own storage, applying the same starvation/
-    freezing/prosperity consequences either way -- except Luxury (Phase
-    13), which never has a starvation/freezing-style consequence, only a
-    prosperity one, and only in the positive direction (see below).
-    Returns the gold-value of what was needed (see settlement_needs_value)."""
+    freezing consequences either way -- except Luxury (Phase 13), which never
+    has a starvation/freezing-style consequence, only a prosperity one, and
+    only in the positive direction (see below).
+    Returns the gold-value of what was needed (see settlement_needs_value).
+
+    Prosperity is NOT touched here. Each unmet need is recorded on the node as
+    a 0..1 deficit and applied to the prosperity TARGET by _update_prosperity,
+    which runs later in the same turn. Subtracting from the meter directly is
+    what broke it (see PROSPERITY_SHORTAGE_WEIGHT): an absolute per-turn
+    penalty against a meter that only closes 1% of its gap per turn settles at
+    target - 100 * penalty, so any lasting shortage pinned every meter in the
+    game at zero."""
     if not hasattr(node, "resources"):
         node.resources = {}
     res = node.resources
     needs = settlement_needs(node, season)
     value = settlement_needs_value(node, season)
+    shortfall = {}
+    luxury_fulfilled = 0.0
 
     food_needed = needs["Food"]
     food_had = _consume_from_pool(res, _FOOD_SOURCES, food_needed)
@@ -2975,8 +3017,7 @@ def _consume_node_needs(node, season, world):
         # attribute added after saves already existed).
         node.turns_without_food = getattr(node, "turns_without_food", 0) + 1
         deficit = (food_needed - food_had) / food_needed
-        node.prosperity = max(0.0, node.prosperity
-                             - _SHORTAGE_PROSPERITY_PENALTY["Food"] * deficit)
+        shortfall["Food"] = deficit
         if node.turns_without_food > STARVATION_GRACE_TURNS:
             _apply_population_loss(node, round(node.population * deficit * STARVATION_SEVERITY))
     else:
@@ -2995,8 +3036,7 @@ def _consume_node_needs(node, season, world):
             # first runs short.
             node.turns_without_firewood = getattr(node, "turns_without_firewood", 0) + 1
             deficit = (wood_needed - wood_had) / wood_needed
-            node.prosperity = max(0.0, node.prosperity
-                                 - _SHORTAGE_PROSPERITY_PENALTY["Firewood"] * deficit)
+            shortfall["Firewood"] = deficit
             if node.turns_without_firewood > FREEZE_GRACE_TURNS:
                 _apply_population_loss(node, round(node.population * deficit * FREEZE_SEVERITY))
         else:
@@ -3009,8 +3049,7 @@ def _consume_node_needs(node, season, world):
     res["Clothes"] = res.get("Clothes", 0) - clothes_had
     if clothes_needed > 0 and clothes_had < clothes_needed:
         deficit = (clothes_needed - clothes_had) / clothes_needed
-        node.prosperity = max(0.0, node.prosperity
-                             - _SHORTAGE_PROSPERITY_PENALTY["Clothes"] * deficit)
+        shortfall["Clothes"] = deficit
 
     # Timber upkeep (Phase 2 of the economy pass) -- same shape as Clothes:
     # a shortfall costs prosperity only, never population. Deliberately NOT
@@ -3023,8 +3062,7 @@ def _consume_node_needs(node, season, world):
         timber_had = _consume_from_pool(res, _TIMBER_SOURCES, timber_needed)
         if timber_had < timber_needed:
             deficit = (timber_needed - timber_had) / timber_needed
-            node.prosperity = max(0.0, node.prosperity
-                                 - _SHORTAGE_PROSPERITY_PENALTY["Timber"] * deficit)
+            shortfall["Timber"] = deficit
 
     # Luxury (Phase 13) -- "these improve prosperity instead of survival."
     # The mirror image of the three shortage penalties above: fulfillment
@@ -3034,9 +3072,13 @@ def _consume_node_needs(node, season, world):
     luxury_needed = needs["Luxury"]
     if luxury_needed > 0:
         luxury_had = _consume_from_pool(res, _LUXURY_GOODS, luxury_needed)
-        fulfillment = luxury_had / luxury_needed
-        node.prosperity = min(PROSPERITY_MAX, node.prosperity
-                             + LUXURY_PROSPERITY_BONUS * fulfillment)
+        luxury_fulfilled = luxury_had / luxury_needed
+
+    # Handed to _update_prosperity, which runs after every node has consumed.
+    # Plain floats on the node, so they pickle and survive a save like every
+    # other per-node state.
+    node.prosperity_shortfall = shortfall
+    node.prosperity_luxury = luxury_fulfilled
 
     _grow_population(node)
     return value
@@ -3818,6 +3860,15 @@ def _deliver_village_yield(village, resource_amounts, throttle=True):
         if share:
             village.resources[resource] = village.resources.get(resource, 0) + share
             delivered[resource] = delivered.get(resource, 0) + share
+
+    # What this village is worth, smoothed, for prosperity (see
+    # village_goods_wealth_value). Recorded here because this is the one place
+    # that knows what a single village actually brought in -- everything
+    # upstream works in region totals.
+    worth = _resource_bundle_value(delivered)
+    previous = getattr(village, "output_value", None)
+    village.output_value = (worth if previous is None else
+                            previous + (worth - previous) * VILLAGE_OUTPUT_EMA)
     return delivered
 
 
@@ -5365,18 +5416,69 @@ def settlement_goods_wealth_value(settlement, season, tax_income):
     return settlement_needs_value(settlement, season) + tax_income
 
 
-def village_goods_wealth_value(farm_output):
-    """A village's per-turn "goods" figure: the gold-value of its farm
-    output, priced at tier 1 (every Crop shares that tier) — villages
-    carry no upkeep/tax of their own (see Village). Used to price this
-    against "Grain" specifically; tier-1-flat is the direct replacement
-    now that Grain itself is gone (see the module docstring)."""
-    return farm_output * BASE_VALUE_BY_TIER[1]
+# Villages are valued on what they actually bring in, smoothed. The smoothing
+# is not cosmetic: a Crop only harvests in its own season (see GROWTH_CYCLE),
+# so an unsmoothed per-turn figure would send every farming village's
+# prosperity to zero for half of every year.
+VILLAGE_OUTPUT_EMA = 0.05      # weight on this turn's delivery
+# Measured once to place the result in a sensible band rather than swept: real
+# delivered value runs a median of 14.3 gold a turn per village against
+# PROSPERITY_VALUE_CEIL of 140, so unscaled a typical village would target ~10
+# of 100. At 2.0 the median lands near 20, a good village near 76, and an
+# excellent one can genuinely max the meter -- which is the spread this is for.
+VILLAGE_OUTPUT_VALUE_SCALE = 2.0
 
 
-def _prosperity_target(raw_value, health_factor):
+def village_goods_wealth_value(village):
+    """A village's per-turn "goods" figure: the smoothed gold-value of what it
+    has actually been delivering (see _deliver_village_yield). Villages carry
+    no upkeep or tax of their own (see Village).
+
+    This used to read `village.farm_output`, which is the DECORATIVE stat
+    worldgen rolls at placement and nothing ever changes -- measured, 0 of 380
+    villages saw it move across 120 turns. So a village's prosperity had
+    exactly one possible target for the entire game and nothing the player did
+    could shift it: the same "a meter that cannot move" defect as the scale bug
+    this function's caller was just fixed for, one layer down."""
+    value = getattr(village, "output_value", None)
+    if value is None:
+        # Never delivered yet (a village founded this turn, or a save from
+        # before this existed). Fall back to the old decorative stat so an
+        # existing game's meters do not all drop to zero on load; the real
+        # figure replaces it on the village's first delivery.
+        return getattr(village, "farm_output", 0) * BASE_VALUE_BY_TIER[1]
+    return value * VILLAGE_OUTPUT_VALUE_SCALE
+
+
+def _prosperity_condition(node):
+    """0..1+ multiplier on a node's prosperity target from how well its own
+    people are actually supplied this turn -- the shortage weights and the
+    luxury bonus, both as fractions (see PROSPERITY_SHORTAGE_WEIGHT).
+
+    Reads what _consume_node_needs recorded earlier this turn. A node that has
+    never consumed yet (a settlement founded this turn, or an old save from
+    before this existed) reads as fully supplied rather than as destitute: it
+    has not failed to feed anyone, it simply has not eaten yet."""
+    shortfall = getattr(node, "prosperity_shortfall", None) or {}
+    # Multiplied, not summed: each shortage takes a share of what is LEFT.
+    # Summing was tried and is wrong at the edges -- the weights add to more
+    # than 1.0, so a node merely short of clothes, timber and firewood hit zero
+    # exactly as if it were starving, and the clamp hid the difference. This
+    # way only Food at a full deficit can reach zero (weight 1.0), which is the
+    # intended meaning: you are destitute when you cannot eat, merely poor when
+    # you are cold and badly dressed.
+    condition = 1.0
+    for need, deficit in shortfall.items():
+        weight = PROSPERITY_SHORTAGE_WEIGHT.get(need, 0.0)
+        condition *= max(0.0, 1.0 - weight * max(0.0, min(1.0, deficit)))
+    luxury = getattr(node, "prosperity_luxury", 0.0) or 0.0
+    return condition + LUXURY_PROSPERITY_BONUS * luxury
+
+
+def _prosperity_target(raw_value, health_factor, condition=1.0):
     return max(0.0, min(PROSPERITY_MAX,
-                        PROSPERITY_MAX * raw_value * health_factor / PROSPERITY_VALUE_CEIL))
+                        PROSPERITY_MAX * raw_value * health_factor * condition
+                        / PROSPERITY_VALUE_CEIL))
 
 
 def seed_prosperity():
@@ -5418,10 +5520,12 @@ def _update_prosperity(world, production_value, consumption_value):
         for sid in nation.meta.get("settlements", []):
             st = world.settlements[sid]
             target = _prosperity_target(
-                settlement_goods_wealth_value(st, world.season, st.tax_income), health)
+                settlement_goods_wealth_value(st, world.season, st.tax_income),
+                health, _prosperity_condition(st))
             st.prosperity += (target - st.prosperity) * PROSPERITY_EASE
         for v in villages_by_fac.get(fac_idx, []):
-            target = _prosperity_target(village_goods_wealth_value(v.farm_output), health)
+            target = _prosperity_target(village_goods_wealth_value(v),
+                                        health, _prosperity_condition(v))
             v.prosperity += (target - v.prosperity) * PROSPERITY_EASE
 
 

@@ -44,18 +44,30 @@ print(f"  ok    none of {scarce} are Timber sources or carry a Timber-style pena
 print("\n--- a shortfall costs prosperity, never population (unlike Food/Firewood) ---")
 before_res = dict(st.resources or {})
 before_prosperity = st.prosperity
+before_short = dict(getattr(st, "prosperity_shortfall", None) or {})
 try:
+    # Consumption records the deficit; the meter itself moves later in the turn
+    # via _update_prosperity. Asserting on the meter here is what this test
+    # used to do, and it was right for the mechanism at the time -- shortages
+    # used to subtract points directly, which is exactly the bug that pinned
+    # every meter in the game at zero (see dev/test_prosperity.py).
     st.resources = {k: v for k, v in before_res.items() if k not in R._TIMBER_SOURCES}
     st.prosperity = 50.0
     R._consume_node_needs(st, w.season, w)
-    assert st.prosperity < 50.0, "a full Timber shortfall should cost prosperity"
+    assert st.prosperity == 50.0, (
+        "consumption must not move the meter directly any more")
+    deficit = (getattr(st, "prosperity_shortfall", None) or {}).get("Timber", 0)
+    assert deficit > 0, "a full Timber shortfall recorded no deficit"
+    assert R._prosperity_condition(st) < 1.0, (
+        "a Timber shortfall should pull the prosperity target down")
     assert not hasattr(st, "turns_without_timber"), (
         "Timber must not grow a starvation-style grace-period counter")
-    print(f"  ok    full shortfall: prosperity 50.0 -> {st.prosperity:.2f}, "
-          f"no population-loss mechanism exists for it")
+    print(f"  ok    full shortfall: deficit {deficit:.2f} recorded, target "
+          f"scaled to {R._prosperity_condition(st):.2f}x, no population loss")
 finally:
     st.resources = before_res
     st.prosperity = before_prosperity
+    st.prosperity_shortfall = before_short
 
 print("\n--- consumption pools across all four sources, biggest stock first ---")
 before_res = dict(st.resources or {})
