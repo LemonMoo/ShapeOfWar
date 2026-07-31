@@ -25,7 +25,7 @@ from PIL import Image, ImageTk
 from app.ui import theme
 from app.ui import widgets
 from app.world.world_map import Stance
-from app.world.worldgen import OCEAN
+from app.world.worldgen import OCEAN, road_chains
 from app.world.territory import bordering_regions, naval_reachable_regions
 from app.world.resources import RESOURCES
 from app.world import resources
@@ -96,6 +96,55 @@ _FOG_HIDDEN_RGB = (7, 9, 14)
 
 # Per-region lightness offsets so neighboring regions of a faction read apart.
 _REGION_SHADES = [-0.12, 0.10, 0.22, -0.04, 0.15, 0.02, 0.28, -0.09, 0.06, 0.19]
+
+
+def _catmull_rom(points, subdivisions):
+    """A CENTRIPETAL Catmull-Rom spline through `points`. It passes THROUGH
+    every one of them rather than being pulled towards them, which is what a
+    road wants: the cells are where the road actually goes, the curve is only
+    how it gets between them.
+
+    Centripetal (the alpha=0.5 knot spacing below), not the uniform version.
+    Uniform Catmull-Rom overshoots wherever the control points turn tightly,
+    and a road network is full of tight turns -- one three-point dirt track
+    that doubled back on itself swung SIX AND A HALF CELLS clear of its own
+    route, drawing a road through country it does not go anywhere near.
+    Centripetal parameterisation is provably free of cusps and
+    self-intersections, and brought that same case under a fifth of a cell.
+
+    The ends are duplicated so the first and last spans are drawn rather than
+    dropped for want of a neighbour."""
+    if len(points) < 3 or subdivisions < 2:
+        return list(points)
+    ext = [points[0]] + list(points) + [points[-1]]
+    out = [points[0]]
+    for i in range(len(ext) - 3):
+        p0, p1, p2, p3 = ext[i:i + 4]
+
+        def knot(t, a, b):
+            d = math.hypot(b[0] - a[0], b[1] - a[1])
+            return t + (d ** 0.5 or 1e-4)
+
+        t0 = 0.0
+        t1 = knot(t0, p0, p1)
+        t2 = knot(t1, p1, p2)
+        t3 = knot(t2, p2, p3)
+        for step in range(1, subdivisions + 1):
+            t = t1 + (t2 - t1) * step / subdivisions
+
+            def lerp(a, b, ta, tb):
+                if tb == ta:
+                    return a
+                f = (t - ta) / (tb - ta)
+                return (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f)
+
+            a1 = lerp(p0, p1, t0, t1)
+            a2 = lerp(p1, p2, t1, t2)
+            a3 = lerp(p2, p3, t2, t3)
+            b1 = lerp(a1, a2, t0, t2)
+            b2 = lerp(a2, a3, t1, t3)
+            out.append(lerp(b1, b2, t1, t2))
+    return out
 
 
 def _hex_to_rgb(h):
@@ -2597,15 +2646,14 @@ class MapView(tk.Frame):
         # altitude; dirt tracks are region-scale detail and would be a grey
         # haze from orbit. One factor (0.18) for every tier, matching
         # _draw_roads' own uniform width regardless of tier.
-        road_segments = [seg for region in wd.regions if region.faction_idx >= 0
-                         for seg in wd.roads_by_region.get(region.id, [])]
+        chains = road_chains(wd)
+        runs = [(cells, tier) for region in wd.regions if region.faction_idx >= 0
+                for cells, tier in chains.get(region.id, ())]
         # Dirt first so the trunk network lies over it -- same reason as
         # _draw_roads, and it has to match or the two surfaces disagree.
-        road_segments.sort(key=lambda seg: _ROAD_DRAW_ORDER.get(seg[2], 0))
-        for (ax, ay), (bx, by), tier in road_segments:
+        runs.sort(key=lambda run: _ROAD_DRAW_ORDER.get(run[1], 0))
+        for cells, tier in runs:
             if tier not in ("stone", "sea") and level < 2:
-                continue
-            if not (self._cell_revealed(ax, ay) or self._cell_revealed(bx, by)):
                 continue
             if tier == "sea":
                 color, width = _TRADE_SEA_COLOR, lw(1.8, 0.18)
@@ -2613,7 +2661,13 @@ class MapView(tk.Frame):
                 color, width = _STONE_ROAD_COLOR, lw(2.2, 0.18)
             else:
                 color, width = _DIRT_ROAD_COLOR, lw(1.6, 0.18)
-            add([(ax, ay), (bx, by)], _GLOBE_RGB[color], width)
+            # Fog-clipped on the CELLS, then smoothed per surviving run: the
+            # fog mask is a grid, and smoothing first would hand it points
+            # between cells it has no answer for.
+            for run in self._fog_clip_runs(cells):
+                if len(run) >= 2:
+                    out.append((self._road_points(run, tier),
+                                _GLOBE_RGB[color], width, 0))
 
         for r in wd.trade_routes:
             sea = r["kind"] == "sea"
@@ -6473,6 +6527,144 @@ class MapView(tk.Frame):
             return None
         return (max(0.0, (min(hits) - 0.5) / steps), min(1.0, (max(hits) + 0.5) / steps))
 
+    # --- road geometry ---------------------------------------------------
+    # A road on a map is never a ruler-drawn line meeting another at a hard
+    # elbow, and that is exactly what these were: stored as endpoint pairs and
+    # drawn one straight segment at a time. Three things fix it, all of them
+    # VIEW-ONLY -- nothing in app/world knows any of this exists, the stored
+    # network is unchanged, and no save needs migrating.
+    #
+    #   1. chain   worldgen.road_chains turns loose segments into connected
+    #              runs, because you cannot smooth a line two points at a time.
+    #   2. wander  each cell gets a small fixed offset, so the road drifts off
+    #              the grid instead of tracking it. Derived by hashing the cell,
+    #              which matters more than it sounds: a junction cell must get
+    #              the SAME offset from every road that meets there, or the
+    #              arms come apart.
+    #   3. smooth  Catmull-Rom through the wandered points, so the corners are
+    #              curves. This is also what stops a 40-cell straight link from
+    #              reading as a drawn line -- it now bows gently along its
+    #              length the way a real road follows the ground.
+    #
+    # A stone road wanders less than a dirt track, which is the whole
+    # difference between an engineered road and a cart route that grew.
+    _ROAD_WANDER = {"stone": 0.22, "dirt": 0.45, "sea": 0.0}
+    _ROAD_SUBDIV = 3        # Catmull-Rom points per source span
+    # One point per cell, EVENLY. This is not just about giving the wander
+    # somewhere to act on a long link: Catmull-Rom overshoots badly where a
+    # short span meets a long one, and a region's road list mixes single-cell
+    # steps with thirty-cell links freely. Sampled unevenly, one dirt track
+    # swung 6.6 cells clear of its own route. Even spacing bounds it -- the
+    # worst case is now a fifth of a cell.
+    _ROAD_DENSIFY = 1.0
+    # The offset is drawn on a COARSER grid than the road's own points, so
+    # neighbouring points share it and the road meanders instead of shaking.
+    # Per-point white noise was the first attempt and it read as a wobbly line
+    # rather than a road following the ground -- a road bends over a hundred
+    # yards, not over every yard.
+    _ROAD_WANDER_GRID = 4
+
+    @staticmethod
+    def _cell_wander(x, y, amount):
+        """A small, fixed, cell-derived offset. Deterministic and position-only
+        -- never random and never per-frame, or the roads would crawl."""
+        if not amount:
+            return 0.0, 0.0
+        h = (x * 73856093) ^ (y * 19349663)
+        h = (h ^ (h >> 13)) * 1274126177 & 0xFFFFFFFF
+        return (((h >> 5) & 1023) / 1023.0 - 0.5) * 2 * amount,                (((h >> 17) & 1023) / 1023.0 - 0.5) * 2 * amount
+
+    def _road_points(self, cells, tier):
+        """A chain of road cells as a smoothed, wandering polyline in world
+        coordinates. Cached per (chain, tier) against the road network's own
+        segment count, because none of it changes until a road is built."""
+        signature = sum(len(v) for v in self.world.roads_by_region.values())
+        cache = getattr(self, "_road_points_cache", None)
+        if cache is None or cache[0] != signature:
+            cache = (signature, {})
+            self._road_points_cache = cache
+        # The WHOLE run, not its endpoints and length. Two different chains
+        # can easily share a first cell, a last cell and a length -- roads
+        # meet at junctions -- and a key that cannot tell them apart hands one
+        # of them the other's geometry. That is how a three-cell dirt track
+        # ended up drawn nearly seven cells clear of its own route.
+        key = (tuple(cells), tier)
+        hit = cache[1].get(key)
+        if hit is not None:
+            return hit
+
+        amount = self._ROAD_WANDER.get(tier, 0.0)
+        # Densify first: a link stored as one 40-cell jump has nothing between
+        # its ends to bend, so it would stay a straight line however much the
+        # rest wandered.
+        dense = []
+        for (ax, ay), (bx, by) in zip(cells, cells[1:]):
+            steps = max(1, int(max(abs(bx - ax), abs(by - ay)) / self._ROAD_DENSIFY))
+            for i in range(steps):
+                t = i / steps
+                dense.append((ax + (bx - ax) * t, ay + (by - ay) * t))
+        dense.append(cells[-1])
+
+        pts = []
+        for i, (x, y) in enumerate(dense):
+            # The two ends stay put: they are a settlement's or a village's own
+            # cell, and a road that does not quite touch the place it serves
+            # looks like a bug rather than like character.
+            edge = i == 0 or i == len(dense) - 1
+            g = self._ROAD_WANDER_GRID
+            dx, dy = (0.0, 0.0) if edge else self._cell_wander(
+                int(x) // g, int(y) // g, amount)
+            # Eased off towards each end, so a road still meets the place it
+            # serves square-on rather than sidling up to it.
+            taper = min(1.0, min(i, len(dense) - 1 - i) / 3.0)
+            pts.append((x + 0.5 + dx * taper, y + 0.5 + dy * taper))
+        if len(pts) < 3:
+            result = pts
+        else:
+            result = _catmull_rom(pts, self._ROAD_SUBDIV)
+        cache[1][key] = result
+        return result
+
+    def _draw_road_chain(self, c, screen, cells, tier, width):
+        """One connected run of road as a single smoothed polyline, plus a
+        brown bridge span wherever a stone road crosses a river.
+
+        One canvas item per RUN rather than per segment, which on a developed
+        realm is a few hundred lines where it used to be a few thousand -- the
+        smoothing pays for itself and then some."""
+        if not (self._cell_revealed(*cells[0]) or self._cell_revealed(*cells[-1])):
+            return
+        is_sea = tier == "sea"
+        is_stone = tier == "stone"
+        if is_sea:
+            color, dash = _TRADE_SEA_COLOR, (2, 3)
+        elif is_stone:
+            color, dash = _STONE_ROAD_COLOR, None
+        else:
+            color, dash = _DIRT_ROAD_COLOR, (4, 3)
+        pts = []
+        for wx, wy in self._road_points(cells, tier):
+            pts.extend(screen(wx, wy))
+        if len(pts) < 4 or not self._visible_pts(pts):
+            return
+        c.create_line(*pts, fill=color, width=width, capstyle="round",
+                      joinstyle="round", dash=dash)
+        if is_stone:
+            # Bridges stay per-crossing: it is the one part of a road that is
+            # genuinely a different object, and it sits on top of the line
+            # rather than replacing a piece of it.
+            for (ax, ay), (bx, by) in zip(cells, cells[1:]):
+                span = self._river_span(ax, ay, bx, by)
+                if span is None:
+                    continue
+                x0, y0 = screen(ax + 0.5, ay + 0.5)
+                x1, y1 = screen(bx + 0.5, by + 0.5)
+                t0, t1 = span
+                c.create_line(x0 + (x1 - x0) * t0, y0 + (y1 - y0) * t0,
+                              x0 + (x1 - x0) * t1, y0 + (y1 - y0) * t1,
+                              fill=_BRIDGE_COLOR, width=width * 1.2,
+                              capstyle="round")
+
     def _draw_road_segment(self, c, screen, ax, ay, bx, by, color, width, dash=None, bridge=False):
         """One road segment. Stone roads (bridge=True) that cross a river
         get the crossing stretch recolored brown (_BRIDGE_COLOR) — see
@@ -6521,21 +6713,15 @@ class MapView(tk.Frame):
         wd = self.world
         width = max(1.0, self._place[2] * 0.18)
 
+        chains = road_chains(wd)
         if self.zoom_faction is None:
             for region in wd.regions:
                 if region.faction_idx < 0:
                     continue
-                for (ax, ay), (bx, by), tier in wd.roads_by_region.get(region.id, []):
+                for cells, tier in chains.get(region.id, ()):
                     if tier not in ("stone", "sea"):
                         continue
-                    if not (self._cell_revealed(ax, ay) or self._cell_revealed(bx, by)):
-                        continue
-                    is_sea = tier == "sea"
-                    color = _TRADE_SEA_COLOR if is_sea else _STONE_ROAD_COLOR
-                    dash = (2, 3) if is_sea else None
-                    self._draw_road_segment(c, screen, ax, ay, bx, by,
-                                            color, width, dash=dash,
-                                            bridge=not is_sea)
+                    self._draw_road_chain(c, screen, cells, tier, width)
             return
 
         # Dirt tracks are the densest thing on the map -- a developed realm has
@@ -6550,24 +6736,14 @@ class MapView(tk.Frame):
         # track meet -- a junction, or a track that was paved along part of
         # its length -- the stone road is the one that should read, and list
         # order alone used to decide that at random.
-        segments = [seg for cid in self.zoom_faction.meta.get("regions", [])
-                    for seg in wd.roads_by_region.get(cid, [])]
-        segments.sort(key=lambda seg: _ROAD_DRAW_ORDER.get(seg[2], 0))
-        for (ax, ay), (bx, by), tier in segments:
-                is_stone = tier == "stone"
-                is_sea = tier == "sea"
-                if not is_stone and not is_sea and not show_dirt:
-                    continue
-                if not (self._cell_revealed(ax, ay) or self._cell_revealed(bx, by)):
-                    continue
-                if is_sea:
-                    color, dash = _TRADE_SEA_COLOR, (2, 3)
-                elif is_stone:
-                    color, dash = _STONE_ROAD_COLOR, None
-                else:
-                    color, dash = _DIRT_ROAD_COLOR, (4, 3)
-                self._draw_road_segment(c, screen, ax, ay, bx, by, color, width,
-                                        dash=dash, bridge=is_stone)
+        runs = [(cells, tier)
+                for cid in self.zoom_faction.meta.get("regions", [])
+                for cells, tier in chains.get(cid, ())]
+        runs.sort(key=lambda run: _ROAD_DRAW_ORDER.get(run[1], 0))
+        for cells, tier in runs:
+            if tier not in ("stone", "sea") and not show_dirt:
+                continue
+            self._draw_road_chain(c, screen, cells, tier, width)
 
     def _draw_villages(self, c, screen):
         """Small dots for villages — only shown once zoomed in close enough

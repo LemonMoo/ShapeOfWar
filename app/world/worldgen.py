@@ -1581,6 +1581,69 @@ def add_road_segments(world, region_id, segments, tier):
                 if frozenset((a, b)) not in covered)
 
 
+def road_chains(world):
+    """Every road in the world as CONNECTED RUNS of cells rather than a bag of
+    loose segments, one run per (region, tier).
+
+    Roads are stored as endpoint pairs, and a region's list mixes single-cell
+    steps from local paths with long straight links from worldgen's MST. Drawn
+    one segment at a time -- which is how it was drawn until now -- that gives
+    exactly the ruler-straight runs meeting at hard elbows a road on a map
+    never has. You cannot smooth a line you are drawing two points at a time;
+    you need to know what comes next, which means chaining first.
+
+    Runs are built by walking endpoint adjacency within a tier, so a junction
+    ends the runs that meet there and each arm is its own polyline. A cell
+    with three roads leaving it is a fork, and a fork should not be smoothed
+    through as if it were a bend.
+
+    Cached on the world with the same segment-count signature road_cells uses:
+    the network genuinely grows during play, and keying on the total count
+    means no road-adding site has to remember to invalidate anything.
+    """
+    signature = sum(len(segs) for segs in world.roads_by_region.values())
+    cached = getattr(world, "_road_chains_cache", None)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+
+    out = {}
+    for region_id, segs in world.roads_by_region.items():
+        chains = []
+        by_tier = {}
+        for a, b, tier in segs:
+            by_tier.setdefault(tier, []).append((tuple(a), tuple(b)))
+        for tier, pairs in by_tier.items():
+            neighbours = {}
+            for a, b in pairs:
+                neighbours.setdefault(a, set()).add(b)
+                neighbours.setdefault(b, set()).add(a)
+            unused = set(map(frozenset, pairs))
+            # Start from the ends and the junctions, so a run is only closed
+            # where the road really ends or really forks. Whatever is left
+            # after that is a loop, and any cell on it will do as a start.
+            starts = [c for c, n in neighbours.items() if len(n) != 2]
+            for start in starts + sorted(neighbours):
+                for first in list(neighbours.get(start, ())):
+                    if frozenset((start, first)) not in unused:
+                        continue
+                    run = [start, first]
+                    unused.discard(frozenset((start, first)))
+                    while True:
+                        here = run[-1]
+                        if len(neighbours.get(here, ())) != 2:
+                            break   # an end, or a junction: stop the run here
+                        nxt = next((n for n in neighbours[here]
+                                    if frozenset((here, n)) in unused), None)
+                        if nxt is None:
+                            break
+                        unused.discard(frozenset((here, nxt)))
+                        run.append(nxt)
+                    chains.append((run, tier))
+        out[region_id] = chains
+    world._road_chains_cache = (signature, out)
+    return out
+
+
 def road_cells(world):
     """Every cell any road in the world runs through, as a set — the thing
     that makes `_elev_cost`'s road discount a cheap set lookup instead of a
