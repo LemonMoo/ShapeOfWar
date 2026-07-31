@@ -163,11 +163,17 @@ NEUTRAL_TERRAIN = {"speed": 1.0, "defender": 1.0, "ranged": 1.0}
 # travel.WEATHER_TRAVEL_RATE): dry hard ground is GOOD to fight on. Making
 # every kind of weather bad would make them interchangeable, and the point of
 # having four is that they are not.
+#
+# The accuracy figures COMPOUND with the unit's own, and were first tuned
+# against an archer at 0.80. Dropping that to 0.60 (see unit_types) took a
+# severe storm from "archers win 72%" to "archers win 0%" -- the same
+# multiplier, a very different fight, because it multiplies. They were raised
+# to match. If archer accuracy is ever changed again, these move with it.
 BATTLE_WEATHER = {
     weather.DROUGHT:  {"speed": 1.00, "ranged": 1.00, "accuracy": 1.00},
-    weather.STORM:    {"speed": 0.88, "ranged": 0.85, "accuracy": 0.70},
-    weather.BLIZZARD: {"speed": 0.78, "ranged": 0.75, "accuracy": 0.80},
-    weather.FOG:      {"speed": 0.97, "ranged": 0.55, "accuracy": 0.85},
+    weather.STORM:    {"speed": 0.88, "ranged": 0.85, "accuracy": 0.82},
+    weather.BLIZZARD: {"speed": 0.78, "ranged": 0.75, "accuracy": 0.88},
+    weather.FOG:      {"speed": 0.97, "ranged": 0.55, "accuracy": 0.90},
 }
 NEUTRAL_WEATHER = {"speed": 1.0, "ranged": 1.0, "accuracy": 1.0}
 

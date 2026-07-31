@@ -95,8 +95,28 @@ UNIT_TYPES = {
     },
     "archer": {
         "name": "Archer", "shape": "square", "radius": 5,
-        "max_hp": 20, "speed": 30, "range": 180, "damage": 6, "cooldown": 0.9,
-        "ranged": True, "accuracy": 0.8, "equipment": [],
+        # damage 5.5, down from 6, on top of the accuracy cut below. Also not
+        # a slope: at 5 the archer army fell from 62% of clear-weather fights
+        # to 19%. Between the two changes an archer-heavy army goes from
+        # winning every clear-weather fight to winning most of them, which is
+        # what "the strong choice" should look like rather than "the choice".
+        "max_hp": 20, "speed": 30, "range": 180, "damage": 5.5, "cooldown": 0.9,
+        # 0.60, down from 0.80. Measured across 36 battles per condition,
+        # archer-heavy against foot:
+        #
+        #   accuracy   clear   severe storm   severe fog
+        #     0.80      100%        72%          67%
+        #     0.65       97%        31%          14%
+        #     0.60       92%         3%           8%
+        #     0.55       72%         3%           0%
+        #
+        # Worth reading before touching this again, because it is not a
+        # slope. Clear-weather dominance barely moves until 0.55, while bad
+        # weather falls off a cliff -- archers either get enough volleys away
+        # before the line reaches them or they do not, and accuracy sits
+        # right on that threshold. Range is not the lever either: at 130
+        # instead of 180 they still won 100% of clear-weather fights.
+        "ranged": True, "accuracy": 0.60, "equipment": [],
     },
     # --- The Assassin (Goblins only) ----------------------------------------
     # A counter-archer, not a duellist. Twin daggers means a very fast, very
