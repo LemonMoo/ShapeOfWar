@@ -3,21 +3,20 @@
 Python/Tkinter desktop 4X strategy game. Single developer, turn-based, procedurally
 generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 
-**Last release: v0.4.0, "The Cartographer Update"** — the whole economy
-rework (§14), the rest of its plan (§16), and the Cartographer's commissioned
-surveys, released together. Check
+**Last release: v0.8.0, "The Sound of It"** — audio and a settings screen,
+every biome finally visible on the political map, roads branching from
+settlements, and the archer pass. Check
 `gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting this
 line — this repo ships fast, sometimes several releases in one day.
 
-**Ten commits sit on `master` unreleased since then.** §17: the domestic
-logistics chain was severed in four places (nothing manufactured existed
-anywhere), two reported UI bugs, and the Mining Camp that closes §15.5's supply
-hole. §18: prosperity was a meter that could not move, and phase A of the
-**biome overhaul, which is mid-flight and is the main thread to pick up**.
-Biome phases **B, C and F are now DONE too** — species homelands, native
-terrain aptitude, and the fantasy naming layer — plus a Stormlight-inspired
-naming convention for Humans. See §19 for the plan and §§20-22 for what was
-built. Working tree is clean; the 30-script suite passes.
+**Two commits sit on `master` unreleased:** weather phase 4 (the map overlay,
+§29) and the lake rework (§30). Working tree is clean; the **39-script suite
+passes**.
+
+**Two long threads finished since the last handoff.** The **biome overhaul**
+is complete — all six phases, §§19-24. The **weather system** is complete —
+all five phases, §10 plus §§27-29. Neither is a live thread any more; §31 is
+where to look for what actually is.
 
 ## HOW THIS PROJECT WANTS TO BE WORKED ON
 
@@ -27,78 +26,88 @@ useful rather than busy.
 - **The user playtests in the game.** Do NOT grind on balance tuning.
   Get the mechanic correct, measure ONCE for direction, pick a sensible
   value, and then **say plainly what may need balancing and name the exact
-  constant**. That hand-off is the deliverable. Multi-trial sweeps chasing
-  an optimum are wasted effort here and were explicitly asked to stop.
+  constant**. That hand-off is the deliverable. This was reinforced sharply
+  during the archer pass (§26): a long sweep across accuracy values got the
+  explicit instruction "don't spend more than a couple minutes running the
+  tournament, I'd like to move on, balance can be ironed out later."
 - **Correctness still deserves real verification.** "Does the chain work,
   does anything go negative, does a village starve, does the panel build"
-  is not balancing — test it properly. The 27-script suite in `dev/` is the
-  standing gate and everything currently passes.
-- **This sim has real run-to-run variance** from an identical world and
-  seed. A single before/after comparison can genuinely mislead. The lesson
-  is NOT "run more trials" — it is *don't lean on small measured deltas at
-  all*. Act only on effects large enough to be obvious. §16.4 is a live
-  example of that going wrong and being caught.
+  is not balancing — test it properly. The 39-script suite in `dev/` is the
+  standing gate.
+- **Do not put a noisy measurement behind an assert.** This sim has real
+  run-to-run variance. A win-rate threshold over a handful of battles is not
+  a gate, it is a coin flip that fails the build — it happened twice in one
+  session (§26). Measure, RECORD the number in the output, assert on the
+  structural fact instead.
+- **Act only on effects large enough to be obvious.** §16.4 is a live example
+  of a small measured delta misleading and being caught.
 - **Ground new mechanics in how the real thing worked** before inventing
-  one. It has produced better rules than the obvious invention every time
-  it has been tried — see the Guild (§14.5), surveys (§16.3) and the claim
-  rework (§16.4).
+  one. It has produced better rules than the obvious invention every time it
+  has been tried — see the Guild (§14.5), surveys (§16.3), the claim rework
+  (§16.4), weather on the roads (§27) and the relative-neighbourhood road
+  rule (§25.3).
 
 ## WHAT IS OPEN, ROUGHLY BY VALUE
 
-1. **THE BIOME OVERHAUL, phases D and E.** Phases A (the matrix), B
-   (homelands), C (terrain aptitude) and F (naming) have all shipped. **§19
-   is the plan.** Phase D is biome-gated buildings and carries the
-   **highest unfairness risk of the chosen mechanics** — each building has
-   to be genuinely equivalent in value, which is hard to verify; §19.3
-   suggests making them variations on one effect. Phase E (terrain in
-   movement and battle) is the biggest build of the set and furthest from
-   everything else.
-2. **Weather Phases 2-4** — logistics, battle, visual. Phases 0 and 1 are
-   built and shipped; nothing since has touched weather. The biggest coherent
-   feature outside the biome work. See **§10**, and read §16 first because
-   Phase 2 (logistics) now lands on top of a much-changed economy.
-3. **Cartographer D — Charts as a tradeable good.** The last of the four
-   approved Guild mechanics; A, B and C all shipped. See §15.4.
-4. **Supply-driven pricing** — a city's price falling as its stock rises.
-   `unit_price`'s surplus factor already half does it. See §16.2.
-5. **The balance lab has no economy section** — all 217 levers in
+See **§31** for the detail on the first three; the rest are older and carry
+their own section references.
+
+1. **Supply-driven pricing** — a city's price falling as its stock rises.
+   `unit_price`'s surplus factor already half does it. See §16.2. This is now
+   the largest unbuilt economic idea.
+2. **The balance lab has no economy section** — all 217 levers in
    `app/core/tuning.py` are battle-side, so every economy number is
-   source-only. Given how much of the economy is now tunable constants,
-   adding a `resources` section would pay for itself. See §15.5.
-6. **`Settlement.tax_income` is a dead stat** — wire it up or delete it.
-7. **The faction health factor is pinned at its 0.5 floor 55% of the time**,
+   source-only. Given how much of the economy is tunable constants, adding a
+   `resources` section would pay for itself. See §15.5.
+3. **Archers are unresolved, and the reason is interesting.** See §26. Every
+   output-side lever collapses their bad-weather record long before it dents
+   their clear-weather dominance, and RANGE does nothing at all — at a third
+   less range they still won every clear-weather fight. That says the cause
+   is not a stat.
+4. **Cartographer D — Charts as a tradeable good.** The last of the four
+   approved Guild mechanics; A, B and C all shipped. See §15.4.
+5. **`Settlement.tax_income` is a dead stat** — wire it up or delete it.
+6. **The faction health factor is pinned at its 0.5 floor 55% of the time**,
    halving every prosperity target, because production value runs under half
    of consumption value for most factions most turns. Found while fixing
    prosperity and deliberately not chased — it is a separate question about
    how those two quantities are measured. `_faction_health_factor`. See §18.1.
+7. **A foothold can still end up with zero villages** (1 in 32 worlds at last
+   count). Latent worldgen edge case, never chased.
 
-*Mining was #2 on this list and is now addressed — see §17.3. The framing was
-also wrong and worth correcting: it is not that mining is broken, it is that
-ore is unavailable until you claim a mountain region, which takes real time.
-Prosperity was #2 after that and is now fixed — see §18.1.*
-
-**Two loose ends left deliberately:**
-- `_VILLAGE_REVEAL_SPAN` (map_view.py, `26`) is a first-pass estimate, not
-  a playtested number — see §13.3.
+**Loose ends left deliberately:**
 - `flatgl_timing.log` instrumentation (`MapView._log_flatgl_timing`) is
   still active. The user was asked once whether to strip it or keep it as a
-  tripwire and the conversation moved on. Ask before removing. See §12.
+  tripwire and the conversation moved on. **Ask before removing.** See §12.
+- Both audio composers (cynicmusic, rubberduck) ask for credit without
+  requiring it. There is no credits screen. If one is ever added they belong
+  on it — see `assets/audio/LICENSES.md`.
 
-**Reading order for the sections below:** **§19 first** if you are picking up
-the biome overhaul, which is the live thread. §18 and §17 are the most recently
-changed code; §14 and §16 are the rest of the economy's current state. §12's
-two methodology lessons matter before touching anything GL-related. Everything
-else is stable background.
+**Reading order for the sections below:** **§31 first** — it is the only
+forward-looking section. Then §25 (roads, which changed a lot and has a
+reusable idea in it), §26 (why archers are still unresolved), §28 (audio, the
+newest subsystem). §12's two methodology lessons matter before touching
+anything GL-related. §§19-24 and §§10/27-29 are now closed records rather than
+plans. Everything else is stable background.
 
-**The suite is 27 scripts and all of them pass.** Run it after every change:
+**The suite is 39 scripts and all of them pass.** Run it after every change:
 
 ```bash
-for t in test_labor test_gold test_cartographer test_timber_upkeep test_stockpile test_spoilage test_claim_cost test_panels test_buildings test_build_menu test_logistics_reach test_mining_camp test_prosperity test_succession test_battle_death test_elim test_commander_gate test_gate2 test_move_anim; do python dev/$t.py dev/worlds/dev160.pkl | tail -1; done
+for f in dev/test_*.py; do out=$(python "$f" 2>&1); [ $? -ne 0 ] && echo "FAIL $f" && echo "$out" | tail -6; done; echo done
 ```
 
-The rest (`test_tuning`, `test_weather`, `test_weather_economy`, `test_plates`,
-`test_sea_bridge`, `test_new_game`, `test_keys`, `test_biomes`) take no world
-argument. `dev160.pkl` is the fast one; `dev560.pkl` is the big late-game world.
+Five of them (`test_battle_death`, `test_commander_gate`, `test_elim`,
+`test_gate2`, `test_succession`) require a world path and fail with
+`IndexError: list index out of range` without one — pass
+`dev/worlds/dev560.pkl`. `dev160.pkl` is the fast one; `dev560.pkl` is the big
+late-game world. `dev/test_lakes.py` generates real worlds and is slow by
+nature; that is the only honest way to test worldgen.
+
+**Environment:** run the suite with `PYTHONIOENCODING=utf-8` or Unicode in the
+output crashes on cp1252. `build.bat` must be run from PowerShell as
+`cmd /c ".\build.bat < NUL"` — it ends in `pause`. **It cannot overwrite the
+exe while the game is running**, and the user often has it open; check for a
+`ShapesOfWar` process and ask rather than killing it.
 
 ---
 
@@ -688,7 +697,7 @@ geometry itself, not just the height composition on top of it.
 
 ---
 
-## 10. Regional weather — Phases 0-1 done, Phases 2-4 not started
+## 10. Regional weather — COMPLETE (phases 0-1 here, 2-4 in SS27-29)
 
 Several design-question rounds preceded any code, same as the plate rework.
 Decided: per-region (not world-wide), multi-turn events (not per-turn
@@ -708,14 +717,14 @@ overlay.
 1. **Weather core** (done) — event generation only, no wiring.
 2. **Economy** (done) — Growing/Plant-stage weather modifies the eventual
    Harvest; surfaces through the existing alert pipe.
-3. **Logistics** (not started) — a genuinely new live per-turn slowdown
+3. **Logistics** (DONE — see S27) — a genuinely new live per-turn slowdown
    mechanism (today `turn_progress` is a flat `+= 1` and commander/ship
    movement is a flat cells-per-turn; neither varies turn-to-turn at all),
    built generically, then hung with weather.
-4. **Battle** (not started) — its own project per the user's explicit
+4. **Battle** (DONE — see S28) — its own project per the user's explicit
    answer; do at least a basic sanity tournament pass even though full
    rigor wasn't required, so nothing ships silently unplayable.
-5. **Visual** (not started) — map/globe overlay, deliberately last so it's
+5. **Visual** (DONE — see S29) — map overlay, deliberately last so it's
    built against settled mechanics rather than redone when tuning changes
    what needs showing.
 
@@ -2115,7 +2124,7 @@ realm before shipping.
 
 ---
 
-## 20. Biome phase B — species homelands (DONE, unreleased)
+## 20. Biome phase B — species homelands (SHIPPED)
 
 Phase B of §19. Elves open in forest, Dwarves in mountain and highland, Orcs
 in savannah, Goblins in jungle and swamp.
@@ -2217,7 +2226,7 @@ avoid.
 
 ---
 
-## 21. Biome phase F — the naming layer, and a voice for Humans (DONE, unreleased)
+## 21. Biome phase F — the naming layer, and a voice for Humans (SHIPPED)
 
 ### 21.1 Named country over mechanical biome
 
@@ -2262,7 +2271,7 @@ Sasasshelter. Every species benefits; only the join is touched.
 
 ---
 
-## 22. Biome phase C — terrain aptitude and acclimatisation (DONE, unreleased)
+## 22. Biome phase C — terrain aptitude and acclimatisation (SHIPPED)
 
 A people works its own country better. `terrain_aptitude` runs 0.85 on wholly
 alien ground up to 1.15 on wholly native.
@@ -2330,7 +2339,7 @@ a tweak meant to fix spawn placement will silently move the economy too.
 
 ---
 
-## 23. Biome phase D — one terrain building, four kinds of country (DONE, unreleased)
+## 23. Biome phase D — one terrain building, four kinds of country (SHIPPED)
 
 Phase D of §19. The risk §19.3 names is real: twelve bespoke buildings cannot
 be verified equal in value, and getting it wrong quietly makes some homelands
@@ -2385,7 +2394,7 @@ reintroduce:
 
 ---
 
-## 24. Biome phase E — terrain in movement and in battle (DONE, unreleased)
+## 24. Biome phase E — terrain in movement and in battle (SHIPPED)
 
 Phase E of §19, built in two halves.
 
@@ -2461,3 +2470,291 @@ every multiplier stays inside that band (speed ≥ 0.70, defender ≤ 1.25, rang
 play:** the 1.20x mountain defender is the one most likely to feel wrong in
 either direction, and an archer-heavy species fighting in jungle is the matchup
 to watch.
+
+---
+
+## 25. Roads — three reworks, and one idea worth reusing
+
+Roads changed more than anything else this session, across three reports that
+turned out to be one subject.
+
+### 25.1 They are drawn as routes, not segments
+
+Roads are STORED as endpoint pairs (`world.roads_by_region`), and a region's
+list mixes single-cell steps from local paths with thirty-cell straight links
+from worldgen's MST. Drawn one segment at a time — which is how it was drawn
+until now — that gives exactly the ruler-straight runs meeting at hard elbows
+that got reported with a screenshot.
+
+You cannot smooth a line you are drawing two points at a time, so:
+
+- `worldgen.road_chains(world)` joins the loose segments into connected runs,
+  one per tier, breaking at real ends and real junctions. 2,982 segments
+  become 351 runs on a developed save, nothing lost. Cached on the same
+  segment-count signature `road_cells` uses.
+- `MapView._road_points` resamples a run evenly, offsets each point by a
+  small amount **hashed from the CELL**, and smooths with a **centripetal**
+  Catmull-Rom.
+- Both renderers draw runs.
+
+Three things there are load-bearing and easy to undo by accident:
+
+* **The offset is hashed from the cell, not the run.** Every road meeting at
+  a junction must be displaced identically or the arms come apart.
+* **Centripetal, not uniform.** Uniform Catmull-Rom overshoots on tight turns
+  and a road network is full of them; one three-point dirt track that doubled
+  back swung six and a half cells clear of its own route.
+* **Both ends are pinned**, so a road still meets the place it serves.
+
+Measured: the drawn road strays a mean of 0.16 cells from its real route for
+stone and 0.39 for dirt, worst 0.72. `dev/test_road_geometry.py` holds that
+under one cell, because character is the point and a road drawn through
+country it does not pass near is a bug.
+
+### 25.2 Cut into the ground, and the close-zoom lag
+
+Every road is drawn TWICE: a darker, wider band (the cutting, the churned
+verge) and the surface sitting inside it. A dirt track's surface runs broken
+and narrower so the ground shows through in patches; a stone road runs solid
+and fills its cut. `_ROAD_CUT_DARKEN`, `_ROAD_CUT_WIDTH`,
+`_DIRT_SURFACE_DASH`, `_DIRT_SURFACE_NARROW`.
+
+The reported close-zoom lag was **self-inflicted by 25.1**: one spline control
+point per cell took a developed realm from 5,964 drawn points to 15,786. That
+density only ever existed to stop *uniform* Catmull-Rom overshooting, and the
+spline became centripetal two commits later, so it had been buying nothing
+since. Halved to a point every two cells: 7,938 points, accuracy unchanged.
+
+**If road drawing ever feels heavy again, look at `_ROAD_DENSIFY` and
+`_ROAD_SUBDIV` first.**
+
+### 25.3 The relative neighbourhood graph — reusable
+
+Two separate reports ("so many roads overlaying on top of one another", and
+"roads should branch out from cities, villages and towns naturally") have the
+same answer, and it is worth knowing by name.
+
+A link A-B is dropped when some third node C is closer to BOTH ends than they
+are to each other — because the road already goes there via C, and building
+A-B as well buys a shortcut nobody needs. That is the **relative
+neighbourhood graph**, and it is the rule that makes a network BRANCH, with
+roads meeting at the places between things instead of every pair getting its
+own private track.
+
+Applied in two places:
+
+- `resources._connect_new_village_to_region` — village mesh. 36 links become
+  26 on a 12-village cluster.
+- `construction._find_road_routes` — settlements. Replaces
+  `_find_road_path`, which returned exactly ONE road to the nearest
+  settlement and therefore built a CHAIN: every new town hanging off one
+  older town, a city with three towns around it connected to one. Re-routing
+  all 42 settlements on a developed save: 42 stone roads become 56, mean 1.33
+  each, never more than 2.
+
+`_find_road_routes` returns routes best-first; **the first entry keeps the old
+meaning exactly** — it is the one the settlement's construction waits on, and
+the sea-lane fallback is still all-or-nothing so an island city gets a lane
+and never a land branch alongside it.
+
+### 25.4 Stone over dirt
+
+`worldgen.add_road_segments` is now the single entry point for adding road
+segments (all four call sites go through it). A higher tier replaces a lower
+one on the same ground rather than leaving both in the list forever, and a
+lower tier laid along an existing higher one adds nothing. Sea lanes are rank
+0 and neither displace nor are displaced — a lane and a road can share a
+port's cell. Both renderers also paint dirt first and the trunk network over
+it, so a junction always reads as stone.
+
+---
+
+## 26. Archers — changed, still unresolved, and the reason matters
+
+An archer-heavy army won **100%** of clear-weather fights against foot. That
+is not a strong choice, it is the only choice.
+
+Now at accuracy 0.60 (from 0.80) and damage 5.5 (from 6). But the measurements
+are more useful than the values, because **both numbers sit on cliffs rather
+than slopes**, n=36 per point, archers against foot in clear weather:
+
+| accuracy | 0.80 | 0.65 | 0.60 | 0.55 |
+|---|---|---|---|---|
+| clear-weather wins | 100% | 97% | 92% | 72% |
+
+| damage | 6.0 | 5.5 | 5.0 |
+|---|---|---|---|
+| clear-weather wins | 69% | 62% | 19% |
+
+**Range is not a lever at all.** At 130 instead of 180 they still won 100% of
+clear-weather fights. That is the finding worth carrying: whatever makes
+massed bows dominant is not how far they shoot, and every output-side lever
+tried so far collapses their BAD-weather record long before it dents the
+clear-weather one. The untested hypothesis is that foot simply has no answer
+to being shot — no shield mechanic covers the approach — which would make this
+a missing mechanic rather than a wrong number.
+
+**Everything here compounds.** Unit accuracy, unit damage and the weather
+multipliers all multiply into the same shot. Dropping accuracy 0.80 → 0.60
+took a severe storm from "archers win 72%" to "archers win 0%" with nothing
+in `battle.py` changing. `BATTLE_WEATHER`'s accuracy figures were raised to
+compensate and carry a comment saying so. **If archer accuracy or damage
+moves again, those move with it.**
+
+The tournament in `dev/test_battle_weather.py` now RECORDS win rates instead
+of asserting on them, and runs 4 battles a condition instead of 10 — ten
+battles measured 30% and then 10% for the same configuration on consecutive
+runs.
+
+---
+
+## 27. Weather phase 2 — a live travel rate (`app/world/travel.py`)
+
+Nothing about travel varied turn to turn: every caravan, regional shipment
+and local wagon did a flat `turn_progress += 1`, so a route's length was
+settled at dispatch. That is why the phasing put "build the live rate" before
+"hang weather on it" — there was nothing to hook into.
+
+Two terms, deliberately different in kind:
+
+**Terrain is MEAN-NEUTRAL over a route, by construction.** This matters more
+than it sounds. Measured on a developed save, real trade routes average a pace
+of 0.65 against open country's 1.00, because they run on roads. A naive
+terrain rate would have made every caravan ~50% faster overnight and silently
+re-tuned the whole economy. Dividing each cell's cost by the route's OWN
+average (`route_pace`, cached on the convoy) means the fast and slow stretches
+cancel: a wagon visibly runs ahead on the road and falls behind in the hills,
+and still arrives on the turn `trade.py` costed it for. Measured with weather
+off across 170 in-flight convoys: mean drift +0.04 turns, every route within
+one turn.
+
+**Weather is the only thing that actually delays anyone.** On routes long
+enough not to be dominated by rounding: storm 1.39x/1.87x, blizzard
+1.59x/2.55x, fog 1.24x/1.50x. **Drought is 1.0 on purpose** — dry ground is
+good for a wagon, and four kinds of weather that are all simply bad are one
+kind of weather with four names. This also gave Fog its first job; it is
+generated in every climate and has no crop effect by design.
+
+A delayed caravan spends more turns exposed to the per-turn raid roll, so bad
+weather costs goods as well as time without a separate rule. `MIN_TRAVEL_RATE`
+(0.25) bounds the worst journey at 4x.
+
+**Known limit, documented in the module:** weather is simulated only for owned
+regions, so open ocean and unclaimed wildland are always clear. A sea storm
+would need weather over water, which does not exist.
+
+**A bug worth remembering:** `weather.KINDS` are lowercase constants
+(`"storm"`), and the first rate table was keyed `"Storm"` — the entire weather
+hook was silently dead. Key off the module's own constants; the test asserts
+the two sets match.
+
+---
+
+## 28. Weather phase 3 — weather in battle
+
+Same hook as biome terrain (phase E, §24): baked into each unit at deploy,
+never read per tick, and it STACKS with terrain rather than replacing it.
+
+**The one line that matters:** terrain is ASYMMETRIC (high ground favours
+whoever holds it — that is the point of high ground); weather is SYMMETRIC
+(rain falls on both armies). A storm that helped the defender would be a
+second high-ground bonus wearing a cloud. A test asserts both sides come out
+of a storm identical.
+
+Three levers, and reach and accuracy are deliberately separate questions:
+`speed` (mud, snow), `ranged` (how far a bowman can SEE — reach, not damage),
+`accuracy` (whether the shot lands once taken, which fog does not answer and a
+wet string does). Mild is exactly half of severe rather than a second table.
+
+`BATTLE_WEATHER` accuracy figures are coupled to unit stats — see §26.
+
+---
+
+## 29. Weather phase 4 — the map overlay (unreleased)
+
+Weather is per-region and changes every turn, which rules out the obvious
+implementation: the terrain raster is cached and only rebuilt when ownership
+changes. So the overlay is made from the two things **both renderers already
+share** — a coloured region outline (`_map_lines`) and a badge at its centre
+(`_map_labels`). No new primitive, no per-cell work, and the Tk canvas and the
+GPU map cannot disagree. A test asserts both methods draw it, because that is
+the failure that would otherwise ship silently.
+
+Drought a gold sun, storm a blue thundercloud, blizzard pale ice, fog grey
+haze. Severe solid and thick, mild dashed and thin.
+
+- **Drought is on the map** even though it does nothing to travel or battle.
+  It is the one that ruins your harvest. Leaving it off because it has no
+  combat effect would be reading the mechanics rather than the game.
+- **Fog-gated on the region's centre**, exactly like the region's name.
+  Weather over unexplored rival territory would quietly make this a scouting
+  tool.
+- **`_weathered_regions()` is cached per turn.** Both draw methods ask and the
+  GPU map calls both every rebuild.
+
+One flaw the test caught rather than the eye: the two severities shared a
+minimum line width, so at world scale they clamped equal and a mild fog drew
+identically to a severe blizzard — at exactly the zoom where you decide
+whether to march. Separate minimums now.
+
+---
+
+## 30. Lakes — one great lake, not a flooded continent (unreleased)
+
+Reported from a screenshot: not that lakes existed, but that there were so
+many ENORMOUS ones that the land stopped reading as whole. Measured across
+three seeds: lakes covered 8.9-14.6% of all land, three to six basins each
+over 1% of it, one at 5.4% of the world's land alone.
+
+**`_LAKE_DEPTH` could not fix it, and that is the instructive part.** It is a
+single global threshold: raise it enough to drown the inland seas and every
+pond goes with them, and the small lakes are pure character. The problem was
+never lake DEPTH, it was the size of individual BASINS.
+
+`worldgen._trim_oversized_lakes` labels the 8-connected components and caps
+each at `_LAKE_MAX_SHARE` (0.5% of land), with `_GREAT_LAKE_LIMIT` (1) exempt
+— the largest keeps whatever size the terrain gave it, because a single huge
+lake is a landmark and that was explicit in the report. An oversized basin
+recedes to its DEEPEST cells (what a drying lake really does), then keeps the
+largest connected component — the deep end of a long lumpy basin can come out
+as two pools, and one lake reading as two is the fractured look being fixed.
+
+Drained cells simply become land. Nothing downstream needs telling: the filled
+DEM is untouched so rivers route across the old basin exactly as before, and a
+drained basin is a low plain.
+
+`_LAKE_DEPTH` also went 0.016 → 0.022, which removes broad shallow sheets
+without costing many actual lakes — basin COUNT falls only ~10%, because a
+pond is deep for its size.
+
+After: 5.6%, 9.2%, 6.9% of land, one oversized basin each. The 9.2% seed is
+almost entirely its single inland sea.
+
+---
+
+## 31. WHERE TO START
+
+The two multi-phase threads that dominated this project — the biome overhaul
+and the weather system — are both **finished**. There is no live thread to
+resume, which is itself the most important thing on this page. Pick by value:
+
+**The strongest remaining idea is supply-driven pricing (§16.2).** It is the
+largest unbuilt economic mechanic, `unit_price`'s surplus factor already does
+half of it, and the economy around it has settled down enough to build on.
+
+**The most useful chore is an economy section in the balance lab (§15.5).**
+All 217 tunable levers are battle-side. Every economy constant — and there are
+now a great many, across `resources.py`, `travel.py`, `trade.py` — is
+source-only, which means the user cannot playtest any of it, and playtesting
+is how this project decides things.
+
+**The most interesting open question is §26**, the archer one. It is not a
+tuning task. Every output-side lever collapses bad-weather performance before
+denting clear-weather dominance, and range does nothing at all. Something
+structural is missing — most likely that foot has no answer to being shot
+during the approach. Read §26 before touching a number.
+
+**Do not re-open** the biome overhaul (§§19-24) or weather (§10, §§27-29)
+expecting to find work. They are closed records. Their tuning constants are
+listed in §19.6 and in the module comments, and every one of them is a
+"judge it in play" number rather than an unfinished job.
