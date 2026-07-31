@@ -72,7 +72,16 @@ def _crosses_ocean(world, a, b):
 
 def _find_other_landmass_region(world, home_landmass, faction_idx):
     """An UNCLAIMED region sharing no cell with `home_landmass` -- a
-    genuinely different landmass to found a settlement on."""
+    genuinely different landmass to found a settlement on.
+
+    It must also have a cell a ship could dock at. Taking merely the first
+    such region used to be enough by luck; on a map where that region is
+    landlocked inland, there is no sea route for anyone to find and the
+    scenario this test exists to exercise quietly stops happening. Requiring
+    a dockable cell here keeps the test testing the thing, rather than
+    skipping whenever the map shifts."""
+    capital = world.factions[faction_idx].meta["capital"]
+    best, best_d2 = None, None
     for region in world.regions:
         if region.faction_idx != -2:      # UNCLAIMED
             continue
@@ -80,10 +89,21 @@ def _find_other_landmass_region(world, home_landmass, faction_idx):
             continue
         if any(c in home_landmass for c in region.cells):
             continue
-        coastal = [c for c in region.cells if world.owner[c[1]][c[0]] != OCEAN]
-        if coastal:
-            return region
-    return None
+        docks = [(x, y) for (x, y) in region.cells
+                 if world.owner[y][x] != OCEAN
+                 and _nearest_ocean_cell(world, (x, y)) is not None]
+        if not docks:
+            continue
+        # NEAREST such landmass, not merely the first in region order. The
+        # reported bug is a city across a strait from its neighbour, and the
+        # sea search only looks inside a bounding box around the two ends
+        # (construction._SEA_LANE_BBOX_PAD) -- a landmass on the far side of
+        # the map has no findable route, so picking one at random turns this
+        # into a test of nothing.
+        d2 = min((x - capital[0]) ** 2 + (y - capital[1]) ** 2 for (x, y) in docks)
+        if best_d2 is None or d2 < best_d2:
+            best, best_d2 = region, d2
+    return best
 
 
 def _nearest_coastal_cell(world, landmass, toward):
@@ -122,7 +142,18 @@ def test_no_fake_road_across_ocean():
         world.owner[y][x] = 0
     faction.meta.setdefault("regions", []).append(region.id)
 
-    target = next(c for c in region.cells if world.owner[c[1]][c[0]] != OCEAN)
+    # A cell a ship can actually reach, not merely the first land cell in the
+    # region -- that one can sit inland with no water within docking range, in
+    # which case there is genuinely no sea route to find and the scenario this
+    # test exists to exercise never happens. Mirrors _nearest_coastal_cell's
+    # own "can _nearest_ocean_cell dock here" test.
+    target = next((c for c in region.cells
+                   if world.owner[c[1]][c[0]] != OCEAN
+                   and _nearest_ocean_cell(world, c) is not None), None)
+    if target is None:
+        print("  (skipped: the second landmass has no dockable cell -- not a "
+              "failure, just an unlucky map)")
+        return
 
     # The real bug report is two ALREADY-EXISTING coastal cities, one per
     # landmass, not "found a new city from a possibly-inland capital 800

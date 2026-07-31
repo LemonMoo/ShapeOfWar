@@ -162,6 +162,36 @@ SPECIES = {
                               "bonus": 0.02})},
 }
 
+# --- Where a people comes from (biome overhaul, phase B) ---------------------
+# Which biomes each species calls home. Used to decide WHICH already-placed
+# capital each species is given (see worldgen._order_capitals_by_affinity) --
+# an Elf realm should open in forest and a Dwarven one in the highlands,
+# rather than the pure lottery it was, where nothing about a species touched
+# placement at all.
+#
+# Weights, not a flat set: a Dwarf would rather have real mountains than mere
+# highland, but will take the highland. Anything unlisted scores 0 for that
+# species -- not a penalty, just no pull.
+#
+# Humans are deliberately broad and shallow. Their trait is literally
+# "adaptable realm-builders", so they get a weak preference for the open,
+# mixed, farmable middle of the map rather than a homeland of their own. That
+# also means they are the species most willing to be displaced when someone
+# else's homeland is scarce, which is exactly right.
+#
+# NOTE this is a preference over capitals that ALREADY passed worldgen's
+# farmland check (_capital_has_nearby_farmland), so it can never place a realm
+# somewhere it cannot feed itself. That guarantee is load-bearing and is
+# asserted in dev/test_homeland.py: forest, the Elf homeland and the single
+# most common biome on the map, grows no crops of its own at all.
+SPECIES_BIOME_AFFINITY = {
+    "Humans":  {"plains": 1.0, "coastal": 0.7, "forest": 0.5, "savannah": 0.5},
+    "Elves":   {"forest": 1.0, "taiga": 0.7, "jungle": 0.4},
+    "Dwarves": {"mountain": 1.0, "highland": 0.9, "tundra": 0.3},
+    "Orcs":    {"savannah": 1.0, "steppe": 0.9, "plains": 0.6},
+    "Goblins": {"swamp": 1.0, "jungle": 0.8, "tundra": 0.6},
+}
+
 # Every species trait, with the "no modifier" value each defaults to. Anything
 # without an entry in SPECIES above (notably the neutral Wildland Garrison,
 # which has no species at all) falls through to these and fights at the plain

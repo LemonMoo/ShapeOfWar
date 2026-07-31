@@ -24,7 +24,8 @@ from app.world import wrap
 from app.world import noise
 from app.world import currents
 from app.world import plates
-from app.world.lexicon import (SPECIES, make_faction_namer, make_region_namer,
+from app.world.lexicon import (SPECIES, SPECIES_BIOME_AFFINITY,
+                               make_faction_namer, make_region_namer,
                                make_ruler_namer, make_settlement_namer,
                                ruler_title)
 
@@ -1929,6 +1930,94 @@ def _capital_has_nearby_farmland(world, x, y, mseed, land_set, coast_d):
     return total > 0 and hits / total >= _CAPITAL_MIN_FOOD_CELL_FRACTION
 
 
+# --- Species homelands (biome overhaul, phase B) -----------------------------
+# How far around a capital counts as "its homeland" when judging what kind of
+# country a realm is opening in. Matches the farmland check's own radius, so
+# both questions are asked of the same neighbourhood.
+_HOMELAND_RADIUS = _CAPITAL_FOOD_CHECK_RADIUS
+_HOMELAND_STEP = _CAPITAL_FOOD_CHECK_STEP
+
+
+def _homeland_biomes(world, x, y):
+    """{biome: share} of the land around a capital. Ocean is skipped rather
+    than counted as a biome, so a peninsular site is judged on the land it
+    actually has."""
+    counts = {}
+    total = 0
+    r = _HOMELAND_RADIUS
+    for dy in range(-r, r + 1, _HOMELAND_STEP):
+        cy = y + dy
+        if not (0 <= cy < world.h):
+            continue
+        for dx in range(-r, r + 1, _HOMELAND_STEP):
+            cx = wrap.wrap_x(x + dx, world.w)
+            biome = world.biome_grid[cy][cx]
+            if biome is None:        # ocean
+                continue
+            counts[biome] = counts.get(biome, 0) + 1
+            total += 1
+    if not total:
+        return {}
+    return {b: n / total for b, n in counts.items()}
+
+
+def homeland_affinity(species, biome_shares):
+    """0..1-ish: how much this species would call that country home. The
+    share-weighted sum of its own preferences, so a capital ringed by forest
+    scores far higher for Elves than one with a single wood in view."""
+    prefs = SPECIES_BIOME_AFFINITY.get(species)
+    if not prefs:
+        return 0.0
+    return sum(share * prefs.get(biome, 0.0)
+               for biome, share in biome_shares.items())
+
+
+def _order_capitals_by_affinity(world, capitals, roster):
+    """Reorder `capitals` so capitals[i] is the homeland handed to roster[i].
+
+    Placement itself is untouched -- every capital in the list has already
+    passed the spacing and farmland checks, and this only decides WHO gets
+    WHICH. That is the whole reason this is an assignment rather than a term
+    in the site score: it cannot strand a faction somewhere unviable, and it
+    cannot fail on a map that happens to have no forest, because there is
+    always some capital left to hand out. A species whose homeland is missing
+    simply gets its next-best country, which is the graceful fallback the
+    design asked for rather than a hard guarantee.
+
+    The player (roster slot 0) is served first, then the rest are matched
+    globally best-first. Rivals still get real affinity, but a single-player
+    game should not open with the player in a swamp because the assignment
+    maths preferred it that way overall.
+    """
+    if len(capitals) <= 1:
+        return capitals
+    shares = [_homeland_biomes(world, x, y) for x, y in capitals]
+    score = [[homeland_affinity(sp, sh) for sh in shares] for sp in roster]
+
+    assigned = [None] * len(roster)
+    free_caps = set(range(len(capitals)))
+    free_slots = set(range(len(roster)))
+
+    # The player first, at their own best available homeland.
+    if free_slots:
+        best_cap = max(free_caps, key=lambda c: score[0][c])
+        assigned[0] = best_cap
+        free_caps.discard(best_cap)
+        free_slots.discard(0)
+
+    # Then greedy global best-first over every remaining pairing. O(n^3) at
+    # worst, on n = faction count (at most a few dozen), once per world.
+    while free_slots and free_caps:
+        slot, cap = max(((s, c) for s in free_slots for c in free_caps),
+                        key=lambda sc: score[sc[0]][sc[1]])
+        assigned[slot] = cap
+        free_slots.discard(slot)
+        free_caps.discard(cap)
+
+    return [capitals[assigned[i]] if assigned[i] is not None else capitals[i]
+            for i in range(len(roster))]
+
+
 # How much the fine-detail noise layer moves the plate-driven height field,
 # relative to the noise's own natural spread once recentered on 0. A starting
 # point, not measured yet -- too high and it drowns the plate structure back
@@ -2161,6 +2250,18 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     _compute_fertility(world, nseed)
     _classify_biomes_and_climate(world)
 
+    # 5b. decide who lives where (biome overhaul, phase B). The species
+    #    roster is rolled HERE rather than inside the faction loop below,
+    #    because the capitals have to be handed out to match it and biomes
+    #    only exist as of the line above. Placement itself is untouched --
+    #    this reorders an already-validated list, so no realm can be moved
+    #    somewhere it cannot feed itself. See _order_capitals_by_affinity.
+    species_names = list(SPECIES.keys())
+    roster = [player_species if (player_species is not None and i == 0)
+              else rng.choice(species_names)
+              for i in range(len(capitals))]
+    capitals = _order_capitals_by_affinity(world, capitals, roster)
+
     # 6. bisect the *entire* landmass into regions — the fixed unit of
     #    territory, decoupled from ownership (see UNCLAIMED-land progressive
     #    expansion in app/world/expansion.py) — before any faction exists.
@@ -2175,8 +2276,10 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     #    expand into over time, instead of claiming the whole map at once.
     _assign_starting_footholds(world, capitals)
 
-    # 9. build factions (species, color, stats, centroid) from their foothold
-    species_names = list(SPECIES.keys())
+    # 9. build factions (species, color, stats, centroid) from their foothold.
+    #    The species roster was rolled in step 5b, where the capitals were
+    #    matched to it -- rolling it again here would hand each faction a
+    #    species unrelated to the homeland it was just given.
     namer = make_faction_namer(rng)
     ruler_namer = make_ruler_namer(rng)
     # per faction: cell count, sum x, sum y, sum fertility (foothold only)
@@ -2192,7 +2295,7 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
 
     for idx in range(len(capitals)):
         is_player = player_species is not None and idx == 0
-        species = player_species if is_player else rng.choice(species_names)
+        species = roster[idx]
         traits = SPECIES[species]
         cells = max(1, sums[idx][0])
         fert_sum = sums[idx][3]

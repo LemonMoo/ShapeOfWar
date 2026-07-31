@@ -27,9 +27,23 @@ def check(name, ok, detail=""):
         FAILURES.append(name)
 
 
-def _first_region_with_villages(world, faction_idx=0):
-    return next(r for r in world.regions
-               if r.faction_idx == faction_idx and r.villages)
+def _first_region_with_villages(world, faction_idx=None):
+    """Any owned region that actually has villages in it.
+
+    Deliberately NOT pinned to faction 0. Weather is not a per-faction
+    mechanic and this only needs a real village to measure a harvest at --
+    but a foothold can legitimately end up with no villages at all (a known
+    worldgen quirk, see HANDOFF), so demanding one from a specific faction
+    made this fail whenever the map shifted under it."""
+    # Ownership first: an UNCLAIMED region has no `villages` attribute at all
+    # until it is settled, so testing it before ownership raises.
+    regions = [r for r in world.regions
+               if r.faction_idx >= 0
+               and (faction_idx is None or r.faction_idx == faction_idx)
+               and getattr(r, "villages", None)]
+    if not regions:
+        raise AssertionError("no owned region anywhere has villages")
+    return regions[0]
 
 
 def _goto_season(world, season):
