@@ -2012,8 +2012,9 @@ Everwood" to be a place rather than scattered pixels.
 
 ## 19. THE BIOME OVERHAUL — the live thread
 
-**This is the work to pick up.** Phases A (§18.2), B (§20), F (§21) and
-C (§22) have shipped; D and E remain.
+**The overhaul is complete.** Phases A (§18.2), B (§20), F (§21), C (§22),
+D (§23) and E (§24) have all shipped. Sections 19.0–19.6 are kept as the
+record of what was agreed and why — read them before changing any of it.
 The user chose the design on every axis already, so these are decisions to
 implement, not to re-open.
 
@@ -2066,7 +2067,7 @@ else. Needs a per-node or per-region acclimatisation counter that pickles.
 The acclimatisation half is the fairness valve: without it, a realm that
 conquers alien terrain is permanently worse at it, which compounds badly.
 
-### 19.3 Phase D — biome-gated buildings
+### 19.3 Phase D — biome-gated buildings — **DONE, see §23**
 
 One terrain-flavoured building per biome family, in the existing build menu
 (`app/world/buildings.py` + `construction.py` cost tables — the Mining Camp in
@@ -2074,7 +2075,7 @@ One terrain-flavoured building per biome family, in the existing build menu
 risk of the chosen mechanics:** each must be genuinely equivalent in value, and
 that is hard to verify. Consider making them all variations on one effect.
 
-### 19.4 Phase E — terrain in movement and battle
+### 19.4 Phase E — terrain in movement and battle — **DONE, see §24**
 
 Swamp slows armies, highland favours defenders, jungle hides them. Touches
 commander movement (`worldgen._elev_cost` already does some terrain) and the
@@ -2102,6 +2103,9 @@ if they want to see the new world before more mechanics land on it.
 | `_HIGHLAND_RELIEF` | resources.py | 0.38 | mountains too walled off or too farmable |
 | `PROSPERITY_SHORTAGE_WEIGHT` | resources.py | 1.0/0.6/0.25/0.25 | shortages too punishing or too weak |
 | `VILLAGE_OUTPUT_VALUE_SCALE` | resources.py | 2.0 | village meters sit too low or max out |
+| `TERRAIN_MOVE_COST` | commander.py | 1.0..2.2 | armies crawl, or terrain never matters |
+| `ROAD_MOVE_COST` | commander.py | 0.6 | roads are a must-build, or not worth it |
+| `BATTLE_TERRAIN` | battle/battle.py | see §24 | a biome decides fights instead of colouring them |
 
 On a generated world the current matrix gives: forest 19%, savannah 13%, jungle
 12%, highland 11%, taiga 10%, plains 9%, tundra 8%, coastal 8%, mountain 4.5%,
@@ -2323,3 +2327,137 @@ it simply starts learning.
 is now load-bearing twice over. Editing it changes where a species spawns
 (phase B) *and* what it is good at (phase C), which is intended — but it means
 a tweak meant to fix spawn placement will silently move the economy too.
+
+---
+
+## 23. Biome phase D — one terrain building, four kinds of country (DONE, unreleased)
+
+Phase D of §19. The risk §19.3 names is real: twelve bespoke buildings cannot
+be verified equal in value, and getting it wrong quietly makes some homelands
+better — which undoes the "asymmetric in KIND, not quality" principle the whole
+overhaul rests on.
+
+**So they are not twelve effects. They are one effect with a biome argument.**
+The Mining Camp (§17.3) already had the right shape and nobody had noticed it
+was a general mechanic: it is not "+X% ore", it is REACH — working cells of a
+given kind that lie in your REGION but outside your own catchment. Every biome
+family now gets exactly that from the same code path: same reach table, same
+cost, same build time, same tiers, same share-splitting, same application
+*before* the labour limit. Fair by construction rather than by balancing,
+because there is no cross-biome comparison left to get wrong.
+
+`OUTSTATIONS` in `resources.py:4267` is the whole table. Four families cover all
+twelve biomes with no overlap and no orphan:
+
+| family | biomes |
+|---|---|
+| Mining Camp | mountain |
+| Woodcutters' Camp | forest, taiga, jungle |
+| Grange | plains, steppe, savannah |
+| Workings | highland, desert, coastal, tundra, swamp |
+
+The Mining Camp is deliberately left alone rather than widened — it is shipped
+and its numbers were measured against mountain alone.
+
+Measured at one tier-1 camp per region per family: Iron and Coal +13%, Barley
++20%, Salt +16% — and **timber DOWN 4%**, which is the mechanic working. Hands
+moved to newly reachable ore and farmland, so a camp is a genuine trade rather
+than free output. That is the number to watch if outstations ever feel like a
+no-brainer.
+
+Two bugs found on the way, both worth knowing because both are easy to
+reintroduce:
+
+* **Fractional stock.** Building maintenance is a fractional per-tier figure
+  and the Timber need was never rounded, so `_consume_from_pool` subtracted a
+  float and stockpiles became `109913.4` — the resource bar was rendering
+  `44.20000000000000045`. Rounded at source. `test_timber_upkeep.py` now
+  asserts a full turn leaves every stock whole; `_fmt_amount` is a display
+  backstop, not the fix.
+* **Verdict scale.** `_outstation_verdict` returned a raw cell count as its
+  score while every other verdict returns a 0..1 fraction, so an outstation
+  outranked a granary that was 100% full and turning production away — purely
+  because 182 > 1.0. Normalised. The Mining Camp had the same latent bug and
+  only escaped notice because it is offered in far fewer regions. **Any new
+  verdict must return 0..1.**
+
+`dev/test_outstation.py` covers it.
+
+---
+
+## 24. Biome phase E — terrain in movement and in battle (DONE, unreleased)
+
+Phase E of §19, built in two halves.
+
+### 24.1 The march
+
+`COMMANDER_CELLS_PER_TURN` was a flat count regardless of what was underfoot.
+It is a **budget** now (`commander.py:31`), and every cell of path spends its
+own terrain's share via `cell_move_cost` / `_advance_along_path`: plains 5 cells
+a turn, forest 3, swamp and mountain 2.
+
+The road half is the part that changes decisions. `ROAD_MOVE_COST = 0.6` beats
+the easiest open country's 1.0, so a column on its own network covers 8 cells a
+turn against 5 across open plains and 2 through a marsh. Rome built roads
+precisely because moving off one cost so much more, and this finally gives the
+network a military value it never had when it only carried trade.
+
+Distinct from `worldgen._elev_cost`, which shapes which way a path is *drawn*.
+A route can reasonably run through hills because going round would be longer;
+this is what crossing them then costs.
+
+Two guards worth keeping: a column always advances **at least one cell**, so a
+commander ordered across a mountain is slowed rather than stranded, and the sea
+branch keeps its flat count because there is no terrain out there.
+`dev/test_march.py` asserts both.
+
+### 24.2 The battle
+
+The battle sim had **no terrain hooks of any kind** — a fight in a marsh
+resolved exactly like one on open plains, which made the new map read as
+decoration the moment an army arrived. `BATTLE_TERRAIN` in
+`app/battle/battle.py` gives every biome three multipliers:
+
+| | speed | defender hp | archer reach |
+|---|---|---|---|
+| swamp | 0.75 | — | 0.85 |
+| mountain | 0.75 | 1.20 | — |
+| jungle | 0.80 | 1.05 | 0.70 |
+| forest | 0.90 | 1.05 | 0.75 |
+| highland | 0.90 | 1.15 | — |
+| taiga | 0.90 | 1.05 | 0.85 |
+| tundra, desert | 0.95 | — | — |
+| plains, steppe, savannah, coastal | neutral | | |
+
+Four decisions that a future agent should not undo without reading this:
+
+* **Reach, not damage, for cover.** Cover is about not being able to see what
+  you are shooting at. Jungle archers keep their punch but must come close
+  enough to be charged, which changes how a wood is fought. Weakening their
+  damage instead would read as arrows bouncing off trees — a bug, not a
+  mechanic.
+* **Applied at deploy, never per tick.** Terrain cannot change mid-battle and
+  the sim runs to a 16.7ms frame budget (see
+  `battle_view._EQUIPMENT_DETAIL_MAX_UNITS`). `Battle.set_terrain` stores the
+  profile, `_apply_terrain` bakes it into each unit as it spawns.
+  `dev/test_battle_terrain.py` asserts `Battle.update` never mentions terrain.
+* **The defender bonus reaches side 1 only.** `DEFENDER_SIDE = 1`; `stage_battle`
+  deploys the attacker as 0 and both real defenders and wildland garrisons as 1.
+  An even-handed high-ground bonus is not a high-ground bonus. This also means
+  claiming a mountain wildland is now genuinely harder than claiming a plain,
+  which is consistent with the settler-cost model in §16.5.
+* **Unknown or unset terrain is neutral.** A headless sim or an old save that
+  names no biome fights exactly as it always did.
+
+One structural change in `app/ui/app.py`: `stage_battle` now resolves `region`
+**before** deploying, because the ground has to be known at spawn time. It used
+to be worked out afterwards, when nothing downstream cared. The battle banner
+carries `terrain_note(biome)` — a modifier the player cannot see is not a
+modifier.
+
+Sized to colour a battle, not decide one, and `test_battle_terrain.py` asserts
+every multiplier stays inside that band (speed ≥ 0.70, defender ≤ 1.25, ranged
+≥ 0.65) so a future tweak past it is a deliberate balance decision. **Judge in
+play:** the 1.20x mountain defender is the one most likely to feel wrong in
+either direction, and an archer-heavy species fighting in jungle is the matchup
+to watch.
