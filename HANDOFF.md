@@ -9,10 +9,12 @@ surveys, released together. Check
 `gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting this
 line — this repo ships fast, sometimes several releases in one day.
 
-**Three commits sit on `master` unreleased since then — see §17.** The
-domestic logistics chain turned out to be severed in four places (nothing
-manufactured existed anywhere), two reported UI bugs, and the Mining Camp that
-closes §15.5's supply hole. Working tree is clean.
+**Five commits sit on `master` unreleased since then.** §17: the domestic
+logistics chain was severed in four places (nothing manufactured existed
+anywhere), two reported UI bugs, and the Mining Camp that closes §15.5's supply
+hole. §18: prosperity was a meter that could not move, and the first phase of a
+**biome overhaul that is mid-flight and is the main thread to pick up** —
+see §19 for the agreed plan and what is left of it. Working tree is clean.
 
 ## HOW THIS PROJECT WANTS TO BE WORKED ON
 
@@ -26,7 +28,7 @@ useful rather than busy.
   an optimum are wasted effort here and were explicitly asked to stop.
 - **Correctness still deserves real verification.** "Does the chain work,
   does anything go negative, does a village starve, does the panel build"
-  is not balancing — test it properly. The 22-script suite in `dev/` is the
+  is not balancing — test it properly. The 27-script suite in `dev/` is the
   standing gate and everything currently passes.
 - **This sim has real run-to-run variance** from an identical world and
   seed. A single before/after comparison can genuinely mislead. The lesson
@@ -40,13 +42,15 @@ useful rather than busy.
 
 ## WHAT IS OPEN, ROUGHLY BY VALUE
 
-1. **Weather Phases 2-4** — logistics, battle, visual. Phases 0 and 1 are
-   built and shipped; nothing since has touched weather. This is the
-   biggest coherent unbuilt feature. See **§10**, and read §16 first
-   because Phase 2 (logistics) now lands on top of a much-changed economy.
-2. **Prosperity is flatlined near 0-2** across every node and has never been
-   investigated. It is a meter the player can see that currently means
-   nothing. `_prosperity_target`/`_update_prosperity`. See §15.5.
+1. **THE BIOME OVERHAUL, phases B-F.** Mid-flight: phase A (the matrix)
+   shipped, five phases remain, and the user has already chosen the design on
+   every axis. **§19 is the plan — read it before anything else.** Phase B is
+   the one that delivers what was actually asked for (species homeland
+   affinity: Elves in forests, Dwarves near mountains).
+2. **Weather Phases 2-4** — logistics, battle, visual. Phases 0 and 1 are
+   built and shipped; nothing since has touched weather. The biggest coherent
+   feature outside the biome work. See **§10**, and read §16 first because
+   Phase 2 (logistics) now lands on top of a much-changed economy.
 3. **Cartographer D — Charts as a tradeable good.** The last of the four
    approved Guild mechanics; A, B and C all shipped. See §15.4.
 4. **Supply-driven pricing** — a city's price falling as its stock rises.
@@ -56,10 +60,16 @@ useful rather than busy.
    source-only. Given how much of the economy is now tunable constants,
    adding a `resources` section would pay for itself. See §15.5.
 6. **`Settlement.tax_income` is a dead stat** — wire it up or delete it.
+7. **The faction health factor is pinned at its 0.5 floor 55% of the time**,
+   halving every prosperity target, because production value runs under half
+   of consumption value for most factions most turns. Found while fixing
+   prosperity and deliberately not chased — it is a separate question about
+   how those two quantities are measured. `_faction_health_factor`. See §18.1.
 
 *Mining was #2 on this list and is now addressed — see §17.3. The framing was
 also wrong and worth correcting: it is not that mining is broken, it is that
-ore is unavailable until you claim a mountain region, which takes real time.*
+ore is unavailable until you claim a mountain region, which takes real time.
+Prosperity was #2 after that and is now fixed — see §18.1.*
 
 **Two loose ends left deliberately:**
 - `_VILLAGE_REVEAL_SPAN` (map_view.py, `26`) is a first-pass estimate, not
@@ -68,10 +78,21 @@ ore is unavailable until you claim a mountain region, which takes real time.*
   still active. The user was asked once whether to strip it or keep it as a
   tripwire and the conversation moved on. Ask before removing. See §12.
 
-**Reading order for the sections below:** §17 is the most recently changed
-code; §14 and §16 are the rest of the economy's current state. §12's two
-methodology lessons matter before touching anything GL-related. Everything
+**Reading order for the sections below:** **§19 first** if you are picking up
+the biome overhaul, which is the live thread. §18 and §17 are the most recently
+changed code; §14 and §16 are the rest of the economy's current state. §12's
+two methodology lessons matter before touching anything GL-related. Everything
 else is stable background.
+
+**The suite is 27 scripts and all of them pass.** Run it after every change:
+
+```bash
+for t in test_labor test_gold test_cartographer test_timber_upkeep test_stockpile test_spoilage test_claim_cost test_panels test_buildings test_build_menu test_logistics_reach test_mining_camp test_prosperity test_succession test_battle_death test_elim test_commander_gate test_gate2 test_move_anim; do python dev/$t.py dev/worlds/dev160.pkl | tail -1; done
+```
+
+The rest (`test_tuning`, `test_weather`, `test_weather_economy`, `test_plates`,
+`test_sea_bridge`, `test_new_game`, `test_keys`, `test_biomes`) take no world
+argument. `dev160.pkl` is the fast one; `dev560.pkl` is the big late-game world.
 
 ---
 
@@ -397,6 +418,19 @@ actually travelled over a fixed 0.75s wall-clock window, eased in and out.
 - `dev/test_move_anim.py`, `dev/test_tuning.py` — same, for the end-turn
   animation (§7) and the balance levers (below). Both take no world argument
   beyond the default.
+- **Economy and biome harnesses**, all added during §14-§19:
+  `test_labor`, `test_buildings`, `test_gold`, `test_cartographer`,
+  `test_timber_upkeep`, `test_stockpile`, `test_spoilage`, `test_claim_cost`,
+  `test_mining_camp`, `test_logistics_reach`, `test_prosperity`, `test_biomes`.
+  Most take a world as `argv[1]`.
+- **Tk widget-tree harnesses**: `test_panels`, `test_build_menu`, `test_keys`.
+  They build a real MapView/Toplevel and assert on the widget tree, and exit 0
+  with a message where there is no display. This is the gap §13.1 flagged.
+- `dev/storage_audit.py` — pool fill, what is destroyed, and what the throttle
+  suppressed. Takes a world or `--fresh <seed> <turns>`. **Every economy number
+  quoted in §14-§18 came out of this**; measure with it before and after.
+- `dev/labor_ab.py` — A/B template: disables the thing under test by making it
+  never bind rather than adding a flag.
 - `dev/globe_shot.py` — renders the globe at each zoom level (§2).
 - `dev/worlds/dev560.pkl` — turn 561, 300 owned regions, 14 factions. The benchmark
   world. `dev160.pkl` is an earlier one with active trade. **Gitignored** (49 MB
@@ -1421,8 +1455,11 @@ along with the small local survey. Still to build:
   already making 57 Iron/turn. It is not "broken", it is "unavailable until you
   take the mountains". A large part of what looked like this finding was
   actually §17.1's logistics faults sitting on top of it.
-- **Prosperity is flatlined near 0–2** across every node on both A/B runs. Not
-  investigated. `_prosperity_target`/`_update_prosperity` are the entry points.
+- ~~**Prosperity is flatlined near 0–2**~~ **FIXED — see §18.1.** It was not a
+  tuning problem at all: shortages subtracted absolute points from a meter that
+  only eased 1% of its gap per turn, so every point of penalty cost 100 points
+  of a 100-point meter. Medians went 1.13 → 44.83 (settlements) and
+  0.47 → 10.54 (villages).
 - **The balance lab has no economy section.** All 217 levers in
   `app/core/tuning.py` are battle-side, so every number in this rework is
   source-only and cannot be tuned live. Adding a `resources` section is cheap
@@ -1841,3 +1878,226 @@ Same contract as §16.7 — first-pass values, named so they can be tuned by fee
 `test_mining_camp`, `test_keys`; `test_labor` and `test_panels` extended. The
 ones that take a world take it as `argv[1]` (default `dev/worlds/dev560.pkl`;
 `dev160.pkl` is faster and is what §17 was verified against).
+
+---
+
+## 18. Prosperity, and the first phase of the biome overhaul
+
+Two more unreleased commits on `master`, after §17.
+
+### 18.1 Prosperity: a meter that could not move (`5d2bde9`)
+
+Prosperity is a visible 0-100 bar on every settlement and village. It read a
+median of **1.13** for settlements and **0.47** for villages, so it told the
+player nothing. It sat on the open list for a long time looking like a tuning
+problem. It was not — it was arithmetic, and this is the transferable part:
+
+**Two mechanisms on incompatible scales.** `_update_prosperity` eases the meter
+proportionally, `P += (target - P) * PROSPERITY_EASE` with ease `0.01`, i.e. 1%
+of the remaining gap per turn. `_consume_node_needs` subtracted **absolute
+points** for every unmet need — Food 8.0, Firewood 5.0, Clothes 2.0, Timber 2.0,
+up to 17 a turn.
+
+At equilibrium `(target - P) * 0.01 == penalty`, so `P` settles at
+`target - 100 * penalty`. **Every single point of per-turn penalty cost 100
+points of a 100-point meter.** A node missing 1% of its Clothes lost 2 points;
+a node with no Clothes at all — which was every node in the game, since Clothes
+were zero world-wide until §17.1 repaired the logistics chain — took the full
+2.0 a turn and was pinned at zero however rich it was.
+
+The targets had been fine the whole time. Settlement targets had a **median of
+100.0** while the meters read 1.13.
+
+**The fix:** shortages scale the TARGET instead of subtracting from the meter,
+so one easing governs both directions and the halves cannot diverge again.
+`PROSPERITY_SHORTAGE_WEIGHT` holds fractions — Food 1.0, Firewood 0.6, Clothes
+0.25, Timber 0.25 — and `LUXURY_PROSPERITY_BONUS` (0.25) lifts it.
+
+Combined **multiplicatively, not additively**: each shortage takes a share of
+what is left. Summing was tried first and is wrong at the edges, because the
+weights add to more than 1.0 — a node merely short of clothes, timber and
+firewood hit exactly zero as though it were starving, and the clamp hid the
+difference. Multiplying means only Food at a full deficit can reach zero, which
+is the intended meaning: destitute when you cannot eat, merely poor when you are
+cold and badly dressed.
+
+**A second dead meter underneath.** Village prosperity was keyed to
+`village.farm_output` — the decorative stat worldgen rolls at placement.
+Measured: **0 of 380 villages saw it change across 120 turns.** A village had
+exactly one possible target for the entire game and nothing the player did could
+move it: the same "meter that cannot move" defect, one layer down. Villages are
+now valued on what they actually deliver, EMA-smoothed (`VILLAGE_OUTPUT_EMA`)
+because a crop only harvests in its own season and an unsmoothed figure would
+send every farming village to zero for half of every year. Old saves fall back
+to `farm_output` until a village's first delivery, so no existing game drops to
+zero on load.
+
+Measured, 120 turns on the developed save:
+
+| | before | after |
+|---|---|---|
+| settlement prosperity (median) | 1.13 | **44.83** |
+| village prosperity (median) | 0.47 | **10.54** |
+| city prosperity (median) | 1.30 | **70.39** |
+| village prosperity (p90) | 0.71 | **36.44** |
+
+`dev/test_prosperity.py`'s sharpest assertion is structural and worth keeping:
+**nothing may write to `node.prosperity` except the easing** (and the
+city-growth reset). Anything else fights it on a different scale and wins, which
+is exactly how this broke. `dev/test_timber_upkeep.py`'s prosperity assertion was
+correct for the old mechanism and now checks the new one. Compendium prose
+updated — it prints these constants and described the old behaviour.
+
+**Left open deliberately:** `_faction_health_factor` is pinned at its 0.5 floor
+55% of the time, halving every target, because production value runs under half
+of consumption value for most factions most turns. That is a separate question
+about how those two are measured, not a prosperity bug.
+
+### 18.2 Biomes A: a real temperature x moisture matrix (`23b14a2`)
+
+First phase of the overhaul in §19. Biomes came from a threshold cascade that
+**never saw temperature** — only `classify_climate` did — so the same moisture
+produced the same biome at the equator and at the pole, and latitude meant
+nothing a player could see or plan around.
+
+They now come from a temperature x moisture matrix (`_BIOME_MATRIX`), the shape
+a Whittaker diagram describes. Relief and water proximity stay as **overrides**
+on top, because the landform beats the weather: you cannot farm a cliff however
+much rain falls on it. `classify_biome` takes a `temperature` argument now
+(defaulted, so any older caller still works); worldgen passes the latitude
+gradient it already computed for climate.
+
+**6 biomes to 12.** New: `highland`, `taiga`, `jungle`, `steppe`, `savannah`,
+`tundra`. Highland matters most — foothills that are ore-bearing but still
+farmable, which is what makes a mountain range habitable rather than a wall, and
+it is where Dwarves are meant to live.
+
+**All six original names survive, and that is load-bearing rather than
+conservative.** `biome_grid` and `region.biome_counts` are computed at worldgen
+and **pickled**, so every dev world and player save already holds those strings;
+renaming one silently orphans a region's whole biome profile. The whole suite
+runs against pickled turn-161 and turn-561 worlds and passes unchanged, which is
+the real proof old saves still load.
+
+**No biome is good at everything**, asserted directly in `dev/test_biomes.py`.
+This is the fairness mechanism the whole overhaul rests on — terrain asymmetric
+in KIND, not in quality, so every realm needs something its neighbours have.
+Highland failed this on the first pass (7 food crops AND 7 ores made a dwarf
+homeland simply better rather than shaped) and now keeps only hardy upland
+grains and rough-grazing animals:
+
+    plains     10 food,  5 herd,  0 wood,  0 ore   breadbasket, no materials
+    highland    2 food,  2 herd,  0 wood,  7 ore   ore country, thin food
+    forest      0 food,  2 herd,  5 wood,  0 ore   timber, no grain
+    savannah    2 food,  4 herd,  0 wood,  0 ore   grazing
+    tundra      0 food,  2 herd,  0 wood,  1 ore   marginal everywhere
+
+Latitude is legible now: poles read tundra, equator jungle, temperate belts
+between. All 12 appear on a generated world, none covers more than 20%, and the
+economy holds — population and starvation land in the same band as before.
+
+**One thing that will mislead you:** an overview render of the biome map looks
+badly speckled and is NOT. That is a downsampling artifact from sampling every
+third cell. At 1:1 the biomes form large coherent patches. Do not "fix" it —
+check a 1:1 crop first. This matters because §19's naming layer wants "the
+Everwood" to be a place rather than scattered pixels.
+
+---
+
+## 19. THE BIOME OVERHAUL — the live thread
+
+**This is the work to pick up.** Phase A shipped (§18.2); B through F remain.
+The user chose the design on every axis already, so these are decisions to
+implement, not to re-open.
+
+### 19.0 What was agreed
+
+- **Spawn binding: strong preference.** Species affinity is a heavy term in
+  start-site scoring — Elves nearly always begin in forest, Dwarves in
+  highland/mountain — but a map that cannot supply one falls back gracefully
+  rather than failing. Not a hard guarantee (which would distort worldgen and
+  make every opening feel the same), not a soft nudge (which you would never
+  notice).
+- **Mechanics chosen:** native-terrain aptitude + acclimatisation,
+  biome-gated buildings, and terrain in movement/battle.
+- **Scope: full rebuild** of the biome system, which phase A delivered.
+- **Fantasy biomes are flavour only** — a named skin over a mechanical biome,
+  never a different or better resource profile. That was explicit.
+
+The user did **not** pick "asymmetric homeland resource profiles" as a separate
+mechanic. It was folded into phase A as a hard constraint of the matrix instead
+(no biome good at all four categories, asserted in the harness), which delivers
+the same fairness without a separate feature. Say so if it comes up.
+
+### 19.1 Phase B — species homeland affinity (DO THIS FIRST)
+
+The actual original ask, and nothing about species touches placement today:
+`_site_score` (worldgen.py) weighs fertility, rivers, coast, borders and
+elevation — **there is no biome term and no species term anywhere in it.** An
+Elf realm is as likely to start in a desert as a Human one.
+
+- Add a species -> biome affinity table (Elves forest/taiga, Dwarves
+  highland/mountain, Orcs savannah/steppe/plains, Goblins swamp/jungle/tundra,
+  Humans broad — their trait is literally "adaptable realm-builders").
+- Add a heavy affinity term to start-site scoring.
+- **Guarantee every faction a viable homeland that can feed itself.** This is
+  the fairness risk: a species whose biome is rare on a given map, or whose
+  homeland cannot grow food, is crippled from turn one. Coastal and desert both
+  produce zero crops (coastal has fishing, which is not in `RESOURCE_SPAWN` —
+  it comes from `_node_fish_yield`), so check for that specifically.
+- `_place_settlements_for_faction` already reads
+  `world.factions[fac_idx].meta["species"]` and does nothing with it.
+
+### 19.2 Phase C — native-terrain aptitude + acclimatisation
+
+A species works its own biomes better (~+15% labour) and alien ones worse, with
+the penalty eroding as it holds the land. Rides the Phase 14 labour system —
+apply it in `_village_terrain_potential` alongside the Mining Camp's cells, so
+it flows through `village_labor_factors` and competes for hands like everything
+else. Needs a per-node or per-region acclimatisation counter that pickles.
+
+The acclimatisation half is the fairness valve: without it, a realm that
+conquers alien terrain is permanently worse at it, which compounds badly.
+
+### 19.3 Phase D — biome-gated buildings
+
+One terrain-flavoured building per biome family, in the existing build menu
+(`app/world/buildings.py` + `construction.py` cost tables — the Mining Camp in
+§17.3 is the template, including its region-level gate). **Highest unfairness
+risk of the chosen mechanics:** each must be genuinely equivalent in value, and
+that is hard to verify. Consider making them all variations on one effect.
+
+### 19.4 Phase E — terrain in movement and battle
+
+Swamp slows armies, highland favours defenders, jungle hides them. Touches
+commander movement (`worldgen._elev_cost` already does some terrain) and the
+battle sim. Biggest build of the set and furthest from the economy work.
+
+### 19.5 Phase F — the fantasy naming layer
+
+Named variants over each mechanical biome — Everwood/Thornwild over `forest`,
+Ashwaste over `desert`, Mistfen over `swamp` — chosen at worldgen from climate
+and region. Pure naming, colour tint and region-name flavour, **zero balance
+effect by construction**, which is the whole point of separating it from the
+mechanical layer.
+
+Cheap, zero risk, and it is what makes the world feel like a place. The user was
+offered it before B and chose to be asked; it is a reasonable thing to do first
+if they want to see the new world before more mechanics land on it.
+
+### 19.6 Numbers to judge in play
+
+| constant | file | now | if it feels wrong |
+|---|---|---|---|
+| `_BIOME_MATRIX` | resources.py | 4x4 grid | a biome is too rare or too common |
+| `_TEMP_BANDS` | resources.py | 0.30/0.62/0.82 | polar or equatorial bands too wide/narrow |
+| `_MOISTURE_BANDS` | resources.py | 0.30/0.48/0.68 | too much desert or too much jungle |
+| `_HIGHLAND_RELIEF` | resources.py | 0.38 | mountains too walled off or too farmable |
+| `PROSPERITY_SHORTAGE_WEIGHT` | resources.py | 1.0/0.6/0.25/0.25 | shortages too punishing or too weak |
+| `VILLAGE_OUTPUT_VALUE_SCALE` | resources.py | 2.0 | village meters sit too low or max out |
+
+On a generated world the current matrix gives: forest 19%, savannah 13%, jungle
+12%, highland 11%, taiga 10%, plains 9%, tundra 8%, coastal 8%, mountain 4.5%,
+steppe 2.2%, desert 2.2%, swamp 0.8%. Steppe, desert and swamp are thin — if a
+species homeland is placed on one of those, check it can actually support a
+realm before shipping.
