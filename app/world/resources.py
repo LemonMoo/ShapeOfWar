@@ -28,7 +28,8 @@ from collections import defaultdict
 
 from app.world.lexicon import SPECIES
 from app.world.worldgen import (OCEAN, _path_dijkstra, _elev_cost, road_cells,
-                                path_transit_cells, _VILLAGE_CATCHMENT_RADIUS)
+                                path_transit_cells, _VILLAGE_CATCHMENT_RADIUS,
+                                homeland_affinity)
 from app.world import weather
 from app.world import wrap
 
@@ -1679,6 +1680,87 @@ def village_labor_factors(world, village, potentials, by_sector_resource):
     return factors
 
 
+# --- Native-terrain aptitude and acclimatisation (biome overhaul, phase C) ---
+# A people works its own country better than someone else's. A Dwarf village
+# in the highlands gets more out of the same ground than an Orc one would,
+# and less out of a jungle.
+#
+# It reuses phase B's SPECIES_BIOME_AFFINITY rather than introducing a second
+# table, which is the point: the land you come from IS the land you are good
+# at. worldgen.homeland_affinity already scores "how much is this my country"
+# from a biome mix, and that is exactly the question here -- asked of a
+# village's own catchment instead of a candidate capital's surroundings.
+#
+# Applied to the LAND's offer inside _village_terrain_potential, alongside the
+# Mining Camp's extra cells and the Gold Mine's multiplier, so it flows
+# through village_labor_factors and competes for hands like everything else
+# rather than being free output bolted on at the end.
+TERRAIN_APTITUDE_BONUS = 0.15     # at most, on wholly native ground
+TERRAIN_APTITUDE_PENALTY = 0.15   # at most, on wholly alien ground
+
+# How many turns of holding a place it takes to learn it. This is the
+# fairness valve, and it is not optional: without it a realm that conquers
+# alien terrain is permanently worse at it than the neighbour it took it
+# from, which compounds every turn and makes expansion into unlike country a
+# trap rather than a choice. Erodes the PENALTY only -- living somewhere long
+# enough stops it fighting you, it does not make you native to it.
+ACCLIMATISATION_TURNS = 120
+
+
+def acclimatisation(village):
+    """0..1 -- how far this village has learned ground alien to its people.
+    0 for somewhere freshly taken, 1 once it is no harder than home."""
+    return max(0.0, min(1.0, getattr(village, "acclimatisation", 0.0)))
+
+
+def terrain_aptitude(world, village):
+    """Multiplier on what this village's land offers, from how well its
+    people know that kind of country. 0.85 on wholly alien ground with no
+    acclimatisation, up to 1.15 on wholly native ground.
+
+    Returns 1.0 (no effect) for a village with no owner or an unknown
+    species, so nothing here can crash a half-built or migrated world."""
+    fac_idx = getattr(village, "faction_idx", -1)
+    if fac_idx is None or fac_idx < 0 or fac_idx >= len(world.factions):
+        return 1.0
+    species = world.factions[fac_idx].meta.get("species")
+    if not species:
+        return 1.0
+    region = world.regions[village.region_id]
+    biome_counts, _climate, _fert = village_local_sample(world, village, region)
+    total = sum(biome_counts.values())
+    if not total:
+        return 1.0
+    shares = {b: n / total for b, n in biome_counts.items()}
+    native = max(0.0, min(1.0, homeland_affinity(species, shares)))
+    learned = acclimatisation(village)
+    return (1.0
+            + TERRAIN_APTITUDE_BONUS * native
+            - TERRAIN_APTITUDE_PENALTY * (1.0 - native) * (1.0 - learned))
+
+
+def advance_acclimatisation(world):
+    """One turn of every village growing used to its ground.
+
+    Tracks WHICH species has been living there, not just for how long: a
+    region that changes hands starts its new owners over, so conquering a
+    people does not hand you their generations of local knowledge along with
+    their fields. Same species, unbroken tenure -> the counter keeps
+    climbing."""
+    step = 1.0 / max(1, ACCLIMATISATION_TURNS)
+    for village in world.villages:
+        fac_idx = getattr(village, "faction_idx", -1)
+        if fac_idx is None or fac_idx < 0 or fac_idx >= len(world.factions):
+            continue
+        species = world.factions[fac_idx].meta.get("species")
+        if getattr(village, "acclim_species", None) != species:
+            village.acclim_species = species
+            village.acclimatisation = 0.0
+            continue
+        if village.acclimatisation < 1.0:
+            village.acclimatisation = min(1.0, village.acclimatisation + step)
+
+
 def _village_terrain_potential(world, village, season):
     """({resource: amount} raw terrain yield, {sector: total},
     {sector: {resource: amount}}) -- what this village's LAND offers this
@@ -1719,6 +1801,17 @@ def _village_terrain_potential(world, village, season):
         industry["Gold Ore"] = round(ore * gold_mine_multiplier(village))
     for resource, amount in industry.items():
         raw[resource] = raw.get(resource, 0) + amount
+
+    # How well these people know this kind of country (phase C). Applied to
+    # everything the LAND offers -- crops and industry alike, since knowing
+    # your own hills is as much use to a miner as knowing your own fields is
+    # to a farmer -- and before the labor limit, so a better-worked catchment
+    # still has to be worked. Fishing is deliberately left out below: the
+    # catch comes off the water, not out of the ground.
+    aptitude = terrain_aptitude(world, village)
+    if aptitude != 1.0:
+        for resource, amount in list(raw.items()):
+            raw[resource] = amount * aptitude
 
     by_sector = defaultdict(float)
     by_sector_resource = defaultdict(dict)
@@ -6070,6 +6163,9 @@ def advance_turn(world):
     # Weather: rolled/advanced before production, so this turn's harvest
     # already reflects whatever's active right now (see advance_weather).
     advance_weather(world)
+    # Another turn of living somewhere (phase C) -- before production, same
+    # reasoning: this turn's yield should reflect what the village knows now.
+    advance_acclimatisation(world)
     # Gold ledger for this turn -- see the section above. Every phase below
     # that can move coin is bracketed by a snapshot, so the breakdown always
     # adds up to the real change with nothing unaccounted for.
