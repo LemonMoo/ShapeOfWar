@@ -80,6 +80,27 @@ assert 0 < sector_total(real, "farming") < potential(v)["farming"], (
 print(f"  ok    at live settings, hands bind  "
       f"{sector_total(real, 'farming')} of {potential(v)['farming']}")
 
+print("\n--- a village with nobody left works nothing ---")
+# Not a corner case: a village really can lose every adult to famine. The bug
+# this guards was that village_labor_factors returned {} for a zero workforce,
+# and compute_village_yield reads a MISSING factor as "no sector, so no labour
+# limit" -- so an emptied village produced its full terrain potential and
+# out-produced a populated one.
+before_adults = v.adults
+try:
+    v.adults = 0
+    empty = yield_for(v)
+    worked = sum(a for r, a in empty.items() if R.production_sector(r))
+    assert worked < 1, f"a village with no adults still produced {empty}"
+    factors, _raw = R.village_labor_state(w, v, season)
+    assert factors, "an empty village returned no factors at all, which reads "
+    assert all(f == 0.0 for f in factors.values()), factors
+    print(f"  ok    0 adults -> nothing worked, factors all 0 "
+          f"({len(factors)} sectors)")
+finally:
+    v.adults = before_adults
+    clear_cache(v)
+
 print("\n--- more hands really do produce more ---")
 before_adults = v.adults
 try:

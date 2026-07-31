@@ -88,6 +88,7 @@ BUILDING_CATEGORY = {
     "shipyard": "Naval",
     resources.GOLD_MINE: "Coin", resources.MINT: "Coin",
     resources.CARTOGRAPHER: "Knowledge",
+    resources.MINING_CAMP: "Industry",
 }
 
 BUILDING_BLURB = {
@@ -111,6 +112,9 @@ BUILDING_BLURB = {
         "Compiles your pilots' and carters' reports into charts. Widens what "
         "everything you have out in the world sends home — it maps almost "
         "nothing on its own.",
+    resources.MINING_CAMP:
+        "Sends miners out to a seam in this region and carts the ore home. "
+        "Iron, coal, copper and tin come from mountains nobody farms.",
 }
 
 # Ore on hand at a settlement above which a Mint is plainly the bottleneck,
@@ -362,8 +366,38 @@ def _cartographer_verdict(world, node):
             "compiles reports; it does not go looking.", 0.0)
 
 
+def _mining_camp_verdict(world, node):
+    """Judged on the seam this region has and how much of it is already being
+    worked -- not on the village's own stock, which is exactly the reading that
+    kept the whole tier invisible (almost no village sits on ore, so nothing
+    about a village's own land ever suggested a mine)."""
+    region = world.regions[node.region_id]
+    total = resources.region_mountain_cells(world, region)
+    if total <= 0:
+        return "idle", "No mountain in this region to work.", 0.0
+    camps = sum(1 for vid in getattr(region, "villages", [])
+                if 0 <= vid < len(world.villages)
+                and resources.storage_tier(world.villages[vid],
+                                           resources.MINING_CAMP) > 0)
+    if camps == 0:
+        return ("urgent",
+                f"{total:,} mountain cells in this region and nobody working "
+                f"them — iron, coal and copper come from nowhere else.",
+                float(total))
+    worked = resources.mining_camp_cells(world, node)
+    if worked >= total / max(1, camps):
+        return ("idle",
+                f"This region's {total:,} mountain cells are already shared "
+                f"between {camps} camps.", 0.0)
+    return ("useful",
+            f"{total:,} mountain cells, shared between {camps} camp"
+            f"{'s' if camps != 1 else ''}.", float(total) / max(1, camps))
+
+
 def _verdict(world, node, building):
     """(priority, reason, score) -- does THIS node want THIS building?"""
+    if building == resources.MINING_CAMP:
+        return _mining_camp_verdict(world, node)
     if building == resources.CARTOGRAPHER:
         return _cartographer_verdict(world, node)
     if building == resources.MINT:
@@ -400,6 +434,15 @@ def _storage_effect_lines(node, building, to_tier):
             added = table[to_tier] - table[to_tier - 1]
             current = resources.node_pool_capacity(node, pool)
             lines.append(f"+{added:,} {pool} space  ({current:,} → {current + added:,})")
+    if building == resources.MINING_CAMP and to_tier is not None:
+        table = resources.MINING_CAMP_CELLS
+        if to_tier < len(table):
+            now = table[min(resources.storage_tier(node, building), len(table) - 1)]
+            lines.append(f"Works {table[to_tier]} mountain cells in this region "
+                         f"(now {now})")
+            lines.append("Iron · Coal · Copper · Tin · Stone · Gems · Gold Ore")
+            lines.append("Dug by this village's own hands — it competes with "
+                         "the harvest")
     if building == resources.GOLD_MINE and to_tier is not None:
         table = resources.GOLD_MINE_YIELD_MULT
         if to_tier < len(table):
@@ -467,7 +510,8 @@ def _all_buildings(node):
     for herd_building in resources.HERD_BUILDINGS:
         if herd_building not in order:
             order.append(herd_building)
-    order += [resources.GOLD_MINE, resources.MINT, resources.CARTOGRAPHER]
+    order += [resources.MINING_CAMP, resources.GOLD_MINE, resources.MINT,
+              resources.CARTOGRAPHER]
     if node_kind(node) == "settlement":
         order.append("shipyard")
     return [b for b in order if resources.storage_max_tier(node, b) > 0
@@ -528,6 +572,14 @@ def build_options(world, node, nation):
         if (building == resources.GOLD_MINE
                 and not resources.storage_tier(node, building)
                 and not resources.has_gold_seam(world, node)):
+            continue
+        # Likewise a Mining Camp needs a mountain in the region to walk out to.
+        # Dropped rather than shown blocked, same reasoning: most regions have
+        # no mountain at all, and a card saying so at every village in them is
+        # noise rather than information.
+        if (building == resources.MINING_CAMP
+                and not resources.storage_tier(node, building)
+                and not resources.has_region_mountain(world, node)):
             continue
         current = resources.storage_tier(node, building)
         max_tier = resources.storage_max_tier(node, building)

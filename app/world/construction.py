@@ -116,6 +116,22 @@ STORAGE_BUILD_COSTS = {
         {"Logs": 200, "Tools": 60, "Gold": 90},
         {"Planks": 320, "Stone": 300, "Tools": 180, "Gold": 700},
     ],
+    # The Mining Camp (see resources.py's Mining Camp section) -- pit props,
+    # a track and the coin to pay people to live out at the seam.
+    #
+    # Tier 1 is deliberately timber, stone and coin with NO Tools: Tools are
+    # smithed from Iron, and this is the building that makes Iron exist at all.
+    # Pricing the first tier in Tools would gate the cure on the disease, which
+    # is exactly the trap the Preserving House hit with Stone (eligible 308
+    # times over 30 turns, affordable zero). Stone is safe here because
+    # BASELINE_INDUSTRY_FLOOR guarantees every region some. Later tiers do want
+    # Tools -- by then you have them, because tier 1 works.
+    "mining_camp": [
+        None,
+        {"Logs": 200, "Stone": 120, "Gold": 160},
+        {"Planks": 300, "Stone": 320, "Tools": 120, "Gold": 600},
+        {"Planks": 620, "Bricks": 400, "Tools": 340, "Gold": 1500},
+    ],
     "mint": [
         None,
         {"Stone": 240, "Iron": 90, "Tools": 60, "Gold": 120},
@@ -141,6 +157,7 @@ STORAGE_BUILD_TURNS = {"granary": [0, 15, 22, 30],
                        "pasture": [0, 8], "barn": [0, 14],
                        "stable": [0, 12], "slaughterhouse": [0, 10],
                        "gold_mine": [0, 18, 28], "mint": [0, 16, 26, 36],
+                       "mining_camp": [0, 16, 26, 36],
                        "cartographer": [0, 20, 30, 42]}
 
 # A village builds smaller and cheaper than a settlement -- but it can build,

@@ -1617,11 +1617,20 @@ def village_labor_factors(world, village, potentials, by_sector_resource):
     the invariant directly (no idle hands while any sector is still short); it
     is what caught this."""
     workforce = village_workforce(village)
-    if workforce <= 0 or not potentials:
+    if not potentials:
         return {}
+    if workforce <= 0:
+        # A village with nobody left in it works nothing. This has to say so
+        # EXPLICITLY rather than return {}: compute_village_yield reads a
+        # missing factor as "this resource has no sector, so no labour limit
+        # applies" and hands back the full terrain potential -- which meant a
+        # village that had lost every adult out-produced a populated one.
+        # Found by dev/test_mining_camp.py asserting the plain-language
+        # property "with no workforce, a mine produces nothing".
+        return {sector: 0.0 for sector, amount in potentials.items() if amount > 0}
     shares = _labor_shares(village, potentials, by_sector_resource)
     if not shares:
-        return {}
+        return {sector: 0.0 for sector, amount in potentials.items() if amount > 0}
 
     def ceiling(sector):
         per = LABOR_OUTPUT_PER_WORKER.get(sector, 1.0)
@@ -1681,7 +1690,20 @@ def _village_terrain_potential(world, village, season):
             m = weather_mult.get(crop)
             if m is not None:
                 raw[crop] = round(amount * m)
-    industry = _industry_yield_core(biome_counts, climate, fertility_frac)
+    # A Mining Camp adds mountain the village does not itself sit on (see
+    # mining_camp_cells) -- to the INDUSTRY sample only, and deliberately after
+    # the crops above: sending miners to a seam two valleys over does not
+    # change what grows in the fields at home.
+    #
+    # Borrowing the village's own climate for those cells is exact rather than
+    # approximate: every Mining resource has a climate_affinity of 1.0 in all
+    # four climates, so climate cannot affect what the extra cells yield.
+    industry_counts = biome_counts
+    extra_mountain = mining_camp_cells(world, village)
+    if extra_mountain:
+        industry_counts = dict(biome_counts)
+        industry_counts["mountain"] = industry_counts.get("mountain", 0) + extra_mountain
+    industry = _industry_yield_core(industry_counts, climate, fertility_frac)
     # The Gold Mine works the seam harder (see GOLD_MINE_YIELD_MULT). Applied
     # to the LAND's offer, before labor, deliberately: a bigger mine is more
     # ore to dig, not free ore -- the extra still has to be worked by hands
@@ -3382,6 +3404,11 @@ def storage_max_tier(node, building):
         # Herd buildings are village-only: animals live where the fields are,
         # and a walled city is not a pasture.
         return VILLAGE_HERD_MAX_TIER if village else 0
+    if building == MINING_CAMP:
+        # Village-only: a camp is people walking out to a seam and carting ore
+        # home, which is a village's work. The region-has-mountain gate needs
+        # the world and lives in buildings.py, same split as the Gold Mine.
+        return (len(MINING_CAMP_CELLS) - 1) if village else 0
     if building == GOLD_MINE:
         # Village-only, and the seam gate lives in buildings.py rather than
         # here: this function takes no world, and "is there ore under this
@@ -3989,6 +4016,84 @@ MINT_RATE_MULT = [1.0, 3.0, 6.0, 10.0]
 # being purely "the same thing, faster" -- it makes each unit of a genuinely
 # scarce resource worth more.
 MINT_YIELD_PER_ORE = [1.0, 1.0, 1.15, 1.3]
+
+
+# --- The Mining Camp: a workforce for ore nobody could reach -----------------
+# The Mining tier was structurally dead, and not for any reason inside the
+# mining code. Villages are sited on FARMLAND -- that is what the placement
+# scoring rewards, correctly -- while Iron, Coal, Copper, Tin and Gold Ore all
+# spawn only on mountain, which is 4.5% of the map. Measured on a fresh
+# 10-faction world: 4 of 303 villages had a single mountain cell in catchment,
+# 57 cells in the whole world, and Iron was produced at 0.35 a turn globally.
+# Tools, Weapons and Shields sat at exactly zero as a direct consequence.
+#
+# Sand, Salt and Clay were fine throughout, which is the tell: they spawn on
+# desert/coastal/swamp, where villages actually get placed. Nothing was wrong
+# with mining -- the ore was simply somewhere nobody lived.
+#
+# A Mining Camp is how that was really solved: you do not move the mountain to
+# the village, you send people out to the seam and cart the ore back.
+# Historically this is what mining settlements WERE (Kutna Hora, Falun,
+# Rammelsberg, Potosi) -- founded on ore, in country that often could not feed
+# them, sustained by food brought in. So the camp works cells in its REGION
+# that lie outside the village's own catchment, which is the whole point:
+# without that it would be gated on exactly the thing that does not exist.
+#
+# Two properties that make it a decision rather than a free upgrade:
+#   * The ore is worked by the village's OWN hands (Phase 14), because the
+#     extra cells are added to the terrain offer BEFORE the labour limit. A
+#     camp competes with the harvest; it does not sit beside it.
+#   * A region's mountain is finite and SHARED between the camps on it, so
+#     building a second camp in the same region splits one seam rather than
+#     doubling it. Where you put a camp matters.
+MINING_CAMP = "mining_camp"
+# Mountain cells a camp can work, by tier.
+#
+# Sized against the seams that actually exist rather than against a village's
+# catchment: a mountainous region holds 100-320 mountain cells, so a first
+# attempt at 14/28/45 was worth only +17% world Iron across 59 camps -- a paid,
+# multi-turn building that barely showed up. These are a real bite out of a
+# real range, while still leaving the region's total as the hard ceiling.
+#
+# The upper tiers exceed what a modest region can supply on its own, which is
+# deliberate: past tier 1 the share cap in mining_camp_cells starts to bind, so
+# a big camp is only worth building on a big mountain, and two big camps in one
+# region genuinely compete. That is the decision this building exists to pose.
+MINING_CAMP_CELLS = [0, 25, 55, 90]
+
+
+def region_mountain_cells(world, region):
+    """Mountain cells in this region -- the finite seam its camps share."""
+    return (getattr(region, "biome_counts", None) or {}).get("mountain", 0)
+
+
+def has_region_mountain(world, village):
+    """Can a Mining Camp be built at this village at all? Gated on the REGION
+    rather than the village's own catchment (which is what gates the Gold
+    Mine): gating on catchment is what left the whole tier unreachable, since
+    almost no village is sited on a mountain in the first place."""
+    return region_mountain_cells(world, world.regions[village.region_id]) > 0
+
+
+def mining_camp_cells(world, village):
+    """How many mountain cells this village's camp actually works.
+
+    Capped by the region's real mountain, divided between however many camps
+    the region has. A seam does not get bigger because two villages both dug
+    into it, and without this a region could be mined an unlimited number of
+    times over by stacking camps."""
+    tier = min(storage_tier(village, MINING_CAMP), len(MINING_CAMP_CELLS) - 1)
+    if tier <= 0:
+        return 0
+    region = world.regions[village.region_id]
+    total = region_mountain_cells(world, region)
+    if total <= 0:
+        return 0
+    camps = sum(1 for vid in getattr(region, "villages", [])
+                if 0 <= vid < len(world.villages)
+                and storage_tier(world.villages[vid], MINING_CAMP) > 0)
+    share = total / max(1, camps)
+    return int(min(MINING_CAMP_CELLS[tier], share))
 
 
 def gold_mine_multiplier(node):
