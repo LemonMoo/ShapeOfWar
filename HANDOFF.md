@@ -9,13 +9,15 @@ surveys, released together. Check
 `gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting this
 line — this repo ships fast, sometimes several releases in one day.
 
-**Six commits sit on `master` unreleased since then.** §17: the domestic
+**Ten commits sit on `master` unreleased since then.** §17: the domestic
 logistics chain was severed in four places (nothing manufactured existed
 anywhere), two reported UI bugs, and the Mining Camp that closes §15.5's supply
 hole. §18: prosperity was a meter that could not move, and phase A of the
 **biome overhaul, which is mid-flight and is the main thread to pick up**.
-§19.1 is now DONE too — phase B, species homelands. See §19 for the agreed
-plan and what is left. Working tree is clean; the 28-script suite passes.
+Biome phases **B, C and F are now DONE too** — species homelands, native
+terrain aptitude, and the fantasy naming layer — plus a Stormlight-inspired
+naming convention for Humans. See §19 for the plan and §§20-22 for what was
+built. Working tree is clean; the 30-script suite passes.
 
 ## HOW THIS PROJECT WANTS TO BE WORKED ON
 
@@ -43,12 +45,14 @@ useful rather than busy.
 
 ## WHAT IS OPEN, ROUGHLY BY VALUE
 
-1. **THE BIOME OVERHAUL, phases C-F.** Mid-flight: phases A (the matrix)
-   and B (species homelands) have shipped, four remain, and the user has
-   already chosen the design on every axis. **§19 is the plan — read it
-   before anything else.** Phase C (native-terrain aptitude) is next in the
-   agreed order; phase F (fantasy names) is cheap, zero-risk and the user
-   was told they would be asked whether they want it early.
+1. **THE BIOME OVERHAUL, phases D and E.** Phases A (the matrix), B
+   (homelands), C (terrain aptitude) and F (naming) have all shipped. **§19
+   is the plan.** Phase D is biome-gated buildings and carries the
+   **highest unfairness risk of the chosen mechanics** — each building has
+   to be genuinely equivalent in value, which is hard to verify; §19.3
+   suggests making them variations on one effect. Phase E (terrain in
+   movement and battle) is the biggest build of the set and furthest from
+   everything else.
 2. **Weather Phases 2-4** — logistics, battle, visual. Phases 0 and 1 are
    built and shipped; nothing since has touched weather. The biggest coherent
    feature outside the biome work. See **§10**, and read §16 first because
@@ -2008,8 +2012,8 @@ Everwood" to be a place rather than scattered pixels.
 
 ## 19. THE BIOME OVERHAUL — the live thread
 
-**This is the work to pick up.** Phases A (§18.2) and B (§20) shipped;
-C through F remain.
+**This is the work to pick up.** Phases A (§18.2), B (§20), F (§21) and
+C (§22) have shipped; D and E remain.
 The user chose the design on every axis already, so these are decisions to
 implement, not to re-open.
 
@@ -2051,7 +2055,7 @@ Elf realm is as likely to start in a desert as a Human one.
 - `_place_settlements_for_faction` already reads
   `world.factions[fac_idx].meta["species"]` and does nothing with it.
 
-### 19.2 Phase C — native-terrain aptitude + acclimatisation
+### 19.2 Phase C — native-terrain aptitude — **DONE, see §22**
 
 A species works its own biomes better (~+15% labour) and alien ones worse, with
 the penalty eroding as it holds the land. Rides the Phase 14 labour system —
@@ -2076,7 +2080,7 @@ Swamp slows armies, highland favours defenders, jungle hides them. Touches
 commander movement (`worldgen._elev_cost` already does some terrain) and the
 battle sim. Biggest build of the set and furthest from the economy work.
 
-### 19.5 Phase F — the fantasy naming layer
+### 19.5 Phase F — the fantasy naming layer — **DONE, see §21**
 
 Named variants over each mechanical biome — Everwood/Thornwild over `forest`,
 Ashwaste over `desert`, Mistfen over `swamp` — chosen at worldgen from climate
@@ -2206,3 +2210,116 @@ the homeland was chosen for whichever species the world was generated with.
 Rerolling gives a homeland matched to the current pick. Fixing that properly
 means regenerating on species change, which is the exact thing §8 exists to
 avoid.
+
+---
+
+## 21. Biome phase F — the naming layer, and a voice for Humans (DONE, unreleased)
+
+### 21.1 Named country over mechanical biome
+
+`Region.flavour_name` gives every region a name for the kind of country it is
+— the Everwood rather than "forest", the Ashwaste rather than "desert" — keyed
+by dominant biome and the region's dominant climate, so the same forest reads
+as the Hollowpine in the frozen north and the Everwood on a warm coast. The
+table is `lexicon.BIOME_FLAVOUR_NAMES`; 12 biomes, each with a climate
+fallback.
+
+**Flavour only, and it is enforced rather than intended.**
+`dev/test_biome_names.py` asserts that not one economy module (resources,
+trade, construction, expansion, buildings) so much as *mentions* the naming
+layer, and that two regions of the same biome are mechanically identical
+whatever they are called. A naming layer that quietly acquired a mechanical
+effect would be the worst outcome of the whole overhaul, because it would make
+terrain unfair in a way no player could see.
+
+It is a **derived property, not a stored field** — nothing added to the
+pickle, so every existing save is named the moment it loads with no migration,
+and being derived it cannot drift from the biome underneath it. Verified
+against a pre-phase-F save: all 1,451 regions named.
+
+### 21.2 Humans got a naming convention of their own
+
+They were the generic-medieval default (Karnhaven, Brenstead, Aldric the
+Bold), which left the one species with no homeland of its own also the one
+with no voice of its own. They now draw on the naming **conventions** of
+Sanderson's Stormlight Archive at the user's request: storm-shaped descriptive
+compounds, oath and highland vocabulary, th/kh/sh/l/n phonetics, and the
+fondness for symmetry (Nomon, Tevet, Kanak, Halah all read the same both
+ways). Realms read as the Leeward Reach and Highstone Oathhold, cities as
+Stormspire and Thalseat, rulers as Queen Dalneth Stormcalled.
+
+**Every name is original.** Not one proper noun of his is reused — that is the
+whole point of borrowing a convention rather than a name, and it is worth
+keeping that line if the other species are ever given the same treatment.
+
+Also: the shared settlement namer now collapses a letter doubled across the
+root/suffix seam, so "Sasas" + "shelter" reads Sasashelter rather than
+Sasasshelter. Every species benefits; only the join is touched.
+
+---
+
+## 22. Biome phase C — terrain aptitude and acclimatisation (DONE, unreleased)
+
+A people works its own country better. `terrain_aptitude` runs 0.85 on wholly
+alien ground up to 1.15 on wholly native.
+
+### 22.1 It reuses phase B's homelands on purpose
+
+It scores off `SPECIES_BIOME_AFFINITY` rather than a second table, and that is
+a design decision rather than a shortcut: **the land you come from IS the land
+you are good at**, and a separate table would be free to drift away from where
+the species actually spawns. `worldgen.homeland_affinity` already answers "how
+much is this my country" from a biome mix — phase C asks it of a village's
+catchment instead of a candidate capital's surroundings. The test asserts that
+coupling directly, so it cannot quietly be replaced with a parallel table.
+
+### 22.2 Where it applies, and why there
+
+Inside `_village_terrain_potential`, on what the **land offers**, beside the
+Mining Camp's extra cells and the Gold Mine's multiplier — so it flows through
+`village_labor_factors` and competes for hands like everything else, rather
+than being free output bolted on at the end. Fishing is deliberately excluded:
+the catch comes off the water, not out of the ground.
+
+### 22.3 Acclimatisation is the fairness valve
+
+`ACCLIMATISATION_TURNS = 120` of unbroken tenure erodes the alien penalty to
+nothing. Without it, a realm that conquers alien terrain is permanently worse
+at it than the neighbour it took it from, which compounds every turn and makes
+expanding into unlike country a trap rather than a choice.
+
+Two properties worth not breaking, both asserted:
+
+- It erodes the **penalty only** and stops at 1.0. Living somewhere long
+  enough stops the ground fighting you; it does not make you native to it.
+- It tracks **which species** has been living there (`acclim_species`), so
+  taking a people's fields does not hand you their generations of learning
+  them. Same species, unbroken tenure → the counter keeps climbing.
+
+Note a village at, say, 1.09 still improves with acclimatisation — a mixed
+catchment has an alien share in it and learning that share is the mechanic
+working, not a bug. Only a *wholly* native catchment has nothing to learn.
+
+### 22.4 Measured
+
+Economically neutral in aggregate over 60 turns: **-6.4% population with it
+against -6.2% without, 84 starving against 87.** That is the right shape — it
+redistributes advantage between realms rather than inflating or deflating the
+economy.
+
+Counters are read through `getattr`, so a pre-phase-C save needs no migration;
+it simply starts learning.
+
+### 22.5 Numbers to judge in play
+
+| constant | file | now | if it feels wrong |
+|---|---|---|---|
+| `TERRAIN_APTITUDE_BONUS` | resources.py | 0.15 | homelands feel too strong or pointless |
+| `TERRAIN_APTITUDE_PENALTY` | resources.py | 0.15 | expanding into alien land feels free or brutal |
+| `ACCLIMATISATION_TURNS` | resources.py | 120 | conquered land settles in too fast or never |
+| `SPECIES_BIOME_AFFINITY` | lexicon.py | per-species | now drives BOTH spawn and aptitude — changing it moves both |
+
+**One coupling to know before touching that last row:** `SPECIES_BIOME_AFFINITY`
+is now load-bearing twice over. Editing it changes where a species spawns
+(phase B) *and* what it is good at (phase C), which is intended — but it means
+a tweak meant to fix spawn placement will silently move the economy too.
