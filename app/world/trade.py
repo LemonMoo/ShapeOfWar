@@ -175,7 +175,7 @@ def _settlement_gold(st):
 # A settlement used to happily spend every last coin the instant it had
 # some to spend, in both foreign and domestic trade -- fine for a single
 # deal, but it meant a nation never actually held onto Gold long enough to
-# fund anything else, like claiming wildland (CLAIM_BASE_COST +
+# fund anything else (claiming wildland no longer costs Gold at all --
 # CLAIM_COST_PER_CELL in expansion.py -- a typical mid-size region runs
 # ~150-250 Gold) or any other future Gold cost. This is purely a trade-
 # spending floor, not a hard cap on the settlement's own Gold: claiming/

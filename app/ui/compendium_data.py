@@ -1140,39 +1140,40 @@ def _expansion_article():
         ),
         "STARTING A CLAIM",
         (
-            "A claim is an expedition, not a purchase: most of what it "
-            "costs is the timber and stone the crew consumes raising "
-            "palisades and the first buildings on unsettled ground. Gold "
-            "is only a small part of the bill."
+            "A claim is colonisation, not a purchase. You send people, and "
+            "you feed them until the first harvest — that is the whole "
+            "bill. No gold, no timber, no stone: those are what you spend "
+            "BUILDING once you are there."
         ),
         (
-            f"A normal land-adjacent claim costs "
-            f"{_cost_phrase(expansion.CLAIM_BASE_COST)}, plus "
-            f"{_cost_phrase(expansion.CLAIM_COST_PER_CELL)} per cell of "
-            f"the region's area. It takes {expansion.CLAIM_BASE_TURNS} "
-            f"turns plus {expansion.CLAIM_TURNS_PER_CELL:.2g} turns per "
-            "cell (paid and started immediately; the fight only happens "
-            "once that work is done)."
+            f"A normal land-adjacent claim takes "
+            f"{expansion.CLAIM_SETTLERS_BASE} settlers plus "
+            f"{expansion.CLAIM_SETTLERS_PER_CELL:.2g} per cell of the "
+            f"region's area, and "
+            f"{expansion.CLAIM_PROVISIONS_PER_SETTLER} food per settler to "
+            f"provision them. It takes {expansion.CLAIM_BASE_TURNS} turns "
+            f"plus {expansion.CLAIM_TURNS_PER_CELL:.2g} turns per cell "
+            "(paid and started immediately; the fight only happens once "
+            "that work is done)."
+        ),
+        (
+            "Settlers come from whichever of your settlements and villages "
+            "sit nearest the new land, and no one place gives up more than "
+            f"{_pct(expansion.CLAIM_SETTLER_DRAW_FRACTION)} of its people "
+            "to a single expedition — nor is any place ever emptied below "
+            "the same floor a famine could push it to. They are working-age "
+            "people, so expansion genuinely costs you hands in the fields "
+            "back home. That is the real price of growing."
         ),
         (
             f"An amphibious claim — a shore region reachable only across "
             f"water, with no land border to territory you already hold — "
-            f"costs far more: {_cost_phrase(expansion.SEA_ONLY_CLAIM_COST)} "
-            f"(plus the same per-cell rate), and its garrison is "
-            f"{_pct(expansion.SEA_ONLY_STRENGTH_MULT)} the size. This is "
-            "deliberate: it stops both you and the AI from cheaply "
-            "leapfrogging across the sea and over-expanding early. Note "
-            "that spoils do NOT cover an amphibious claim — it is a "
-            "genuine investment, not a way to make money across the sea."
-        ),
-        (
-            "Because that bill is mostly materials, every region — desert, "
-            "steppe, bare rock — scrapes together a small amount of Logs "
-            "and Stone each turn no matter what its land is like. It is "
-            "deliberately meagre, and a region with real forest or a "
-            "quarry is far above it and gains nothing. It exists so that a "
-            "realm founded on barren ground can still, slowly, fund its "
-            "way outward instead of being sealed in by geography."
+            f"costs far more: {expansion.SEA_ONLY_SETTLERS_BASE} settlers "
+            f"plus {expansion.SEA_ONLY_SETTLERS_PER_CELL:.2g} per cell, and "
+            f"its garrison is {_pct(expansion.SEA_ONLY_STRENGTH_MULT)} the "
+            "size. A sea crossing needs more people and more supplies, and "
+            "only a realm with people to spare can mount one — which is "
+            "what stops both you and the AI from leapfrogging the map early."
         ),
         "SPOILS",
         (
@@ -1183,15 +1184,15 @@ def _expansion_article():
             "new villages, so rich land is worth more than a bog."
         ),
         (
-            f"The Gold taken is {expansion.CLAIM_SPOILS_GOLD_MULT:.2g}× "
-            f"what you paid for the claim, plus "
+            f"The Gold taken is {expansion.CLAIM_SPOILS_GOLD_BASE} from the "
+            f"garrison's own strongbox plus "
             f"{expansion.CLAIM_SPOILS_GOLD_PER_STRENGTH:.2g} per point of "
-            "garrison strength. A land claim you win therefore returns "
-            "MORE Gold than it cost. That is intentional: early expansion "
-            "is meant to be how a young realm generates coin and gets its "
-            "economy moving, rather than every kingdom simply starting "
-            "with a heap of it. The margin per claim is small — it "
-            "compounds over a campaign instead of arriving all at once."
+            "garrison strength — a tough wildland was guarding something. "
+            "Since a claim costs no Gold at all, every claim you win is "
+            "pure coin gained. That is intentional: expansion is meant to "
+            "be how a young realm generates money and gets its economy "
+            "moving, rather than every kingdom simply starting with a heap "
+            "of it."
         ),
         "ODDS",
         (

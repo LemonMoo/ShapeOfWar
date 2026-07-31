@@ -1227,7 +1227,7 @@ def compute_industry_yield(region, season):
     # Every region scrapes together SOME timber and stone, whatever its biome:
     # scrub and deadwood, and rock prised out of the ground. Without this a
     # desert or steppe realm produces literally zero of both, and since claiming
-    # wildland is now paid mostly in Logs and Stone (see expansion.CLAIM_BASE_COST)
+    # wildland is paid in settlers and provisions now (see expansion.claim_cost)
     # such a realm could never expand at all -- a permanent dead end decided at
     # worldgen. On a late-game test map Stone was the single binding constraint
     # on 4 of 14 realms, and halving its price changed nothing, because their
@@ -1871,12 +1871,27 @@ def _river_cell_flow(world):
     return flow_by_cell
 
 
-# What fraction of its geographic fish yield a SETTLEMENT actually lands.
-# Villages get the Phase 14 labour model instead (their crews are real hands
-# taken off other work); settlements have no labour model, so without a
-# number here they landed 100% of their yield every turn forever. See
-# _produce_fishing for the measurement that produced this.
-SETTLEMENT_FISHING_SHARE = 0.15
+# A settlement's fishing fleet was once scaled down by a share constant here,
+# because settlements have no labour model (villages got one in Phase 14) and
+# so land their FULL geographic yield every turn -- measured at 1,210
+# Fish/turn from settlements alone against a world-wide food demand of
+# 181/turn, with Fish and Smoked Fish together ~50% of everything destroyed
+# anywhere.
+#
+# That cut was REVERTED, and the reason is worth keeping. It did reduce the
+# waste (fish destroyed roughly halved) but it reduced supply to do it, and
+# that same supply was quietly feeding people: on a developed save, cutting
+# the settlement catch to 15% turned a 60-turn population trend of -5.6%
+# into -18.5%, and even 60% still cost -9.9%. Meanwhile the "waste" it was
+# fixing was costing nothing real -- fish rots because it spoils at 0.35,
+# not because storage is full, and the storage pools were measured as
+# non-binding (see the note on STORAGE_POOL_BASE).
+#
+# So: gross fish spoilage is high and looks alarming in dev/storage_audit.py,
+# but it is mostly a cosmetic metric. Do not "fix" it by cutting supply.
+# If it is ever worth revisiting, the lever that would not cost food
+# security is the spoil rate itself, or giving fish a real preservation
+# path that villages can actually reach -- not less fishing.
 
 
 def _node_fish_yield(world, pos):
@@ -1946,25 +1961,10 @@ def _produce_fishing(world):
             yield_amt = yield_amt * factors.get("fishing", 0.0)
             if yield_amt <= 0:
                 continue
-        else:
-            # A settlement has no labour model at all -- it is a consumer, and
-            # its fishing fleet isn't a workforce question. That exemption was
-            # correct in principle and badly wrong in magnitude: it meant a
-            # coastal settlement landed its FULL geographic yield every turn,
-            # forever, throttled by nothing. Measured on a 14-faction world,
-            # settlements alone landed 1,210 Fish/turn against a total food
-            # demand of 181/turn across every node in the world -- Fish and
-            # Smoked Fish together were ~50% of everything destroyed anywhere.
-            #
-            # A town on a river is not a fishing fleet; the boats that feed a
-            # city are a side trade, and the real fishing economy belongs to
-            # the villages that do nothing else (which is what the labour
-            # model above already expresses properly). Scaled down rather than
-            # removed, so a coastal settlement still puts fish on its own
-            # table -- see SETTLEMENT_FISHING_SHARE.
-            yield_amt = yield_amt * SETTLEMENT_FISHING_SHARE
-            if yield_amt <= 0:
-                continue
+        # A settlement has no labour model -- it is a consumer, and its
+        # fishing fleet isn't a workforce question, so it lands its full
+        # yield. Scaling that down was tried and reverted; see the note
+        # above _node_fish_yield for the measurement and why.
         if not hasattr(node, "resources"):
             node.resources = {}
         # Same storage feedback as the harvest (see storage_throttle): boats

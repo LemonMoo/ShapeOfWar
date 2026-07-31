@@ -4106,28 +4106,43 @@ class MapView(tk.Frame):
                          bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
                          justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
             return
-        cost = expansion.claim_cost(region, sea_only)
-        afford = construction.can_afford(player, cost, self.world)
-        tk.Label(self.actions, text=f"Cost: {_format_resources(cost)}\n"
-                 f"Build time: {expansion.claim_turns(region)} turns",
-                 bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
-                 justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
-        # The claim is meant to pay for itself in coin -- show that up front, or
-        # the cost reads as pure expenditure and nobody expands early.
+        # A claim is colonisation: settlers and the food to see them through
+        # (see expansion.claim_cost). Both figures are shown against what the
+        # realm actually has, since "80 settlers" means nothing on its own.
+        settlers = expansion.claim_settlers(region, sea_only)
+        provisions = expansion.claim_cost(region, sea_only)["Food"]
+        have_settlers = expansion.faction_available_settlers(self.world, faction_idx)
+        have_food = expansion._faction_food_stock(self.world, faction_idx)
+        blocked = expansion.can_afford_claim(self.world, faction_idx, region, sea_only)
+        tk.Label(self.actions,
+                 text=f"Settlers: {settlers:,} (you can spare {have_settlers:,})\n"
+                      f"Provisions: {provisions:,} food (you hold {have_food:,})\n"
+                      f"Journey: {expansion.claim_turns(region)} turns",
+                 bg=theme.PANEL, fg=theme.INK if not blocked else theme.BAD,
+                 font=theme.FONT, justify="left",
+                 wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
+        # Settlers are working-age people, and population is the workforce
+        # (Phase 14) -- saying so stops this reading as a free number.
+        tk.Label(self.actions,
+                 text="Settlers are drawn from your nearest places and come "
+                      "off their workforce.",
+                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_SMALL,
+                 justify="left",
+                 wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
+        # Winning pays real coin -- show that up front, or the cost reads as
+        # pure expenditure and nobody expands early.
         spoils = expansion.claim_spoils(self.world, region)
         if spoils:
-            net = expansion.claim_net_gold(self.world, region)
             goods = sum(v for k, v in spoils.items() if k != "Gold")
             line = f"Spoils if won: {spoils.get('Gold', 0):,} Gold"
             if goods:
                 line += f" + {goods:,} units of stores"
-            if not sea_only and net > 0:
-                line += f"\n(net {net:+,} Gold on the claim)"
             tk.Label(self.actions, text=line, bg=theme.PANEL, fg=theme.GOOD,
                      font=theme.FONT, justify="left",
                      wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
         widgets.button(self.actions, "Claim Territory",
-                        lambda cnty=region: self._do_claim(cnty)
+                        lambda cnty=region: self._do_claim(cnty),
+                        state="disabled" if blocked else "normal"
                         ).pack(fill="x", pady=2)
 
     def _do_claim(self, region):

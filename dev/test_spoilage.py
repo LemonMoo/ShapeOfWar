@@ -69,43 +69,23 @@ try:
 finally:
     village.resources = before_res
 
-print("\n--- a settlement's fishing fleet is a side trade, not an industry ---")
-assert 0 < R.SETTLEMENT_FISHING_SHARE < 1.0, R.SETTLEMENT_FISHING_SHARE
-st = next((s for s in w.settlements if (getattr(s, "fish_yield", None) or 0) > 0), None)
-if st is None:
-    # fish_yield is computed lazily on first _produce_fishing; force it
-    for s in w.settlements:
-        s.fish_yield = R._node_fish_yield(w, s.pos)
-    st = next((s for s in w.settlements if s.fish_yield > 0), None)
-if st is not None:
-    before = dict(st.resources or {})
-    try:
-        st.resources = {}
-        R._produce_fishing(w)
-        landed = (st.resources or {}).get("Fish", 0)
-        full = st.fish_yield * R.storage_throttle(st, "Fish")
-        assert landed <= round(full * R.SETTLEMENT_FISHING_SHARE) + 1, (
-            f"{st.name} landed {landed} against a scaled ceiling of "
-            f"{full * R.SETTLEMENT_FISHING_SHARE:.1f}")
-        print(f"  ok    {st.name}: geographic yield {st.fish_yield:.1f}/turn, "
-              f"actually landed {landed} at share {R.SETTLEMENT_FISHING_SHARE}")
-    finally:
-        st.resources = before
-else:
-    print("  skip  no coastal settlement in this world")
+print("\n--- settlement fishing was NOT capped, deliberately ---")
+# Scaling the settlement catch down halved fish spoilage and cost far more
+# than it bought: on a developed save it turned a 60-turn population trend
+# of -5.6% into -18.5%, and even a mild 0.6 cut still cost -9.9%. The waste
+# it "fixed" is cosmetic -- fish rots because it spoils at 0.35, not because
+# storage is full, and the pools were measured non-binding. Guarding the
+# revert so it does not get reintroduced from the audit numbers alone.
+assert not hasattr(R, "SETTLEMENT_FISHING_SHARE"), (
+    "capping the settlement catch reduces waste by cutting the food supply "
+    "populations actually eat -- see the note above _node_fish_yield")
+print("  ok    settlements still land their full catch; the cut was reverted")
 
-print("\n--- villages keep the labour model, not the flat share ---")
-# The share is a settlement-only concession; a village's catch is still
-# whatever share of its workforce actually went fishing (Phase 14).
+print("\n--- a village's catch is still its own labour decision ---")
 import inspect
 src = inspect.getsource(R._produce_fishing)
 assert "village_labor_state" in src, "villages must still go through the labour model"
-assert "SETTLEMENT_FISHING_SHARE" in src
-assert src.index("village_labor_state") < src.index("SETTLEMENT_FISHING_SHARE"), (
-    "the village branch must come first -- a village must never take the "
-    "settlement share")
-print("  ok    villages route through village_labor_state; the flat share is "
-      "the settlement branch only")
+print("  ok    a village lands whatever share of its workforce went fishing")
 
 print("\n--- the storage throttle taper is soft, not a cliff ---")
 assert 0.0 < R.STORAGE_THROTTLE_FLOOR < 1.0, R.STORAGE_THROTTLE_FLOOR

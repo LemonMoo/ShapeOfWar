@@ -3,8 +3,8 @@ starting the game already owning a fully-formed nation. Every region not
 part of a faction's starting foothold begins UNCLAIMED, defended by a
 neutral "wildland" garrison (see app/world/worldgen.py's
 _seed_wildland_strength) — claiming one requires being adjacent to land you
-already hold (no leapfrogging), costs real resources, takes real turns, and
-only resolves win/loss against the garrison once the work is done.
+already hold (no leapfrogging), costs settlers and provisions, takes real
+turns, and only resolves win/loss against the garrison once the work is done.
 """
 import math
 import random
@@ -19,19 +19,39 @@ from app.world.lexicon import make_settlement_namer
 from app.world.construction import (can_afford, _pay_cost, RoadProject, _path_between,
                                     _ai_has_active_construction)
 
-# Claiming is an expedition, not a purchase. It used to be paid in Gold alone
-# (80 flat + 0.6/cell, so ~170 for a typical region), which made expansion a
-# pure treasury check -- and a punishing one: instrumenting the expansion AI
-# showed 90% of all its attempts failing on affordability, against 0.2% blocked
-# by anything else. Gold is now a small fraction of that, and most of the cost
-# is the timber and stone an expedition actually consumes putting up palisades,
-# bridges and the first buildings on ground nobody has settled before.
-# Stone is kept genuinely minimal. At a first pass it was the single binding
-# constraint on 4 of 14 realms in a late-game save (Logs never blocked anyone),
-# which is not what "a minimal amount of stone" should mean -- quarrying is far
-# rarer across the map than logging, so the same nominal price bites much harder.
-CLAIM_BASE_COST = {"Gold": 25, "Logs": 30, "Stone": 12}
-CLAIM_COST_PER_CELL = {"Gold": 0.1, "Logs": 0.12, "Stone": 0.04}
+# Claiming is COLONISATION: you send people, and you feed them until the
+# first harvest. Nothing else.
+#
+# It has been priced three ways now. First Gold alone (a pure treasury
+# check: 90% of all AI attempts failed on affordability, against 0.2%
+# blocked by anything else). Then Gold + Logs + Stone, on the reasoning
+# that an expedition consumes timber and stone raising palisades. That
+# second version is the one this replaces, and it failed for a structural
+# reason rather than a tuning one: measured on a real save, 5 of 14 realms
+# COULD NOT CLAIM ANYTHING AT ALL -- four short of Stone, one short of
+# Gold. Quarrying barely exists for most realms (villages are sited on
+# farmland, mountain is ~4.5% of the map), and some worlds mint no gold
+# whatsoever. Pricing expansion in goods that whole realms structurally
+# cannot obtain is a dead end, not a difficulty setting.
+#
+# Settlers and provisions cannot lock anyone out, because a realm without
+# people or food is already finished. It is also what taking new land
+# actually cost, historically -- the Roman colonia, the Greek apoikia, the
+# Norse landnam, the Ottoman surgun, homesteading: you moved families and
+# you victualled them. Timber and stone are what you spend building a fort
+# once you are there, which is what the BUILD menu is for.
+#
+# The real bite is that population IS the workforce (see resources.py's
+# Phase 14 labour model), so settlers come straight off the fields at home.
+# Expansion now competes with production instead of draining a pile nobody
+# was using.
+CLAIM_SETTLERS_BASE = 40
+CLAIM_SETTLERS_PER_CELL = 0.15
+CLAIM_PROVISIONS_PER_SETTLER = 3     # food to see them to the first harvest
+# No single node gives up more than this share of its people to any one
+# expedition -- a realm should be able to expand without gutting the
+# village next door to do it.
+CLAIM_SETTLER_DRAW_FRACTION = 0.25
 CLAIM_BASE_TURNS = 4
 CLAIM_TURNS_PER_CELL = 0.03
 CLAIM_FAIL_COOLDOWN_TURNS = 5
@@ -44,8 +64,12 @@ CLAIM_FAIL_STRENGTH_BUMP = 1.15   # a region "digs in" after repelling a claim
 # can cheaply leapfrog across the sea and over-expand beyond their real reach
 # in the early game.
 # Rebalanced on the same principle, but deliberately still steep: an amphibious
-# claim has to be a real commitment, not a way to leapfrog the map early.
-SEA_ONLY_CLAIM_COST = {"Gold": 300, "Logs": 220, "Stone": 90}
+# claim has to be a real commitment, not a way to leapfrog the map early. In
+# settlers-and-provisions terms that reads more naturally than it did in
+# gold and stone -- a sea crossing needs more people and more supplies, and
+# is exactly the kind of undertaking a realm has to be big enough to mount.
+SEA_ONLY_SETTLERS_BASE = 180
+SEA_ONLY_SETTLERS_PER_CELL = 0.35
 SEA_ONLY_STRENGTH_MULT = 1.5      # its garrison is stronger (more soldiers) too
 
 # Wildland garrisons fight 10% below their nominal strength rating — applied
@@ -90,9 +114,9 @@ def frontier_id_sets(world, faction_idx):
 def is_sea_only_claim(world, faction_idx, region, frontier=None):
     """True when `region` is claimable only across water — naval-reachable
     from the faction's territory but NOT sharing a land border with it. These
-    amphibious claims carry the steep SEA_ONLY_CLAIM_COST and a tougher
-    garrison (see SEA_ONLY_STRENGTH_MULT); a normal land-adjacent claim is
-    False and keeps the cheap per-cell cost.
+    amphibious claims need far more settlers (SEA_ONLY_SETTLERS_BASE) and a
+    tougher garrison (see SEA_ONLY_STRENGTH_MULT); a normal land-adjacent
+    claim is False and keeps the cheap per-cell rate.
 
     `frontier` is an optional (land_ids, naval_ids) pair from
     frontier_id_sets, for callers testing many regions at once. Passing it is
@@ -105,11 +129,120 @@ def is_sea_only_claim(world, faction_idx, region, frontier=None):
     return region.id in naval
 
 
+def claim_settlers(region, sea_only=False):
+    """How many people this claim takes out of the realm."""
+    base = SEA_ONLY_SETTLERS_BASE if sea_only else CLAIM_SETTLERS_BASE
+    per_cell = SEA_ONLY_SETTLERS_PER_CELL if sea_only else CLAIM_SETTLERS_PER_CELL
+    return max(1, round(base + per_cell * len(region.cells)))
+
+
 def claim_cost(region, sea_only=False):
-    cost = dict(SEA_ONLY_CLAIM_COST if sea_only else CLAIM_BASE_COST)
-    for resource, per_cell in CLAIM_COST_PER_CELL.items():
-        cost[resource] = cost.get(resource, 0) + round(per_cell * len(region.cells))
-    return cost
+    """The GOODS half of a claim -- provisions for the settlers, and nothing
+    else. Returned as a {resource: amount} dict for the same reason it
+    always was: every caller (the UI's cost line, the AI's affordability
+    check) already speaks that shape.
+
+    "Food" is not a resource in the registry -- it is a pooled demand met by
+    any edible (resources._FOOD_SOURCES), exactly as population consumption
+    already works -- so this does NOT go through construction.can_afford /
+    _pay_cost, which look resources up by literal name. See
+    can_afford_claim / _pay_claim below."""
+    settlers = claim_settlers(region, sea_only)
+    return {"Food": settlers * CLAIM_PROVISIONS_PER_SETTLER}
+
+
+def _faction_population_nodes(world, faction_idx):
+    """Every settlement and village this faction owns that has people in it,
+    nearest-first ordering left to the caller."""
+    nodes = [s for s in world.settlements if s.faction_idx == faction_idx]
+    nodes += [v for v in world.villages if v.faction_idx == faction_idx]
+    return [n for n in nodes if getattr(n, "population", 0) > 0]
+
+
+def _node_spare_settlers(node):
+    """How many people this node will release to an expedition: its share cap
+    (CLAIM_SETTLER_DRAW_FRACTION), and never below the same hard floor
+    starvation itself respects (resources.POPULATION_MIN_FRACTION of its own
+    max_population) -- so expanding can never empty a village the way a
+    famine can't."""
+    from app.world.resources import POPULATION_MIN_FRACTION
+    pop = getattr(node, "population", 0)
+    if pop <= 0:
+        return 0
+    max_pop = getattr(node, "max_population", None) or pop
+    floor = max_pop * POPULATION_MIN_FRACTION
+    return max(0, int(min(pop * CLAIM_SETTLER_DRAW_FRACTION, pop - floor)))
+
+
+def faction_available_settlers(world, faction_idx):
+    """People the realm could actually put on the road right now."""
+    return sum(_node_spare_settlers(n)
+               for n in _faction_population_nodes(world, faction_idx))
+
+
+def _faction_food_stock(world, faction_idx):
+    """Total edible goods across the realm -- the pooled figure provisions
+    are drawn from (see claim_cost on why this isn't a plain resource)."""
+    from app.world.resources import _FOOD_SOURCES
+    nation = world.factions[faction_idx]
+    total = 0
+    for node in _faction_population_nodes(world, faction_idx):
+        res = getattr(node, "resources", None) or {}
+        total += sum(res.get(f, 0) for f in _FOOD_SOURCES)
+    return total
+
+
+def can_afford_claim(world, faction_idx, region, sea_only=False):
+    """None if this claim can be funded, else why not. Replaces the plain
+    construction.can_afford call this used to make -- settlers are people,
+    not stock, and provisions are a pooled food draw."""
+    settlers = claim_settlers(region, sea_only)
+    if faction_available_settlers(world, faction_idx) < settlers:
+        return (f"Not enough people to settle it — this expedition needs "
+                f"{settlers:,} settlers.")
+    needed = claim_cost(region, sea_only)["Food"]
+    if _faction_food_stock(world, faction_idx) < needed:
+        return (f"Not enough food to provision {settlers:,} settlers — "
+                f"needs {needed:,}.")
+    return None
+
+
+def _pay_claim(world, faction_idx, region, sea_only=False):
+    """Take the settlers and the provisions. Settlers come from the nodes
+    nearest the region first -- people go to the frontier from the edge of
+    the realm, not from the capital on the far side of it -- each giving up
+    at most its own spare share. Returns (settlers_taken, food_taken)."""
+    from app.world.resources import _FOOD_SOURCES, _consume_from_pool
+    from app.world import wrap
+    settlers = claim_settlers(region, sea_only)
+    cx, cy = region.cells[len(region.cells) // 2]
+
+    nodes = sorted(_faction_population_nodes(world, faction_idx),
+                   key=lambda n: wrap.dist2_wrap(n.pos, (cx, cy), world.w))
+    taken = 0
+    for node in nodes:
+        if taken >= settlers:
+            break
+        give = min(_node_spare_settlers(node), settlers - taken)
+        if give <= 0:
+            continue
+        node.population -= give
+        # Keep the adults/children split honest -- settlers are working-age
+        # people, which is exactly why this costs the realm real labour.
+        adults = getattr(node, "adults", 0)
+        node.adults = max(0, adults - give)
+        taken += give
+
+    needed = claim_cost(region, sea_only)["Food"]
+    food_taken = 0
+    for node in nodes:
+        if food_taken >= needed:
+            break
+        res = getattr(node, "resources", None)
+        if not res:
+            continue
+        food_taken += _consume_from_pool(res, _FOOD_SOURCES, needed - food_taken)
+    return taken, food_taken
 
 
 def claim_turns(region):
@@ -188,13 +321,12 @@ def start_claim(world, faction_idx, region):
     if blocked:
         return blocked
 
-    nation = world.factions[faction_idx]
     sea_only = is_sea_only_claim(world, faction_idx, region)
-    cost = claim_cost(region, sea_only)
-    if not can_afford(nation, cost, world):
-        return "You don't have enough resources to fund this expansion."
+    blocked = can_afford_claim(world, faction_idx, region, sea_only)
+    if blocked:
+        return blocked
 
-    _pay_cost(nation, cost, world)
+    _pay_claim(world, faction_idx, region, sea_only)
 
     project = ClaimProject(faction_idx, region, sea_only)
     world.claim_projects.append(project)
@@ -344,19 +476,17 @@ def ensure_interregion_roads(world):
 # Scaled off the region's OWN output rather than a flat bundle, so seizing rich
 # land is worth more than seizing a bog, and off wildland_strength for the Gold,
 # because a garrison tough enough to need a real army was guarding something.
-# Gold spoils are pinned to what the claim actually COST rather than floating
-# free, so taking wildland is reliably profitable in coin instead of sometimes
-# being a net loss (at the first pass it returned 38 Gold against a 45 Gold
-# price). That profit is the point: it gives an early realm a way to GENERATE
-# gold by expanding, rather than every kingdom simply starting with a pile of
-# it. The margin is deliberately modest and per-claim -- it compounds over a
-# campaign instead of arriving all at once.
+# Gold spoils used to be pinned to the Gold the claim cost (a multiple of it),
+# which kept expansion reliably profitable in coin. A claim costs no Gold at
+# all now -- it is paid in settlers and provisions -- so there is nothing left
+# to take a multiple OF, and the bounty rests on the one thing that was
+# always the better signal anyway: how tough the garrison was. A wildland
+# strong enough to need a real army was guarding something.
 #
-# Pinned to the LAND cost specifically, so an amphibious claim (far pricier --
-# see SEA_ONLY_CLAIM_COST) stays a real commitment rather than a way to farm
-# coin across the sea.
+# This still gives an early realm a way to GENERATE gold by expanding rather
+# than every kingdom starting with a pile of it, which was the point.
 CLAIM_SPOILS_YIELD_TURNS = 10    # stores roughly this many turns of local output
-CLAIM_SPOILS_GOLD_MULT = 1.8     # Gold returned, as a multiple of the Gold paid
+CLAIM_SPOILS_GOLD_BASE = 45      # a garrison's own strongbox
 CLAIM_SPOILS_GOLD_PER_STRENGTH = 0.25   # plus a bounty for a tough garrison
 
 
@@ -369,8 +499,7 @@ def claim_spoils(world, region):
         take = round(amount * CLAIM_SPOILS_YIELD_TURNS)
         if take > 0:
             spoils[resource] = take
-    paid = claim_cost(region).get("Gold", 0)
-    gold = round(paid * CLAIM_SPOILS_GOLD_MULT
+    gold = round(CLAIM_SPOILS_GOLD_BASE
                  + region.wildland_strength * CLAIM_SPOILS_GOLD_PER_STRENGTH)
     if gold > 0:
         spoils["Gold"] = spoils.get("Gold", 0) + gold
@@ -378,9 +507,11 @@ def claim_spoils(world, region):
 
 
 def claim_net_gold(world, region):
-    """Gold left over after paying for the claim -- what the UI should promise,
-    since 'spoils 100' means little without 'cost 45' beside it."""
-    return claim_spoils(world, region).get("Gold", 0) - claim_cost(region).get("Gold", 0)
+    """Gold a successful claim brings in. All of the spoils, now: a claim
+    costs no Gold at all (settlers and provisions -- see claim_cost), so
+    there is nothing to net it off against. Kept as its own function
+    because the UI reads it and the distinction may return."""
+    return claim_spoils(world, region).get("Gold", 0)
 
 
 def _grant_claim_spoils(world, region):
@@ -483,9 +614,8 @@ def run_commander_ai(world):
         fr = frontier_id_sets(world, fac_idx)
         useful = [r for r in frontier
                   if commander_mod.commander_can_reach(world, fac_idx, r)
-                  and can_afford(nation,
-                                 claim_cost(r, is_sea_only_claim(world, fac_idx, r, fr)),
-                                 world)]
+                  and can_afford_claim(world, fac_idx, r,
+                                       is_sea_only_claim(world, fac_idx, r, fr)) is None]
         if useful:
             continue
         # Head for the staging ground of the closest target: one of our OWN
@@ -550,9 +680,8 @@ def run_expansion_ai(world):
         # part of the choice rather than a post-hoc test.
         fr = frontier_id_sets(world, fac_idx)     # scanned once, not per region
         affordable = [r for r in reachable
-                      if can_afford(nation,
-                                    claim_cost(r, is_sea_only_claim(world, fac_idx, r, fr)),
-                                    world)]
+                      if can_afford_claim(world, fac_idx, r,
+                                          is_sea_only_claim(world, fac_idx, r, fr)) is None]
         if not affordable:
             continue
         region = random.choice(affordable)
