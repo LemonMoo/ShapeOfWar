@@ -19,7 +19,8 @@ from app.core.events import bus
 from app.core.save import (save_game, load_game, has_save, list_saves,
                            new_save_id, delete_save)
 from app.world.worldgen import generate_world
-from app.battle.battle import Battle, Army, terrain_note
+from app.battle.battle import (Battle, Army, terrain_note,
+                               weather_note)
 from app.battle.unit_types import UNIT_TYPES
 
 _GAME_SCREENS = ("map", "battle")
@@ -460,6 +461,12 @@ class App(tk.Tk):
             frontier = bordering_regions(self.world, attacker_idx, defender_idx)
             region = random.choice(frontier) if frontier else None
         battle.set_terrain(getattr(region, "dominant_biome", None))
+        # ...and what the sky is doing over it (weather phase 4). Only owned
+        # regions have weather simulated at all (resources.advance_weather),
+        # so a fight in the wildlands is fought on a clear day -- the same
+        # limit travel.py documents, and for the same reason.
+        battle.set_weather((getattr(self.world, "region_weather", None) or {}
+                            ).get(region.id) if region is not None else None)
 
         a_army, a_comp = self._army_for(attacker, 0)
         d_army, d_comp = self._army_for(defender, 1)
@@ -474,6 +481,9 @@ class App(tk.Tk):
         note = terrain_note(battle.biome)
         if note:
             msg += f"  ({battle.biome.capitalize()}: {note}.)"
+        sky = weather_note(battle.weather_event)
+        if sky:
+            msg += f"  ({sky.capitalize()}.)"
         self.battle_view.set_battle(battle, msg)
         self.show_screen("battle")
 

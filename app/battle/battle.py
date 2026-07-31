@@ -7,6 +7,7 @@ import numpy as np
 
 from app.core.events import bus
 from app.battle import order_ai, orders
+from app.world import weather
 from app.battle.unit import Unit
 
 # Collision tuning.
@@ -136,6 +137,58 @@ BATTLE_TERRAIN = {
 }
 NEUTRAL_TERRAIN = {"speed": 1.0, "defender": 1.0, "ranged": 1.0}
 
+# --- Weather in battle (weather phase 4) -------------------------------------
+# Where a battle is fought was phase E; WHEN it is fought is this. The two
+# stack, and they are deliberately different in one important way:
+#
+#   terrain is ASYMMETRIC -- high ground favours whoever holds it, which is
+#           the entire point of high ground.
+#   weather is SYMMETRIC -- rain falls on both armies. A storm that helped
+#           the defender would be a second terrain bonus wearing a cloud, and
+#           it would make defending in bad weather strictly better rather
+#           than differently hard.
+#
+# Grounded in what weather actually did to battles rather than in abstract
+# modifiers. Wet bowstrings and a headwind are the reason Crecy and Agincourt
+# read the way they do; fog is why Barnet was fought half-blind and formations
+# shot at their own side.
+#
+#   speed     mud, snow underfoot, ground that will not hold a boot
+#   ranged    how far a bowman can SEE to shoot -- reach, not damage, exactly
+#             as with cover in phase E
+#   accuracy  whether the shot lands once he has taken it, which is a
+#             different question from whether he can see the target at all
+#
+# Drought is neutral here for the same reason it is neutral for a wagon (see
+# travel.WEATHER_TRAVEL_RATE): dry hard ground is GOOD to fight on. Making
+# every kind of weather bad would make them interchangeable, and the point of
+# having four is that they are not.
+BATTLE_WEATHER = {
+    weather.DROUGHT:  {"speed": 1.00, "ranged": 1.00, "accuracy": 1.00},
+    weather.STORM:    {"speed": 0.88, "ranged": 0.85, "accuracy": 0.70},
+    weather.BLIZZARD: {"speed": 0.78, "ranged": 0.75, "accuracy": 0.80},
+    weather.FOG:      {"speed": 0.97, "ranged": 0.55, "accuracy": 0.85},
+}
+NEUTRAL_WEATHER = {"speed": 1.0, "ranged": 1.0, "accuracy": 1.0}
+
+# Mild weather is half the effect of severe, rather than a second table to
+# keep in step with the first. One set of numbers to tune, and "severe" always
+# means exactly twice as much of whatever that weather does.
+MILD_WEATHER_SCALE = 0.5
+
+
+def weather_profile(event):
+    """The multipliers for fighting under `event` (a weather.WeatherEvent, or
+    None for a clear day). Severity scales the distance from 1.0, so a mild
+    storm is half a severe one and clear weather changes nothing."""
+    if event is None:
+        return dict(NEUTRAL_WEATHER)
+    base = BATTLE_WEATHER.get(event.kind)
+    if not base:
+        return dict(NEUTRAL_WEATHER)
+    scale = 1.0 if event.severity == weather.SEVERE else MILD_WEATHER_SCALE
+    return {k: 1.0 - (1.0 - v) * scale for k, v in base.items()}
+
 # Which side is defending. stage_battle deploys the attacker as side 0 and
 # the defender as side 1, and a wildland garrison is likewise side 1 -- it is
 # being attacked in its own country, which is exactly the case high ground is
@@ -169,6 +222,37 @@ def terrain_note(biome):
     return "; ".join(parts)
 
 
+# One clause per kind, not an enumeration of every field that moved. Deriving
+# the note from the numbers produced things like "the shooting is blind work;
+# the shooting is unsteady; heavy going" for a mild fog that barely slowed
+# anyone -- accurate, unreadable, and overstating a 2% change. What a player
+# needs is what this weather DOES to a fight, in one line.
+_WEATHER_NOTES = {
+    weather.STORM: ("rain and wind spoil the shooting",
+                    "driving rain: the bows are near useless and the field is mud"),
+    weather.BLIZZARD: ("snow underfoot slows both sides",
+                       "a blizzard: nobody moves well and nobody shoots well"),
+    weather.FOG: ("mist shortens every sightline",
+                  "thick fog: the archers cannot see far enough to matter"),
+}
+
+
+def weather_note(event):
+    """One short clause on what the weather is doing to this fight, or "" for
+    weather that changes nothing. Same reasoning as terrain_note: a modifier
+    the player cannot see is a modifier that does not exist.
+
+    Drought gets no line because it does nothing here, which is itself worth
+    not saying -- a note that reads "the drought changes nothing" is noise.
+    """
+    if event is None:
+        return ""
+    pair = _WEATHER_NOTES.get(event.kind)
+    if not pair:
+        return ""
+    return pair[1] if event.severity == weather.SEVERE else pair[0]
+
+
 def terrain_profile(biome):
     """The three multipliers for a battle fought on `biome`. Unknown or
     missing terrain is neutral, so a headless sim or an old save that names
@@ -198,6 +282,10 @@ class Battle:
         # deploy; neutral until then, so nothing that never calls it changes.
         self.biome = None
         self.terrain = dict(NEUTRAL_TERRAIN)
+        # And when it is being fought (weather phase 4). Neutral until
+        # set_weather, so a headless sim or a clear day changes nothing.
+        self.weather_event = None
+        self.weather = dict(NEUTRAL_WEATHER)
 
     def spawn_projectile(self, sx, sy, tx, ty, color):
         self.projectiles.append(Projectile(sx, sy, tx, ty, color))
@@ -227,19 +315,41 @@ class Battle:
         self.biome = biome
         self.terrain = terrain_profile(biome)
 
-    def _apply_terrain(self, unit, side):
-        """Bake this battle's ground into one freshly-created unit.
+    def set_weather(self, event):
+        """Say what the weather is doing. Same rule as set_terrain: before
+        deploy, or it colours nothing."""
+        self.weather_event = event
+        self.weather = weather_profile(event)
 
-        Ranged reach is scaled rather than ranged damage: cover is about not
-        being able to SEE what you are shooting at, and shortening the bow
-        line is what actually changes how a wood is fought -- archers have to
-        come close enough to be charged. Weakening their damage instead would
-        read as bows mysteriously bouncing off."""
-        t = self.terrain
-        if t["speed"] != 1.0:
-            unit.speed *= t["speed"]
-        if t["ranged"] != 1.0 and getattr(unit, "_ranged", False):
-            unit._range *= t["ranged"]
+    def _apply_terrain(self, unit, side):
+        """Bake this battle's ground AND weather into one freshly-created
+        unit.
+
+        Reach is scaled rather than ranged damage, for both: cover and fog
+        are about not being able to SEE what you are shooting at, and
+        shortening the bow line is what actually changes how a wood -- or a
+        foggy morning -- is fought, because archers have to come close enough
+        to be charged. Weakening their damage instead would read as arrows
+        mysteriously bouncing off.
+
+        Accuracy is separate from reach and only weather touches it: whether
+        a shot lands once taken is a different question from whether the
+        bowman could see the target at all, and it is the one a headwind and
+        a wet string actually answer.
+
+        The defender bonus is TERRAIN ONLY. Rain falls on both armies -- a
+        storm that helped whoever was defending would just be a second
+        high-ground bonus wearing a cloud."""
+        t, w = self.terrain, self.weather
+        speed = t["speed"] * w["speed"]
+        if speed != 1.0:
+            unit.speed *= speed
+        if getattr(unit, "_ranged", False):
+            reach = t["ranged"] * w["ranged"]
+            if reach != 1.0:
+                unit._range *= reach
+            if w["accuracy"] != 1.0:
+                unit._accuracy *= w["accuracy"]
         if side == DEFENDER_SIDE and t["defender"] != 1.0:
             unit.max_hp *= t["defender"]
             unit.hp = unit.max_hp
