@@ -82,10 +82,21 @@ def bar_row(parent, label, used, cap, warn_at=0.85):
              font=theme.FONT_SMALL, anchor="e").pack(side="right")
     meter = tk.Canvas(parent, height=6, bg=theme.METER_TRACK, highlightthickness=0)
     meter.pack(fill="x", pady=(2, 3))
-    meter.update_idletasks()
-    width = max(1, meter.winfo_width())
-    meter.create_rectangle(0, 0, width * min(1.0, frac), 6,
-                            fill=colour, outline="")
+
+    # Drawn from <Configure> rather than by forcing update_idletasks() to
+    # learn the width. That call was the single worst source of the panel
+    # "flashing" every turn: it makes Tk process pending geometry AND repaint
+    # immediately, in the middle of a rebuild, so every storage bar in the
+    # panel painted a half-built frame on its way past. A settlement with
+    # four pools did it four times a turn. Tk tells us the width when it has
+    # one; there is no need to ask.
+    def _draw(_event=None):
+        meter.delete("all")
+        width = max(1, meter.winfo_width())
+        meter.create_rectangle(0, 0, width * min(1.0, frac), 6,
+                                fill=colour, outline="")
+
+    meter.bind("<Configure>", _draw)
 
 
 def button(parent, text, command, kind="default", state="normal", compact=False,

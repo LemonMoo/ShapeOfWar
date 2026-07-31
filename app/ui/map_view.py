@@ -16,6 +16,7 @@ import math
 import queue
 import threading
 import time
+import contextlib
 import tkinter as tk
 
 import numpy as np
@@ -1669,6 +1670,11 @@ class MapView(tk.Frame):
 
         self._resource_rows = tk.Frame(canvas, bg=theme.PANEL)
         window = canvas.create_window((0, 0), window=self._resource_rows, anchor="nw")
+        # Kept so _update_resource_bar can hide the rows while it rebuilds
+        # them. This frame lives in a canvas window rather than being packed,
+        # so the pack_forget trick _quiet_rebuild uses does not apply here --
+        # hiding the canvas ITEM is the equivalent.
+        self._resource_rows_window = window
         self._resource_rows.bind(
             "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfig(window, width=e.width))
@@ -1711,6 +1717,22 @@ class MapView(tk.Frame):
                   for node in construction._faction_nodes(player, self.world))
 
     def _update_resource_bar(self):
+        # Hidden while it is torn down and rebuilt, for the same reason the
+        # selection panel is (see _quiet_rebuild): thirty-odd rows destroyed
+        # and recreated in place is the left side of the screen blinking
+        # every turn. Wrapped so an exception mid-rebuild cannot leave the
+        # bar permanently invisible.
+        canvas = self._resource_canvas
+        window = getattr(self, "_resource_rows_window", None)
+        if window is not None:
+            canvas.itemconfigure(window, state="hidden")
+        try:
+            self._rebuild_resource_rows()
+        finally:
+            if window is not None:
+                canvas.itemconfigure(window, state="normal")
+
+    def _rebuild_resource_rows(self):
         for w in self._resource_rows.winfo_children():
             w.destroy()
         current = self._current_resource_snapshot()
@@ -2058,6 +2080,11 @@ class MapView(tk.Frame):
         self._prosperity_canvas = tk.Canvas(self.prosperity_frame, height=14,
                                             bg=theme.PANEL, highlightthickness=0)
         self._prosperity_canvas.pack(fill="x", pady=(2, 2))
+        # Redraw on resize instead of forcing a layout pass at draw time.
+        self._prosperity_value = 0.0
+        self._prosperity_canvas.bind(
+            "<Configure>",
+            lambda e: self._draw_prosperity_bar(self._prosperity_value))
         self._prosperity_pct_lbl = tk.Label(self.prosperity_frame, text="",
                                             bg=theme.PANEL, fg=theme.MUTED,
                                             font=theme.FONT_SMALL)
@@ -2074,6 +2101,10 @@ class MapView(tk.Frame):
         self._storage_canvas = tk.Canvas(self.storage_frame, height=14,
                                          bg=theme.PANEL, highlightthickness=0)
         self._storage_canvas.pack(fill="x", pady=(2, 2))
+        self._storage_values = (0, 0)
+        self._storage_canvas.bind(
+            "<Configure>",
+            lambda e: self._draw_storage_bar(*self._storage_values))
         self._storage_pct_lbl = tk.Label(self.storage_frame, text="",
                                          bg=theme.PANEL, fg=theme.MUTED,
                                          font=theme.FONT_SMALL)
@@ -4238,8 +4269,13 @@ class MapView(tk.Frame):
         self._draw_prosperity_bar(value)
 
     def _draw_prosperity_bar(self, value):
+        # No update_idletasks() here. This canvas is built once in
+        # _build_panel and lives for the session, so after its first layout
+        # winfo_width() is already right -- forcing a geometry pass and a
+        # repaint mid-rebuild just painted a half-built panel, every turn.
+        # The <Configure> binding below covers a real resize.
         c = self._prosperity_canvas
-        c.update_idletasks()
+        self._prosperity_value = value
         w = c.winfo_width()
         if w <= 1:
             w = 270   # not yet laid out on the very first draw
@@ -4271,8 +4307,9 @@ class MapView(tk.Frame):
         self._draw_storage_bar(stored, capacity)
 
     def _draw_storage_bar(self, stored, capacity):
+        # See _draw_prosperity_bar on why this no longer forces a repaint.
         c = self._storage_canvas
-        c.update_idletasks()
+        self._storage_values = (stored, capacity)
         w = c.winfo_width()
         if w <= 1:
             w = 270   # not yet laid out on the very first draw
@@ -4314,6 +4351,31 @@ class MapView(tk.Frame):
                              subtitle, default_open,
                              on_toggle=lambda: self._toggle_panel_card(key))
 
+    @contextlib.contextmanager
+    def _quiet_rebuild(self, frame):
+        """Rebuild `frame`'s contents without the empty middle being drawn.
+
+        Every _show_* destroys the panel's whole widget tree and builds a new
+        one. Done while the frame is mapped, Tk is free to paint the gap, and
+        on a busy panel that reads as the whole side of the screen blinking
+        once a turn. Unmapping it first means the intermediate states have
+        nowhere to appear: Tk paints once, when it comes back.
+
+        Restores the exact pack options it was managed with rather than
+        assuming any -- re-packing with defaults would silently move the
+        frame to the end of its parent and reflow the panel."""
+        try:
+            info = frame.pack_info()
+        except tk.TclError:
+            info = None                 # not packed (yet); nothing to hide
+        if info:
+            frame.pack_forget()
+        try:
+            yield
+        finally:
+            if info:
+                frame.pack(**info)
+
     def _rebuild_selection_panel(self):
         """Redraw whichever selection panel is currently up.
 
@@ -4323,14 +4385,15 @@ class MapView(tk.Frame):
         card's open/shut state and then redrew nothing at all. The arrow even
         changed on the next unrelated redraw, which made it look like the click
         had registered and the card had simply refused to move."""
-        if self.selected is not None:
-            self._show_faction(self.selected)
-        if self.selected_region is not None:
-            self._show_region(self.selected_region)
-        if self.selected_settlement is not None:
-            self._show_settlement(self.selected_settlement)
-        if self.selected_village is not None:
-            self._show_village(self.selected_village)
+        with self._quiet_rebuild(self.actions):
+            if self.selected is not None:
+                self._show_faction(self.selected)
+            if self.selected_region is not None:
+                self._show_region(self.selected_region)
+            if self.selected_settlement is not None:
+                self._show_settlement(self.selected_settlement)
+            if self.selected_village is not None:
+                self._show_village(self.selected_village)
 
     def _toggle_panel_card(self, key):
         # Commanders too -- refresh() handles that one separately because it

@@ -231,5 +231,50 @@ assert view.trade_log_frame.winfo_manager() == "place", (
     "the trade log was not placed with the canvas swapped out")
 print("  ok    the trade log still opens with the canvas swapped out")
 
+print("\n--- panels rebuild without painting the half-built state ---")
+# Two separate causes of the side panels visibly flashing once a turn, both
+# guarded here because both are easy to reintroduce without noticing.
+import inspect
+from app.ui import widgets as _widgets
+
+# 1. Forcing a layout pass mid-rebuild. update_idletasks() makes Tk process
+#    geometry AND repaint immediately, so calling it while a panel is
+#    half-built paints the half-built panel. bar_row did it once per storage
+#    meter -- four times a turn on a settlement with four pools.
+def _code_only(fn):
+    """Source with comment lines stripped -- the notes explaining why these
+    no longer call update_idletasks() name it, and would match otherwise."""
+    return "\n".join(line for line in inspect.getsource(fn).splitlines()
+                     if not line.lstrip().startswith("#"))
+
+for fn in (_widgets.bar_row, view._draw_prosperity_bar, view._draw_storage_bar):
+    assert "update_idletasks" not in _code_only(fn), (
+        f"{fn.__name__} forces a repaint mid-rebuild -- that is what made the "
+        f"panels flash. Read the width from <Configure> instead.")
+print("  ok    no meter forces a layout pass to learn its own width")
+
+# 2. Tearing a mapped frame down and building it back up in place. Unmapping
+#    it first means the empty middle has nowhere to be drawn.
+src = inspect.getsource(view._rebuild_selection_panel)
+assert "_quiet_rebuild" in src, (
+    "the selection panel rebuilds while mapped -- the empty gap will paint")
+src = inspect.getsource(view._update_resource_bar)
+assert "hidden" in src, (
+    "the resource bar rebuilds its rows while visible")
+print("  ok    both rebuilds hide their container first")
+
+# ...and both must put it back, whatever happens inside.
+before = view.actions.pack_info()
+try:
+    with view._quiet_rebuild(view.actions):
+        raise RuntimeError("boom")
+except RuntimeError:
+    pass
+assert view.actions.pack_info() == before, (
+    "_quiet_rebuild lost the frame's pack options after an exception")
+state = view._resource_canvas.itemcget(view._resource_rows_window, "state")
+assert state == "normal", state
+print("  ok    the container comes back even if the rebuild raises")
+
 root.destroy()
 print("\nPANELS TEST PASSED")
