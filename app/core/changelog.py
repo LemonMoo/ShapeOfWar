@@ -20,6 +20,14 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 68,
+        "title": "Weather You Can See",
+        "items": [
+            "NEW: weather is on the map. A region under a storm, a blizzard, a drought or a fog is outlined and badged in its own colour — severe solid and thick, mild dashed and thin — so you can see what your caravans and armies are marching into before you order it",
+            "CHANGED: far fewer inland seas. Lake basins are capped at half a percent of the land each, with the single largest left alone — a great lake is a landmark, six of them is a flooded continent. Small lakes are untouched",
+        ],
+    },
+    {
         "version": 67,
         "title": "The Sound of It",
         "items": [
