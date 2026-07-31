@@ -20,6 +20,19 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 63,
+        "title": "The Cartographer Update",
+        "items": [
+            "NEW: commission a surveying party from a Cartographer's Guild — it walks out into the unknown for real, charts what it finds, travels further and faster along a coast, and can fail to come home",
+            "NEW: villages have a finite workforce now, so what a place produces is a decision about where its hands go rather than a readout of its terrain — and you can give that order per village, per region or realm-wide",
+            "NEW: a proper build menu that says which buildings a place actually needs, plus the Gold Mine and the Mint, so coin is finally something you produce rather than something you start with",
+            "NEW: set a stockpile target per good, per place — how much to hold back before the rest is traded away",
+            "CHANGED: claiming wildland costs settlers and the food to provision them instead of gold, timber and stone. Five of fourteen realms could not previously afford to expand at all",
+            "CHANGED: timber is consumed by upkeep now — roofs, repairs, and every building you have put up — so the woodpile has somewhere to go and building carries an ongoing cost",
+            "FIXED: the trade log never appeared when you clicked its tab",
+        ],
+    },
+    {
         "version": 62,
         "title": "Village View Is Just Zooming In Now",
         "items": [

@@ -3,43 +3,68 @@
 Python/Tkinter desktop 4X strategy game. Single developer, turn-based, procedurally
 generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 
-**Last release: v0.3.9_4** ("Fantasy HUD Redesign, Road Merging, Zoom-Based
-Village View"). Check `gh release list --repo LemonMoo/ShapeOfWar --limit 5`
-before trusting this line — this repo ships fast, sometimes several releases
-in one day. Working tree is clean; the release commit is pushed to
-`master` and the exe is attached to the GitHub release.
+**Last release: v0.4.0, "The Cartographer Update"** — the whole economy
+rework (§14), the rest of its plan (§16), and the Cartographer's commissioned
+surveys, released together. Check
+`gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting this
+line — this repo ships fast, sometimes several releases in one day. Working
+tree is clean, everything is pushed to `master`, exe attached to the release.
 
-**Since v0.3.7_2** (§11, the last point this document covered): v0.3.8
-shipped background end-turn processing and a GPU-rendered flat map, which
-then took SEVEN point releases (v0.3.8_1-_7) to actually get smooth and
-correctly layered — see **§12** for the full saga, including two
-methodology lessons (a false lead confirmed-in-isolation, and a whole class
-of bug invisible to the verification method being used) worth reading
-before debugging anything else GL-related in this codebase. v0.3.9 through
-v0.3.9_4 (this session) shipped a full fantasy/medieval HUD visual
-redesign, fixed new roads drawing redundantly parallel to existing ones
-instead of merging into them, and replaced the clunky click-to-enter
-"village view" mode with a pure zoom-scale threshold. See **§13**.
+## HOW THIS PROJECT WANTS TO BE WORKED ON
 
-**A large, unreleased economy rework landed after v0.3.9_4 and is the thing
-to read first if you are picking this up: see §14 (what shipped) and §15
-(the plan for finishing it).** Five commits, all on `master`, none released.
-Nothing below §14 has been invalidated by it, but the economy sections
-(§10's weather Phase 2 especially) should be read alongside it.
+Read this before anything else; it is the thing most likely to make you
+useful rather than busy.
 
-**Two things worth doing before anything else touches this area:**
-1. `_VILLAGE_REVEAL_SPAN` (map_view.py, currently `26`) is a first-pass
-   estimate, not a playtested number — see §13.3.
-2. `flatgl_timing.log` diagnostic instrumentation (`MapView._log_flatgl_timing`,
-   still active) was never actually resolved — the user was asked once
-   whether to strip it or keep it as a standing tripwire and the
-   conversation moved on before it was answered. See §12's closing note.
+- **The user playtests in the game.** Do NOT grind on balance tuning.
+  Get the mechanic correct, measure ONCE for direction, pick a sensible
+  value, and then **say plainly what may need balancing and name the exact
+  constant**. That hand-off is the deliverable. Multi-trial sweeps chasing
+  an optimum are wasted effort here and were explicitly asked to stop.
+- **Correctness still deserves real verification.** "Does the chain work,
+  does anything go negative, does a village starve, does the panel build"
+  is not balancing — test it properly. The 22-script suite in `dev/` is the
+  standing gate and everything currently passes.
+- **This sim has real run-to-run variance** from an identical world and
+  seed. A single before/after comparison can genuinely mislead. The lesson
+  is NOT "run more trials" — it is *don't lean on small measured deltas at
+  all*. Act only on effects large enough to be obvious. §16.4 is a live
+  example of that going wrong and being caught.
+- **Ground new mechanics in how the real thing worked** before inventing
+  one. It has produced better rules than the obvious invention every time
+  it has been tried — see the Guild (§14.5), surveys (§16.3) and the claim
+  rework (§16.4).
 
-**In progress, unreleased: Phases 2-4 of the regional weather system**
-(logistics, battle, visual). Phases 0 (event generation) and 1 (economy —
-crop yields, the "weather" alert) are both built, measured, and shipped as
-of v0.3.7_2, and nothing since has touched weather. See **§10** for the
-full phasing plan and what's left.
+## WHAT IS OPEN, ROUGHLY BY VALUE
+
+1. **Weather Phases 2-4** — logistics, battle, visual. Phases 0 and 1 are
+   built and shipped; nothing since has touched weather. This is the
+   biggest coherent unbuilt feature. See **§10**, and read §16 first
+   because Phase 2 (logistics) now lands on top of a much-changed economy.
+2. **Mining is structurally broken** and is probably the largest remaining
+   economic hole — villages are sited on farmland, mountain is ~4.5% of the
+   map, so Iron/Coal/Copper/Tin are near-zero and Tools/Weapons/Shields
+   effectively cannot be made. It is a *supply* problem. See §15.5.
+3. **Cartographer D — Charts as a tradeable good.** The last of the four
+   approved Guild mechanics; A, B and C all shipped. See §15.4.
+4. **Prosperity is flatlined near 0-2** across every node and has never been
+   investigated. `_prosperity_target`/`_update_prosperity`. See §15.5.
+5. **The balance lab has no economy section** — all 217 levers in
+   `app/core/tuning.py` are battle-side, so every economy number is
+   source-only. Given how much of the economy is now tunable constants,
+   adding a `resources` section would pay for itself. See §15.5.
+6. **`Settlement.tax_income` is a dead stat** — wire it up or delete it.
+
+**Two loose ends left deliberately:**
+- `_VILLAGE_REVEAL_SPAN` (map_view.py, `26`) is a first-pass estimate, not
+  a playtested number — see §13.3.
+- `flatgl_timing.log` instrumentation (`MapView._log_flatgl_timing`) is
+  still active. The user was asked once whether to strip it or keep it as a
+  tripwire and the conversation moved on. Ask before removing. See §12.
+
+**Reading order for the sections below:** §14 and §16 are the current state
+of the economy and the most recently changed code. §12's two methodology
+lessons matter before touching anything GL-related. Everything else is
+stable background.
 
 ---
 
@@ -1127,7 +1152,10 @@ still fires correctly.
 
 ---
 
-## 14. The economy rework (unreleased) — labour, buildings, coin, cartography
+## 14. The economy rework — labour, buildings, coin, cartography
+
+*Released in v0.4.0. Phases 1 and 4 of the plan are here; §16 covers the
+rest (2, 3, 5) and the Cartographer's surveys.*
 
 Five commits on `master`, none released. Driven by one reported symptom —
 "storage just ends up piling up and spoiling" — which turned out not to be a
@@ -1285,13 +1313,17 @@ that take a world take it as `argv[1]` (default `dev/worlds/dev560.pkl`).
 
 ---
 
-## 15. Finishing the economy rework — the plan
+## 15. The economy plan — what it said, and what is left
+
+*Phases 2, 3 and 5 and Cartographer B/C are DONE — see §16 for what
+actually got built and how it differed. What remains live here is §15.4's
+mechanic D, and the standing findings in §15.5.*
 
 The user approved a five-phase plan and picked all four player levers. Phases
 1 and 4 shipped (§14.1, §14.4). **Phases 2, 3 and 5 remain, in that order**,
 plus the rest of the Cartographer (§15.4).
 
-### 15.1 Phase 2 — real demand sinks (NEXT: measured, not started)
+### 15.1 Phase 2 — real demand sinks — **DONE, see §16.1**
 
 Durables still pile up: p90 fill 0.91, 20.8% of durable production still
 thrown away. Measured on a fresh world at turn 80 (scratch probe, easy to
@@ -1327,7 +1359,7 @@ Measured on the same world: Iron 0.2/turn, Copper 0.1, Coal 0.2, Tin 0.0. A
 Stone or Iron upkeep would starve the map instantly. Only wood is genuinely
 overproduced. Verify with the probe before choosing any resource.
 
-### 15.2 Phase 3 — market sink + sell-surplus policy
+### 15.2 Phase 3 — market sink + sell-surplus policy — **DONE, see §16.2**
 
 - Supply-driven pricing: a city's price for a good falls as its stock rises.
   `trade.unit_price` and `_regional_unit_price` already exist to build on, and
@@ -1338,7 +1370,7 @@ overproduced. Verify with the probe before choosing any resource.
   lever the user picked, still unbuilt. A target reserve per good is the same
   concept as a sell threshold seen from the other side.
 
-### 15.3 Phase 5 — storage as a cost curve, spoilage retune
+### 15.3 Phase 5 — storage as a cost curve, spoilage retune — **DONE, see §16.4**
 
 - Replace `STORAGE_THROTTLE_FLOOR = 0.0` with a soft floor so production
   continues wastefully rather than vanishing silently. The throttle is now much
@@ -1349,7 +1381,7 @@ overproduced. Verify with the probe before choosing any resource.
 - Re-check pool sizing: `other` sits at 2–4% of capacity and `feed` at 8–21%
   while `durable` p90 is 0.91. Space is allocated to pools with nothing to hold.
 
-### 15.4 Cartographer — B, C and D remain
+### 15.4 Cartographer — **B and C DONE (§16.3); D remains**
 
 The user approved all four mechanics. **A shipped** (traffic compilation),
 along with the small local survey. Still to build:
@@ -1402,3 +1434,211 @@ Same discipline the rest of the project runs on, and it earned its keep here:
   them. `dev/test_gold.py` is written that way deliberately.
 - Run the full 18-script suite after every change. Everything currently
   passes; there are no known-failing tests to work around.
+
+---
+
+## 16. v0.4.0, "The Cartographer Update" — finishing the economy plan
+
+Everything in §15 that was still outstanding, plus two Guild mechanics and
+one real bug. All released together as v0.4.0, which also carries the whole
+of §14 (which had been sitting unreleased on `master`).
+
+### 16.1 Phase 2 — a real demand sink for durables
+
+Only ~26% of durable production was consumed by anything; the rest piled up
+and was thrown away. Added a pooled **Timber** need with two halves:
+
+- **Population upkeep** (`TIMBER_UPKEEP_PER_CAPITA`) — roofs, handles,
+  fences. Ordinary wear.
+- **Building maintenance** (`BUILDING_MAINTENANCE_PER_TIER`) — every built
+  tier costs upkeep per turn, which is what finally gives the build decision
+  ongoing weight instead of being a one-off.
+
+Drawn from `_TIMBER_SOURCES` (Planks/Hardwood/Softwood/Logs) as one pool, the
+same way `_FOOD_SOURCES` works. It plugs into `settlement_needs`, so
+consumption, the alert pipe and automatic redistribution all pick it up in
+one move — that is the design note worth remembering for any future need.
+A shortfall costs prosperity only, never population and never a building
+tier (degrading tiers was considered and explicitly rejected as
+irreversible-feeling).
+
+Measured: durable throttle-loss ~22% to ~18%, durable mean fill ~0.39 to
+~0.35, household/other/feed unmoved.
+
+**Sized against wood only, deliberately.** Iron/Coal/Copper/Tin are
+near-zero (see §15.5's mining finding) and a sink there would starve the
+map. Verify with `dev/storage_audit.py` before adding a sink for anything
+else.
+
+### 16.2 Phase 3 — a stockpile lever, and the gold question
+
+The user's own pushback reshaped this one and the reasoning is worth
+keeping. The plan called for a "market sink" — sell surplus for gold. That
+would have **created money from nothing**: gold only ever enters this
+economy through minting (a finite, geography-gated resource) or moves from
+another faction's treasury via real trade. Paying for surplus out of thin
+air is pure inflation with no counterpart.
+
+So the sink is not a sink at all. It is a **per-node, per-good stockpile
+target** that widens or tightens how much a node holds back before local
+logistics, regional trade or sell-to-city may carry the rest away — working
+purely through the reserve every domestic tier already reads via
+`_node_surplus`. No new goods, no new gold.
+
+Scoped to ordinary discretionary goods only (`stockpile_eligible`).
+Food/Firewood/Clothes/Luxury/Timber/Fodder keep their own tuned survival and
+upkeep formulas, so a misclick can never starve a village — that property is
+asserted directly in `dev/test_stockpile.py`. Reachable from the
+settlement/village panel as a default-closed STOCKPILE card with five coarse
+presets.
+
+**Still unbuilt from §15.2:** supply-driven pricing (a city's price falling
+as its stock rises). `unit_price`'s surplus factor already half does it.
+
+### 16.3 Cartographer B and C — commissioned surveys
+
+Mechanic A (shipped in §14.5) multiplies what your own traffic reports back
+and deliberately never goes looking. B is the half that does: pay gold and
+paper, and a `SurveyExpedition` walks out and charts a corridor. Same shape
+as every other multi-turn project — precomputed path, per-turn advance hook
+— and, **like Commanders, it exists for every faction while only revealing
+fog for the player**; that split lives in `vision.recompute`, so nothing in
+the world model has to know who is looking.
+
+Two things measurement changed, both worth knowing:
+
+- **It targets the FURTHEST reachable unexplored cell, not the nearest.**
+  "Head for the frontier" reads as *nearest*, and that is wrong: fog begins
+  at your own border, so the first version charged 60 gold to walk 8 cells
+  to the end of the road. Aiming at the far edge of range makes it an actual
+  expedition (~49 cells, ~1,600 revealed).
+- **Loss chance compounds.** 0.02/turn sounded small and worked out to ~49%
+  over a ~30-turn journey — a coin flip on a paid commission. 0.006 gives
+  ~17%.
+
+Mechanic C falls out of the same object: a coastal party moves faster and
+commits to a longer route (further again with a shipyard). It also spends
+fewer turns exposed, so **the coast is genuinely safer as well as quicker** —
+unplanned, and exactly why real ages of discovery mapped coastlines decades
+before interiors.
+
+**One lifecycle bug caught and guarded:** `advance_surveys` runs BEFORE
+`vision.recompute`, so dropping a finished party the same turn silently lost
+the last stretch it charted. Finished parties now survive one turn and are
+swept up on the next pass.
+
+### 16.4 Phase 5 — waste, and one change that had to be reverted
+
+**Read this one.** It is the clearest example in the project of a measured
+improvement that was actually a regression.
+
+`STORAGE_THROTTLE_FLOOR` went 0.0 to 0.15, so a node at capacity is throttled
+rather than switched off entirely. Household throttle-loss ~4.1% to ~2.8%,
+delivered production up ~3-4%, destruction flat. That part stands.
+
+The investigation then found Fish + Smoked Fish were **~50% of everything
+destroyed world-wide**, from two causes:
+
+- **Fish was flagged inedible** — by analogy to Livestock needing
+  slaughtering. But a live sheep is not food yet and a landed fish is, and
+  historically curing made a catch *storable and tradeable*, not edible. It
+  was also the exact bug already fixed once for raw Crops: a village has no
+  smokehouse, so it could neither cure nor eat its own catch and watched it
+  rot at 0.35. **This fix stands.** Note the food pool keys off *category*,
+  not the bare `edible` flag — that flag means "consumed by mouth", which
+  also covers Salt, Wine and Beer, and sweeping those in would let a village
+  subsist on salt.
+- **Settlements landed their full geographic catch every turn**, unthrottled,
+  because they have no labour model. 1,210 Fish/turn from settlements alone
+  against a world-wide food demand of 181/turn. Capping it halved fish
+  destruction and total destruction fell ~30%.
+
+**That cap was then reverted.** On a *developed* save it turned a 60-turn
+population trend of -5.6% into **-18.5%**, and even a mild version still
+cost -9.9%. It reduced waste by reducing supply — and that same supply was
+quietly feeding people. Meanwhile the waste it "fixed" was costing nothing
+real: fish rots because it spoils fast, not because storage is full, and the
+pools were measured as non-binding.
+
+Three lessons, all recorded next to the code so the audit numbers alone do
+not tempt a repeat:
+
+1. **Gross spoilage of an oversupplied good is a cosmetic metric.** Do not
+   optimise it by cutting supply.
+2. **Verify on a developed save, not just a fresh one.** The cap looked fine
+   on a fresh world and only showed its cost on a turn-160 one.
+3. **Pool sizing (§15.3's third item) was revisited and deliberately left
+   alone.** Durable p90 had already fallen 0.91 to 0.76 and `other` reaches
+   capacity in 0 of 20,121 sampled node-turns, so there was no binding
+   constraint left to relieve, and giving durable more room would work
+   against the Timber sink. Reasoning is next to `STORAGE_POOL_BASE`.
+
+### 16.5 Wildland claims are colonisation now
+
+Not on the §15 plan — raised directly by the user, who was right.
+
+The old price (Gold + Logs + Stone) was not a difficulty setting, it was a
+dead end: measured on a real save, **5 of 14 realms could not claim anything
+at all** — four short of Stone, one short of Gold. Quarrying barely exists
+for most realms (§15.5) and some worlds mint no gold whatsoever, so
+expansion was priced in goods whole realms can never obtain.
+
+A claim now costs **settlers drawn from the places nearest the new land,
+plus food to provision them**, and nothing else. Neither can lock anyone
+out — a realm with no people or no food is already finished — and it is what
+taking new land actually cost historically (the Roman *colonia*, the Greek
+*apoikia*, the Norse *landnam*, homesteading: you moved families and you
+victualled them). Timber and stone are what you spend *building* once you
+are there, which is what the BUILD menu is for.
+
+It also bites where the old price did not: population **is** the workforce
+(§14.1), so settlers come off the fields at home and expansion competes with
+production instead of draining a pile nobody was using. No single node gives
+up more than `CLAIM_SETTLER_DRAW_FRACTION` of its people, and none is ever
+emptied below the floor a famine respects.
+
+Measured: 0 of 14 realms blocked, the AI still expands (+9 regions in 60
+turns), and a small realm gets a couple of claims before it must rebuild its
+stores — a self-correcting brake rather than a wall. `claim_cost` returns
+`{"Food": N}` and does **not** go through `construction.can_afford` /
+`_pay_cost` (those look resources up by literal name; "Food" is a pooled
+demand) — use `can_afford_claim` / `_pay_claim`.
+
+### 16.6 The trade log bug
+
+It was the only floating panel parented to `self.canvas` instead of the
+MapView. That worked for exactly as long as the canvas was always on screen
+— the GPU flat map replaces it (`_activate_flatgl` calls
+`self.canvas.pack_forget()`), and an unmapped parent takes its children with
+it, silently. The reopen tab was already on the MapView, so it stayed
+perfectly clickable while the panel behind it could never appear.
+
+Same family as the v0.3.8_7 z-order bug (§12). `dev/test_panels.py` now
+asserts every floating panel hangs off the MapView and that the log still
+opens with the canvas swapped out.
+
+### 16.7 Numbers to judge in play, not in a simulator
+
+Per the working note at the top: these are first-pass values, named here so
+they can be tuned by feel rather than by another sweep.
+
+| constant | file | now | if it feels wrong |
+|---|---|---|---|
+| `TIMBER_UPKEEP_PER_CAPITA` | resources.py | 0.016 | timber piling up again / everyone short of wood |
+| `BUILDING_MAINTENANCE_PER_TIER` | resources.py | 0.8 | building feels free / feels punishing |
+| `STORAGE_THROTTLE_FLOOR` | resources.py | 0.15 | full nodes idle / overflow returns |
+| `CLAIM_SETTLERS_BASE` / `_PER_CELL` | expansion.py | 40 / 0.15 | expansion too cheap or too slow |
+| `CLAIM_PROVISIONS_PER_SETTLER` | expansion.py | 3 | food is or isn't the real brake |
+| `SEA_ONLY_SETTLERS_BASE` / `_PER_CELL` | expansion.py | 180 / 0.35 | amphibious claims too easy/impossible |
+| `SURVEY_COST` | resources.py | 60 Gold, 5 Paper | surveys never worth it / always worth it |
+| `SURVEY_LOSS_CHANCE_PER_TURN` | resources.py | 0.006 (~17%) | losses feel cheap or brutal |
+| `SURVEY_MAX_RANGE` | resources.py | 60 cells | expeditions too short/long |
+| `_VILLAGE_REVEAL_SPAN` | map_view.py | 26 | villages appear too early/late |
+
+### 16.8 Regression suite
+
+**22 scripts, all passing.** New in this batch: `test_timber_upkeep`,
+`test_stockpile`, `test_spoilage`, `test_claim_cost`; `test_cartographer`
+and `test_panels` were extended. The ones that take a world take it as
+`argv[1]` (default `dev/worlds/dev560.pkl`; `dev160.pkl` is the faster one
+and is what everything above was verified against).
