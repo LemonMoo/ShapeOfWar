@@ -20,6 +20,19 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 65,
+        "title": "The Lay of the Land Update",
+        "items": [
+            "NEW: a march is reckoned in country, not miles — plains 5 cells a turn, forest 3, swamp and mountain 2",
+            "NEW: your road network is worth an army now. A column on its own roads covers 8 cells a turn against 5 across open plains",
+            "NEW: where a battle is fought finally matters — broken ground slows both sides, the high ground favours whoever holds it, and thick cover shortens the archers' reach until they have to come close enough to be charged",
+            "NEW: outstations for every kind of country — the Woodcutters' Camp, the Grange and the Workings join the Mining Camp, each letting a village work ground inside its region but outside its own reach",
+            "CHANGED: settlements are bigger and easier to pick out on the map, and roads and villages now appear a good deal further out",
+            "FIXED: ending a turn no longer blanks the screen or flashes every panel in the HUD",
+            "FIXED: resource amounts like 44.20000000000000045 — a building-upkeep figure was leaking fractions into every stockpile",
+        ],
+    },
+    {
         "version": 64,
         "title": "The Homelands Update",
         "items": [

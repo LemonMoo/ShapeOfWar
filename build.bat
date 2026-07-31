@@ -1,6 +1,6 @@
-@echo off
+﻿@echo off
 REM ==========================================================
-REM  Build ShapesOfWar.exe — standalone Tkinter desktop app.
+REM  Build ShapesOfWar.exe â€” standalone Tkinter desktop app.
 REM  Re-run this after editing any game files to refresh the exe.
 REM
 REM  APP_VERSION is stamped into the exe's Windows version
@@ -9,7 +9,7 @@ REM  match the release tag you're about to cut.
 REM ==========================================================
 setlocal
 cd /d "%~dp0"
-set APP_VERSION=0.5.0
+set APP_VERSION=0.6.0
 
 echo Generating version resource ...
 python make_version_file.py "build_version_game.txt" "%APP_VERSION%" "Shapes of War" "Shapes of War" "ShapesOfWar.exe"
