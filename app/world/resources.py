@@ -5985,10 +5985,43 @@ def _connect_new_village_to_region(world, region, new_village):
         if dist2 <= VILLAGE_MESH_LINK_RADIUS ** 2:
             candidates.append((dist2, other))
     candidates.sort(key=lambda t: t[0])
-    for _, other in candidates[:VILLAGE_MESH_MAX_LINKS]:
+
+    # Relative-neighbourhood pruning. Taking the N nearest villages built a
+    # dense mesh: three villages in a row each linked to both the others, so
+    # the region filled with near-parallel tracks running alongside each other
+    # to the same places. Reported as roads "overlaying on top of one another".
+    #
+    # A link A-B is dropped when some third village C is closer to BOTH ends
+    # than they are to each other -- because then the road already goes there
+    # via C, and building A-B as well buys a shortcut nobody needs. This is
+    # the relative neighbourhood graph, and it is worth using by name rather
+    # than capping the count harder: it is exactly the rule that produces a
+    # network that BRANCHES, with roads meeting at the places between things
+    # instead of every pair of neighbours getting its own private track.
+    linked = []
+    for dist2, other in candidates:
+        redundant = False
+        for _, third in candidates:
+            if third is other:
+                continue
+            if (_dist2(third.pos, new_village.pos) < dist2
+                    and _dist2(third.pos, other.pos) < dist2):
+                redundant = True
+                break
+        if redundant:
+            continue
+        linked.append(other)
+        if len(linked) >= VILLAGE_MESH_MAX_LINKS:
+            break
+
+    for other in linked:
         path = _local_road_path(world, new_village.pos, other.pos,
                                 faction_idx=region.faction_idx)
         add_road_segments(world, region.id, list(zip(path, path[1:])), "dirt")
+
+
+def _dist2(a, b):
+    return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
 
 
 # --- turn loop ---------------------------------------------------------------

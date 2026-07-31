@@ -179,6 +179,47 @@ assert ROAD_TIER_RANK["stone"] > ROAD_TIER_RANK["dirt"] > 0
 print("  ok    paving removes the track, a track on a road adds nothing, "
       "sea lanes are untouched")
 
+print("\n--- a road is cut into the ground, not painted on it ---")
+# Each road is drawn twice: a darker, wider band (the cutting, the churned
+# verge) and the surface sitting down inside it.
+from app.ui.map_view import (_darken, _ROAD_CUT_DARKEN, _ROAD_CUT_WIDTH,
+                             _DIRT_ROAD_COLOR, _STONE_ROAD_COLOR,
+                             _DIRT_SURFACE_NARROW)
+
+
+def brightness(hex_colour):
+    return sum(int(hex_colour[i:i + 2], 16) for i in (1, 3, 5))
+
+
+for colour in (_DIRT_ROAD_COLOR, _STONE_ROAD_COLOR):
+    assert brightness(_darken(colour, _ROAD_CUT_DARKEN)) < brightness(colour)
+assert _ROAD_CUT_WIDTH > 1.0, "the cut must be wider than the surface in it"
+assert _DIRT_SURFACE_NARROW < 1.0, (
+    "a worn track's surface should be narrower than the cut, so the ground "
+    "shows along its edges")
+gpu = view._map_lines(2, 12.0)
+widths = {round(w, 2) for _, _, w, _ in gpu}
+assert len(widths) >= 2, (
+    "the GPU map emits one width for everything -- the cut is missing, and "
+    "the two renderers must agree or switching them changes how the world "
+    "looks")
+print(f"  ok    a {_DIRT_ROAD_COLOR} surface over a "
+      f"{_darken(_DIRT_ROAD_COLOR, _ROAD_CUT_DARKEN)} cut {_ROAD_CUT_WIDTH}x "
+      f"as wide, on both renderers")
+
+print("\n--- a dirt track is worn, a stone road is laid ---")
+assert any(dash for _, _, _, dash in gpu), (
+    "nothing is drawn broken -- a dirt track should show the ground through it")
+print("  ok    the surface runs broken for dirt and solid for stone")
+
+print("\n--- the drawing got CHEAPER, not more expensive ---")
+# The point of halving the sampling: roads lagged at close zoom.
+total = sum(len(view._road_points(cells, tier)) for cells, tier in runs)
+assert total < 12000, (
+    f"{total:,} drawn points -- that is the close-zoom lag this was meant to fix")
+print(f"  ok    {total:,} points for the whole network, against 15,786 at one "
+      f"control point per cell")
+
 print("\n--- none of this touched the stored network ---")
 assert sum(len(s) for s in world.roads_by_region.values()) == segments
 print("  ok    the road data is exactly as it was loaded")

@@ -371,6 +371,26 @@ _MARKER_MAX_R = 26.0   # never larger than this, however far zoomed in --
 _DIRT_ROAD_COLOR = "#8a6f4a"
 _STONE_ROAD_COLOR = "#9a9ba3"
 _BRIDGE_COLOR = "#6e4326"   # a stone road's river crossing, recolored like timber decking
+
+# A road is cut INTO the ground, not painted on top of it. Each one is drawn
+# twice: a darker, wider band first -- the shadow in the cutting, the churned
+# verge, the ditch -- and the surface over the middle of it. That reads as
+# something dug rather than a coloured line laid across the grass, and it
+# costs one extra polyline per road rather than any per-cell work.
+_ROAD_CUT_DARKEN = 0.45     # how much darker the cut is than the surface
+_ROAD_CUT_WIDTH = 2.1       # how much wider, as a multiple of the surface
+
+# ...and a dirt track is a worn surface, not a line. Drawn broken, so the dark
+# cut shows through in patches along its length: ruts, puddles, bare earth. A
+# stone road is laid and stays laid, so it runs solid.
+_DIRT_SURFACE_DASH = (5, 4)
+_DIRT_SURFACE_NARROW = 0.62   # the surface is narrower than the cut it sits in
+
+
+def _darken(hex_color, amount):
+    r, g, b = _hex_to_rgb(hex_color)
+    return "#%02x%02x%02x" % (int(r * (1 - amount)), int(g * (1 - amount)),
+                              int(b * (1 - amount)))
 _TRADE_LAND_COLOR = "#7c5f26"   # long-haul trade road — dark bronze, recedes into the map
 _TRADE_SEA_COLOR = "#557c8c"    # dark shipping-lane blue, dotted like a nautical chart
 _CURRENT_COLOR = "#5ee0c8"      # cool cyan-teal -- distinct from both trade-lane
@@ -2527,9 +2547,21 @@ class MapView(tk.Frame):
             # fog mask is a grid, and smoothing first would hand it points
             # between cells it has no answer for.
             for run in self._fog_clip_runs(cells):
-                if len(run) >= 2:
-                    out.append((self._road_points(run, tier),
-                                _GL_RGB[color], width, 0))
+                if len(run) < 2:
+                    continue
+                points = self._road_points(run, tier)
+                if tier == "sea":
+                    out.append((points, _GL_RGB[color], width, 2))
+                    continue
+                # Cut then surface, exactly as the canvas draws it -- the two
+                # surfaces have to agree or switching renderers changes how
+                # the world looks.
+                out.append((points, _GL_RGB[_darken(color, _ROAD_CUT_DARKEN)],
+                            width * _ROAD_CUT_WIDTH, 0))
+                out.append((points, _GL_RGB[color],
+                            width if tier == "stone"
+                            else width * _DIRT_SURFACE_NARROW,
+                            0 if tier == "stone" else 3))
 
         for r in wd.trade_routes:
             sea = r["kind"] == "sea"
@@ -6113,14 +6145,15 @@ class MapView(tk.Frame):
     # A stone road wanders less than a dirt track, which is the whole
     # difference between an engineered road and a cart route that grew.
     _ROAD_WANDER = {"stone": 0.22, "dirt": 0.45, "sea": 0.0}
-    _ROAD_SUBDIV = 3        # Catmull-Rom points per source span
-    # One point per cell, EVENLY. This is not just about giving the wander
-    # somewhere to act on a long link: Catmull-Rom overshoots badly where a
-    # short span meets a long one, and a region's road list mixes single-cell
-    # steps with thirty-cell links freely. Sampled unevenly, one dirt track
-    # swung 6.6 cells clear of its own route. Even spacing bounds it -- the
-    # worst case is now a fifth of a cell.
-    _ROAD_DENSIFY = 1.0
+    _ROAD_SUBDIV = 2        # Catmull-Rom points per source span
+    # A control point every couple of cells, evenly. This started at one per
+    # cell to stop the spline overshooting where a short span met a long one,
+    # back when the spline was uniform Catmull-Rom; centripetal handles uneven
+    # spacing properly, so the dense sampling was buying nothing. Halving it
+    # took a developed realm from 15,786 drawn points to 7,938 -- which is
+    # what the roads lagging at close zoom actually was -- with the measured
+    # stray off route unchanged at 0.33 cells mean, 0.76 worst.
+    _ROAD_DENSIFY = 2.0
     # The offset is drawn on a COARSER grid than the road's own points, so
     # neighbouring points share it and the road meanders instead of shaking.
     # Per-point white noise was the first attempt and it read as a wobbly line
@@ -6200,19 +6233,27 @@ class MapView(tk.Frame):
             return
         is_sea = tier == "sea"
         is_stone = tier == "stone"
-        if is_sea:
-            color, dash = _TRADE_SEA_COLOR, (2, 3)
-        elif is_stone:
-            color, dash = _STONE_ROAD_COLOR, None
-        else:
-            color, dash = _DIRT_ROAD_COLOR, (4, 3)
         pts = []
         for wx, wy in self._road_points(cells, tier):
             pts.extend(screen(wx, wy))
         if len(pts) < 4 or not self._visible_pts(pts):
             return
-        c.create_line(*pts, fill=color, width=width, capstyle="round",
-                      joinstyle="round", dash=dash)
+        if is_sea:
+            # A lane is on the water, not in it -- nothing to cut into.
+            c.create_line(*pts, fill=_TRADE_SEA_COLOR, width=width,
+                          capstyle="round", joinstyle="round", dash=(2, 3))
+            return
+        color = _STONE_ROAD_COLOR if is_stone else _DIRT_ROAD_COLOR
+        # The cut first: darker and wider, so the surface sits down inside it.
+        c.create_line(*pts, fill=_darken(color, _ROAD_CUT_DARKEN),
+                      width=width * _ROAD_CUT_WIDTH, capstyle="round",
+                      joinstyle="round")
+        # Then the surface. A stone road is laid and runs solid; a dirt track
+        # is worn, so it runs broken and the cut shows through in patches.
+        c.create_line(*pts, fill=color,
+                      width=width if is_stone else width * _DIRT_SURFACE_NARROW,
+                      capstyle="round", joinstyle="round",
+                      dash=None if is_stone else _DIRT_SURFACE_DASH)
         if is_stone:
             # Bridges stay per-crossing: it is the one part of a road that is
             # genuinely a different object, and it sits on top of the line
