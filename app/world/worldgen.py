@@ -2323,9 +2323,8 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
         world.height = world_height.tolist()
     world.current_u = cu.tolist()
     world.current_v = cv.tolist()
-    # Traced once here rather than per-frame by either renderer -- both the
-    # flat map and the globe draw the exact same lines (see
-    # currents.build_streamlines).
+    # Traced once here rather than per-frame by the renderer, which draws
+    # them exactly as traced (see currents.build_streamlines).
     world.current_streamlines = currents.build_streamlines(
         world.current_u, world.current_v, land, width, height)
 

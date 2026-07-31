@@ -8,14 +8,14 @@ its cost stops scaling with window resolution. Measured on a 300-region,
 rasterizer, and pushing a freshly-resized terrain image through it every
 frame scales with pixel count. A GPU texture sample doesn't.
 
-This reuses gl_globe.py's line/marker/text-glyph shaders directly rather
+This reuses gl_common.py's line/text-glyph shaders directly rather
 than reinventing them: they already take a generic (u_viewproj, u_rot)
 uniform pair and place world-space points through it, so an orthographic
 flat camera is simply u_rot = identity and u_viewproj = a 2D ortho matrix
 built from MapView.view -- nothing in those shaders assumes a sphere. Only
 the terrain itself gets a new, much simpler shader here: a textured quad,
 no Mercator projection, no elevation displacement, no day/night/clouds --
-this view is meant to match the existing flat map's look, not the globe's.
+this view is meant to match the existing flat map's look.
 
 World-wrap seam: unlike the sphere (which wraps for free -- longitude is
 circular), a flat orthographic quad needs the same trick the PIL renderer's
@@ -28,20 +28,20 @@ such free ride, since those are placed at real positions rather than
 texture-sampled -- see _wrap_x.
 
 Simplification kept from the first pass, deliberate and low-risk: no
-standing 3D pins for settlements/villages/commanders (see the globe's
+standing 3D pins for settlements/villages/commanders (see the canvas's
 set_pins) -- a "planted spire" under a dead-on orthographic top-down camera
 foreshortens to a blob, so it buys nothing here. Shape is instead carried
 by a small self-contained marker shader (SHAPE_CIRCLE/TRIANGLE/SQUARE/
 DIAMOND/HULL below) that reproduces the canvas's city/castle/town/
 commander/ship silhouettes as a per-instance fragment-shader test -- not
-shared with gl_globe.py's own plain-circle _MARK shader, so the working
-globe is untouched by this.
+self-contained: gl_common.py carries only the line and text shaders,
+which need no shapes at all.
 """
 import math
 
 import numpy as np
 
-from app.ui import gl_globe as _glg
+from app.ui import gl_common as _glg
 
 _HAVE_GL = _glg._HAVE_GL
 OpenGLFrame = _glg.OpenGLFrame
@@ -78,7 +78,7 @@ void main() {
     float hidden = texture(u_fog, v_uv).r * u_fog_on;
     // Same flat darkening the PIL renderer composites for unexplored
     // ground (MapView._FOG_HIDDEN_RGB) -- no cloud-cover flourish here,
-    // this view matches the existing flat map rather than the globe.
+    // this view matches the existing flat map.
     vec3 hidden_color = vec3(7.0 / 255.0, 9.0 / 255.0, 14.0 / 255.0);
     f_color = vec4(mix(base, hidden_color, hidden), 1.0);
 }
@@ -87,9 +87,9 @@ void main() {
 _IDENTITY3 = np.eye(3, dtype="f4")
 _CLEAR_RGB = (13.0 / 255.0, 16.0 / 255.0, 23.0 / 255.0)   # theme.CANVAS, #0d1017
 
-# Shape-aware marker billboard: a self-contained replacement for gl_globe's
+# Shape-aware marker billboard: a self-contained replacement for the
 # plain circular _MARK shader (not touching that one -- it's shared with the
-# working, shipped globe, and this needs shapes the globe has no use for).
+# canvas's own marker drawing, in shader form).
 # One quad, one fragment-shader shape test per instance, selected by
 # `in_shape` -- cheaper than separate draw calls per shape and the instance
 # count here is always small (dozens to low hundreds).
@@ -254,7 +254,7 @@ class GLFlatMapFrame(OpenGLFrame):
         self.tex_fog = ctx.texture((1, 1), 1, b"\x00")
         self._configure_textures()
 
-        # Lines, markers and text: gl_globe's own programs and vertex
+        # Lines, markers and text: gl_common's programs and vertex
         # layouts, reused verbatim -- see this module's docstring.
         self.line_prog = ctx.program(vertex_shader=_glg._LINE_VERT,
                                      fragment_shader=_glg._LINE_FRAG)
@@ -363,7 +363,7 @@ class GLFlatMapFrame(OpenGLFrame):
 
     def set_lines(self, paths):
         """paths: [(cells, (r,g,b), width_px, dash), ...] -- the exact shape
-        MapView._map_lines already builds (shared with the globe).
+        MapView._map_lines already builds.
 
         Skips the rebuild entirely when both `paths` (checked by identity,
         not equality -- MapView._sync_flatgl hands back the exact same

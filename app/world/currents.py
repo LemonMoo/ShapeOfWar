@@ -373,7 +373,7 @@ def sea_edge_cost_fn(world):
 # Traced ONCE at world generation and stored on the world (see
 # app/world/worldgen.py's call into build_streamlines), not recomputed per
 # frame by either renderer -- integrating a vector field is cheap once, and
-# both the flat map and the globe want the exact same lines.
+# every renderer wants the exact same lines.
 STREAMLINE_SPACING = 42       # cells between seed points on the tracing grid
 STREAMLINE_STEP = 6.0         # cells advanced per integration step
 STREAMLINE_MAX_STEPS = 90

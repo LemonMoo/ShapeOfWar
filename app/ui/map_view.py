@@ -38,7 +38,6 @@ from app.world import buildings
 # Sector names as the player sees them, shared with the build menu so the two
 # surfaces can never drift into calling the same thing different names.
 from app.ui.build_menu import SECTOR_LABEL
-from app.ui import gl_globe
 from app.ui import gl_flatmap
 from app.ui.gl_flatmap import (SHAPE_CIRCLE, SHAPE_TRIANGLE, SHAPE_SQUARE,
                                SHAPE_DIAMOND, SHAPE_HULL)
@@ -204,10 +203,10 @@ class _Lerp:
                 self.a[1] + self.dy * t)
 
 
-class _GlobeColors(dict):
+class _GLColors(dict):
     """'#rrggbb' -> (r, g, b) floats in 0..1, memoised.
 
-    The globe rebuilds its overlays every frame from the same handful of
+    The GPU map rebuilds its overlays every frame from the same handful of
     palette constants the canvas draws with, and GL wants floats. Converting
     on the fly turned out to be the one genuinely hot line in that rebuild --
     thousands of road segments a frame, each parsing the same six hex digits."""
@@ -218,10 +217,10 @@ class _GlobeColors(dict):
         return value
 
 
-_GLOBE_RGB = _GlobeColors()
-_GLOBE_LABEL_COLOR = (0.96, 0.96, 0.96)
-_GLOBE_VILLAGE_LABEL_COLOR = (0.84, 0.86, 0.88)
-_GLOBE_PLAYER_COMMANDER = (0.90, 0.52, 1.0)   # the orchid the flat map uses
+_GL_RGB = _GLColors()
+_GL_LABEL_COLOR = (0.96, 0.96, 0.96)
+_GL_VILLAGE_LABEL_COLOR = (0.84, 0.86, 0.88)
+_GL_PLAYER_COMMANDER = (0.90, 0.52, 1.0)   # the orchid the flat map uses
 
 # Painting order for road tiers: low first, so a stone road always lies over
 # the dirt track it was paved from rather than whichever happened to be later
@@ -646,18 +645,11 @@ class MapView(tk.Frame):
         self.canvas = tk.Canvas(self, bg=theme.CANVAS, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
         self._bind_map_events(self.canvas)
-        # The globe is a SECOND view of the same world, stacked in the same
-        # place as the flat map and raised/lowered by _set_globe. Built lazily
-        # (see _ensure_globe) so a machine with no GL never pays for it and the
-        # flat map remains the guaranteed path.
-        self.globe = None
-        self.globe_active = False
-        # GPU flat map (see gl_flatmap.py): a third view of the same content
-        # the canvas draws, swapped in for it automatically -- not a player
-        # choice like the globe toggle -- the moment GL is confirmed
-        # available (_ensure_flatgl/_activate_flatgl, called from render()).
-        # Falls back to the canvas the same way the globe falls back to the
-        # flat map: dynamically, every render(), if it ever reports failed
+        # GPU flat map (see gl_flatmap.py): a second view of the same content
+        # the canvas draws, swapped in for it automatically rather than by a
+        # player toggle, the moment GL is confirmed available
+        # (_ensure_flatgl/_activate_flatgl, called from render()). Falls back
+        # to the canvas dynamically, every render(), if it ever reports failed
         # rather than only once at startup.
         self._flatgl = None
         self._flatgl_tried = False
@@ -775,11 +767,6 @@ class MapView(tk.Frame):
         # Restore the view this world was last played in, and where the camera
         # was left. Both ride along on the world object, so they persist through
         # a save/load without touching the save schema.
-        want_globe = bool(getattr(world, "prefer_globe", False))
-        if want_globe != self.globe_active:
-            self._set_globe(want_globe)
-        elif self.globe_active and self.globe is not None:
-            self.globe.restore_camera(getattr(world, "globe_camera", None))
         self._exit_ui()
         self._hide_prosperity_bar()
         self._hide_storage_bar()
@@ -2188,8 +2175,6 @@ class MapView(tk.Frame):
                        ).pack(side="bottom", fill="x", padx=14, pady=(0, 6))
         self.view_btn = widgets.button(foot, "View: Political", self._toggle_mode)
         self.view_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 8))
-        self.globe_btn = widgets.button(foot, "Globe", self.toggle_globe)
-        self.globe_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 4))
         self.currents_btn = widgets.button(foot, "Currents: Off", self._toggle_currents)
         self.currents_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 4))
 
@@ -2294,92 +2279,13 @@ class MapView(tk.Frame):
             for wdg in (frame,) + tuple(frame.winfo_children()):
                 wdg.bind("<Button-1>", lambda e, c=cb: c())
 
-    # --- globe view -----------------------------------------------------------
-    def _ensure_globe(self):
-        """Create the globe on first use. Returns False if this machine cannot
-        have one, in which case the flat map simply stays up."""
-        if self.globe is not None:
-            return not self.globe.failed
-        if not gl_globe.gl_available():
-            return False
-        try:
-            self.globe = gl_globe.GLGlobeFrame(self, on_pick=self._on_globe_pick,
-                                              on_right_click=self._on_globe_right_click)
-        except Exception:
-            self.globe = None
-            return False
-        return True
-
-    def toggle_globe(self):
-        self._set_globe(not self.globe_active)
-
     def _flat_widget(self):
         """Whichever widget is currently drawing the flat map -- the GPU
         frame once _activate_flatgl has swapped it in, the plain canvas
-        otherwise. _set_globe hides/shows this one, not always self.canvas,
-        so toggling the globe on and off works the same regardless of which
-        flat renderer is underneath it."""
+        otherwise."""
         return self._flatgl if self._use_flatgl else self.canvas
 
-    def _set_globe(self, on):
-        if on and not self._ensure_globe():
-            self.show_bottom_message("This machine has no 3D support — "
-                                     "staying on the flat map.")
-            return
-        self.globe_active = bool(on)
-        if self.globe_active:
-            self._flat_widget().pack_forget()
-            self._flat_legend.place_forget()
-            self.globe.pack(fill="both", expand=True)
-            self.globe.update_idletasks()
-            saved = getattr(self.world, "globe_camera", None)
-            if saved:
-                self.globe.restore_camera(saved)
-            else:
-                # First time this world has ever shown the globe: face the
-                # player's own capital rather than leaving the mesh's
-                # arbitrary default orientation (the map's geometric centre,
-                # which is very often on the far side of the planet from
-                # anyone's actual kingdom).
-                #
-                # _ensure_base()/set_map() have to run BEFORE face_cell:
-                # cell_to_point's longitude/latitude math reads the map's
-                # actual width/height off the uploaded image, and a globe
-                # that has never had set_map called yet falls back to a 1x1
-                # placeholder size -- face_cell would aim at a wildly wrong
-                # direction computed against that fake size instead of the
-                # real 1100x660 world. Caught on a real generated world: the
-                # capital-facing rotation landed the capital BEHIND the
-                # camera (z=-0.88 instead of near +1).
-                self._ensure_base()
-                self.globe.set_map(self._base_img)
-                self._face_globe_home()
-        else:
-            self.globe.pack_forget()
-            self._flat_widget().pack(fill="both", expand=True)
-        # Remember which view the player prefers, and where they left the
-        # camera -- both ride along in the save (see app/core/save.py).
-        self.world.prefer_globe = self.globe_active
-        if hasattr(self, "globe_btn"):
-            self.globe_btn.config(text="Flat Map" if self.globe_active else "Globe")
-        self._apply_panel_layout()
-        self.render()
 
-    def _face_globe_home(self):
-        """Orient a freshly-opened globe at the player's own capital, or the
-        centre of their territory if a capital can't be found (a sandbox
-        world with no player faction just keeps the default orientation --
-        there is no 'home' to face)."""
-        wd = self.world
-        pidx = wd.player_faction_idx
-        if pidx is None:
-            return
-        nation = wd.factions[pidx]
-        capital = nation.meta.get("capital")
-        if capital is not None:
-            self.globe.face_cell(*capital)
-        elif getattr(nation, "center", None):
-            self.globe.face_cell(nation.center[0] * wd.w, nation.center[1] * wd.h)
 
     # --- GPU flat map -----------------------------------------------------
     def _ensure_flatgl(self):
@@ -2413,15 +2319,14 @@ class MapView(tk.Frame):
         # the instant the GPU flat map activated -- lower() puts it back at
         # the bottom, exactly where self.canvas always was.
         self._flatgl.lower()
-        self._flatgl.update_idletasks()   # winfo_width/height valid immediately,
-                                           # same reason _set_globe does this
+        self._flatgl.update_idletasks()   # winfo_width/height valid immediately
         self._use_flatgl = True
 
     def _deactivate_flatgl(self):
         """Back to the Tk/PIL canvas -- either GL genuinely isn't available
         on this machine, or self._flatgl started failing after having
-        worked (see render()'s own check, mirroring how the globe falls
-        back to the flat map dynamically rather than only once at startup)."""
+        worked (see render()'s own check, which runs every frame rather than
+        only once at startup)."""
         self._flatgl.pack_forget()
         self.canvas.pack(fill="both", expand=True)
         self._use_flatgl = False
@@ -2429,10 +2334,9 @@ class MapView(tk.Frame):
 
     def _flat_level(self):
         """0/1/2 for world/region/village view -- the flat map's own
-        three-tier zoom state expressed as the same int _map_lines/
-        _map_labels already take from the globe's altitude-derived
-        zoom_level. Level 2 is now a zoom-scale threshold (see
-        _villages_visible) rather than a separate clicked-into mode."""
+        three-tier zoom state, expressed as the int _map_lines/_map_labels
+        take. Level 2 is a zoom-scale threshold (see _villages_visible)
+        rather than a separate clicked-into mode."""
         if self.zoom_faction is None:
             return 0
         return 2 if self._villages_visible() else 1
@@ -2475,7 +2379,7 @@ class MapView(tk.Frame):
         )
 
     def _sync_flatgl(self):
-        """The GPU flat map's equivalent of _sync_globe: push the same
+        """Push the terrain raster, fog mask, and line/marker/label
         terrain raster, fog mask, and line/marker/label content the Tk
         canvas would draw, in the GPU frame's own terms (see gl_flatmap.py).
         Also refreshes self._place/_canvas_wh/_view_center_x exactly as the
@@ -2575,62 +2479,20 @@ class MapView(tk.Frame):
         except Exception:
             pass
 
-    def _sync_globe(self):
-        """Push the flat map's own raster, fog, overlays and markers at the
-        sphere.
-
-        Everything the flat map draws on top of the terrain is rebuilt here in
-        the globe's own terms: paths become segment strips on the sphere,
-        markers become billboards, names become glyph quads. The three zoom
-        levels are read off the camera's ALTITUDE (globe.zoom_level) rather
-        than from self.zoom_faction/_villages_visible -- on the globe, flying
-        closer IS drilling down, so there is no separate view state to
-        enter (same reasoning the flat map's own _villages_visible now
-        follows: zoom depth alone decides the level)."""
-        wd = self.world
-        self._ensure_base()
-        self._ensure_fog_overlay()
-        g = self.globe
-        g.set_map(self._base_img, self._fog_overlay_img)
-        # Elevation is static for the life of a world (worldgen never revises
-        # it), so this is skipped once already set for this exact height grid
-        # rather than re-encoding an identical texture every render() call.
-        if g._height_grid is not wd.height:
-            g.set_elevation(wd.height, wd.sea_level)
-        # Sun angle advances with the year, so the terminator is not a fixed
-        # decoration -- the planet turns under its own sun as the game runs.
-        ang = (getattr(wd, "turn", 0) % 100) / 100.0 * 2.0 * math.pi
-        g.sun = np.array([math.cos(ang), 0.32, math.sin(ang)])
-        level = g.zoom_level
-        # Markers and text are sized in sphere radii / screen pixels; scaling
-        # by altitude keeps them a constant size on screen, so a settlement is
-        # the same dot from orbit as it is from just above the ground.
-        mscale = g.dist / gl_globe.DIST_DEFAULT
-        g.set_lines(self._map_lines(level))
-        g.set_pins(self._globe_pins(level, mscale))
-        g.set_markers(self._globe_markers(level, mscale))
-        g.set_labels(self._map_labels(level, cull=g.visible_mask))
-        g.render_now()
-        self.world.globe_camera = g.camera_state()
 
     def _map_lines(self, level, scale=None):
         """Every path the flat map draws, as (cells, rgb, width_px, dash) for
-        a GL renderer's set_lines -- shared by the globe (gl_globe.py) and
-        the GPU flat map (gl_flatmap.py): nothing here is sphere-specific,
-        it is pure world-state-to-line-list, so both projections read the
-        same content and only differ in how each cell ends up on screen.
-        Fog-clipped through the same _fog_clip_runs the canvas versions use,
-        so neither GL view ever reveals a route the flat canvas would have
-        hidden.
+        the GPU flat map's set_lines (gl_flatmap.py). Pure
+        world-state-to-line-list -- it says WHAT to draw, the renderer decides
+        where each cell lands on screen. Fog-clipped through the same
+        _fog_clip_runs the canvas versions use, so the GPU map never reveals a
+        route the canvas would have hidden.
 
-        `scale` (the flat map's current world-to-screen zoom, self._place[2])
-        is None for the globe, which keeps the fixed pixel widths below --
-        constant screen size regardless of camera altitude is the right
-        call there, the same way markers/text already work. The flat map
-        passes its own scale so roads/routes grow thicker zoomed in, exactly
-        matching what the Tk canvas already does (_draw_roads etc.) -- `lw`
-        below carries each line's canvas width FACTOR, applied as
-        max(minimum, scale*factor), the fixed value otherwise."""
+        `scale` is the current world-to-screen zoom (self._place[2]), so
+        roads and routes grow thicker zoomed in exactly as the Tk canvas
+        already does (_draw_roads etc.): `lw` below carries each line's canvas
+        width FACTOR, applied as max(minimum, scale*factor). Passing None
+        keeps the fixed pixel widths instead."""
         wd = self.world
         out = []
 
@@ -2667,17 +2529,17 @@ class MapView(tk.Frame):
             for run in self._fog_clip_runs(cells):
                 if len(run) >= 2:
                     out.append((self._road_points(run, tier),
-                                _GLOBE_RGB[color], width, 0))
+                                _GL_RGB[color], width, 0))
 
         for r in wd.trade_routes:
             sea = r["kind"] == "sea"
             add(r["cells"],
-                _GLOBE_RGB[_TRADE_SEA_COLOR if sea else _TRADE_LAND_COLOR],
+                _GL_RGB[_TRADE_SEA_COLOR if sea else _TRADE_LAND_COLOR],
                 lw(1.8, 0.154) if sea else lw(2.4, 0.22), dash=2)
 
         for proj in wd.trade_route_projects:
             for seg in proj.built_segments:
-                add(seg, _GLOBE_RGB[_TRADE_ROUTE_CONSTRUCTION_COLOR],
+                add(seg, _GL_RGB[_TRADE_ROUTE_CONSTRUCTION_COLOR],
                     lw(1.8, 0.18), dash=3)
 
         # A route with a caravan on it is redrawn brighter on top, exactly as
@@ -2697,12 +2559,12 @@ class MapView(tk.Frame):
                          "river": _FOREIGN_RIVER_CARAVAN_STYLE}.get(
                              caravan.kind, _FOREIGN_CARAVAN_STYLE)["glow"]
                 width = max(1.0, width * 0.5)
-            add(caravan.path, _GLOBE_RGB[color], width, dash=2)
+            add(caravan.path, _GL_RGB[color], width, dash=2)
 
         # A commander's queued march. The canvas has drawn this dashed preview
         # since commanders existed (_draw_commanders), but it was never added
-        # here -- so on the GPU flat map and the globe, giving a move order
-        # showed you nothing at all. Same colours and the same fog rules as
+        # here -- so on the GPU flat map, giving a move order showed you
+        # nothing at all. Same colours and the same fog rules as
         # the canvas: your own in orchid, a rival in his realm's colour, and a
         # foreign march traced only across ground you have actually explored
         # (add() fog-clips, which is exactly the leak that matters -- an
@@ -2717,26 +2579,26 @@ class MapView(tk.Frame):
                 continue
             mine = player_idx is not None and cmd.faction_idx == player_idx
             if mine:
-                colour = _GLOBE_RGB[_COMMANDER_STYLE["fill"]]
+                colour = _GL_RGB[_COMMANDER_STYLE["fill"]]
                 width = lw(2.0, 0.19)
             else:
                 if not self._cell_revealed(*self._display_cell(cmd)):
                     continue
-                colour = _GLOBE_RGB[wd.factions[cmd.faction_idx].color]
+                colour = _GL_RGB[wd.factions[cmd.faction_idx].color]
                 width = lw(1.5, 0.14)
             add(remaining, colour, width, dash=2)
 
         if self.attack_mode is not None:
             for region in self._attack_frontier:
                 for x0, y0, x1, y1 in self._region_border_segments(region):
-                    out.append(([(x0, y0), (x1, y1)], _GLOBE_RGB[theme.BAD],
+                    out.append(([(x0, y0), (x1, y1)], _GL_RGB[theme.BAD],
                                 lw(2.6, 0.3, minimum=2.0), 0))
 
         # In-progress road construction (see _draw_construction): only the
         # portion actually built so far, same as the canvas draws it.
         for road in wd.road_projects:
             if len(road.built_cells) >= 2:
-                add(road.built_cells, _GLOBE_RGB[_DIRT_ROAD_COLOR], lw(1.6, 0.18), dash=2)
+                add(road.built_cells, _GL_RGB[_DIRT_ROAD_COLOR], lw(1.6, 0.18), dash=2)
 
         # Battle-outcome border flash (see _draw_flash): gold for a region
         # gained, red for a failed attack, fading/pulsing over its lifetime.
@@ -2755,147 +2617,22 @@ class MapView(tk.Frame):
                 out.append(([(x0, y0), (x1, y1)], color, width, 0))
         return out
 
-    def _globe_markers(self, level, mscale):
-        """Ships, caravans and the settlement-placement hint as billboards --
-        settlements, villages and commanders now get real 3D pins instead
-        (see _globe_pins): a moving boat or wagon reads fine as a flat icon
-        you glance at in passing, but a place you think of as 'planted
-        there' (or a commander you give orders to) read as an ugly flat dot
-        no matter how you looked at it, worse the more of them piled up on
-        screen once village counts stopped being capped.
 
-        Culled to what the camera can actually see (globe.visible_mask) -- the
-        GPU would clip and depth-test the rest anyway, but at village altitude
-        over a developed realm that is nearly all of several hundred markers
-        whose geometry there is no reason to build."""
-        wd = self.world
-        g = self.globe
-        marks = []
-
-        def add(items, size, color_of):
-            """items: [(obj, (cx, cy)), ...] already fog-checked."""
-            if not items:
-                return
-            mask = g.visible_mask([pos for _, pos in items])
-            for keep, (obj, pos) in zip(mask, items):
-                if keep:
-                    marks.append((pos[0], pos[1], size * mscale, color_of(obj)))
-
-        # Everything that moves is placed by _display_pos, so the globe gets
-        # the end-turn slide for free rather than needing its own copy of it.
-        ships_aboard = {cmd.aboard_ship_id for cmd in wd.commanders
-                        if cmd.aboard_ship_id is not None}
-        ships = [(s, self._display_pos(s)) for s in wd.ships
-                 if s.id not in ships_aboard
-                 and self._cell_revealed(*self._display_cell(s))]
-        add(ships, 0.012, lambda s: _GLOBE_RGB[_SHIP_STYLE["fill"]])
-
-        caravans = [(c, self._display_pos(c)) for c in wd.trade_caravans
-                    if self._cell_revealed(*self._display_cell(c))]
-        add(caravans, 0.013, lambda c: _GLOBE_RGB[self._caravan_style(c)["fill"]])
-
-        # Settlement placement hint (see _score_placement_hint) -- the
-        # globe's equivalent of the flat map's gold dots over a region's
-        # own best-scoring cells while a City/Town/Castle is armed to
-        # place. Same advisory-only meaning: it doesn't restrict the click.
-        if self.building_mode is not None and self._placement_hint_cells:
-            hints = [(None, pos) for pos in self._placement_hint_cells]
-            add(hints, 0.009, lambda _obj: _GLOBE_RGB["#ffec78"])
-        return marks
-
-    # Village pins: a real spire like a settlement's, just much smaller --
-    # planted, not floating, but unmistakably humbler than a City/Town/
-    # Castle. Sized as a flat multiple of mscale rather than off
-    # _SETTLE_STYLE (villages have no entry there).
-    _GLOBE_VILLAGE_RADIUS = 0.006
-    _GLOBE_VILLAGE_HEIGHT = 0.016
-    # Commander pins: tall and thin rather than short and wide -- a banner/
-    # spike silhouette that never reads as "a small settlement" even though
-    # it shares the same hex-pyramid mesh, because the proportions are
-    # nothing alike.
-    _GLOBE_COMMANDER_RADIUS = 0.007
-    _GLOBE_COMMANDER_HEIGHT = 0.050
-
-    def _globe_pins(self, level, mscale):
-        """Settlements, villages and commanders as real 3D geometry
-        (gl_globe.set_pins) rather than flat billboards -- all three are
-        things a player thinks of as standing/planted somewhere (or, for a
-        commander, someone you give orders to and must always be able to
-        pick out), not something that merely floats over the map. Ships and
-        caravans stay flat markers in _globe_markers -- a moving icon glanced
-        at in passing doesn't carry the same expectation.
-
-        Settlements are sized off _SETTLE_STYLE's existing city/castle/town
-        scale (the same numbers the flat map's own marker radius uses), so a
-        city reads bigger than a town here exactly the way it already does
-        everywhere else -- no second, separately-tuned size table."""
-        wd = self.world
-        g = self.globe
-
-        def faction_rgb(idx):
-            if idx is None or idx < 0:
-                return (0.63, 0.63, 0.63)
-            return _GLOBE_RGB[wd.factions[idx].color]
-
-        pins = []
-
-        def add(items, radius, height, color_of):
-            """items: [(obj, (cx, cy)), ...] already fog-checked."""
-            if not items:
-                return
-            mask = g.visible_mask([pos for _, pos in items])
-            for keep, (obj, pos) in zip(mask, items):
-                if keep:
-                    pins.append((pos[0], pos[1], radius * mscale, height * mscale,
-                                color_of(obj)))
-
-        # From orbit only cities; closer in, everything -- the same thinning
-        # rule _draw_settlements applies between world and region view.
-        settlements = [(st, st.pos) for st in wd.settlements
-                       if (level >= 1 or st.kind == "city")
-                       and self._cell_revealed(*st.pos)]
-        mask = g.visible_mask([pos for _, pos in settlements]) if settlements else []
-        for keep, (st, pos) in zip(mask, settlements):
-            if not keep:
-                continue
-            base = _SETTLE_STYLE[st.kind]["base"]
-            pins.append((pos[0], pos[1], 0.018 * base * mscale,
-                        0.052 * base * mscale, faction_rgb(st.faction_idx)))
-
-        if level >= 2:
-            villages = [(v, v.pos) for v in wd.villages
-                        if self._cell_revealed(*v.pos)]
-            add(villages, self._GLOBE_VILLAGE_RADIUS, self._GLOBE_VILLAGE_HEIGHT,
-                lambda v: _GLOBE_RGB[_VILLAGE_STYLE["fill"]])
-
-        # The player's own commander keeps the orchid it has on the flat map:
-        # it is the one marker you give orders to and must never be mistaken
-        # for a rival's.
-        commanders = [(cmd, self._display_pos(cmd)) for cmd in wd.commanders
-                      if cmd.faction_idx == wd.player_faction_idx
-                      or self._cell_revealed(*self._display_cell(cmd))]
-        add(commanders, self._GLOBE_COMMANDER_RADIUS, self._GLOBE_COMMANDER_HEIGHT,
-            lambda cmd: (_GLOBE_PLAYER_COMMANDER
-                        if cmd.faction_idx == wd.player_faction_idx
-                        else faction_rgb(cmd.faction_idx)))
-        return pins
 
     def _map_labels(self, level, cull=None, region_names=True):
         """Names and alert badges, by zoom level: realms at world view,
         regions at region view, settlements and villages at village view.
-        Shared by the globe and the GPU flat map, same reasoning as
-        _map_lines -- this is world-state-to-label-list, not sphere-specific.
+        Same reasoning as _map_lines -- this is world-state-to-label-list,
+        and the renderer decides where each label lands.
 
-        `cull`, when given, is the globe's g.visible_mask (a point-list ->
-        bool-array culling test against camera altitude/horizon) -- the flat
-        map passes None, since an orthographic GL viewport clips off-screen
-        geometry on its own for free and there is no horizon to test against.
+        `cull`, when given, is a point-list -> bool-array culling test; the
+        GPU map passes None, since an orthographic viewport clips off-screen
+        geometry on its own for free.
 
-        `region_names` gates the level-1 branch below. The globe's own
-        altitude-based hemisphere culling (`cull`) keeps the ON-SCREEN count
-        bounded even for a sprawling kingdom, but the flat map's orthographic
-        camera can put an ENTIRE developed kingdom on screen at once with no
-        such limit -- exactly the "realm view used to label every single
+        `region_names` gates the level-1 branch below. An orthographic camera
+        can put an ENTIRE developed kingdom on screen at once with nothing
+        bounding the label count -- exactly the "realm view used to label
+        every single
         region... dozens of names stacked over the terrain" problem
         _draw_labels' own docstring describes fixing on the canvas years ago
         (it now shows region names nowhere at all, only nation names at
@@ -2940,7 +2677,7 @@ class MapView(tk.Frame):
                 kept.append(f)
             add([(f.name, (f.center[0] * wd.w, f.center[1] * wd.h))
                  for f in kept],
-                15.0, _GLOBE_LABEL_COLOR, -14.0)
+                15.0, _GL_LABEL_COLOR, -14.0)
         elif level == 1:
             # region_names=False (the flat map -- see this method's own
             # docstring) means genuinely nothing at this level, NOT a
@@ -2952,11 +2689,11 @@ class MapView(tk.Frame):
                      if r.faction_idx >= 0 and self._is_known(wd.factions[r.faction_idx])
                      and self._cell_revealed(int(r.center[0] * wd.w),
                                              int(r.center[1] * wd.h))],
-                    12.0, _GLOBE_LABEL_COLOR, -10.0)
+                    12.0, _GL_LABEL_COLOR, -10.0)
         else:
             add([(st.name, st.pos) for st in wd.settlements
                  if self._cell_revealed(*st.pos)],
-                12.0, _GLOBE_LABEL_COLOR, 14.0)
+                12.0, _GL_LABEL_COLOR, 14.0)
             # Village names only once there are few enough to read. The whole
             # facing hemisphere of a developed realm is hundreds of them, which
             # is label soup rather than information -- the same reason the flat
@@ -2967,7 +2704,7 @@ class MapView(tk.Frame):
                 count = (int(cull([pos for _, pos in villages]).sum())
                          if cull is not None else len(villages))
                 if count <= _VILLAGE_LABEL_LIMIT:
-                    add(villages, 9.0, _GLOBE_VILLAGE_LABEL_COLOR, 10.0)
+                    add(villages, 9.0, _GL_VILLAGE_LABEL_COLOR, 10.0)
 
         # Alerts ride on the same text path rather than getting their own
         # geometry: a "!" over the marker is the badge, and it is legible at
@@ -2975,7 +2712,7 @@ class MapView(tk.Frame):
         if level >= 1 and self._alert_node_ids:
             alerts = self._alert_node_ids
             for critical in (True, False):
-                colour = _GLOBE_RGB[theme.BAD if critical
+                colour = _GL_RGB[theme.BAD if critical
                                     else self._ALERT_WARN_COLOR]
                 add([("!", n.pos)
                      for nodes in (wd.settlements, wd.villages) for n in nodes
@@ -2988,7 +2725,7 @@ class MapView(tk.Frame):
         if self.attack_mode is not None and self._attack_frontier:
             add([(r.name, (r.center[0] * wd.w, r.center[1] * wd.h))
                  for r in self._attack_frontier],
-                12.0, _GLOBE_LABEL_COLOR, 0.0)
+                12.0, _GL_LABEL_COLOR, 0.0)
         return out
 
     _SETTLE_SHAPE = {"city": SHAPE_CIRCLE, "castle": SHAPE_TRIANGLE, "town": SHAPE_SQUARE}
@@ -2996,22 +2733,17 @@ class MapView(tk.Frame):
     def _flat_markers(self, level):
         """Everything the flat map draws as a point marker, as
         (cell_x, cell_y, radius_world_units, (r,g,b), shape) for
-        gl_flatmap's set_markers -- the GPU flat map's equivalent of
-        _globe_markers/_globe_pins. No standing 3D pins (a "planted spire"
-        viewed by a dead-on orthographic top-down camera foreshortens to a
-        blob, so there is no benefit to the extra geometry the globe uses
-        for settlements/villages/commanders) -- shape is instead carried by
-        gl_flatmap's own marker shader (SHAPE_CIRCLE/TRIANGLE/SQUARE/
-        DIAMOND/HULL), which reproduces the canvas's city/castle/town/
-        commander/ship silhouettes directly. Sized by _marker_radius's own
-        screen-pixel-clamped rule rather than the globe's altitude-relative
-        mscale, so a marker is exactly as legible at any zoom as it already
-        is on the flat canvas.
+        gl_flatmap's set_markers -- the GPU equivalent of what the canvas
+        draws. Shape is carried by gl_flatmap's own marker shader
+        (SHAPE_CIRCLE/TRIANGLE/SQUARE/DIAMOND/HULL), which reproduces the
+        canvas's city/castle/town/commander/ship silhouettes directly, and
+        size comes from _marker_radius's screen-pixel-clamped rule, so a
+        marker is exactly as legible at any zoom as it is on the canvas.
 
-        No camera-culling here (unlike _globe_markers' visible_mask): an
-        orthographic viewport clips off-screen instances on the GPU for
-        free, and at flat-map scale (hundreds, not tens of thousands, of
-        markers) there is no reason to spend CPU time pre-filtering them."""
+        No camera-culling here: an orthographic viewport clips off-screen
+        instances on the GPU for free, and at flat-map scale (hundreds, not
+        tens of thousands, of markers) there is no reason to spend CPU time
+        pre-filtering them."""
         wd = self.world
         scale = self._place[2]
         marks = []
@@ -3044,7 +2776,7 @@ class MapView(tk.Frame):
             if st is self.selected_settlement:
                 ring(st.pos[0] + 0.5, st.pos[1] + 0.5, r)
             marks.append((st.pos[0] + 0.5, st.pos[1] + 0.5, px(r),
-                         _GLOBE_RGB[style["fill"]], self._SETTLE_SHAPE[st.kind]))
+                         _GL_RGB[style["fill"]], self._SETTLE_SHAPE[st.kind]))
 
         if level >= 2:
             zf = wd.factions.index(self.zoom_faction)
@@ -3055,18 +2787,18 @@ class MapView(tk.Frame):
                 if v is self.selected_village:
                     ring(v.pos[0] + 0.5, v.pos[1] + 0.5, r)
                 marks.append((v.pos[0] + 0.5, v.pos[1] + 0.5, px(r),
-                             _GLOBE_RGB[_VILLAGE_STYLE["fill"]], SHAPE_CIRCLE))
+                             _GL_RGB[_VILLAGE_STYLE["fill"]], SHAPE_CIRCLE))
 
         # Commanders: diamond, player's own kept orchid.
         cr = _COMMANDER_STYLE["r"]
         for cmd in wd.commanders:
             mine = cmd.faction_idx == wd.player_faction_idx
             if mine:
-                color = _GLOBE_RGB[_COMMANDER_STYLE["fill"]]
+                color = _GL_RGB[_COMMANDER_STYLE["fill"]]
             else:
                 if not self._cell_revealed(*self._display_cell(cmd)):
                     continue
-                color = _GLOBE_RGB[wd.factions[cmd.faction_idx].color]
+                color = _GL_RGB[wd.factions[cmd.faction_idx].color]
             cx, cy = self._display_pos(cmd)
             if cmd is self.selected_commander:
                 ring(cx + 0.5, cy + 0.5, cr)
@@ -3081,7 +2813,7 @@ class MapView(tk.Frame):
             if ship.id in aboard_ids:
                 continue
             sx, sy = self._display_pos(ship)
-            marks.append((sx + 0.5, sy + 0.5, px(sr), _GLOBE_RGB[_SHIP_STYLE["fill"]],
+            marks.append((sx + 0.5, sy + 0.5, px(sr), _GL_RGB[_SHIP_STYLE["fill"]],
                          SHAPE_HULL))
 
         # Trade caravans, yours or foreign, land/sea/river.
@@ -3090,7 +2822,7 @@ class MapView(tk.Frame):
                 continue
             style = self._caravan_style(caravan)
             cx, cy = self._display_pos(caravan)
-            marks.append((cx + 0.5, cy + 0.5, px(style["r"]), _GLOBE_RGB[style["fill"]],
+            marks.append((cx + 0.5, cy + 0.5, px(style["r"]), _GL_RGB[style["fill"]],
                          SHAPE_CIRCLE))
 
         # Settlement placement hint (see _score_placement_hint) -- advisory
@@ -3098,12 +2830,12 @@ class MapView(tk.Frame):
         # Castle is armed to place.
         if self.building_mode is not None and self._placement_hint_cells:
             for x, y in self._placement_hint_cells:
-                marks.append((x + 0.5, y + 0.5, px(4.0), _GLOBE_RGB["#ffec78"], SHAPE_CIRCLE))
+                marks.append((x + 0.5, y + 0.5, px(4.0), _GL_RGB["#ffec78"], SHAPE_CIRCLE))
 
         # In-progress settlement construction sites (see _draw_construction).
         for project in wd.settlement_projects:
             marks.append((project.pos[0] + 0.5, project.pos[1] + 0.5, px(4.0),
-                         _GLOBE_RGB["#f2e9c9"], SHAPE_CIRCLE))
+                         _GL_RGB["#f2e9c9"], SHAPE_CIRCLE))
 
         # Forest/mountain terrain-symbol glyphs (see _draw_terrain_symbols):
         # same jittered per-cell sampling, screen-spacing formula and
@@ -3126,8 +2858,8 @@ class MapView(tk.Frame):
             sym_r = max(2.5, scale * spacing * 0.22)
             gy0 = by0 - by0 % spacing
             gx0 = bx0 - bx0 % spacing
-            forest_rgb = _GLOBE_RGB[_FOREST_SYMBOL_FILL]
-            mountain_rgb = _GLOBE_RGB[_MOUNTAIN_SYMBOL_FILL]
+            forest_rgb = _GL_RGB[_FOREST_SYMBOL_FILL]
+            mountain_rgb = _GL_RGB[_MOUNTAIN_SYMBOL_FILL]
             for gy in range(gy0, by1, spacing):
                 for gx in range(gx0, bx1, spacing):
                     wx = gx % wd.w
@@ -3159,7 +2891,7 @@ class MapView(tk.Frame):
 
     def _caravan_style(self, caravan):
         """The marker style for a caravan -- yours or somebody else's, by
-        kind. Shared by the flat map's marker pass and the globe's."""
+        kind."""
         mine = (self.world.player_faction_idx is not None
                 and self.world.player_faction_idx in (caravan.seller_idx,
                                                       caravan.buyer_idx))
@@ -3169,166 +2901,8 @@ class MapView(tk.Frame):
             return _RIVER_CARAVAN_STYLE if mine else _FOREIGN_RIVER_CARAVAN_STYLE
         return _CARAVAN_STYLE if mine else _FOREIGN_CARAVAN_STYLE
 
-    _GLOBE_COMMANDER_HIT_PX = 14
-    _GLOBE_SETTLEMENT_HIT_PX = 16
-    _GLOBE_VILLAGE_HIT_PX = 12
 
-    def _globe_marker_hit(self, sx, sy, candidates, hit_px):
-        """The first of `candidates` (an iterable of (obj, pos)) whose
-        projected screen position is within `hit_px` of the click, or None.
-        Shared by commander/settlement/village hit-testing below -- same
-        screen-space nearest-marker-wins idea _on_click uses for the flat
-        map, just projected through the globe's own camera (see
-        gl_globe.project_to_screen) instead of world_to_screen."""
-        g = self.globe
-        best_obj, best_d2 = None, hit_px * hit_px
-        for obj, pos in candidates:
-            proj = g.project_to_screen(*pos)
-            if proj is None:
-                continue
-            px, py = proj
-            d2 = (px - sx) ** 2 + (py - sy) ** 2
-            if d2 <= best_d2:
-                best_obj, best_d2 = obj, d2
-        return best_obj
 
-    def _on_globe_right_click(self, cell):
-        """The globe's equivalent of _on_right_click: send the currently
-        selected Commander toward the clicked ground cell directly."""
-        if self.selected_commander is None:
-            return
-        cmd = self.selected_commander
-        self.commander_move_mode = None
-        msg = commander.set_move_order(self.world, cmd, cell)
-        self.show_bottom_message(msg)
-        self._show_commander(cmd)
-        self.render()
-
-    def _on_globe_pick(self, cell, sx, sy):
-        """A click on the globe: (cell_x, cell_y) or None from gl_globe.pick,
-        plus the raw screen coordinates the click landed at. Mirrors
-        _on_click's branch order (planning modes first, then commander
-        selection, then settlement/village markers, then region/faction)
-        so every action the flat map supports is reachable here too --
-        flying closer already IS drilling down on the globe (see
-        gl_globe's zoom_level), so there is no separate per-level branch
-        to duplicate the way _on_click has one per flat-map zoom level."""
-        wd = self.world
-
-        if self.attack_mode is not None:
-            if cell is not None:
-                cx, cy = cell
-                cid = wd.region_grid[cy][cx]
-                if any(c.id == cid for c in self._attack_frontier):
-                    self._launch_attack(wd.regions[cid])
-            return
-
-        if self.building_mode is not None:
-            if cell is not None:
-                region, kind = self.building_mode
-                cx, cy = cell
-                if wd.region_grid[cy][cx] == region.id:
-                    player = self._player_faction()
-                    msg = construction.start_settlement(wd, player, (cx, cy), kind)
-                    self.building_mode = None
-                    self._placement_hint_cells = None
-                    self._base_key = None
-                    self.show_bottom_message(msg)
-                    if self.selected_region is region:
-                        self._show_region(region)
-                    self.render()
-            return
-
-        if self.commander_move_mode is not None:
-            if cell is not None:
-                cmd = self.commander_move_mode
-                self.commander_move_mode = None
-                msg = commander.set_move_order(wd, cmd, cell)
-                self.show_bottom_message(msg)
-                if self.selected_commander is cmd:
-                    self._show_commander(cmd)
-                self.render()
-            return
-
-        # --- Commander selection: same priority _on_click gives it, over
-        # anything else at the point clicked -- only the player's own
-        # commanders (an opponent's is a marker, not something you can open
-        # a panel/orders for).
-        self.selected_commander = None
-        player = self._player_faction()
-        if player is not None:
-            player_idx = wd.factions.index(player)
-            mine = [(cmd, self._display_pos(cmd)) for cmd in wd.commanders
-                   if cmd.faction_idx == player_idx]
-            hit = self._globe_marker_hit(sx, sy, mine, self._GLOBE_COMMANDER_HIT_PX)
-            if hit is not None:
-                self.selected_commander = hit
-                self._show_commander(hit)
-                self.render()
-                return
-
-        # --- Settlement selection: any revealed settlement, any faction --
-        # the flat map already allows this at region-view zoom (a foreign
-        # settlement's marker opens its panel there too; only VILLAGE VIEW,
-        # a whole extra zoom level, is foreign-gated), and the globe already
-        # shows every revealed settlement's pin regardless of owner (see
-        # _globe_pins), so clicking one is consistent with what's on screen.
-        settlements = [(st, st.pos) for st in wd.settlements
-                       if self._cell_revealed(*st.pos)]
-        hit = self._globe_marker_hit(sx, sy, settlements, self._GLOBE_SETTLEMENT_HIT_PX)
-        if hit is not None:
-            self.selected_settlement = hit
-            self.selected_village = None
-            self._show_settlement(hit)
-            self.render()
-            return
-
-        # --- Village selection: same reasoning as settlements above --
-        # _globe_labels/_globe_markers already show any revealed village
-        # regardless of owner, so clicking one is consistent with that,
-        # even though the flat map only ever reaches a village panel
-        # through its own faction's village view.
-        villages = [(v, v.pos) for v in wd.villages if self._cell_revealed(*v.pos)]
-        hit = self._globe_marker_hit(sx, sy, villages, self._GLOBE_VILLAGE_HIT_PX)
-        if hit is not None:
-            self.selected_village = hit
-            self.selected_settlement = None
-            self._show_village(hit)
-            self.render()
-            return
-
-        # --- Fall back to region/faction selection (the globe's original
-        # behavior, unchanged).
-        if cell is None or not self._cell_revealed(*cell):
-            return
-        cx, cy = cell
-        cid = wd.region_grid[cy][cx]
-        if cid < 0:
-            self.selected = None
-            self.selected_region = None
-            self.render()
-            return
-        region = wd.regions[cid]
-        self.selected_region = region
-        owner = region.faction_idx
-        nation = wd.factions[owner] if owner >= 0 else None
-        self.selected = nation
-        # Deliberately does NOT touch self.zoom_faction. That is flat-map
-        # drill-down state with real side effects elsewhere in this file --
-        # which raster _ensure_base builds (region-mode vs political-mode),
-        # back-button visibility, foreign-nation gating (_zoom_is_foreign) --
-        # and setting it here was a real bug: selecting a region on the globe
-        # was quietly flipping the FLAT MAP into "drilled into this faction"
-        # state, and the next thing to read zoom_faction (often on the very
-        # same click, via code that assumes it is only ever set through the
-        # flat map's own drill-in flow) would act on a change the player
-        # never asked for -- surfacing as the view snapping back out to the
-        # world map instead of just highlighting the clicked region. Region
-        # ownership now comes straight from the region itself wherever it's
-        # needed (see _show_region), so nothing here has to borrow flat-map
-        # state to work.
-        self._show_region(region)
-        self.render()
 
     _MODES = ["political", "fertility", "elevation", "biome", "climate"]
 
@@ -5700,12 +5274,9 @@ class MapView(tk.Frame):
         # Region-mode (per-region shading, with the selected one picked out)
         # applies whenever EITHER the flat map has drilled into a faction
         # (zoom_faction) OR something has a specific region selected without
-        # that drill-down state (the globe: see _on_globe_pick, which
-        # deliberately never touches zoom_faction). Either alone is enough --
-        # they used to always coincide on the flat map, but the globe needed
-        # a way to ask for a region highlight without also pulling in
-        # zoom_faction's other side effects (back-button visibility,
-        # _zoom_is_foreign, ...).
+        # that drill-down state. Either alone is enough: a caller can ask for
+        # a region highlight without also pulling in zoom_faction's other
+        # side effects (back-button visibility, _zoom_is_foreign, ...).
         region_mode = self.zoom_faction is not None or self.selected_region is not None
         if region_mode:
             sc = self.selected_region.id if self.selected_region else -1
@@ -5884,16 +5455,9 @@ class MapView(tk.Frame):
             # cancelled when the turn starts, but this is the actual
             # correctness guarantee, not that cancellation.
             return
-        if self.globe_active and self.globe is not None:
-            if self.globe.failed:
-                self._set_globe(False)      # GL died -> back to the flat map
-            else:
-                self._sync_globe()
-                return
-        # GPU flat map: not a player-facing toggle like the globe -- swapped
-        # in for the canvas automatically whenever GL is available, and
-        # dynamically fallen back from (not just checked once at startup)
-        # the same way the globe falls back to the flat map above.
+        # GPU flat map: not a player-facing toggle -- swapped in for the
+        # canvas automatically whenever GL is available, and dynamically
+        # fallen back from rather than only checked once at startup.
         if self._ensure_flatgl():
             if not self._use_flatgl:
                 self._activate_flatgl()

@@ -158,7 +158,7 @@ class App(tk.Tk):
         """Exclude the just-loaded world's object graph from the cyclic
         GC's periodic scans. Diagnosed from a reported GPU-flat-map stutter
         that turned out not to be GPU-bound at all (GPU usage stayed near
-        0% through it) or GL-specific (the globe, sharing the same
+        0% through it) or GL-specific (the GPU map, sharing the same
         moderngl/pyopengltk plumbing, never showed it): a developed world
         is one big, long-lived object graph (regions, villages,
         settlements, roads, factions...) that Python's cyclic collector
