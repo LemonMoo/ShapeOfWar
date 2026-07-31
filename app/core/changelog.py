@@ -20,6 +20,20 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 64,
+        "title": "The Homelands Update",
+        "items": [
+            "NEW: 12 biomes instead of 6, from a real temperature x moisture matrix — latitude means something now, and highland is farmable ore country rather than a wall",
+            "NEW: your people start where they come from. Elves open in forest, Dwarves in mountain and highland, Orcs on the savannah, Goblins in jungle and swamp",
+            "NEW: a people works its own country better and alien country worse — and slowly learns ground it holds, so conquest is a choice rather than a trap",
+            "NEW: every region is a named place now — the Everwood, the Ashwaste, the Mistfen — reading differently by climate",
+            "NEW: Humans have a naming voice of their own at last, all storms, oaths and stone",
+            "NEW: the Mining Camp — a village can work a seam nobody lives near, so ore is reachable instead of theoretical",
+            "FIXED: prosperity was a meter that could not move. Nothing manufactured existed anywhere either — the domestic supply chain was severed in four separate places",
+            "FIXED: the trade log never appeared when you clicked its tab; folding cards that would not fold",
+        ],
+    },
+    {
         "version": 63,
         "title": "The Cartographer Update",
         "items": [
