@@ -722,14 +722,7 @@ class MapView(tk.Frame):
                 dirty.clear()
             self._last_territory_version = territory_version
         self._base_img = self._base_key = None
-        if self.selected is not None:
-            self._show_faction(self.selected)
-        if self.selected_region is not None:
-            self._show_region(self.selected_region)
-        if self.selected_settlement is not None:
-            self._show_settlement(self.selected_settlement)
-        if self.selected_village is not None:
-            self._show_village(self.selected_village)
+        self._rebuild_selection_panel()
         # Treasury is an in-game panel that can be left open across End Turn,
         # so it has to be rebuilt here to show the turn's new figures.
         self._refresh_treasury()
@@ -4252,11 +4245,31 @@ class MapView(tk.Frame):
                              subtitle, default_open,
                              on_toggle=lambda: self._toggle_panel_card(key))
 
+    def _rebuild_selection_panel(self):
+        """Redraw whichever selection panel is currently up.
+
+        Every kind of selection has to be here, which is exactly what the
+        folding cards got wrong: this used to cover only Settlements and
+        Villages, so clicking SUMMARY or SETTLEMENTS on a REGION flipped the
+        card's open/shut state and then redrew nothing at all. The arrow even
+        changed on the next unrelated redraw, which made it look like the click
+        had registered and the card had simply refused to move."""
+        if self.selected is not None:
+            self._show_faction(self.selected)
+        if self.selected_region is not None:
+            self._show_region(self.selected_region)
+        if self.selected_settlement is not None:
+            self._show_settlement(self.selected_settlement)
+        if self.selected_village is not None:
+            self._show_village(self.selected_village)
+
     def _toggle_panel_card(self, key):
-        node = self.selected_village or self.selected_settlement
-        if node is not None:
-            (self._show_village if node is self.selected_village
-             else self._show_settlement)(node)
+        # Commanders too -- refresh() handles that one separately because it
+        # also drives the treasury, but a fold has to redraw it like any other.
+        if self.selected_commander is not None:
+            self._show_commander(self.selected_commander)
+            return
+        self._rebuild_selection_panel()
 
     def _kv(self, parent, label, value, fg=None):
         """One aligned label/value row -- the replacement for cramming figures

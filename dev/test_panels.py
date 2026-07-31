@@ -139,6 +139,66 @@ for name, call in cases:
     root.update_idletasks()
 print("  ok    every panel rebuilds after advance_turn")
 
+print("\n--- folding cards actually fold, on EVERY kind of panel ---")
+# The bug: _toggle_panel_card only redrew Settlements and Villages, so clicking
+# SUMMARY or SETTLEMENTS on a Region flipped the card's stored state and then
+# rebuilt nothing at all. The arrow even changed on the next unrelated redraw,
+# which made it look like the card had refused to move rather than that the
+# click had gone nowhere.
+def card_header(view, title):
+    for wdg in walk(view.actions):
+        try:
+            text = str(wdg.cget("text"))
+        except tk.TclError:
+            continue
+        if text.endswith(title.upper()) and text[:1] in ("▾", "▸"):
+            return wdg
+    return None
+
+
+def select(kind):
+    """Put the view into the state a real click leaves it in. The _show_*
+    methods only DRAW -- it is _on_click that records what is selected (see
+    map_view's click handler), and a fold has to redraw from that same
+    recorded state, so a test that only calls _show_* would be testing a
+    situation the game never gets into."""
+    view.selected = view.selected_region = None
+    view.selected_settlement = view.selected_village = None
+    view.selected_commander = None
+    if kind == "region":
+        view.selected, view.selected_region = faction, region
+        view._show_region(region)
+    elif kind == "faction":
+        view.selected = faction
+        view._show_faction(faction)
+    elif kind == "settlement":
+        view.selected_settlement = settlement
+        view._show_settlement(settlement)
+    else:
+        view.selected_village = village
+        view._show_village(village)
+
+
+for name in ("region", "faction", "settlement", "village"):
+    select(name)
+    root.update_idletasks()
+    head = card_header(view, "SUMMARY")
+    assert head is not None, f"{name} panel has no SUMMARY card to fold"
+    before = str(head.cget("text"))[:1]
+    head.event_generate("<Button-1>")
+    root.update_idletasks()
+    head_after = card_header(view, "SUMMARY")
+    assert head_after is not None, f"{name}: the panel vanished after a fold"
+    after = str(head_after.cget("text"))[:1]
+    assert after != before, (
+        f"{name}: clicking SUMMARY did not redraw the card "
+        f"(arrow stayed {before!r}) -- the fold state flipped with nothing "
+        f"rebuilt to show it")
+    # And put it back, so the next case starts from a known state.
+    head_after.event_generate("<Button-1>")
+    root.update_idletasks()
+    print(f"  ok    {name:<11} SUMMARY folds {before} -> {after} and back")
+
 print("\n--- every floating panel survives the canvas/GL swap ---")
 # The bug this guards, twice over: the flat map is a GL surface that
 # REPLACES self.canvas (_activate_flatgl does self.canvas.pack_forget()).

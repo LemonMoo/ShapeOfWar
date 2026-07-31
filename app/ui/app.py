@@ -90,10 +90,18 @@ class App(tk.Tk):
         bus.on("faction:eliminated", self._on_faction_eliminated)
         self.bind("<Escape>", self._on_escape)
         self.bind("<F1>", self._on_f1)
-        self.bind("<e>", self._on_end_turn_key)
-        self.bind("<E>", self._on_end_turn_key)
-        self.bind("<v>", self._on_toggle_mode_key)
-        self.bind("<V>", self._on_toggle_mode_key)
+        # bind_all, not bind: a plain bind on the root only fires while focus
+        # is somewhere inside the root's own widget tree, and this game has
+        # real child Toplevels -- the Compendium and the Build Menu -- which
+        # take focus when opened. With a root bind, E and V simply stopped
+        # working after opening either one, and started again if you happened
+        # to click back on the map, which is exactly the "works sometimes"
+        # this fixes. bind_all reaches every window in the application.
+        for key, handler in (("e", self._on_end_turn_key),
+                             ("E", self._on_end_turn_key),
+                             ("v", self._on_toggle_mode_key),
+                             ("V", self._on_toggle_mode_key)):
+            self.bind_all(f"<{key}>", handler)
 
         self.show_screen("menu")
 
@@ -330,10 +338,28 @@ class App(tk.Tk):
         if self.map_view is not None:
             self.map_view.open_compendium()
 
+    _TEXT_ENTRY_CLASSES = frozenset(("Entry", "TEntry", "Text", "Spinbox",
+                                     "TSpinbox", "TCombobox"))
+
+    def _is_typing(self, event):
+        """True when the key belongs to a text field rather than to the game.
+
+        Needed because these are bind_all now (see __init__): a single letter
+        is both a shortcut and a character, and the Compendium's search box is
+        a real Entry the player types into. Checked on the event's own widget,
+        which is the one the keystroke was actually delivered to."""
+        widget = getattr(event, "widget", None)
+        try:
+            return widget.winfo_class() in self._TEXT_ENTRY_CLASSES
+        except (AttributeError, tk.TclError):
+            return False
+
     def _on_end_turn_key(self, event):
         """E: End Turn -- only while actually looking at the map (not
         paused, not mid-battle, not on a menu where 'e' should just be a
         letter -- e.g. typing a faction name on the New Game screen)."""
+        if self._is_typing(event):
+            return
         if self._current_screen == "map" and not self._paused:
             self.map_view._on_end_turn()
 
@@ -343,6 +369,8 @@ class App(tk.Tk):
         Also inert while a background turn is processing (MapView.render()
         would just no-op it anyway -- skipping the call keeps the key
         feeling inert rather than silently swallowed)."""
+        if self._is_typing(event):
+            return
         if (self._current_screen == "map" and not self._paused
                 and not self.map_view._end_turn_busy):
             self.map_view._toggle_mode()

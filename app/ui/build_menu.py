@@ -199,8 +199,21 @@ class BuildMenuWindow(tk.Toplevel):
         self._canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
 
     def _on_destroy(self, event):
-        if event.widget is self:
-            self.unbind_all("<MouseWheel>")
+        if event.widget is not self:
+            return
+        self.unbind_all("<MouseWheel>")
+        # Hand focus back to the game. An undecorated window has to take focus
+        # for itself (see _take_focus), and Windows does not reliably give it
+        # back to the parent when one is destroyed -- leaving the keyboard
+        # pointed at nothing, which is half of why E stopped ending turns
+        # after opening this window. (The other half was the root binding
+        # itself; see App.__init__'s bind_all.)
+        try:
+            master = self.master
+            if master is not None and master.winfo_exists():
+                master.focus_force()
+        except tk.TclError:
+            pass   # the whole app is going away
 
     # --- content ---------------------------------------------------------
     def _render(self):
