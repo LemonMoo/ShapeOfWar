@@ -141,10 +141,11 @@ SECTIONS = [
     ),
     Section(
         "commander_rules", "Commander rules", (unit_types, [
-            "COMMANDER_AURA_RADIUS", "COMMANDER_SCREEN_MIN",
+            "COMMANDER_AURA_RADIUS", "COMMANDER_LEASH",
+            "COMMANDER_RETURN_SPEED_MULT",
         ]),
-        "How far a commander's aura reaches, and how many of his own soldiers "
-        "must stand between him and a fight before he will advance into it.",
+        "How far a commander's aura reaches, and how far from his own army he "
+        "can get before he stops everything and rides back to it.",
         # Imported BY VALUE into app/battle/unit.py -- changing the attribute
         # here alone would do nothing at all there.
         mirror=(unit_mod,),

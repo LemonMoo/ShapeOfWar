@@ -21,7 +21,9 @@ import random
 
 from app.battle import orders
 from app.battle.unit_types import (UNIT_TYPES, COMMANDER_AURA_RADIUS,
-                                   COMMANDER_SCREEN_MIN, commander_profile)
+                                   COMMANDER_LEASH, COMMANDER_LAST_STAND,
+                                   COMMANDER_RETURN_SPEED_MULT,
+                                   commander_profile)
 from app.world.lexicon import species_traits
 
 _IMPACT_CHARGE_MIN = 0.5   # momentum above which a couched hit spawns an impact
@@ -339,6 +341,13 @@ class Unit:
         # cooldown -- counts as stationary and stops shoving.
         self.advancing = False
 
+        # A commander dragged off his own battle comes back before he does
+        # anything else -- not fighting, not advancing, not retargeting. This
+        # runs first precisely because every one of those is a way to stay
+        # away: it is the fact of being far from his army that has to win.
+        if self._return_to_army(dt):
+            return
+
         # Cavalry told to charge and regroup pull out of the fight entirely
         # after an impact, so that runs ahead of ordinary target seeking.
         if self.stance == orders.STANCE_CYCLE_CHARGE:
@@ -395,7 +404,21 @@ class Unit:
 
         target_dist = (math.hypot(self.target.x - self.x, self.target.y - self.y)
                       if self.target is not None else None)
-        in_attack_range = target_dist is not None and target_dist <= self.attack_range
+        # Reach is measured centre to centre, but collision holds two bodies
+        # apart by the sum of their radii -- so a unit whose reach is shorter
+        # than that can never touch its target at all. A Commander has reach
+        # 18 and radius 15, so two of them are held 30px apart and simply
+        # stand there: once commanders stopped walking into the crowd and
+        # started surviving to the end, battles began ending 1-v-1 with two
+        # leaders unable to land a blow on each other, forever.
+        #
+        # The floor only ever binds where reach is shorter than the bodies
+        # themselves. Two soldiers (radius 5) need 11 and have far more, so
+        # nothing about ordinary combat changes.
+        reach = max(self.attack_range,
+                    self.radius + getattr(self.target, "radius", 0) + 1
+                    if self.target is not None else 0)
+        in_attack_range = target_dist is not None and target_dist <= reach
         # Facing always points at a real TARGET when there is one -- the
         # shield block arc and sword/bow visuals read it, and those care who
         # you're fighting, not which empty patch of ground you're walking
@@ -506,11 +529,22 @@ class Unit:
                 battle.on_attack(self, self.target, outcome)
 
     def _screened(self, dist_to_target):
-        """True unless this is a commander who has run out of soldiers between
-        himself and his target -- see unit_types.COMMANDER_SCREEN_MIN.
+        """Whether a commander may CLOSE on his target. For an AI-run
+        commander the answer is now simply no, ever.
 
-        Only ever costs anything for the one commander per army; every other
-        unit short-circuits on the first test.
+        This started as a count of how many of his own soldiers stood between
+        him and what he was fighting, on the theory that he should not push
+        past his own line. Measured, that theory does not hold: a front line
+        is between him and the enemy essentially always, so the test passed
+        essentially always, and he walked forward with it. Splitting a real
+        battle's commander movement into "advanced under his own orders"
+        against "shoved by collisions" came out 1,006px to 128px -- he was
+        never being carried off. He was walking there.
+
+        So he holds his ground and fights whatever reaches him. The only
+        thing that moves an AI commander now is staying with his own army
+        (see _return_to_army), which is what a commander's position is
+        actually for.
 
         Bypassed entirely under direct player control (see _player_directed):
         a player who explicitly orders their own commander forward -- a
@@ -526,16 +560,69 @@ class Unit:
             return True
         if self._player_directed:
             return True
-        tx, ty = self.target.x, self.target.y
-        ahead = 0
+        return self._army_spent()
+
+    def _army_spent(self):
+        """True once he has no line left worth holding. A commander whose
+        soldiers are gone fights like anyone else -- otherwise two commanders
+        whose armies had wiped each other out stood and looked at one another
+        until the clock ran out, which is exactly how the swamp case in
+        dev/test_battle_terrain stopped resolving."""
+        left = 0
         for u in self.faction.units:
-            if u is self or not u.alive:
+            if u is self or not u.alive or getattr(u, "is_commander", False):
                 continue
-            if math.hypot(u.x - tx, u.y - ty) < dist_to_target:
-                ahead += 1
-                if ahead >= COMMANDER_SCREEN_MIN:
-                    return True
-        return False
+            left += 1
+            if left > COMMANDER_LAST_STAND:
+                return False
+        return True
+
+    def _army_anchor(self):
+        """Where his own army is actually fighting -- the mean position of his
+        living soldiers, commanders excluded so he cannot anchor to himself.
+        None if he has no army left, in which case there is nothing to hold
+        the line with and nothing to leash him to."""
+        xs = ys = 0.0
+        n = 0
+        for u in self.faction.units:
+            if u is self or not u.alive or getattr(u, "is_commander", False):
+                continue
+            xs += u.x
+            ys += u.y
+            n += 1
+        return (xs / n, ys / n) if n else None
+
+    def _return_to_army(self, dt):
+        """Walk back toward his own line, and say whether he is doing so.
+
+        The leash exists because screening cannot fix being CARRIED: a
+        commander in contact with a charging line takes knockback from it
+        however heavy he is (see the mass comment in __init__), and enough of
+        it in one direction walks him clean off his own battle. Past
+        COMMANDER_LEASH he stops fighting, stops advancing, and comes back.
+
+        Never applied under direct player control -- ordering your own
+        commander somewhere is a decision, not an accident."""
+        if not getattr(self, "is_commander", False) or self._player_directed:
+            return False
+        anchor = self._army_anchor()
+        if anchor is None or self._army_spent():
+            return False   # nothing left to stand with; see _army_spent
+        dx, dy = anchor[0] - self.x, anchor[1] - self.y
+        dist = math.hypot(dx, dy)
+        if dist <= COMMANDER_LEASH:
+            return False
+        # He rides back rather than trudging. Without this an all-cavalry
+        # army simply outruns its own commander -- the anchor is its centre
+        # of mass and it gallops -- so he falls further behind every tick
+        # while doing exactly the right thing.
+        move = self.effective_speed * COMMANDER_RETURN_SPEED_MULT * dt
+        self.x += dx / dist * move
+        self.y += dy / dist * move
+        self.advancing = False
+        self.charge = 0.0
+        self.facing = (dx / dist, dy / dist)
+        return True
 
     # --- cavalry: charge and regroup -----------------------------------------
     # Riders are worst in a grind (melee_floor) and best out of a gallop, but

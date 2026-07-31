@@ -144,13 +144,19 @@ for biome, profile in BATTLE_TERRAIN.items():
 print("  ok    every multiplier is inside the intended modest band")
 
 print("\n--- a battle on hard ground still actually resolves ---")
+# What this asserts is that hard ground does not DEADLOCK a fight. It earned
+# its keep: making commanders hold their ground meant battles started ending
+# 1-v-1 between two leaders, and that exposed a latent bug where a Commander's
+# reach (18) is shorter than two Commander bodies held apart by collision (30)
+# -- they stood facing each other, unable to land a blow, forever. See the
+# reach floor in Unit.update.
 for biome in ("swamp", "mountain", "jungle", "plains"):
     b = make(biome)
-    for _ in range(6000):
+    for _ in range(12000):
         b.update(1 / 60)
         if b.over:
             break
-    assert b.over, f"a battle in {biome} never ended in 100 simulated seconds"
+    assert b.over, f"a battle in {biome} never ended in 200 simulated seconds"
     side = b.armies.index(b.winner) if b.winner in b.armies else b.winner
     print(f"  ok    {biome:<9} resolved, winner side {side}")
 

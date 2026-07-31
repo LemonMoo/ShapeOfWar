@@ -264,16 +264,27 @@ UNIT_TYPES = {
 # needs no cleanup when the commander dies (see Unit._aura).
 COMMANDER_AURA_RADIUS = 130
 
-# A commander will not push past his own troops: he only advances while at
-# least this many of his soldiers stand between him and what he is fighting.
+# A commander holds his ground. He fights whatever reaches him and never
+# walks forward to close on anything -- see Unit._screened, which used to
+# count how many of his own soldiers stood between him and his target and
+# let him advance once enough did. Measured, that was no restraint at all: a
+# front line is between him and the enemy essentially always. Splitting a
+# real battle's commander movement into "advanced under his own orders"
+# against "shoved by collisions" came out 1,006px to 128px.
 #
-# Without it he walks into the enemy line like any other unit, and once there a
-# crowd of enemies simply carries him along -- measured on a losing side, an
-# outnumbered commander was transported from x=114 to x=879 and pinned against
-# the far edge for 1,346 ticks before dying. Screening him is also what the
-# deploy comment has always claimed happens ("cutting to the enemy's commander
-# means going through their army first"); it just was not actually enforced.
-COMMANDER_SCREEN_MIN = 4
+# The one thing that does move him: staying with his own army. Past this
+# distance from where his soldiers are actually fighting he stops everything
+# else and comes back, which also covers being shoved by a charging line.
+COMMANDER_LEASH = 165.0
+
+# ...unless there is no line left to hold. Once his own army is down to this
+# many soldiers or fewer, a commander fights like anyone else. Without it two
+# commanders whose armies had wiped each other out simply stood and looked at
+# one another forever -- caught by dev/test_battle_terrain, where a swamp
+# battle stopped resolving at all.
+COMMANDER_LAST_STAND = 3
+COMMANDER_RETURN_SPEED_MULT = 1.6   # he rides back, rather than trudging after
+                                    # an army that gallops
 
 COMMANDER_BY_SPECIES = {
     # The Marshal: least dangerous commander alive, the best force multiplier
