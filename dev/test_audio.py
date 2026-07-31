@@ -149,6 +149,23 @@ for word in ("rubberduck", "cynicmusic", "opengameart.org"):
     assert word in text, f"{word} is not credited in the licence record"
 print("  ok    LICENSES.md names every source, and all of it is CC0")
 
+print("\n--- ...and the build actually PACKS them into the exe ---")
+# The bug this guards is the one that made v0.8.0 -- the release called "The
+# Sound of It" -- and v0.9.0 completely silent. Every test above passes from
+# source, because from source audio._asset_root resolves to the real folder.
+# In a --onefile build it resolves under sys._MEIPASS, and build.bat had no
+# --add-data at all, so there was nothing there. The game then did exactly what
+# it is written to do about a missing file: note it once and never mention it
+# again. Nothing in the code was wrong, and nothing in the code could have
+# caught it.
+build = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "build.bat")
+script = open(build, encoding="utf-8", errors="replace").read()
+assert "--add-data" in script and "assets" in script.split("--add-data", 1)[1][:40], (
+    "build.bat does not bundle assets/ -- the packaged game will be silent, "
+    "and every test in this file will still pass")
+print("  ok    build.bat bundles assets/ into the exe")
+
 print("\n--- callers name events, never files ---")
 # If a file path ever appears at a call site, swapping a sound stops being a
 # one-line change to the table in audio.py.

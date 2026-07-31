@@ -20,6 +20,19 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 69,
+        "title": "Armies That Fight Like Armies",
+        "items": [
+            "FIXED: the sound. Music and effects have been in the game since v0.8.0 and have never once played in the released build — the audio files were not being packed into it at all",
+            "NEW: soldiers keep a spacing and step around each other instead of walking through their own line, and a man does not join a fight three of his fellows already have in hand",
+            "NEW: cavalry ride THROUGH what they charge, then wheel and come again from a new direction, instead of bouncing off the same face of the same formation",
+            "NEW: archers form a firing line — wide, shallow, ranks staggered — instead of bunching into a knot where half of them cannot shoot",
+            "NEW: every signature unit now fights like what it is. The Shieldwarden holds the front of the line it protects, the Standard Bearer stays with the body of the army, the Bladesinger works the flanks, the Berserker goes to the thickest of it, the Sapper bombs the densest knot and the Assassin goes around a line instead of through it",
+            "NEW: a Firing Line order for your own archers (L), alongside Shield Wall and Charge & Regroup",
+            "CHANGED: the species are far closer together than they were — the gap between the best and worst army has halved, without a single stat being touched",
+        ],
+    },
+    {
         "version": 68,
         "title": "Weather You Can See",
         "items": [
