@@ -55,6 +55,7 @@ from app.world import resources
 from app.world import wrap
 from app.world import rivers
 from app.world import currents
+from app.world import travel
 
 # --- market ------------------------------------------------------------------
 MIN_TRADE_QUANTITY = 20
@@ -980,7 +981,13 @@ def advance_caravans(world):
                            "leg": c.leg})
             continue   # caravan (and its goods/gold) simply vanishes
 
-        c.turn_progress += 1
+        # Weather phase 2: a live rate, not a flat step. Terrain cancels
+        # over the whole route (travel.route_pace), so in clear weather
+        # this is exactly the +1 it used to be -- what actually delays a
+        # caravan is the weather it is crossing. And a delayed caravan
+        # spends more turns exposed to the raid roll above, which is the
+        # right consequence without a separate rule for it.
+        c.turn_progress += travel.convoy_rate(world, c)
         if c.turn_progress < c.turns_total:
             remaining.append(c)
             continue
@@ -1851,7 +1858,7 @@ def advance_regional_shipments(world):
                           "origin_name": origin.name, "dest_name": dest.name})
             continue
 
-        s.turn_progress += 1
+        s.turn_progress += travel.convoy_rate(world, s)
         if s.turn_progress < s.turns_total:
             remaining.append(s)
             continue

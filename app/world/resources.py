@@ -5361,9 +5361,14 @@ def advance_local_shipments(world):
     check at delivery -- same grace-period philosophy as everywhere else
     in Phase 9/10: an over-full granary just spoils faster next turn
     (advance_settlement_storage), the wagon isn't turned away."""
+    # Imported here rather than at module scope: travel reaches commander ->
+    # construction -> back to this module, and the cycle only stays harmless
+    # if the import happens after everything is loaded. Same idiom the other
+    # late imports in this file use.
+    from app.world import travel
     remaining = []
     for s in world.local_shipments:
-        s.turn_progress += 1
+        s.turn_progress += travel.convoy_rate(world, s)
         if s.turn_progress < s.turns_total:
             remaining.append(s)
             continue
