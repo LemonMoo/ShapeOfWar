@@ -9,12 +9,13 @@ surveys, released together. Check
 `gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting this
 line — this repo ships fast, sometimes several releases in one day.
 
-**Five commits sit on `master` unreleased since then.** §17: the domestic
+**Six commits sit on `master` unreleased since then.** §17: the domestic
 logistics chain was severed in four places (nothing manufactured existed
 anywhere), two reported UI bugs, and the Mining Camp that closes §15.5's supply
-hole. §18: prosperity was a meter that could not move, and the first phase of a
-**biome overhaul that is mid-flight and is the main thread to pick up** —
-see §19 for the agreed plan and what is left of it. Working tree is clean.
+hole. §18: prosperity was a meter that could not move, and phase A of the
+**biome overhaul, which is mid-flight and is the main thread to pick up**.
+§19.1 is now DONE too — phase B, species homelands. See §19 for the agreed
+plan and what is left. Working tree is clean; the 28-script suite passes.
 
 ## HOW THIS PROJECT WANTS TO BE WORKED ON
 
@@ -42,11 +43,12 @@ useful rather than busy.
 
 ## WHAT IS OPEN, ROUGHLY BY VALUE
 
-1. **THE BIOME OVERHAUL, phases B-F.** Mid-flight: phase A (the matrix)
-   shipped, five phases remain, and the user has already chosen the design on
-   every axis. **§19 is the plan — read it before anything else.** Phase B is
-   the one that delivers what was actually asked for (species homeland
-   affinity: Elves in forests, Dwarves near mountains).
+1. **THE BIOME OVERHAUL, phases C-F.** Mid-flight: phases A (the matrix)
+   and B (species homelands) have shipped, four remain, and the user has
+   already chosen the design on every axis. **§19 is the plan — read it
+   before anything else.** Phase C (native-terrain aptitude) is next in the
+   agreed order; phase F (fantasy names) is cheap, zero-risk and the user
+   was told they would be asked whether they want it early.
 2. **Weather Phases 2-4** — logistics, battle, visual. Phases 0 and 1 are
    built and shipped; nothing since has touched weather. The biggest coherent
    feature outside the biome work. See **§10**, and read §16 first because
@@ -2006,7 +2008,8 @@ Everwood" to be a place rather than scattered pixels.
 
 ## 19. THE BIOME OVERHAUL — the live thread
 
-**This is the work to pick up.** Phase A shipped (§18.2); B through F remain.
+**This is the work to pick up.** Phases A (§18.2) and B (§20) shipped;
+C through F remain.
 The user chose the design on every axis already, so these are decisions to
 implement, not to re-open.
 
@@ -2029,7 +2032,7 @@ mechanic. It was folded into phase A as a hard constraint of the matrix instead
 (no biome good at all four categories, asserted in the harness), which delivers
 the same fairness without a separate feature. Say so if it comes up.
 
-### 19.1 Phase B — species homeland affinity (DO THIS FIRST)
+### 19.1 Phase B — species homeland affinity — **DONE, see §20**
 
 The actual original ask, and nothing about species touches placement today:
 `_site_score` (worldgen.py) weighs fertility, rivers, coast, borders and
@@ -2101,3 +2104,105 @@ On a generated world the current matrix gives: forest 19%, savannah 13%, jungle
 steppe 2.2%, desert 2.2%, swamp 0.8%. Steppe, desert and swamp are thin — if a
 species homeland is placed on one of those, check it can actually support a
 realm before shipping.
+
+---
+
+## 20. Biome phase B — species homelands (DONE, unreleased)
+
+Phase B of §19. Elves open in forest, Dwarves in mountain and highland, Orcs
+in savannah, Goblins in jungle and swamp.
+
+### 20.1 The design choice that matters
+
+`_site_score` weighs fertility, rivers, coast, borders and elevation, and
+there is still **no species term in it** — because the affinity was not added
+there. Capitals are placed exactly as before, and then **handed out to match
+the species roster** (`worldgen._order_capitals_by_affinity`), which is a
+reorder of an already-validated list.
+
+That is deliberate and it is what makes the fairness requirement in §19.1 free
+rather than hard:
+
+- Every capital in the list already passed the spacing and the farmland check
+  (`_capital_has_nearby_farmland`), so **no realm can be moved somewhere it
+  cannot live** — the reorder cannot invent a site or drop one.
+- It **cannot fail** on a map with no forest. A species whose homeland is
+  absent simply gets its next-best country. That is the graceful fallback the
+  design asked for, not a hard guarantee.
+- The player (roster slot 0) is served first at their own best homeland, then
+  the rest are matched globally best-first. A single-player game should not
+  open with the player in a swamp because the assignment maths preferred it
+  overall.
+
+The table is `lexicon.SPECIES_BIOME_AFFINITY` — weights, not a flat set, so a
+Dwarf prefers real mountains but will take highland. Humans are deliberately
+broad and shallow (their trait is literally "adaptable realm-builders"), which
+also makes them the species most willing to be displaced when someone else's
+homeland is scarce.
+
+**One structural consequence worth knowing:** the species roster is now rolled
+in step 5b of `generate_world`, before regions are generated, because the
+capitals have to be handed out to match it and biomes only exist from step 5.
+It is no longer rolled inside the faction loop. That shifts RNG consumption, so
+**the same seed builds a different world than before this change** — expected,
+but it is what broke the two tests below.
+
+### 20.2 Measured
+
+| | random pairing | matched |
+|---|---|---|
+| seed 7 mean affinity | 0.192 | **0.526** |
+| seed 42 mean affinity | 0.260 | **0.556** |
+
+Every species' single best available homeland goes to that species
+(asserted in `dev/test_homeland.py`). 40 turns on a generated world: no realm
+eliminated, none halved.
+
+### 20.3 Two suite failures, neither a regression in the feature
+
+Both were tests pinned to incidental properties of one seed's map, which moved
+because the roster roll shifted RNG. Worth reading as a pattern — anything that
+generates a world and then assumes something specific about the result is
+fragile in exactly this way.
+
+- **`test_weather_economy`** demanded a village from faction 0 specifically.
+  Weather is not a per-faction mechanic; it now takes a village from any owned
+  region.
+- **`test_sea_bridge`** picked the *first* unclaimed region on another
+  landmass. On the new map that one is inland (no dock) and far away (outside
+  `_SEA_LANE_BBOX_PAD`), so no sea route existed to find and the scenario the
+  test exists for quietly stopped happening — it passed by skipping. It now
+  picks the **nearest** landmass with a dockable cell, which is what the
+  original bug report was actually about, and the full sea-lane assertions run
+  again.
+
+### 20.4 A real pre-existing bug found on the way
+
+**A starting foothold can end up with zero villages**, including the player's.
+`STARTING_VILLAGE_COUNT` is meant to floor the home region at 3, but
+`_place_villages_for_region` pops a candidate and `continue`s when
+`_too_close_any` rejects it for spacing — the floor stops the viability
+`break`, it does not stop the candidate list being exhausted by spacing
+conflicts. A faction with no villages produces nothing at all under the
+per-village economy.
+
+Measured across 8 seeds x 4 factions: **3 of 32 before this change, 1 of 32
+after** (the reorder tends to land species on better-shaped land), so phase B
+improves it — but it does not fix it and it is not the fix. Worth doing
+properly: either retry with relaxed spacing once the floor is unmet, or place
+the floor villages first and let spacing apply only above it.
+
+### 20.5 Numbers to judge in play
+
+| constant | file | now | if it feels wrong |
+|---|---|---|---|
+| `SPECIES_BIOME_AFFINITY` | lexicon.py | per-species weights | a species keeps opening somewhere that feels wrong for it |
+| `_HOMELAND_RADIUS` | worldgen.py | 8 (= the farmland check's own) | homelands judged on too much or too little surrounding land |
+
+A caveat to state plainly if it comes up: **changing species on the New Game
+screen does not move your capital.** Identity patching is deliberately not
+world-shaping (§8) — it runs in ~0.1ms so browsing species stays instant — and
+the homeland was chosen for whichever species the world was generated with.
+Rerolling gives a homeland matched to the current pick. Fixing that properly
+means regenerating on species change, which is the exact thing §8 exists to
+avoid.
