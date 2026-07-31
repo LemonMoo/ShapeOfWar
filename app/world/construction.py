@@ -126,7 +126,29 @@ STORAGE_BUILD_COSTS = {
     # times over 30 turns, affordable zero). Stone is safe here because
     # BASELINE_INDUSTRY_FLOOR guarantees every region some. Later tiers do want
     # Tools -- by then you have them, because tier 1 works.
+    # Every outstation costs the same as every other (phase D). That is the
+    # fairness guarantee doing its job: the family is one building with a
+    # biome argument, so giving any member its own price would quietly make
+    # one homeland cheaper to work than another. See resources.OUTSTATIONS.
     "mining_camp": [
+        None,
+        {"Logs": 200, "Stone": 120, "Gold": 160},
+        {"Planks": 300, "Stone": 320, "Tools": 120, "Gold": 600},
+        {"Planks": 620, "Bricks": 400, "Tools": 340, "Gold": 1500},
+    ],
+    "woodcutters_camp": [
+        None,
+        {"Logs": 200, "Stone": 120, "Gold": 160},
+        {"Planks": 300, "Stone": 320, "Tools": 120, "Gold": 600},
+        {"Planks": 620, "Bricks": 400, "Tools": 340, "Gold": 1500},
+    ],
+    "grange": [
+        None,
+        {"Logs": 200, "Stone": 120, "Gold": 160},
+        {"Planks": 300, "Stone": 320, "Tools": 120, "Gold": 600},
+        {"Planks": 620, "Bricks": 400, "Tools": 340, "Gold": 1500},
+    ],
+    "workings": [
         None,
         {"Logs": 200, "Stone": 120, "Gold": 160},
         {"Planks": 300, "Stone": 320, "Tools": 120, "Gold": 600},
@@ -158,6 +180,9 @@ STORAGE_BUILD_TURNS = {"granary": [0, 15, 22, 30],
                        "stable": [0, 12], "slaughterhouse": [0, 10],
                        "gold_mine": [0, 18, 28], "mint": [0, 16, 26, 36],
                        "mining_camp": [0, 16, 26, 36],
+                       "woodcutters_camp": [0, 16, 26, 36],
+                       "grange": [0, 16, 26, 36],
+                       "workings": [0, 16, 26, 36],
                        "cartographer": [0, 20, 30, 42]}
 
 # A village builds smaller and cheaper than a settlement -- but it can build,

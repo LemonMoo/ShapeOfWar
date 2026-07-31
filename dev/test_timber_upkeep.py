@@ -142,6 +142,26 @@ try:
 finally:
     st.resources = before_res
 
+print("\n--- CRITICAL: the need is whole, so stocks stay whole ---")
+# _consume_from_pool subtracts exactly what it is given. Building maintenance
+# is a fractional per-tier figure, so an unrounded Timber need leaked straight
+# into storage -- a stockpile became 109913.4 and the resource bar started
+# rendering "44.20000000000000045". Every other need here is rounded; this
+# one has to be too.
+needs = R.settlement_needs(st, w.season)
+assert float(needs["Timber"]).is_integer(), (
+    f"Timber need {needs['Timber']} is fractional and will make stocks float")
+fractional = [(n.name, r, a) for n in list(w.settlements) + list(w.villages)
+              for r, a in (n.resources or {}).items()
+              if isinstance(a, float) and not float(a).is_integer()]
+assert not fractional, fractional[:3]
+R.advance_turn(w)
+fractional = [(n.name, r, a) for n in list(w.settlements) + list(w.villages)
+              for r, a in (n.resources or {}).items()
+              if isinstance(a, float) and not float(a).is_integer()]
+assert not fractional, f"a turn produced fractional stock: {fractional[:3]}"
+print("  ok    Timber need is whole; a full turn leaves every stock whole")
+
 print("\n--- a real turn still runs, and nothing goes negative ---")
 for _ in range(3):
     R.advance_turn(w)

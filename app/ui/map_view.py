@@ -387,12 +387,20 @@ _DIRT_ROAD_MIN_SCALE = 20.0
 
 
 def _fmt_amount(n):
-    """Compact number formatting for resource amounts (12345 -> '12.3k')."""
+    """Compact number formatting for resource amounts (12345 -> '12.3k').
+
+    Small numbers go through round() rather than str() so a float that has
+    picked up binary-representation dust somewhere upstream reads as "44"
+    rather than "44.20000000000000045". Stocks are meant to be whole units
+    and the economy keeps them that way (see resources.settlement_needs on
+    why a need must be rounded before it is subtracted), but a display has
+    no business rendering seventeen decimals whatever arrives -- this is the
+    backstop, not the fix."""
     if n >= 10000:
         return f"{n / 1000:.0f}k"
     if n >= 1000:
         return f"{n / 1000:.1f}k"
-    return str(n)
+    return str(int(n)) if float(n).is_integer() else f"{n:.1f}"
 
 
 def _format_resources(res):

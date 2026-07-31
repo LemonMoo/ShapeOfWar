@@ -1768,7 +1768,18 @@ def _village_terrain_potential(world, village, season):
     used to return outright."""
     region = world.regions[village.region_id]
     biome_counts, climate, fertility_frac = village_local_sample(world, village, region)
-    raw = _crop_yield_core(biome_counts, climate, fertility_frac, season)
+    # Outstations (phase D): cells of a given kind that lie in this village's
+    # REGION but outside its own catchment, which it walks out to work. Same
+    # mechanic for every biome family -- see OUTSTATIONS. Added to the LAND's
+    # offer BEFORE the Phase 14 labour limit, so a camp competes with the
+    # harvest for hands rather than being free output.
+    reach = village_outstation_cells(world, village)
+    crop_counts = biome_counts
+    if reach[OUTSTATION_CROP]:
+        crop_counts = dict(biome_counts)
+        for b, cells in reach[OUTSTATION_CROP].items():
+            crop_counts[b] = crop_counts.get(b, 0) + cells
+    raw = _crop_yield_core(crop_counts, climate, fertility_frac, season)
     # Weather (see _advance_region_crop_weather) applies to the LAND's offer,
     # not to the workforce: a drought means there is less out there to bring
     # in, however many hands are sent.
@@ -1778,19 +1789,21 @@ def _village_terrain_potential(world, village, season):
             m = weather_mult.get(crop)
             if m is not None:
                 raw[crop] = round(amount * m)
-    # A Mining Camp adds mountain the village does not itself sit on (see
-    # mining_camp_cells) -- to the INDUSTRY sample only, and deliberately after
-    # the crops above: sending miners to a seam two valleys over does not
-    # change what grows in the fields at home.
+    # The extractive outstations (Mining Camp, Workings, Woodcutters' Camp)
+    # feed the INDUSTRY sample; the Grange fed the crop sample above. Which
+    # sample a family uses is fixed in OUTSTATIONS, so ore can never arrive
+    # in the harvest or grain out of a quarry.
     #
-    # Borrowing the village's own climate for those cells is exact rather than
-    # approximate: every Mining resource has a climate_affinity of 1.0 in all
-    # four climates, so climate cannot affect what the extra cells yield.
+    # Borrowing the village's own climate for remote cells is exact rather
+    # than approximate for Mining (every Mining resource has a
+    # climate_affinity of 1.0 in all four climates); for Forestry it is a
+    # close approximation, since a camp's woodland is in the same region and
+    # regions are climatically coherent.
     industry_counts = biome_counts
-    extra_mountain = mining_camp_cells(world, village)
-    if extra_mountain:
+    if reach[OUTSTATION_INDUSTRY]:
         industry_counts = dict(biome_counts)
-        industry_counts["mountain"] = industry_counts.get("mountain", 0) + extra_mountain
+        for b, cells in reach[OUTSTATION_INDUSTRY].items():
+            industry_counts[b] = industry_counts.get(b, 0) + cells
     industry = _industry_yield_core(industry_counts, climate, fertility_frac)
     # The Gold Mine works the seam harder (see GOLD_MINE_YIELD_MULT). Applied
     # to the LAND's offer, before labor, deliberately: a bigger mine is more
@@ -2961,8 +2974,14 @@ def settlement_needs(settlement, season):
         needs["Firewood"] = _population_scaled_need(settlement.population, FIREWOOD_PER_CAPITA_WINTER)
     needs["Clothes"] = _population_scaled_need(settlement.population, CLOTHES_PER_CAPITA)
     needs["Luxury"] = _population_scaled_need(settlement.population, LUXURY_PER_CAPITA)
-    needs["Timber"] = (_population_scaled_need(settlement.population, TIMBER_UPKEEP_PER_CAPITA)
-                       + _building_maintenance_need(settlement))
+    # Rounded, like every other need here. Building maintenance is a
+    # fractional per-tier figure, and an unrounded total leaks straight into
+    # storage: _consume_from_pool subtracts what it is given, so a need of
+    # 84.4 turns an integer stockpile into 109913.4 and the resource bar
+    # starts showing "44.20000000000000045". Stocks are whole units.
+    needs["Timber"] = round(
+        _population_scaled_need(settlement.population, TIMBER_UPKEEP_PER_CAPITA)
+        + _building_maintenance_need(settlement))
     return needs
 
 
@@ -3545,11 +3564,13 @@ def storage_max_tier(node, building):
         # Herd buildings are village-only: animals live where the fields are,
         # and a walled city is not a pasture.
         return VILLAGE_HERD_MAX_TIER if village else 0
-    if building == MINING_CAMP:
-        # Village-only: a camp is people walking out to a seam and carting ore
-        # home, which is a village's work. The region-has-mountain gate needs
-        # the world and lives in buildings.py, same split as the Gold Mine.
-        return (len(MINING_CAMP_CELLS) - 1) if village else 0
+    if building in OUTSTATIONS:
+        # Village-only, every member of the family: an outstation is people
+        # walking out to ground nobody lives on and carrying the work home,
+        # which is a village's work. The does-the-region-hold-that-land gate
+        # needs the world and lives in buildings.py, same split as the Gold
+        # Mine's seam check.
+        return (len(OUTSTATION_CELLS) - 1) if village else 0
     if building == GOLD_MINE:
         # Village-only, and the seam gate lives in buildings.py rather than
         # here: this function takes no world, and "is there ore under this
@@ -4212,38 +4233,150 @@ MINING_CAMP = "mining_camp"
 MINING_CAMP_CELLS = [0, 25, 55, 90]
 
 
+# --- The outstation family (biome overhaul, phase D) -------------------------
+# One terrain building per biome family. The fairness problem phase D poses is
+# that twelve bespoke buildings cannot be verified equal in value, and getting
+# it wrong makes some homelands quietly better -- which would undo the
+# "asymmetric in KIND, not quality" principle the whole overhaul rests on.
+#
+# So they are not twelve effects. They are ONE effect with a biome argument.
+# The Mining Camp already had the right shape and did not look like a general
+# mechanic: it is not "+X% ore", it is REACH -- a village works cells of a
+# given kind that lie in its REGION but outside its own catchment. Every
+# biome family gets exactly that, from the same code path, with the same cell
+# table, the same tiers, the same share-splitting and the same
+# before-the-labour-limit application.
+#
+# That is what makes it fair BY CONSTRUCTION rather than by balancing: there
+# is no cross-biome value comparison to get wrong, because it is the same
+# building everywhere. What it is worth varies with how much of your own kind
+# of country your region actually holds, which is a real, visible quantity and
+# the same rule for everyone. dev/test_outstation.py asserts the shared
+# constants directly.
+#
+# Every biome belongs to exactly one family. Mining Camp keeps mountain alone
+# and is untouched -- it is shipped, measured and tested, and widening it
+# would silently move numbers that were tuned against mountain specifically.
+OUTSTATION_CROP, OUTSTATION_INDUSTRY = "crop", "industry"
+
+WOODCUTTERS_CAMP = "woodcutters_camp"
+GRANGE = "grange"
+WORKINGS = "workings"
+
+# building -> (biomes worked, which sample the cells feed, what to call them)
+OUTSTATIONS = {
+    MINING_CAMP:      (("mountain",), OUTSTATION_INDUSTRY, "mountain"),
+    WOODCUTTERS_CAMP: (("forest", "taiga", "jungle"), OUTSTATION_INDUSTRY, "woodland"),
+    GRANGE:           (("plains", "steppe", "savannah"), OUTSTATION_CROP, "farmland"),
+    # The leftovers, and they have more in common than they look: highland,
+    # desert, coastal, tundra and swamp are all places you go to TAKE
+    # something out of the ground -- stone, sand, salt, clay, peat -- rather
+    # than to farm or to fell. "Workings" is what such a site was called.
+    WORKINGS:         (("highland", "desert", "coastal", "tundra", "swamp"),
+                       OUTSTATION_INDUSTRY, "workable"),
+}
+
+# Shared by every member of the family. Same reach, same price of reaching --
+# this single table is the fairness guarantee, so resist giving any one
+# building its own.
+OUTSTATION_CELLS = MINING_CAMP_CELLS
+
+
+def outstation_biomes(building):
+    """The biomes this outstation can work, () if it is not one."""
+    entry = OUTSTATIONS.get(building)
+    return entry[0] if entry else ()
+
+
+def outstation_for_biome(biome):
+    """Which outstation works `biome`, or None. Every biome belongs to
+    exactly one family -- asserted in dev/test_outstation.py, since an
+    overlap would let one region be worked twice over."""
+    for building, (biomes, _sample, _label) in OUTSTATIONS.items():
+        if biome in biomes:
+            return building
+    return None
+
+
+def region_outstation_cells(world, region, building):
+    """Cells of this outstation's kind in the region -- the finite ground its
+    camps share."""
+    counts = getattr(region, "biome_counts", None) or {}
+    return sum(counts.get(b, 0) for b in outstation_biomes(building))
+
+
 def region_mountain_cells(world, region):
     """Mountain cells in this region -- the finite seam its camps share."""
     return (getattr(region, "biome_counts", None) or {}).get("mountain", 0)
 
 
+def has_region_outstation_land(world, village, building):
+    """Can this outstation be built at this village at all? Gated on the
+    REGION rather than the village's own catchment (which is what gates the
+    Gold Mine): gating on catchment is what left the mining tier unreachable,
+    since almost no village is sited on a mountain in the first place, and
+    the same trap applies to every other kind of country."""
+    return region_outstation_cells(
+        world, world.regions[village.region_id], building) > 0
+
+
 def has_region_mountain(world, village):
-    """Can a Mining Camp be built at this village at all? Gated on the REGION
-    rather than the village's own catchment (which is what gates the Gold
-    Mine): gating on catchment is what left the whole tier unreachable, since
-    almost no village is sited on a mountain in the first place."""
-    return region_mountain_cells(world, world.regions[village.region_id]) > 0
+    """Kept as the Mining Camp's own name for the check above -- callers
+    predating the family still read the way they always did."""
+    return has_region_outstation_land(world, village, MINING_CAMP)
 
 
-def mining_camp_cells(world, village):
-    """How many mountain cells this village's camp actually works.
+def outstation_cells(world, village, building):
+    """How many cells this village's outstation actually works.
 
-    Capped by the region's real mountain, divided between however many camps
-    the region has. A seam does not get bigger because two villages both dug
-    into it, and without this a region could be mined an unlimited number of
-    times over by stacking camps."""
-    tier = min(storage_tier(village, MINING_CAMP), len(MINING_CAMP_CELLS) - 1)
+    Capped by the region's real land of that kind, divided between however
+    many camps of that family the region has. Ground does not get bigger
+    because two villages both walked out onto it, and without this a region
+    could be worked an unlimited number of times over by stacking camps."""
+    tier = min(storage_tier(village, building), len(OUTSTATION_CELLS) - 1)
     if tier <= 0:
         return 0
     region = world.regions[village.region_id]
-    total = region_mountain_cells(world, region)
+    total = region_outstation_cells(world, region, building)
     if total <= 0:
         return 0
     camps = sum(1 for vid in getattr(region, "villages", [])
                 if 0 <= vid < len(world.villages)
-                and storage_tier(world.villages[vid], MINING_CAMP) > 0)
+                and storage_tier(world.villages[vid], building) > 0)
     share = total / max(1, camps)
-    return int(min(MINING_CAMP_CELLS[tier], share))
+    return int(min(OUTSTATION_CELLS[tier], share))
+
+
+def mining_camp_cells(world, village):
+    """The Mining Camp's own name for outstation_cells -- behaviour is
+    unchanged from before the family existed."""
+    return outstation_cells(world, village, MINING_CAMP)
+
+
+def village_outstation_cells(world, village):
+    """{sample: {biome: cells}} every outstation at this village contributes,
+    split by which sample the cells feed. One call so _village_terrain_potential
+    does not have to know the family's shape.
+
+    Cells are spread across the family's biomes in proportion to what the
+    region actually holds -- a Woodcutters' Camp in a region that is mostly
+    taiga brings home mostly taiga, which is what decides the resources."""
+    out = {OUTSTATION_CROP: {}, OUTSTATION_INDUSTRY: {}}
+    region = world.regions[village.region_id]
+    counts = getattr(region, "biome_counts", None) or {}
+    for building, (biomes, sample, _label) in OUTSTATIONS.items():
+        cells = outstation_cells(world, village, building)
+        if cells <= 0:
+            continue
+        total = sum(counts.get(b, 0) for b in biomes)
+        if total <= 0:
+            continue
+        for b in biomes:
+            have = counts.get(b, 0)
+            if have:
+                share = cells * (have / total)
+                out[sample][b] = out[sample].get(b, 0) + share
+    return out
 
 
 def gold_mine_multiplier(node):
