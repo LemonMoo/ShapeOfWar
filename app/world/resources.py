@@ -4675,8 +4675,19 @@ def rotate_for_turn(items, turn):
     Mint on the map stood idle while the ore rotted where it was dug.
 
     Deliberately a rotation rather than a shuffle or a demand-weighted sort:
-    it is a pure function of the turn number, so a replayed turn moves exactly
-    the same goods and nothing about determinism changes."""
+    it is a pure function of its inputs, so a replayed turn moves exactly the
+    same goods and nothing about determinism changes.
+
+    **Pass a per-node offset, not just the turn.** Rotating on the turn alone
+    puts every node in the world on the SAME order on the same turn, which
+    only half-fixes the starvation it was written for: a good still gets a
+    chance on just the one turn its rotation brings it forward, and only from
+    nodes that happen to be under their shipment cap right then. Measured
+    after the turn-only version shipped: Clay and Cotton still moved ZERO
+    units over 40 turns, from villages that passed every gate individually
+    (38 spare against a minimum of 15, no shipments in flight, a good road to
+    a city with room). Offsetting by the node's own id decorrelates them, so
+    on any given turn some node somewhere is looking at each good."""
     items = list(items)
     if not items:
         return items
@@ -4684,11 +4695,13 @@ def rotate_for_turn(items, turn):
     return items[offset:] + items[:offset]
 
 
-def local_shipment_priority(turn):
+def local_shipment_priority(turn, node_id=0):
     """The order a node checks its surplus in this turn. Survival goods keep
     the front unconditionally -- covering someone's starvation always beats
-    moving ore -- and the industrial tail rotates (see rotate_for_turn)."""
-    return _LOCAL_SHIPMENT_SURVIVAL + rotate_for_turn(_LOCAL_SHIPMENT_INDUSTRIAL, turn)
+    moving ore -- and the industrial tail rotates (see rotate_for_turn), by
+    turn AND by node so nodes don't all scan in lockstep."""
+    return _LOCAL_SHIPMENT_SURVIVAL + rotate_for_turn(_LOCAL_SHIPMENT_INDUSTRIAL,
+                                                      turn + node_id)
 
 
 def _region_logistics_nodes(world, region):
@@ -4903,7 +4916,7 @@ def run_local_logistics(world):
     no player or AI decision involved, matching how the rest of this
     economy already works."""
     world._local_path_budget = LOCAL_PATH_BUDGET_PER_TURN
-    priority = local_shipment_priority(getattr(world, "turn", 0))
+    turn = getattr(world, "turn", 0)
     for region in world.regions:
         if region.faction_idx < 0:
             continue
@@ -4930,7 +4943,9 @@ def run_local_logistics(world):
                 continue
             own_needs = needs_by_node[(kind, node.id)]
             dispatched = False
-            for resource in priority:
+            # Per node, not once per turn: see rotate_for_turn on why a shared
+            # order leaves low-volume goods still starved.
+            for resource in local_shipment_priority(turn, node.id):
                 surplus = _node_surplus(node, resource, own_needs)
                 if surplus < LOCAL_SHIPMENT_MIN_QUANTITY:
                     continue

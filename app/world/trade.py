@@ -1521,27 +1521,44 @@ def _regional_node_kind(node):
     return "settlement" if hasattr(node, "kind") else "village"
 
 
-REGIONAL_PATH_BUDGET_PER_TURN = 1   # cap on brand-new (uncached) Dijkstra path
-                                     # lookups per turn, shared by
-                                     # run_regional_trade/run_sell_to_city --
-                                     # widening Regional Markets to include
-                                     # every Village (not just Settlements,
-                                     # see _faction_regional_nodes) means a
-                                     # much bigger pool of possible node
-                                     # pairs. Not just a one-time startup
-                                     # cost either: new Villages keep
-                                     # appearing all game (city growth),
-                                     # each one creating a fresh batch of
-                                     # never-yet-pathed pairs -- measured,
-                                     # real hitching without this cap, even
-                                     # well into the midgame. Kept
-                                     # deliberately tight (real per-turn
-                                     # cost measured down to ~1ms/turn
-                                     # amortized at 1) rather than a bigger
-                                     # number that only helps once at
-                                     # startup; already-cached pairs are
-                                     # completely unaffected and stay
-                                     # instant forever once resolved.
+# Cap on brand-new (uncached) Dijkstra path lookups per turn, shared by
+# run_regional_trade/run_sell_to_city. The cap itself is right -- widening
+# Regional Markets to every Village means a large pool of possible pairs, new
+# Villages keep appearing all game, and there was real measured hitching
+# without it.
+#
+# The VALUE was not. At 1/turn this quietly strangled the entire domestic
+# economy, and it took walking the chain from a raw good to a workshop to see
+# it. Measured on a fresh 10-faction world at turn 120: 340 villages, 32
+# settlements, and only 120 village->city pairs had EVER been solved. Of the
+# 313 pairs never looked up, every single one turned out to have a perfectly
+# good route the moment the budget was refilled -- the goods were not stranded
+# by geography or by any threshold, the game had simply never computed the
+# path. Iron, Coal, Copper, Clay, Cotton and Gold Ore all arrived at
+# settlements at a measured 0.00 per turn while sitting in ample surplus a few
+# regions away, so Tools, Weapons, Shields, Bricks and Cloth sat at exactly
+# zero world-wide and 16 of ~22 settlement recipes were blocked on a zero
+# input.
+#
+# The original reasoning ("a bigger number only helps once at startup") had it
+# backwards: because a solved pair is cached FOREVER, the cost of a bigger
+# budget really is transient while the benefit is permanent.
+#
+# 4 is where measurement put it, not intuition. Benchmarked on the turn-561
+# world (dev/bench_turn.py, 651 nodes, the worst case for this because its
+# uncached backlog is enormous and its paths are long):
+#
+#     budget 1  378 ms/turn      budget 4  446 ms/turn
+#     budget 3  424 ms/turn      budget 8  573 ms/turn
+#
+# 8 was tried first and costs +52% on a developed world -- far more than the
+# ~21ms a fresh-world timing suggested, because searches there are much dearer
+# than the 2.6ms measured on a small map. 4 buys four times the discovery rate
+# for +18%, lands on the same ~424-446ms end turn this project has benchmarked
+# at before, and still clears a ~340-pair backlog in ~85 turns rather than
+# never. The cost is transient in any case: it falls away as the cache fills,
+# and end turn already runs on a background thread.
+REGIONAL_PATH_BUDGET_PER_TURN = 4
 
 
 def _regional_route(world, a_node, b_node):
@@ -1895,8 +1912,31 @@ CITY_STOCKPILE_CEILING_FRACTION = 0.8
 
 _NONPERISHABLE_RESOURCES = {name for name in _SETTLEMENT_STORAGE_RESOURCES
                             if RESOURCES.get(name, {}).get("spoil_rate", 0) <= 0}
-# Stable base order, rotated per turn at the call site so nothing is starved.
-_SELL_TO_CITY_ORDER = sorted(_NONPERISHABLE_RESOURCES)
+
+# What this tier will actually cart to a city. The rule the original
+# "spoil_rate <= 0" filter was reaching for was "don't bother hauling things
+# that rot on their own timeline -- the need-based tiers cover those". Testing
+# it as EXACTLY zero was too strict by a hair, and the hair mattered: Cotton
+# (0.02), Wool (0.01), Paper (0.02) and Resin (0.02) are industrial inputs
+# about as durable as a dried grain, and they were excluded alongside Milk at
+# 0.40.
+#
+# Nothing else could move them either. They are not consumption goods, so no
+# need-based tier wants them; run_local_logistics does want them as production
+# inputs but is region-locked, and the villages that grow cotton mostly have no
+# settlement in their own region. So they fell through every tier at once, and
+# the measurable consequence was Cloth and Paper sitting at exactly ZERO
+# world-wide -- with them, Clothes, Fine Clothes and Books too.
+#
+# Foods are excluded explicitly rather than by rate, because that is the real
+# distinction: a Bean does not need this tier (regional trade already moves
+# 18,000 units of grain on need), while a bale of cotton has nothing else.
+SELL_TO_CITY_MAX_SPOIL = 0.02
+_SELL_TO_CITY_EXCLUDE = set(_FOOD_SOURCES) | {"Fodder"}
+_SELL_TO_CITY_ORDER = sorted(
+    name for name in _SETTLEMENT_STORAGE_RESOURCES
+    if RESOURCES.get(name, {}).get("spoil_rate", 0) <= SELL_TO_CITY_MAX_SPOIL
+    and name not in _SELL_TO_CITY_EXCLUDE)
 
 
 def _faction_cities(nation, world):
@@ -1942,6 +1982,13 @@ def run_sell_to_city(world):
         nodes = _faction_regional_nodes(world, fac_idx, nation)
         needs_by_node = {(kind, node.id): settlement_needs(node, season)
                          for kind, node in nodes}
+        # How much of each good the whole realm is holding, for the scarcity
+        # tie-break below. One pass over the faction's own nodes per turn.
+        faction_supply = {}
+        for _k, n in nodes:
+            for r, amt in (getattr(n, "resources", None) or {}).items():
+                if amt > 0:
+                    faction_supply[r] = faction_supply.get(r, 0) + amt
 
         for kind, node in nodes:
             if kind == "settlement" and node.kind == "city":
@@ -1954,12 +2001,47 @@ def run_sell_to_city(world):
             # alphabetical order starved everything after the first few
             # letters: measured over 60 turns it moved 11,102 Coal and zero
             # Gold Ore, purely because "Coal" sorts before "Gold Ore".
-            for resource in resources.rotate_for_turn(_SELL_TO_CITY_ORDER, world.turn):
+            # Which surplus to send is decided by what the CITY is short of,
+            # not by whose turn it is in a rotation. Rotation alone cannot
+            # work here and the reason is worth keeping: a bulk good is
+            # ALWAYS shippable, so with a dozen of them (Hardwood, Logs,
+            # Softwood, Stone, Firewood, Glass...) scattered through the order,
+            # one is always ahead of a scarce good. Traced directly on a
+            # developed save: a village with 128 spare Clay dispatched every
+            # single turn for 120 turns and never once sent Clay -- its
+            # rotation index crept down one per turn from 23 while Hardwood,
+            # then Logs, then Softwood kept cycling into the low slots, and its
+            # stock drained faster than the ~33 turns it needed to reach the
+            # front. Clay was the only good in the game to ship ZERO times.
+            #
+            # Sending what the destination has least of is both the obvious
+            # reading of the tier's purpose (relieve the seller, supply the
+            # city) and self-correcting: a workshop starved of an input pulls
+            # that input in first, and stops pulling once it has some.
+            #
+            # City stock alone is not enough of a key, though, and the reason
+            # only showed up in a trace: a working city CONSUMES what arrives,
+            # so it holds zero of nearly everything and almost every candidate
+            # ties at 0 -- collapsing the sort straight back to the rotation
+            # that could not solve this in the first place. The scarcity of the
+            # good across the whole realm breaks that tie, and encodes the
+            # right instinct directly: a cart is a scarce slot, so spend it on
+            # the scarce cargo. Timber is everywhere and will come anyway; the
+            # region's only clay will not.
+            city = _nearest_city(node, [c for c in cities if c is not node], world)
+            if city is None:
+                continue
+            city_stock = city.resources if hasattr(city, "resources") else {}
+            rotated = resources.rotate_for_turn(_SELL_TO_CITY_ORDER,
+                                                world.turn + node.id)
+            candidates = sorted(
+                range(len(rotated)),
+                key=lambda i: (city_stock.get(rotated[i], 0),
+                               faction_supply.get(rotated[i], 0),
+                               i))
+            for resource in (rotated[i] for i in candidates):
                 surplus = _node_surplus(node, resource, own_needs)
                 if surplus < SELL_TO_CITY_MIN_QUANTITY:
-                    continue
-                city = _nearest_city(node, [c for c in cities if c is not node], world)
-                if city is None:
                     continue
                 cap = settlement_storage_capacity(city)
                 stock = node_space_used(city)   # space, not item count (Phase 2)
