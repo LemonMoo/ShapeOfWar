@@ -3,16 +3,22 @@
 Python/Tkinter desktop 4X strategy game. Single developer, turn-based, procedurally
 generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 
-**Last release: v0.9.0, "Weather You Can See"** — the weather map overlay
-(§29) and the lake basin rework (§30). Check
+**Last release: v0.10.0, "Armies That Fight Like Armies"** — the battle
+movement rework (§32) and the fix for packaged audio (§33). Check
 `gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting this
 line — this repo ships fast, sometimes several releases in one day.
 
-**Nothing is sitting unreleased.** Working tree is clean; the **39-script
-suite passes**. One caveat found while running it: `dev/test_mining_camp.py`
-fails on `dev560.pkl` specifically (`workers > 0` assertion) and passes on
-`dev160.pkl` and with no world — a world-specific quirk of that late-game
-save, not a regression.
+**Nothing is sitting unreleased.** Working tree is clean; the **42-script
+suite passes** (39 plus `test_formation`, `test_cavalry_cycle`,
+`test_firing_line`, `test_special_roles` — and note `test_special_roles` is
+one of the slower ones, it runs real battles). One caveat found while running
+it: `dev/test_mining_camp.py` fails on `dev560.pkl` specifically (`workers >
+0` assertion) and passes on `dev160.pkl` and with no world — a world-specific
+quirk of that late-game save, not a regression.
+
+**The thing most worth knowing from this session:** the roster spread went
+**75 points to 38** without a single stat being touched. §32 is why, and what
+it means for the balance work that was queued.
 
 **Two long threads finished since the last handoff.** The **biome overhaul**
 is complete — all six phases, §§19-24. The **weather system** is complete —
@@ -2759,3 +2765,124 @@ during the approach. Read §26 before touching a number.
 expecting to find work. They are closed records. Their tuning constants are
 listed in §19.6 and in the module comments, and every one of them is a
 "judge it in play" number rather than an unfinished job.
+
+---
+
+## 32. Battle movement AI — the swarm problem (v0.10.0)
+
+Asked for in five parts: less swarmy armies, path around your own soldiers,
+cavalry that ride THROUGH instead of bouncing off, archers that hold a line,
+and specials that feel like they do their job. They are one problem seen from
+five sides — **every soldier was an independent agent running at its own
+best-scored enemy in a straight line**, and there was nothing between "that is
+my target" and "add speed*dt toward it". `BATTLE_AI_PLAN.md` is the plan as
+written before any code; this is what it turned into.
+
+**Not one stat moved.** Everything here is movement and target choice. That
+was deliberate: §4/§26's tuning is delicate and half-finished, and re-fitting
+it underneath a behaviour change would have made both unreadable.
+
+### What was built
+
+- **`app/battle/movement.py`** (new) — seek + separation from allies + step
+  around an ally dead ahead, with the deflection CAPPED (an army that orbits
+  is a worse failure than one that clumps) and units already in contact
+  skipping it entirely (that is where the crowd is, so it is most of the cost
+  saved). Plus the anti-swarm rule: a man does not join a fight `CONTACT_CAP`
+  of his fellows already have — he stands `SWARM_STANDOFF` behind it and
+  re-targets sooner. Mean nearest-ally distance 5.7px → 7.5px, A/B'd.
+- **Cavalry ride through and wheel** (`Unit._begin_ride_through`/`_begin_wheel`).
+  The old cycle set its rally point straight back along the rider's own
+  facing — literally a bounce. Now the impact heading is FROZEN (facing tracks
+  the current target, and a heading that did the same curves back into the
+  press), the rider clears the press, then wheels to a bearing at least
+  `WHEEL_MIN_TURN` off the last. Consecutive charges now land a mean 115° apart.
+- **`STANCE_FIRING_LINE`** — a real slotted formation for bows, wide and
+  shallow, ranks staggered by half a spacing. Frontage of 24 archers under
+  fire: 128px → 410px at the same depth. `form_shield_wall` and
+  `form_firing_line` now share `_lay_out_line`. Carries **no combat modifier
+  at all**, on purpose.
+- **`app/battle/roles.py`** (new) — six roles keyed off a `role` entry in
+  `UNIT_TYPES`: anchor, banner, flanker, frenzied, bombard, infiltrator. See
+  the module docstring; the measured effect of each is in the commit and in
+  `dev/test_special_roles.py`'s own output.
+
+### Four things testing forced, all of which generalise
+
+1. **A slow unit cannot lead a line it walks 25% slower than.** The
+   Shieldwarden ended up 92px BEHIND the centre it was trying to stand 46px in
+   front of. Capping its catch-up at the ARMY's pace does not fix it either —
+   matching a speed only stops a gap growing, it never closes one. It needs to
+   overtake (`STATION_CATCHUP_MAX`), fenced by three conditions so it can never
+   become a speed bonus.
+2. **A station-keeper with nobody left to keep station with walks backwards
+   forever.** An army down to its last Standard Bearers each held station
+   behind a centre of mass that was itself, and the battle never ended.
+   `STATION_LAST_STAND`, same shape as `COMMANDER_LAST_STAND`.
+3. **Two formed lines can stand 200px apart and neither will move.** The
+   firing line's hysteresis let a line hold outside its own reach; against
+   another doing the same, nothing ever happened. It now walks unless the enemy
+   is actually closing. Caught by `test_battle_terrain`'s swamp fight, which is
+   the second time that test has caught a non-resolving battle.
+4. **"Goes where the fighting is thickest" is a POSITION, not a target
+   score.** Implementing the Berserker as a bonus for targets many allies were
+   already fighting measured *backwards*: eight of them converged on one man,
+   killed him in a second, and were sampled standing among fresh, uncrowded
+   enemies. Aiming at the densest knot instead: 9.7 → 25.3 enemies within 70px.
+
+Two measurement traps also worth remembering: a group's posture must not be
+decided off ONE member's nearest enemy (that number jumps 90px the moment that
+enemy dies — the archer line formed and dissolved three times in 25s), and a
+formation's shape must not be measured off a unit's `facing` (every soldier
+faces whoever it is personally fighting, which made a wide line measure as a
+deep one).
+
+### What it did to the roster, and what that means
+
+Same command, same seeds, either side of the change (`dev/tournament.py 3 on`):
+
+| | Hum | Elv | Dwa | Orc | Gob | spread |
+|---|---|---|---|---|---|---|
+| v0.9.0 | 25% | 79% | 8% | 54% | 83% | **75** |
+| v0.10.0 | 50% | 58% | 21% | 54% | 58% | **38** |
+
+**The spread halved on a behaviour change with no stat attached.** That is the
+largest single move toward an even roster this project has produced, and it
+says something about the balance work queued in §4: those numbers were fitted
+to an army that fought as a swarm, so part of what was being tuned was the
+bug. **Re-baseline before touching a species multiplier.** Dwarves are still
+last (21%) and that job is not finished.
+
+Stalemates went 0/60 → 2/60: formations that hold their ground make longer
+fights. Worth watching rather than acting on — if it climbs, `TIME_LIMIT` in
+the tournament and the real battle clock are the places to look.
+
+Cost: 1.1 ms/tick at 142 units in contact, asserted in `dev/test_formation.py`
+against the 16.7ms budget.
+
+**Every constant is a first pass, gathered at the top of `movement.py` and
+`roles.py` for exactly that reason.** The ones most likely to want moving in
+play: `PERSONAL_SPACE` (how loose a line stands), `CONTACT_CAP` (how many men
+can gang up), `WHEEL_MIN_TURN` and `WHEEL_STAGING_DIST` (how wide cavalry
+swing), `FIRE_SPACING`/`FIRE_MAX_RANK` (how wide a bow line is), and
+`ANCHOR_LEAD`/`BANNER_BACK`.
+
+---
+
+## 33. The sound was never in the exe (v0.10.0)
+
+Reported as "none of the sounds are working". **`build.bat` had no
+`--add-data` at all**, so v0.8.0 — the release called "The Sound of It" — and
+v0.9.0 both shipped completely silent.
+
+Nothing in the code was wrong. `audio._asset_root` correctly resolves under
+`sys._MEIPASS` in a `--onefile` build; there was simply nothing there. The
+player then did exactly what it is written to do about a missing file: note it
+once, and never mention it again. **Every audio test passed the whole time**,
+because from source that same path resolves to the real folder.
+
+The general lesson, which is not about audio: **a test that runs from source
+cannot see a packaging bug, and packaging is a place where a silent failure is
+the default.** `dev/test_audio.py` now asserts `build.bat` bundles `assets/`,
+which is the only place this could ever have been caught. Anything else that
+ever lives under `assets/` is covered by the same line.
