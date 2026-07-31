@@ -218,4 +218,98 @@ assert R.cartographer_radius(c4) > 0, "three turns of surveying did nothing"
 print(f"  ok    3 turns with a guild; surveyed radius "
       f"{R.cartographer_radius(c4):.2f}")
 
+print("\n=== mechanic B: commissioned surveys ===")
+
+print("\n--- a survey has to be paid for, and needs a Guild to commission it ---")
+w5 = fresh()
+refog(w5)
+w5.survey_expeditions = []
+st5 = next(s for s in w5.settlements if s.faction_idx == w5.player_faction_idx)
+assert "Guild" in R.can_commission_survey(w5, st5), R.can_commission_survey(w5, st5)
+R.set_storage_tier(st5, R.CARTOGRAPHER, 3)
+st5.resources = dict(st5.resources or {})
+for name in R.SURVEY_COST:
+    st5.resources[name] = 0
+blocked = R.can_commission_survey(w5, st5)
+assert blocked and "Needs" in blocked, blocked
+print(f"  ok    no Guild -> refused; Guild but no funds -> {blocked!r}")
+
+for name, amount in R.SURVEY_COST.items():
+    st5.resources[name] = amount * 4
+assert R.can_commission_survey(w5, st5) is None
+paid_before = {n: st5.resources[n] for n in R.SURVEY_COST}
+msg = R.start_survey(w5, st5)
+assert w5.survey_expeditions, msg
+for name, amount in R.SURVEY_COST.items():
+    assert paid_before[name] - st5.resources[name] == amount, name
+print(f"  ok    commissioned, and it actually cost "
+      f"{', '.join(f'{a} {n}' for n, a in R.SURVEY_COST.items())}")
+
+print("\n--- one party per settlement at a time ---")
+again = R.can_commission_survey(w5, st5)
+assert again and "already in the field" in again, again
+print(f"  ok    {again!r}")
+
+print("\n--- it heads OUT, not to the nearest scrap of fog next door ---")
+exp = w5.survey_expeditions[0]
+_speed, reach = R.survey_speed_and_range(w5, st5)
+assert len(exp.path) > 10, (
+    f"a commissioned expedition walked only {len(exp.path)} cells -- targeting "
+    f"the NEAREST fog rather than the furthest reachable is the bug here")
+print(f"  ok    {len(exp.path)}-cell route out of a {reach}-cell range")
+
+print("\n--- it charts only what it has actually walked ---")
+assert exp.charted == exp.path[:1], exp.charted
+before = revealed(w5)
+for _ in range(400):
+    R.advance_surveys(w5)
+    vision.recompute(w5)
+    if all(e.finished for e in w5.survey_expeditions):
+        break
+assert exp.finished, "the party never finished or died"
+if not exp.lost:
+    assert exp.charted == exp.path, "a completed survey must have charted it all"
+gained = revealed(w5) - before
+assert gained > 0, "a completed survey revealed nothing"
+print(f"  ok    walked it and revealed {gained:,} cells "
+      f"({'lost on the way' if exp.lost else 'came home'})")
+
+print("\n--- a finished party is swept up only after vision has read it ---")
+# The bug this guards: advance_surveys runs BEFORE vision.recompute, so
+# dropping a finished expedition the same turn silently loses the last
+# stretch it charted.
+assert exp in w5.survey_expeditions, (
+    "a party that finished this turn must survive until the next sweep")
+R.advance_surveys(w5)
+assert exp not in w5.survey_expeditions, "the next sweep should clear it"
+print("  ok    kept for one turn after finishing, then cleared")
+
+print("\n=== mechanic C: coast before interior ===")
+w6 = fresh()
+from app.world.construction import _is_coastal
+inland = next((s for s in w6.settlements if not _is_coastal(w6, s.pos)), None)
+coastal = next((s for s in w6.settlements if _is_coastal(w6, s.pos)), None)
+if inland and coastal:
+    i_speed, i_reach = R.survey_speed_and_range(w6, inland)
+    coastal.has_shipyard = False
+    c_speed, c_reach = R.survey_speed_and_range(w6, coastal)
+    assert c_speed > i_speed and c_reach > i_reach, (i_speed, c_speed, i_reach, c_reach)
+    coastal.has_shipyard = True
+    y_speed, y_reach = R.survey_speed_and_range(w6, coastal)
+    assert y_speed > c_speed and y_reach > c_reach, (c_speed, y_speed)
+    print(f"  ok    inland {i_speed:g}/turn to {i_reach}; coastal {c_speed:g} to "
+          f"{c_reach}; with a shipyard {y_speed:g} to {y_reach}")
+else:
+    print("  skip  this world has no inland/coastal pair to compare")
+
+print("\n--- a survey is dangerous, but not a coin flip ---")
+# The per-turn chance compounds over a ~30-turn journey; the first value
+# tried worked out to ~49% and had to come down. Guard the total, not the
+# per-turn number.
+p_survive = (1.0 - R.SURVEY_LOSS_CHANCE_PER_TURN) ** 30
+assert 0.7 < p_survive < 0.97, (
+    f"over a typical 30-turn survey the party comes home {p_survive:.0%} of "
+    f"the time -- that is not a risk the player can reason about")
+print(f"  ok    ~{1 - p_survive:.0%} chance of loss over a 30-turn expedition")
+
 print("\nCARTOGRAPHER TEST PASSED")

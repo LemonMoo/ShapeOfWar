@@ -4172,6 +4172,228 @@ def advance_cartographers(world):
         st.survey_radius = min(reach, done + rate)
 
 
+# --- Commissioned surveys (Cartographer mechanic B, plus C's coastal bias) ---
+# The Guild's own local survey above is deliberately tiny -- a neighbourhood,
+# not a discovery. This is the other half: pay real money and real paper, and
+# a surveying party actually walks out into the unknown and maps what it
+# finds. It can also fail to come back, which is the point -- the decision
+# the player is being offered is whether the map is worth the risk and the
+# purse, and a survey that always succeeded would just be a slow button.
+#
+# Historically this is the commissioned expedition rather than the trade
+# route: the Casa de la Contratacion's padron real was compiled from pilots'
+# logs (that is mechanic A, already shipped), but the blanks between them
+# were filled by voyages sent out FOR the map -- Cook, La Perouse, the
+# Lewis and Clark model. Expensive, deliberate, and genuinely dangerous.
+SURVEY_COST = {"Gold": 60, "Paper": 5}
+SURVEY_CELLS_PER_TURN = 1.5      # a party on foot, mapping as it goes
+SURVEY_MAX_RANGE = 60            # cells of route a party will commit to
+SURVEY_REVEAL_RADIUS = 3         # how wide a corridor it charts as it walks
+# Mechanic C -- coast before interior. A coastline is the one route that
+# surveys itself: you can follow it, you can see inland from it, and you can
+# resupply along it. A party setting out from a port does better; one with a
+# real vessel to hand does better still. This is why every real age of
+# discovery mapped the coasts of a continent decades before its interior.
+SURVEY_COASTAL_SPEED_MULT = 1.6
+SURVEY_COASTAL_RANGE_MULT = 1.5
+SURVEY_SHIPYARD_SPEED_MULT = 2.2
+SURVEY_SHIPYARD_RANGE_MULT = 2.0
+# Per turn, while standing on ground nobody owns or somebody hostile does.
+#
+# Small because it COMPOUNDS: a full-range inland survey is ~49 cells at
+# 1.5 cells/turn, so a party is exposed for about 33 turns, and the first
+# value tried here (0.02) worked out to a ~49% chance of never coming back
+# -- measured, 4 losses in 8 runs. A coin flip on a commissioned expedition
+# is not a risk the player can reason about. At 0.006 the same journey runs
+# ~18% -- a real possibility of disaster, usually a map.
+#
+# It also gives mechanic C a second, unplanned edge that happens to be
+# exactly right: a coastal party moves faster, so it spends fewer turns
+# exposed and is meaningfully safer as well as quicker. Following the coast
+# really was the safer way to map a continent.
+SURVEY_LOSS_CHANCE_PER_TURN = 0.006
+
+
+class SurveyExpedition:
+    """A surveying party walking a fixed route out from a settlement,
+    charting a corridor as it goes.
+
+    Same shape as every other multi-turn project in the game (RoadProject,
+    ClaimProject, TradeCaravan): a precomputed `path`, a float `progress`
+    along it, and a per-turn advance hook. Exists for every faction, not
+    just the player -- exactly like Commanders and caravans, which also
+    move for everyone and only ever reveal fog for the player (that split
+    lives in vision.recompute, not here, so nothing in the world model has
+    to know who is looking)."""
+
+    def __init__(self, faction_idx, origin_id, path, speed):
+        self.faction_idx = faction_idx
+        self.origin_id = origin_id      # settlement that paid for it
+        self.path = path
+        self.progress = 0.0             # index into path, fractional
+        self.speed = speed              # cells per turn
+        self.lost = False
+        # Set the turn a party finishes or is lost, and only swept up on the
+        # NEXT advance_surveys -- vision.recompute runs after this hook, so
+        # removing it the same turn would silently lose the last stretch it
+        # charted (the whole point of the final leg of a survey).
+        self.finished = False
+
+    @property
+    def pos(self):
+        return self.path[min(int(self.progress), len(self.path) - 1)]
+
+    @property
+    def complete(self):
+        return self.progress >= len(self.path) - 1
+
+    @property
+    def charted(self):
+        """The stretch actually walked so far -- what vision.py reveals a
+        corridor around. Everything past this is still unknown ground."""
+        return self.path[:min(int(self.progress), len(self.path) - 1) + 1]
+
+
+def survey_speed_and_range(world, settlement):
+    """(cells per turn, max route length) for a party setting out from
+    `settlement` -- mechanic C's coastal bias (see SURVEY_COASTAL_*)."""
+    from app.world.construction import _is_coastal
+    speed = SURVEY_CELLS_PER_TURN
+    reach = SURVEY_MAX_RANGE
+    if _is_coastal(world, settlement.pos):
+        if getattr(settlement, "has_shipyard", False):
+            speed *= SURVEY_SHIPYARD_SPEED_MULT
+            reach *= SURVEY_SHIPYARD_RANGE_MULT
+        else:
+            speed *= SURVEY_COASTAL_SPEED_MULT
+            reach *= SURVEY_COASTAL_RANGE_MULT
+    return speed, int(reach)
+
+
+def can_commission_survey(world, settlement):
+    """Why this settlement can't send a party out, or None if it can."""
+    if storage_tier(settlement, CARTOGRAPHER) <= 0:
+        return "Needs a Cartographer's Guild."
+    if any(e.origin_id == settlement.id and e.faction_idx == settlement.faction_idx
+           and not e.finished
+           for e in getattr(world, "survey_expeditions", []) or []):
+        return "A survey from here is already in the field."
+    res = getattr(settlement, "resources", None) or {}
+    for name, amount in SURVEY_COST.items():
+        if res.get(name, 0) < amount:
+            return f"Needs {amount} {name}."
+    return None
+
+
+def _survey_target(world, settlement, reach):
+    """Where to send a party: the FURTHEST unexplored land within `reach`.
+
+    Furthest, not nearest. Nearest is the obvious reading of "head for the
+    frontier" and it is wrong here -- fog begins at your own border, so the
+    nearest unmapped cell is usually a few steps outside the gate, and a
+    commissioned expedition would charge real gold to walk to the end of
+    the road and back. Aiming at the far edge of what a party can reach is
+    what actually buys the player a corridor of new country, and it is what
+    a commissioned voyage was for: go as far as the supplies last.
+
+    Auto-targeted rather than player-aimed. The decision being offered is
+    whether and when to pay for a survey at all -- that is what the Guild
+    is for -- and asking the player to also pick a compass bearing across a
+    black map is asking them to choose without information. Aiming is a
+    refinement deliberately left for later.
+
+    None where there is nothing hidden in reach (a fully explored
+    neighbourhood, or an AI faction, which has no fog at all -- see the
+    SurveyExpedition docstring)."""
+    fog = getattr(world, "fog", None)
+    if fog is None or world.player_faction_idx != settlement.faction_idx:
+        return None
+    w, h = world.w, world.h
+    sx, sy = settlement.pos
+    best, best_d2 = None, None
+    # Scan the box the party could actually reach rather than the whole map.
+    for y in range(max(0, sy - reach), min(h, sy + reach + 1)):
+        for x in range(sx - reach, sx + reach + 1):
+            wx = wrap.wrap_x(x, w)
+            if world.owner[y][wx] == OCEAN:
+                continue
+            if fog[y * w + wx]:
+                continue        # already revealed
+            d2 = wrap.dist2_wrap((wx, y), (sx, sy), w)
+            if d2 > reach * reach:
+                continue        # the box's corners reach further than the party
+            if best_d2 is None or d2 > best_d2:
+                best, best_d2 = (wx, y), d2
+    return best
+
+
+def start_survey(world, settlement):
+    """Commission a survey out of `settlement`. Returns a message either
+    way -- same shape as construction.start_settlement/expansion.start_claim,
+    so the UI can just show whatever comes back."""
+    blocked = can_commission_survey(world, settlement)
+    if blocked:
+        return blocked
+    speed, reach = survey_speed_and_range(world, settlement)
+    target = _survey_target(world, settlement, reach)
+    if target is None:
+        return "Nothing left to chart within reach of here."
+    cellset = {(x, y)
+               for y in range(max(0, min(settlement.pos[1], target[1]) - 10),
+                              min(world.h, max(settlement.pos[1], target[1]) + 11))
+               for x in wrap.bbox_span_wrap(settlement.pos[0], target[0], world.w, 10)
+               if world.owner[y][x] != OCEAN}
+    path = _path_dijkstra(cellset,
+                          lambda c: _elev_cost(world, world.base_cost, c),
+                          settlement.pos, target, world.w)
+    if not path or len(path) < 2:
+        return "No overland route to anywhere unmapped from here."
+    path = path[:reach + 1]
+    res = settlement.resources
+    for name, amount in SURVEY_COST.items():
+        res[name] = res.get(name, 0) - amount
+    if not hasattr(world, "survey_expeditions"):
+        world.survey_expeditions = []
+    world.survey_expeditions.append(
+        SurveyExpedition(settlement.faction_idx, settlement.id, path, speed))
+    return (f"A surveying party sets out from {settlement.name} — "
+            f"{len(path) - 1} cells of unknown country ahead.")
+
+
+def advance_surveys(world):
+    """Move every party one turn, and roll for the ones in dangerous
+    country. Returns event dicts for UI messaging, same as the trade tiers.
+
+    A party is only at risk on ground nobody owns or somebody hostile does
+    -- walking your own roads is not an adventure. Losing one costs
+    everything already paid; what it charted on the way stays charted,
+    which is the honest outcome (the map came back even when the party
+    did not, via whoever straggled home)."""
+    expeditions = getattr(world, "survey_expeditions", None)
+    if not expeditions:
+        return []
+    events = []
+    still_going = []
+    for exp in expeditions:
+        if exp.finished:
+            continue        # finished last turn; vision has since read it
+        exp.progress += exp.speed
+        x, y = exp.pos
+        owner = world.owner[y][x]
+        hostile = owner != exp.faction_idx     # unclaimed (<0) or someone else's
+        if hostile and random.random() < SURVEY_LOSS_CHANCE_PER_TURN:
+            exp.lost = exp.finished = True
+            events.append({"type": "survey_lost", "faction_idx": exp.faction_idx,
+                           "pos": exp.pos, "charted": len(exp.charted)})
+        elif exp.complete:
+            exp.finished = True
+            events.append({"type": "survey_done", "faction_idx": exp.faction_idx,
+                           "pos": exp.pos, "charted": len(exp.charted)})
+        still_going.append(exp)
+    world.survey_expeditions = still_going
+    return events
+
+
 def preserving_cap_multiplier(node):
     """Conversion-cap multiplier from this node's Preserving House, 0 if it
     has none."""
@@ -5675,8 +5897,10 @@ def advance_turn(world):
     world.commander_successions = commander.advance_commander_succession(world)
 
     # Cartographers survey a little further before the fog is recomputed, so
-    # this turn's work shows up this turn rather than one turn late.
+    # this turn's work shows up this turn rather than one turn late. Same for
+    # any surveying parties out in the field.
     advance_cartographers(world)
+    world.survey_events = advance_surveys(world)
 
     # Fog of war: reveal whatever's now in range as territory changes hands
     # (app/world/vision.py).

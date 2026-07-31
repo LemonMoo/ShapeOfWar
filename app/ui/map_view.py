@@ -4456,6 +4456,7 @@ class MapView(tk.Frame):
 
         if own:
             self._build_entry_card(st, player)
+            self._build_survey_card(st)
 
         making = self._settlement_conversions(st)
         body = self._card("INDUSTRY", f"{len(making)} running", key="production",
@@ -4566,6 +4567,46 @@ class MapView(tk.Frame):
             return
         build_menu.open_for(self.winfo_toplevel(), self.world, node, player,
                             on_change=self._after_build_menu_change)
+
+    def _build_survey_card(self, st):
+        """SURVEY -- commission a party to go and map what's out there
+        (resources.start_survey). Only appears where there's a Guild to
+        commission it from; a settlement without one has nothing to say
+        here and gets no empty card."""
+        wd = self.world
+        if resources.storage_tier(st, resources.CARTOGRAPHER) <= 0:
+            return
+        in_field = [e for e in getattr(wd, "survey_expeditions", None) or []
+                    if e.origin_id == st.id and e.faction_idx == st.faction_idx
+                    and not e.finished]
+        body = self._card("SURVEY", "in the field" if in_field else "available",
+                          key="survey", default_open=False)
+        if body is None:
+            return
+        if in_field:
+            exp = in_field[0]
+            done, total = len(exp.charted), len(exp.path)
+            self._kv(body, "Party out", f"{done}/{total} cells charted")
+            return
+
+        speed, reach = resources.survey_speed_and_range(wd, st)
+        self._kv(body, "Cost", _format_resources(resources.SURVEY_COST))
+        self._kv(body, "Range", f"{reach} cells at {speed:g}/turn")
+        blocked = resources.can_commission_survey(wd, st)
+        if blocked:
+            tk.Label(body, text=blocked, bg=theme.PANEL, fg=theme.MUTED,
+                     font=theme.FONT_SMALL, anchor="w", justify="left",
+                     wraplength=_RIGHT_PANEL_W - 60).pack(fill="x", pady=(4, 0))
+        widgets.button(body, "Commission a Survey…",
+                       lambda n=st: self._do_start_survey(n),
+                       state="disabled" if blocked else "normal"
+                       ).pack(fill="x", pady=(8, 2))
+
+    def _do_start_survey(self, st):
+        self.show_bottom_message(resources.start_survey(self.world, st))
+        self._show_settlement(st)
+        self._update_resource_bar()
+        self.render()
 
     def _after_build_menu_change(self):
         """Something was started from the build menu: bring the map's own

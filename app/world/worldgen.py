@@ -1815,6 +1815,8 @@ class World:
         self.granary_projects = []     # list[GranaryProject] — see app/world/construction.py
         self.warehouse_projects = []   # list[WarehouseProject] — see app/world/construction.py
         self.claim_projects = []       # list[ClaimProject] — see app/world/expansion.py
+        self.survey_expeditions = []   # list[SurveyExpedition] — see app/world/resources.py
+        self.survey_events = []        # this turn's survey completion/loss events
         self.commanders = []           # list[Commander] — see app/world/commander.py
         self.ships = []                 # list[Ship] — see app/world/commander.py
         self.total_land_cells = 0      # cached once at gen time (vision%/target-size% denom)

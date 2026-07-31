@@ -241,6 +241,21 @@ def recompute(world):
         # every call is fine): reveal() is a no-op for anything already
         # revealed, and fog is monotonic besides, so this only actually
         # does anything the first time a given stretch is built/traveled.
+        # A commissioned surveying party charts a corridor along everything
+        # it has actually walked so far (resources.SurveyExpedition) -- the
+        # one Guild mechanic that reveals genuinely unknown country rather
+        # than widening what your existing traffic already reports. Only the
+        # stretch behind it: what lies ahead is exactly what it was sent to
+        # find out. Same player-only split as Commanders above -- parties
+        # walk for every faction, but fog is the player's alone.
+        from app.world.resources import SURVEY_REVEAL_RADIUS
+        survey_reach = SURVEY_REVEAL_RADIUS + guild
+        for exp in getattr(world, "survey_expeditions", None) or []:
+            if exp.faction_idx != player_idx:
+                continue
+            for x, y in exp.charted:
+                _reveal_around(reveal, w, h, x, y, survey_reach)
+
         route_reach = ROUTE_REVEAL_RADIUS + guild
         for cid in world.factions[player_idx].meta.get("regions", []):
             for (ax, ay), (bx, by), _tier in world.roads_by_region.get(cid, []):
