@@ -14,6 +14,7 @@ import math
 import random
 
 from app.world.worldgen import (OCEAN, Settlement, SETTLEMENT_TYPES,
+                                add_road_segments,
                                 SETTLEMENT_TAX_INCOME, _roll_population, _path_dijkstra,
                                 _elev_cost, _SEA_COAST_REACH, _site_score,
                                 _too_close_any, _mark_occupied_both,
@@ -792,8 +793,8 @@ def _finish_settlement(world, project):
         region.meta_settlements.append(st.id)
     sea_lane = getattr(project, "sea_lane", None)
     if sea_lane:
-        segs = world.roads_by_region.setdefault(project.region_id, [])
-        segs.extend((p1, p2, "sea") for p1, p2 in zip(sea_lane, sea_lane[1:]))
+        add_road_segments(world, project.region_id,
+                          list(zip(sea_lane, sea_lane[1:])), "sea")
 
 
 def _finish_road(world, road):
@@ -806,8 +807,8 @@ def _finish_road(world, road):
     region_id = world.region_grid[y][x]
     if region_id < 0:
         return
-    segs = world.roads_by_region.setdefault(region_id, [])
-    segs.extend((a, b, road.tier) for a, b in zip(road.path, road.path[1:]))
+    add_road_segments(world, region_id, list(zip(road.path, road.path[1:])),
+                      road.tier)
 
 
 def advance_projects(world):

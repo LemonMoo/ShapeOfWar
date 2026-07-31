@@ -29,8 +29,17 @@ from app.world import construction
 from app.world import resources
 
 
-_CARD_W = 300
+# Deliberately narrower than it reads: the cards are dense but short, and a
+# wide card wastes the right half of every one of them on empty space while
+# forcing a scroll to see the fourth building. Narrower cards plus a bigger
+# window is how more of the menu fits on screen at once.
+_CARD_W = 250
 _CARD_MIN_COLS = 2
+_CARD_MAX_COLS = 5
+
+# The window's preferred size, clamped to the game window by _place_over. Big
+# enough for four columns of cards, which is the point of the narrower card.
+_PREFERRED_SIZE = (1280, 860)
 
 # Priority colour and label. "urgent" is the one that carries information the
 # player did not already have -- something at this node is being destroyed
@@ -103,7 +112,17 @@ class BuildMenuWindow(tk.Toplevel):
         self._build_chrome()
         self._render()
         self.bind("<Escape>", lambda e: self.destroy())
-        self.bind_all("<MouseWheel>", self._on_wheel)
+        # On the Toplevel, NOT bind_all. Every widget inside a window has its
+        # toplevel in its own bindtags, so one binding here reaches the whole
+        # menu wherever the pointer happens to be -- and, unlike bind_all,
+        # nobody else can take it away. bind_all was the bug: map_view's side
+        # panels bind_all the wheel on <Enter> and unbind_all it on <Leave>
+        # (map_view.py:1057 and friends), so merely moving the mouse across
+        # the map's panels on the way to this window silently deleted this
+        # window's scrolling. It also stopped this window clobbering theirs.
+        self.bind("<MouseWheel>", self._on_wheel)
+        self.bind("<Button-4>", self._on_wheel)
+        self.bind("<Button-5>", self._on_wheel)
         self.bind("<Destroy>", self._on_destroy)
         # An undecorated window is not given focus by the window manager, so
         # Escape would do nothing until something inside it were clicked.
@@ -113,7 +132,7 @@ class BuildMenuWindow(tk.Toplevel):
         """Centre on the game window. With no OS frame there is no sensible
         default position -- an undecorated window placed by the window manager
         lands in the top-left corner of the screen."""
-        width, height = 1000, 700
+        width, height = _PREFERRED_SIZE
         try:
             master.update_idletasks()
             mw, mh = master.winfo_width(), master.winfo_height()
@@ -180,7 +199,7 @@ class BuildMenuWindow(tk.Toplevel):
 
     def _on_canvas_resize(self, event):
         self._canvas.itemconfigure(self._window, width=event.width)
-        cols = max(1, min(4, event.width // (_CARD_W + 16)))
+        cols = max(1, min(_CARD_MAX_COLS, event.width // (_CARD_W + 14)))
         if cols != getattr(self, "_cols", None):
             self._cols = cols
             self._render()
@@ -196,12 +215,18 @@ class BuildMenuWindow(tk.Toplevel):
         self.geometry(f"+{event.x_root - origin[0]}+{event.y_root - origin[1]}")
 
     def _on_wheel(self, event):
-        self._canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        # X11 sends wheel as Button-4/5 with no .delta; Windows sends a signed
+        # delta. Three units a notch rather than one -- the cards are tall and
+        # a one-unit scroll barely moves the page.
+        if getattr(event, "num", None) in (4, 5):
+            step = -3 if event.num == 4 else 3
+        else:
+            step = -3 if event.delta > 0 else 3
+        self._canvas.yview_scroll(step, "units")
 
     def _on_destroy(self, event):
         if event.widget is not self:
             return
-        self.unbind_all("<MouseWheel>")
         # Hand focus back to the game. An undecorated window has to take focus
         # for itself (see _take_focus), and Windows does not reliably give it
         # back to the parent when one is destroyed -- leaving the keyboard
@@ -217,6 +242,13 @@ class BuildMenuWindow(tk.Toplevel):
 
     # --- content ---------------------------------------------------------
     def _render(self):
+        # Where the player was looking, so a turn-end refresh does not throw
+        # them back to the top of a menu they were reading. Captured before
+        # the teardown because an empty body reports a scrollregion of 0.
+        try:
+            was_at = self._canvas.yview()[0]
+        except (tk.TclError, IndexError):
+            was_at = None
         for child in self._body.winfo_children():
             child.destroy()
         cols = max(_CARD_MIN_COLS, getattr(self, "_cols", _CARD_MIN_COLS))
@@ -247,7 +279,18 @@ class BuildMenuWindow(tk.Toplevel):
             grid.grid_columnconfigure(col, weight=1, uniform="card")
         for i, option in enumerate(options):
             self._card(grid, option).grid(row=i // cols, column=i % cols,
-                                          sticky="nsew", padx=6, pady=6)
+                                          sticky="nsew", padx=5, pady=5)
+
+        if was_at:
+            # after_idle, not now: the scrollregion is only correct once Tk has
+            # processed the <Configure> this rebuild just queued.
+            self.after_idle(lambda f=was_at: self._restore_scroll(f))
+
+    def _restore_scroll(self, fraction):
+        try:
+            self._canvas.yview_moveto(fraction)
+        except tk.TclError:
+            pass   # window closed between the rebuild and the idle callback
 
     def _render_production(self, parent):
         report = B.production_report(self.world, self.node)
@@ -406,14 +449,14 @@ class BuildMenuWindow(tk.Toplevel):
         head = tk.Frame(frame, bg=theme.PANEL_ALT)
         head.pack(fill="x")
         tk.Label(head, text=option.label, bg=theme.PANEL_ALT, fg=theme.ACCENT,
-                 font=theme.FONT_HEADER, anchor="w", padx=10,
-                 pady=6).pack(side="left")
+                 font=theme.FONT_HEADER, anchor="w", padx=8,
+                 pady=4).pack(side="left")
         tk.Label(head, text=self._tier_pips(option), bg=theme.PANEL_ALT,
-                 fg=theme.INK, font=theme.FONT_SMALL, padx=10).pack(side="right")
+                 fg=theme.INK, font=theme.FONT_SMALL, padx=8).pack(side="right")
 
         tk.Label(frame, text=badge, bg=theme.PANEL, fg=colour,
                  font=theme.FONT_SMALL_BOLD, anchor="w"
-                 ).pack(fill="x", padx=10, pady=(6, 0))
+                 ).pack(fill="x", padx=8, pady=(4, 0))
         if option.reason:
             tk.Label(frame, text=option.reason, bg=theme.PANEL, fg=theme.INK,
                      font=theme.FONT_SMALL, anchor="w", justify="left",
@@ -429,7 +472,7 @@ class BuildMenuWindow(tk.Toplevel):
                      font=theme.FONT_SMALL, anchor="w", justify="left",
                      wraplength=_CARD_W - 34).pack(fill="x", padx=12)
 
-        tk.Frame(frame, bg=theme.LINE, height=1).pack(fill="x", padx=10, pady=(8, 6))
+        tk.Frame(frame, bg=theme.LINE, height=1).pack(fill="x", padx=8, pady=(6, 4))
         self._card_footer(frame, option)
         return frame
 
@@ -443,10 +486,16 @@ class BuildMenuWindow(tk.Toplevel):
 
     def _card_footer(self, frame, option):
         if option.in_progress:
+            # Counting DOWN, not up. "3 of 8 turns" makes you do the
+            # subtraction yourself every turn; what you actually want to know
+            # is how much longer you are waiting.
             elapsed, total = option.in_progress
-            tk.Label(frame, text=f"Under construction — {elapsed} of {total} turns",
+            left = max(0, total - elapsed)
+            when = "finishes this turn" if left <= 0 else (
+                "1 turn left" if left == 1 else f"{left} turns left")
+            tk.Label(frame, text=f"Under construction — {when}",
                      bg=theme.PANEL, fg=theme.WARN, font=theme.FONT_SMALL_BOLD,
-                     anchor="w").pack(fill="x", padx=10, pady=(0, 10))
+                     anchor="w").pack(fill="x", padx=8, pady=(0, 8))
             return
         if option.blocked:
             tk.Label(frame, text=option.blocked, bg=theme.PANEL, fg=theme.MUTED,
@@ -487,6 +536,29 @@ class BuildMenuWindow(tk.Toplevel):
         self._notice(message)
         if self.on_change:
             self.on_change()
+
+
+def refresh_open(master):
+    """Re-render every build menu that is currently open.
+
+    The menu used to be a snapshot: you started a Granary, ended six turns,
+    and the card still said what it said when you opened it -- no countdown,
+    and no change from "not built" to "built" until you closed and reopened
+    the window. Called from MapView.refresh(), which is the one place that
+    already knows a turn has been processed.
+
+    Closed windows are dropped from the registry here rather than in the
+    window's own destroy handler: this runs every turn anyway, and it means
+    there is exactly one place that knows how the registry is shaped.
+    """
+    menus = getattr(master, "_build_menus", None)
+    if not menus:
+        return
+    for key, window in list(menus.items()):
+        if window is None or not window.winfo_exists():
+            menus.pop(key, None)
+            continue
+        window._render()
 
 
 def open_for(master, world, node, nation, on_change=None):

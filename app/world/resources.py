@@ -28,6 +28,7 @@ from collections import defaultdict
 
 from app.world.lexicon import SPECIES
 from app.world.worldgen import (OCEAN, _path_dijkstra, _elev_cost, road_cells,
+                                add_road_segments,
                                 path_transit_cells, _VILLAGE_CATCHMENT_RADIUS,
                                 homeland_affinity)
 from app.world import weather
@@ -5953,8 +5954,7 @@ def _grow_city_villages(world):
         world.villages.append(v)
         region.villages.append(v.id)
         path = _local_road_path(world, st.pos, v.pos, faction_idx=st.faction_idx)
-        segs = world.roads_by_region.setdefault(region_id, [])
-        segs.extend((p1, p2, "dirt") for p1, p2 in zip(path, path[1:]))
+        add_road_segments(world, region_id, list(zip(path, path[1:])), "dirt")
         _connect_new_village_to_region(world, region, v)
 
         st.villages_spawned += 1
@@ -5985,11 +5985,10 @@ def _connect_new_village_to_region(world, region, new_village):
         if dist2 <= VILLAGE_MESH_LINK_RADIUS ** 2:
             candidates.append((dist2, other))
     candidates.sort(key=lambda t: t[0])
-    segs = world.roads_by_region.setdefault(region.id, [])
     for _, other in candidates[:VILLAGE_MESH_MAX_LINKS]:
         path = _local_road_path(world, new_village.pos, other.pos,
                                 faction_idx=region.faction_idx)
-        segs.extend((p1, p2, "dirt") for p1, p2 in zip(path, path[1:]))
+        add_road_segments(world, region.id, list(zip(path, path[1:])), "dirt")
 
 
 # --- turn loop ---------------------------------------------------------------

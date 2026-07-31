@@ -276,5 +276,35 @@ state = view._resource_canvas.itemcget(view._resource_rows_window, "state")
 assert state == "normal", state
 print("  ok    the container comes back even if the rebuild raises")
 
+print("\n--- a commander's march is drawn on the GPU map, not only the canvas ---")
+# The bug: _draw_commanders has drawn the dashed route on the Tk canvas since
+# commanders existed, but _map_lines -- what the GPU flat map draws from --
+# never included it. On the GPU surface, giving a move order showed nothing.
+from app.world import commander as C
+import random as _random
+
+C.ensure_faction_commanders(world)
+mine = next((c for c in world.commanders if c.faction_idx == pidx), None)
+if mine is None:
+    print("  skip  the player has no commander on this save")
+else:
+    view.selected_commander = mine
+    before = len(view._map_lines(2, 4.0))
+    sig_before = view._flat_content_signature(2, 4.0)
+    land = [(x, y) for y in range(0, world.h, 37) for x in range(0, world.w, 37)
+            if world.owner[y][x] != C.OCEAN]
+    C.set_move_order(world, mine, _random.Random(3).choice(land))
+    assert mine.path, "could not give this commander a route to test with"
+    assert len(view._map_lines(2, 4.0)) > before, (
+        "the march added no line to the GPU line list")
+    # ...and the map has to notice. The order is given to an ALREADY selected
+    # commander, so nothing else in the signature moves; without a term for
+    # the route the cached lines would be reused until the turn ended.
+    assert view._flat_content_signature(2, 4.0) != sig_before, (
+        "the flat map would reuse its cached lines and not draw the route "
+        "until the end of the turn")
+    print(f"  ok    a {len(mine.path)}-cell march reaches the GPU map, and the "
+          f"content cache notices immediately")
+
 root.destroy()
 print("\nPANELS TEST PASSED")

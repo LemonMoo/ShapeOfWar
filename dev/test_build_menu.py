@@ -324,7 +324,13 @@ win._place_over(_Stub())
 # Only the POSITION is readable here: geometry() reports the actual size of an
 # unmapped window (1x1), not the requested one. The size floor is minsize.
 _, x, y = win.geometry().split("+")
-assert (int(x), int(y)) == (400, 150), (
+# Derived from _place_over's own preferred size rather than hardcoded, so
+# resizing the window is a one-line change instead of a puzzle in this file.
+_pw, _ph = build_menu._PREFERRED_SIZE
+_want_w = max(700, min(_pw, 1600 - 60))
+_want_h = max(480, min(_ph, 900 - 60))
+assert (int(x), int(y)) == (100 + (1600 - _want_w) // 2,
+                            50 + (900 - _want_h) // 2), (
     f"not centred on a 1600x900 parent at (100,50): +{x}+{y}")
 assert win.minsize() == (700, 480), win.minsize()
 print(f"  ok    centres at +{x}+{y} on a 1600x900 parent at (100,50); "
@@ -345,13 +351,74 @@ reopened = build_menu.open_for(_root, w, village, nation)
 assert reopened is not first, "a destroyed window was handed back out"
 reopened.update_idletasks()
 assert B.node_kind(village) == "village" and village.name in " ".join(texts(reopened))
-# The wheel binding is bind_all, so a closed window must not leave one behind
-# that scrolls a dead canvas.
 other.update_idletasks()
 other.event_generate("<MouseWheel>", delta=120)
 print("  ok    reopened cleanly; the surviving window still handles the wheel")
 
-for win in windows + [other, reopened]:
+print("\n--- the wheel belongs to the window, not to bind_all ---")
+# The bug: this used to be bind_all, and map_view's side panels bind_all the
+# wheel on <Enter> and unbind_all it on <Leave> (map_view.py:1057 and
+# friends). Merely moving the mouse across the map's panels on the way to
+# this window silently deleted the menu's own scrolling, which is why it
+# only scrolled when the pointer was over the scrollbar itself.
+import inspect
+# Comment lines stripped: the note in build_menu explaining why this is NOT
+# bind_all any more names it, and would match otherwise. Same trap
+# dev/test_panels.py hit with update_idletasks.
+src = "\n".join(line for line in
+                inspect.getsource(build_menu.BuildMenuWindow).splitlines()
+                if not line.lstrip().startswith("#"))
+assert "bind_all" not in src, (
+    "the build menu binds the wheel globally again -- anyone else's "
+    "unbind_all will take it away")
+assert 'self.bind("<MouseWheel>"' in src, (
+    "the wheel must be bound on the Toplevel, which is in every descendant's "
+    "bindtags and cannot be unbound by another widget")
+# And it really does scroll from a widget deep inside, not just from the root.
+deep = [wd for wd in walk(reopened) if isinstance(wd, tk.Label)]
+assert deep, "no labels in the menu to aim an event at"
+before = reopened._canvas.yview()[0]
+for _ in range(6):
+    deep[-1].event_generate("<MouseWheel>", delta=-120)
+reopened.update_idletasks()
+assert reopened._canvas.yview()[0] >= before
+print("  ok    the wheel scrolls the page from a label deep inside the menu")
+
+print("\n--- an open menu follows the turn instead of freezing ---")
+# The bug: the menu was a snapshot. You could start a Granary, end six turns
+# watching nothing change, and only see it built by closing and reopening.
+target = next((o for o in B.build_options(w, village, nation)
+               if o.affordable and not o.in_progress and not o.blocked), None)
+if target is None:
+    print("  skip  this village can afford nothing right now")
+else:
+    construction.start_storage_building(w, nation, village, target.building)
+    build_menu.refresh_open(_root)
+    reopened.update_idletasks()
+    joined = " | ".join(texts(reopened))
+    assert "Under construction" in joined, joined[:300]
+    assert "turns left" in joined or "finishes this turn" in joined, (
+        "the countdown should say how much longer, not make the player "
+        "subtract elapsed from total every turn")
+    first_read = joined
+    for _ in range(2):
+        R.advance_turn(w)
+        build_menu.refresh_open(_root)
+        reopened.update_idletasks()
+    assert " | ".join(texts(reopened)) != first_read, (
+        "two turns passed and the open menu said exactly the same thing")
+    print(f"  ok    {target.label} shows a countdown that moves with the turn")
+
+print("\n--- refreshing drops windows that have been closed ---")
+ghost = build_menu.open_for(_root, w, settlement, nation)
+ghost.destroy()
+_root.update_idletasks()
+build_menu.refresh_open(_root)
+assert all(win.winfo_exists() for win in _root._build_menus.values()), (
+    "refresh_open kept a destroyed window in the registry")
+print("  ok    a destroyed window is dropped from the registry")
+
+for win in windows + [other, reopened] + list(_root._build_menus.values()):
     try:
         win.destroy()
     except tk.TclError:

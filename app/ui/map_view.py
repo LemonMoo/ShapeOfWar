@@ -174,6 +174,12 @@ _GLOBE_LABEL_COLOR = (0.96, 0.96, 0.96)
 _GLOBE_VILLAGE_LABEL_COLOR = (0.84, 0.86, 0.88)
 _GLOBE_PLAYER_COMMANDER = (0.90, 0.52, 1.0)   # the orchid the flat map uses
 
+# Painting order for road tiers: low first, so a stone road always lies over
+# the dirt track it was paved from rather than whichever happened to be later
+# in the region's segment list. Sea lanes go on top of both -- they are drawn
+# dashed and thin, and a lane hidden under a road reads as a broken lane.
+_ROAD_DRAW_ORDER = {"dirt": 0, "stone": 1, "sea": 2}
+
 
 def _lighten(rgb, amt):
     r, g, b = rgb
@@ -766,6 +772,11 @@ class MapView(tk.Frame):
             self._last_territory_version = territory_version
         self._base_img = self._base_key = None
         self._rebuild_selection_panel()
+        # Same reasoning as the treasury below: a build menu can be left open
+        # across End Turn, and until this call it was a snapshot -- you could
+        # start a Granary, end six turns watching nothing change, and only see
+        # it built by closing and reopening the window.
+        build_menu.refresh_open(self.winfo_toplevel())
         # Treasury is an in-game panel that can be left open across End Turn,
         # so it has to be rebuilt here to show the turn's new figures.
         self._refresh_treasury()
@@ -2404,6 +2415,14 @@ class MapView(tk.Frame):
             self.mode, self.selected_settlement, self.selected_village,
             self.selected_commander, self.attack_mode, id(self._attack_frontier),
             self.building_mode, tuple(hint) if hint else None,
+            # Marching orders. A move order is given to an ALREADY-selected
+            # commander, so selected_commander above does not change and the
+            # route would not appear until something else forced a rebuild --
+            # which, since wd.turn is in here, meant "at the end of the turn".
+            # A dozen-odd commanders, three attribute reads each: still cheap
+            # enough to compute every frame.
+            tuple((c.path_index, len(c.path) if c.path else 0)
+                  for c in wd.commanders),
         )
 
     def _sync_flatgl(self):
@@ -2578,21 +2597,23 @@ class MapView(tk.Frame):
         # altitude; dirt tracks are region-scale detail and would be a grey
         # haze from orbit. One factor (0.18) for every tier, matching
         # _draw_roads' own uniform width regardless of tier.
-        for region in wd.regions:
-            if region.faction_idx < 0:
+        road_segments = [seg for region in wd.regions if region.faction_idx >= 0
+                         for seg in wd.roads_by_region.get(region.id, [])]
+        # Dirt first so the trunk network lies over it -- same reason as
+        # _draw_roads, and it has to match or the two surfaces disagree.
+        road_segments.sort(key=lambda seg: _ROAD_DRAW_ORDER.get(seg[2], 0))
+        for (ax, ay), (bx, by), tier in road_segments:
+            if tier not in ("stone", "sea") and level < 2:
                 continue
-            for (ax, ay), (bx, by), tier in wd.roads_by_region.get(region.id, []):
-                if tier not in ("stone", "sea") and level < 2:
-                    continue
-                if not (self._cell_revealed(ax, ay) or self._cell_revealed(bx, by)):
-                    continue
-                if tier == "sea":
-                    color, width = _TRADE_SEA_COLOR, lw(1.8, 0.18)
-                elif tier == "stone":
-                    color, width = _STONE_ROAD_COLOR, lw(2.2, 0.18)
-                else:
-                    color, width = _DIRT_ROAD_COLOR, lw(1.6, 0.18)
-                add([(ax, ay), (bx, by)], _GLOBE_RGB[color], width)
+            if not (self._cell_revealed(ax, ay) or self._cell_revealed(bx, by)):
+                continue
+            if tier == "sea":
+                color, width = _TRADE_SEA_COLOR, lw(1.8, 0.18)
+            elif tier == "stone":
+                color, width = _STONE_ROAD_COLOR, lw(2.2, 0.18)
+            else:
+                color, width = _DIRT_ROAD_COLOR, lw(1.6, 0.18)
+            add([(ax, ay), (bx, by)], _GLOBE_RGB[color], width)
 
         for r in wd.trade_routes:
             sea = r["kind"] == "sea"
@@ -2623,6 +2644,33 @@ class MapView(tk.Frame):
                              caravan.kind, _FOREIGN_CARAVAN_STYLE)["glow"]
                 width = max(1.0, width * 0.5)
             add(caravan.path, _GLOBE_RGB[color], width, dash=2)
+
+        # A commander's queued march. The canvas has drawn this dashed preview
+        # since commanders existed (_draw_commanders), but it was never added
+        # here -- so on the GPU flat map and the globe, giving a move order
+        # showed you nothing at all. Same colours and the same fog rules as
+        # the canvas: your own in orchid, a rival in his realm's colour, and a
+        # foreign march traced only across ground you have actually explored
+        # (add() fog-clips, which is exactly the leak that matters -- an
+        # unclipped line would give away where he is going through country you
+        # cannot see).
+        for cmd in wd.commanders:
+            path = getattr(cmd, "path", None)
+            if not path:
+                continue
+            remaining = path[cmd.path_index:]
+            if len(remaining) < 2:
+                continue
+            mine = player_idx is not None and cmd.faction_idx == player_idx
+            if mine:
+                colour = _GLOBE_RGB[_COMMANDER_STYLE["fill"]]
+                width = lw(2.0, 0.19)
+            else:
+                if not self._cell_revealed(*self._display_cell(cmd)):
+                    continue
+                colour = _GLOBE_RGB[wd.factions[cmd.faction_idx].color]
+                width = lw(1.5, 0.14)
+            add(remaining, colour, width, dash=2)
 
         if self.attack_mode is not None:
             for region in self._attack_frontier:
@@ -6498,8 +6546,14 @@ class MapView(tk.Frame):
         # something; stone roads (and sea lanes, the other trunk-scale
         # connector) still show at every zoom exactly as before.
         show_dirt = self._place[2] >= _DIRT_ROAD_MIN_SCALE
-        for cid in self.zoom_faction.meta.get("regions", []):
-            for (ax, ay), (bx, by), tier in wd.roads_by_region.get(cid, []):
+        # Dirt first, trunk roads over the top. Where a stone road and a dirt
+        # track meet -- a junction, or a track that was paved along part of
+        # its length -- the stone road is the one that should read, and list
+        # order alone used to decide that at random.
+        segments = [seg for cid in self.zoom_faction.meta.get("regions", [])
+                    for seg in wd.roads_by_region.get(cid, [])]
+        segments.sort(key=lambda seg: _ROAD_DRAW_ORDER.get(seg[2], 0))
+        for (ax, ay), (bx, by), tier in segments:
                 is_stone = tier == "stone"
                 is_sea = tier == "sea"
                 if not is_stone and not is_sea and not show_dirt:

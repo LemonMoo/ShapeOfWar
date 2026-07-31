@@ -1391,8 +1391,7 @@ def _bridge_region_to_kingdom(world, region):
         tier = "sea"
     if path is None:
         return
-    segs = world.roads_by_region.setdefault(region.id, [])
-    segs.extend((p1, p2, tier) for p1, p2 in zip(path, path[1:]))
+    add_road_segments(world, region.id, list(zip(path, path[1:])), tier)
 
 
 def _generate_villages(world, rng):
@@ -1539,6 +1538,47 @@ def _path_dijkstra(cellset, cost_fn, start, goal, width, edge_cost_fn=None):
         path.append(parent[path[-1]])
     path.reverse()
     return path
+
+
+ROAD_TIER_RANK = {"dirt": 1, "stone": 2}
+
+
+def add_road_segments(world, region_id, segments, tier):
+    """Fold segments into a region's permanent road network, letting a better
+    road replace a worse one on the same ground -- and never laying the same
+    stretch twice.
+
+    Roads are stored as endpoint pairs per region, and new roads deliberately
+    reuse an existing route's cells wherever they can (a new road joins an
+    existing one rather than cutting its own line beside it). The consequence
+    was that paving a dirt track as a stone road left BOTH segments in the
+    list forever: the same ground drawn twice, once as a stone road and once
+    as a dirt track over or under it depending purely on list order.
+
+    A stone road paved over a dirt track IS the dirt track now, so the dirt
+    segment goes; and a dirt track routed along an existing stone road adds
+    nothing, because the stone road is already there and is the better one.
+    Direction-insensitive throughout: a segment recorded a->b and one recorded
+    b->a are the same piece of road.
+
+    Sea lanes are not on this scale at all (rank 0) and neither displace a
+    road nor are displaced by one -- a lane and a road can legitimately share
+    a port's cell without either paving the other.
+    """
+    segs = world.roads_by_region.setdefault(region_id, [])
+    rank = ROAD_TIER_RANK.get(tier, 0)
+    incoming = [(a, b) for a, b in segments]
+    if rank:
+        keys = {frozenset((a, b)) for a, b in incoming}
+        segs[:] = [(a, b, t) for a, b, t in segs
+                   if not (0 < ROAD_TIER_RANK.get(t, 0) < rank
+                           and frozenset((a, b)) in keys)]
+        covered = {frozenset((a, b)) for a, b, t in segs
+                   if ROAD_TIER_RANK.get(t, 0) >= rank}
+    else:
+        covered = {frozenset((a, b)) for a, b, t in segs if t == tier}
+    segs.extend((a, b, tier) for a, b in incoming
+                if frozenset((a, b)) not in covered)
 
 
 def road_cells(world):
