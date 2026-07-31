@@ -3969,8 +3969,14 @@ class MapView(tk.Frame):
                                        key=lambda kv: -kv[1])) or "Unclassified"
 
         is_foreign = self._zoom_is_foreign()
+        # The region's fantasy name for the country it is -- "the Everwood"
+        # rather than "forest" (biome overhaul, phase F). Purely a name; the
+        # mechanical biome is still spelled out in the SUMMARY card below, so
+        # nothing is hidden behind the flavour.
+        flavour = region.flavour_name
         self.info.config(fg=theme.INK,
                           text=f"{region.name}\nRegion of {country.name}"
+                               + (f"\n{flavour}" if flavour else "")
                                + ("\nForeign territory" if is_foreign else ""))
 
         for w in self.actions.winfo_children():
@@ -4057,10 +4063,13 @@ class MapView(tk.Frame):
             f"{biome.capitalize()} ({round(100 * count / total_cells)}%)"
             for biome, count in sorted(region.biome_counts.items(),
                                        key=lambda kv: -kv[1])) or "Unclassified"
-        lines = [f"{region.name}", "Unclaimed wildland",
-                 f"Area {region.stats['area']} · Fertility {region.stats['fertility']}%",
-                 f"Biome: {biome_line}",
-                 f"Wildland garrison strength: {region.wildland_strength}"]
+        lines = [f"{region.name}", "Unclaimed wildland"]
+        flavour = region.flavour_name        # phase F, see Region.flavour_name
+        if flavour:
+            lines.append(flavour)
+        lines += [f"Area {region.stats['area']} · Fertility {region.stats['fertility']}%",
+                  f"Biome: {biome_line}",
+                  f"Wildland garrison strength: {region.wildland_strength}"]
         sea_only = False
         if player is not None:
             faction_idx = wd.factions.index(player)

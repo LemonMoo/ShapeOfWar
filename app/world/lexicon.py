@@ -723,3 +723,87 @@ def make_faction_namer(rng):
         return name
 
     return namer
+
+
+# --- The fantasy naming layer (biome overhaul, phase F) ----------------------
+# A named skin over each mechanical biome: the Everwood rather than "forest",
+# the Ashwaste rather than "desert".
+#
+# FLAVOUR ONLY, and that is a hard constraint rather than a stylistic note.
+# A named variant NEVER has a different or better resource profile than the
+# mechanical biome underneath it -- two regions both classified `forest` are
+# mechanically identical whether one is called an Everwood and the other a
+# Thornwild. This lives in lexicon.py, next to the other namers and a long way
+# from resources.py, precisely so that nothing in the economy can reach it:
+# the name is derived FROM the biome and is never read back by anything that
+# computes a yield. dev/test_biome_names.py asserts that directly.
+#
+# Why it is worth having anyway: "the Mistfen" is a place and "swamp" is a
+# terrain type, and a world made of places is the one the player remembers.
+#
+# Keyed by mechanical biome, then by the region's dominant climate, so the
+# same forest reads differently in the frozen north than on a warm coast.
+# "*" is the fallback for any climate without its own entry.
+BIOME_FLAVOUR_NAMES = {
+    "forest": {
+        "cold":      ("the Hollowpine", "the Frostwood", "the Rimewood"),
+        "humid":     ("the Everwood", "the Greenmarch", "the Dampholt"),
+        "*":         ("the Everwood", "the Thornwild", "the Silvermoot"),
+    },
+    "taiga": {
+        "*":         ("the Pinereach", "the Longwood", "the Coldmoot"),
+    },
+    "jungle": {
+        "*":         ("the Verdance", "the Tanglewild", "the Rainmaw"),
+    },
+    "plains": {
+        "arid":      ("the Dryacres", "the Dustdowns", "the Thinfields"),
+        "cold":      ("the Palefields", "the Shortgrass", "the Wintermeads"),
+        "*":         ("the Wide Acres", "the Goldfields", "the Greendowns"),
+    },
+    "savannah": {
+        "*":         ("the Sunveldt", "the Lionreach", "the Brightveldt"),
+    },
+    "steppe": {
+        "*":         ("the Windsea", "the Longgrass", "the Riderwaste"),
+    },
+    "desert": {
+        "*":         ("the Ashwaste", "the Sunscour", "the Dunereach"),
+    },
+    "tundra": {
+        "*":         ("the Palefrost", "the Rimewaste", "the White Silence"),
+    },
+    "swamp": {
+        "cold":      ("the Frozenfen", "the Greymire", "the Chillmarsh"),
+        "*":         ("the Mistfen", "the Blackmire", "the Sorrowmarsh"),
+    },
+    "coastal": {
+        "cold":      ("the Grey Shore", "the Icereach", "the Sleetstrand"),
+        "*":         ("the Saltmarch", "the Tidewatch", "the Foamreach"),
+    },
+    "highland": {
+        "cold":      ("the Hoarfell", "the Bleakmoor", "the Windbite"),
+        "*":         ("the Stonemoor", "the Highfell", "the Craghold"),
+    },
+    "mountain": {
+        "*":         ("the Skyteeth", "the Ironspine", "the Cloudwall"),
+    },
+}
+
+
+def biome_flavour_name(biome, climate, key):
+    """The named variant of `biome` in `climate` for a region.
+
+    `key` is any stable integer the caller owns (a region id) -- the choice
+    has to survive a save/load and be identical on every machine, so it is a
+    plain index rather than an rng draw. Returns None for a biome with no
+    flavour entry, which callers should render as the plain mechanical name
+    rather than inventing one.
+    """
+    by_climate = BIOME_FLAVOUR_NAMES.get(biome)
+    if not by_climate:
+        return None
+    options = by_climate.get(climate) or by_climate.get("*")
+    if not options:
+        return None
+    return options[key % len(options)]

@@ -283,6 +283,35 @@ class Region:
         self.dominant_climate = (max(climate_counts, key=climate_counts.get)
                                   if climate_counts else "temperate")
 
+    @property
+    def dominant_biome(self):
+        """The biome this region mostly IS, or None for a region with no
+        classified land at all."""
+        counts = getattr(self, "biome_counts", None)
+        if not counts:
+            return None
+        return max(counts, key=counts.get)
+
+    @property
+    def flavour_name(self):
+        """This region's fantasy name for the country it is -- "the Everwood"
+        rather than "forest" (biome overhaul, phase F).
+
+        A derived PROPERTY rather than a field set at worldgen, deliberately:
+        it adds nothing to the pickle, so every existing save gets a name the
+        moment it loads, and there is no migration to write. It is also, by
+        being derived, structurally incapable of drifting away from the
+        mechanical biome underneath it.
+
+        Flavour only. Nothing in the economy reads this -- see
+        lexicon.BIOME_FLAVOUR_NAMES."""
+        from app.world.lexicon import biome_flavour_name
+        biome = self.dominant_biome
+        if biome is None:
+            return None
+        return biome_flavour_name(biome, getattr(self, "dominant_climate",
+                                                 "temperate"), self.id)
+
 
 def _generate_all_regions(world, rng, base_cost, land_cells):
     """Bisect the *entire* landmass into regions before any faction owns
