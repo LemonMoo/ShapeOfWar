@@ -19,6 +19,7 @@ from app.core.events import bus
 from app.core.save import (save_game, load_game, has_save, list_saves,
                            new_save_id, delete_save)
 from app.world.worldgen import generate_world
+from app.core import audio
 from app.battle.battle import (Battle, Army, terrain_note,
                                weather_note)
 from app.battle.unit_types import UNIT_TYPES
@@ -47,6 +48,11 @@ class App(tk.Tk):
         self.geometry("1180x720")
         self.minsize(880, 560)
         self.configure(bg=theme.BG)
+
+        # Sound. Never fatal: audio.init() returns False on a machine with no
+        # device and everything downstream of it no-ops, so the game plays
+        # exactly as it did before rather than refusing to start.
+        audio.init()
 
         self.world = None
         self.map_view = None
@@ -306,6 +312,10 @@ class App(tk.Tk):
             return
         self._paused = False
         self._current_screen = name
+        # Music follows the screen. play_music ignores a request for the track
+        # already playing, so moving between the menu and the map does not
+        # restart it -- only actually going to war changes the tune.
+        audio.play_music("battle" if name == "battle" else "map")
         view.tkraise()
         # tkraise() only changes stacking order, never keyboard focus -- an
         # Entry on the screen being left (the New Game screen's realm-name/
@@ -484,6 +494,7 @@ class App(tk.Tk):
         sky = weather_note(battle.weather_event)
         if sky:
             msg += f"  ({sky.capitalize()}.)"
+        audio.play("battle_start")
         self.battle_view.set_battle(battle, msg)
         self.show_screen("battle")
 

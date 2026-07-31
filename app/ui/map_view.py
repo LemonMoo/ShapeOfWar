@@ -22,6 +22,7 @@ import tkinter as tk
 import numpy as np
 from PIL import Image, ImageTk
 
+from app.core import audio
 from app.ui import theme
 from app.ui import widgets
 from app.world.world_map import Stance
@@ -3221,6 +3222,10 @@ class MapView(tk.Frame):
         self._turn_overlay_id = self.after(_TURN_OVERLAY_DELAY_MS,
                                             self._show_turn_overlay)
         self._turn_in_flight = True
+        # Played on the UI thread as the turn STARTS, not when it finishes:
+        # the sound is feedback that the button did something, and feedback
+        # that arrives after the work is not feedback.
+        audio.play("end_turn")
         threading.Thread(target=self._turn_worker, args=(self._turn_token,),
                          daemon=True).start()
 
@@ -4468,6 +4473,7 @@ class MapView(tk.Frame):
         player = self._player_faction()
         if player is None:
             return
+        audio.play("menu_open")
         build_menu.open_for(self.winfo_toplevel(), self.world, node, player,
                             on_change=self._after_build_menu_change)
 

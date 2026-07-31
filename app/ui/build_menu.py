@@ -22,6 +22,7 @@ Tk notes worth keeping, both hit while building this:
 """
 import tkinter as tk
 
+from app.core import audio
 from app.ui import theme
 from app.ui import widgets
 from app.world import buildings as B
@@ -532,6 +533,13 @@ class BuildMenuWindow(tk.Toplevel):
         else:
             message = construction.start_storage_building(
                 self.world, self.nation, self.node, option.building)
+        # "Started" or "you cannot" both come back as a message string, so the
+        # sound keys off whether a project actually appeared rather than off
+        # the button having been pressed.
+        audio.play("build_start" if option.building in
+                   {o.building for o in B.build_options(self.world, self.node,
+                                                        self.nation)
+                    if o.in_progress} else "denied")
         self._render()
         self._notice(message)
         if self.on_change:
