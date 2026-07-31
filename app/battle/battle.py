@@ -319,6 +319,31 @@ class Battle:
     # cover AVOID_DIST in one ring of nine cells.
     MOVE_CELL = 32
 
+    def enemy_within(self, unit, radius):
+        """Is any living enemy within `radius` of `unit`? Answered off the
+        per-tick movement grid, so a rider can ask it every tick while riding
+        through a formation without it costing a scan of the field (which
+        nearest_enemy is).
+
+        `radius` must not exceed MOVE_CELL, since only the one ring of cells
+        around the unit is searched -- anything further away can sit in a cell
+        this never looks at."""
+        grid = self._move_grid
+        if not grid:
+            return False
+        cell = self.MOVE_CELL
+        cx, cy = int(unit.x // cell), int(unit.y // cell)
+        side = unit.faction.side
+        r2 = radius * radius
+        for gx in (cx - 1, cx, cx + 1):
+            for gy in (cy - 1, cy, cy + 1):
+                for other in grid.get((gx, gy), ()):
+                    if other.alive and other.faction.side != side:
+                        dx, dy = other.x - unit.x, other.y - unit.y
+                        if dx * dx + dy * dy <= r2:
+                            return True
+        return False
+
     def _build_move_grid(self):
         """One spatial hash of every living unit, built before any unit moves,
         for movement.steer's neighbour lookup.
@@ -624,6 +649,7 @@ class Battle:
             if stance != orders.STANCE_CYCLE_CHARGE:
                 u._cycle_state = "run"
                 u._cycle_rally = None
+                u._cycle_heading = None
         if stance == orders.STANCE_SHIELD_WALL and taking:
             self.form_shield_wall(taking)
         return len(taking)

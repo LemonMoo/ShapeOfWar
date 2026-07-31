@@ -159,11 +159,14 @@ class Unit:
         self.move_point = None       # (x, y) to walk toward, ignoring choose_target
         self.manual_target = None    # a specific enemy Unit to fight, never re-scored
 
-        # Cavalry cycle-charge state machine: "run" (going in), "withdraw"
-        # (pulling out after an impact), see Unit._update_cycle_charge.
+        # Cavalry cycle-charge state machine: "run" (going in), "through"
+        # (riding out the far side after an impact), "wheel" (coming round to a
+        # fresh bearing). See Unit._update_cycle_charge.
         self._cycle_state = "run"
-        self._cycle_rally = None     # (x, y) it is pulling back to
+        self._cycle_rally = None     # (x, y) it is riding to before turning in
         self._cycle_timer = 0.0
+        self._cycle_heading = None   # heading frozen at impact -- see
+                                     # _begin_ride_through for why it is frozen
         # uids this unit has already opened on -- only allocated for a type that
         # actually has a first strike, so ordinary soldiers carry no extra set.
         self._struck = set() if t.get("first_strike") else None
@@ -534,7 +537,7 @@ class Unit:
                 # Ordered to cycle: don't stand and grind, pull out now and
                 # line up the next run.
                 if self.stance == orders.STANCE_CYCLE_CHARGE:
-                    self._begin_cycle_withdraw(battle)
+                    self._begin_ride_through(battle)
             if self.cleave and outcome == "hit":
                 self._cleave(battle, dmg)
             if outcome == "hit" and self.type.get("splash_radius"):
@@ -642,59 +645,132 @@ class Unit:
         self.facing = (dx / dist, dy / dist)
         return True
 
-    # --- cavalry: charge and regroup -----------------------------------------
-    # Riders are worst in a grind (melee_floor) and best out of a gallop, but
-    # left alone they bury themselves in the first line they touch and stay
-    # there fighting at a fraction of their worth. This makes them behave the
-    # way cavalry is supposed to: hit, pull clear, pick the fattest formation
-    # on the field, and come again.
+    # --- cavalry: ride through, wheel, come again -----------------------------
+    # Riders are worst in a grind (melee_floor) and best out of a gallop, so
+    # left alone they bury themselves in the first line they touch and fight at
+    # a fraction of their worth. The cycle is what makes horse worth having.
+    #
+    # The first version of it REVERSED at contact: the rally point was set
+    # straight back along the rider's own facing, so a squadron bounced off the
+    # same face of the same formation over and over, like a fly at a window.
+    # That is not what a charge is. A charge that stops in the enemy line is a
+    # failed charge; the drill was to ride THROUGH, reform behind, and come
+    # again from a direction the enemy is not already facing.
+    #
+    # Three states:
+    #   "through"  -- keep the impact heading and ride clear of the press. No
+    #                 fighting: stopping to trade blows is the exact failure
+    #                 this exists to prevent.
+    #   "wheel"    -- ride to a staging point on a NEW bearing to the next
+    #                 target, at least WHEEL_MIN_TURN off the one just used.
+    #   "run"      -- gallop in. Ordinary seek-and-hit behaviour.
     #
     # Returns True if it took over movement for this tick (caller returns).
-    CYCLE_WITHDRAW_SECONDS = 1.9   # how long they run before turning about
-    CYCLE_WITHDRAW_DIST = 150.0    # how far back the rally point is set
-    CYCLE_REENGAGE_SLACK = 12.0    # px of the rally point that counts as reached
+    RIDE_THROUGH_MIN_SECONDS = 0.30   # always clear the body it just struck
+    RIDE_THROUGH_MAX_SECONDS = 1.30   # ...but never ride off the field chasing
+                                      # a gap that is not there
+    RIDE_THROUGH_CLEAR = 30.0         # no enemy this close = out the far side.
+                                      # Must be <= Battle.MOVE_CELL (see
+                                      # Battle.enemy_within)
+    WHEEL_MIN_TURN = math.radians(75)  # how far round the new approach must be
+                                       # from the last one. Below ~60 the next
+                                       # run lands on the same face again
+    WHEEL_STAGING_DIST = 165.0        # how far out the turn is taken -- far
+                                      # enough to be at a gallop on arrival
+    WHEEL_MAX_SECONDS = 3.2           # safety: never wheel forever
+    CYCLE_REENGAGE_SLACK = 14.0       # px of the staging point that counts as
+                                      # reached
 
     def _update_cycle_charge(self, dt, battle):
-        if self._cycle_state == "withdraw":
+        state = self._cycle_state
+        if state == "through":
+            self._cycle_timer += dt
+            fx, fy = self._cycle_heading or self.facing
+            self.advancing = True      # still moving, so they shove clear of
+                                       # the scrum rather than sticking in it
+            move = self.effective_speed * dt
+            self.x += fx * move
+            self.y += fy * move
+            self.facing = (fx, fy)
+            # Momentum keeps building the whole way through and round, which is
+            # what makes the second charge land as hard as the first.
+            self.charge = min(1.0, self.charge
+                              + dt / self.type.get("charge_ramp", 1.2))
+            past_min = self._cycle_timer >= self.RIDE_THROUGH_MIN_SECONDS
+            clear = past_min and not battle.enemy_within(self, self.RIDE_THROUGH_CLEAR)
+            edge = not (self.radius < self.x < battle.width - self.radius
+                        and self.radius < self.y < battle.height - self.radius)
+            if clear or edge or self._cycle_timer >= self.RIDE_THROUGH_MAX_SECONDS:
+                self._begin_wheel(battle)
+            return True
+
+        if state == "wheel":
             self._cycle_timer -= dt
+            if self.target is None or not self.target.alive:
+                self._begin_wheel(battle)
+                if self._cycle_state != "wheel":
+                    return True
             rx, ry = self._cycle_rally or (self.x, self.y)
             dx, dy = rx - self.x, ry - self.y
             dist = math.hypot(dx, dy)
             if self._cycle_timer <= 0.0 or dist <= self.CYCLE_REENGAGE_SLACK:
-                # Turn about and pick the fattest enemy formation to hit next,
-                # rather than whatever happens to be nearest -- the whole point
-                # of pulling out is choosing where the next impact lands.
+                # Committed: don't re-shop a target mid-run, or the whole point
+                # of having chosen an angle to come in on is thrown away.
                 self._cycle_state = "run"
-                self.target = battle.densest_enemy(self) or battle.nearest_enemy(self)
-                self._retarget_cd = 1.2   # commit to it; don't re-shop mid-run
+                self._retarget_cd = 1.2
                 return False
             if dist > 1e-6:
-                self.advancing = True     # pulling out still counts as moving,
-                                          # so they shove clear of the scrum
+                self.advancing = True
                 move = self.effective_speed * dt
-                self.x += dx / dist * move
-                self.y += dy / dist * move
-                self.facing = (dx / dist, dy / dist)
-            # Momentum builds on the way out too: by the time they turn about
-            # they are already at a gallop, which is what makes the second
-            # charge land as hard as the first.
+                ndx, ndy = movement.steer(self, dx / dist, dy / dist, battle)
+                self.x += ndx * move
+                self.y += ndy * move
+                self.facing = (ndx, ndy)
             self.charge = min(1.0, self.charge
                               + dt / self.type.get("charge_ramp", 1.2))
             return True
         return False
 
-    def _begin_cycle_withdraw(self, battle):
-        """Called the instant a cycling rider lands an impact: set a rally point
-        back the way it came and disengage."""
-        self._cycle_state = "withdraw"
-        self._cycle_timer = self.CYCLE_WITHDRAW_SECONDS
-        # Straight back from whatever it just hit, not to a fixed home corner:
-        # that keeps the turnaround short and stops the whole squadron funnelling
-        # to one spot on the map.
-        fx, fy = self.facing
-        rx = self.x - fx * self.CYCLE_WITHDRAW_DIST
-        ry = self.y - fy * self.CYCLE_WITHDRAW_DIST
+    def _begin_ride_through(self, battle):
+        """Called the instant a cycling rider lands an impact: hold the heading
+        it struck on and ride on through the formation."""
+        self._cycle_state = "through"
+        self._cycle_timer = 0.0
+        # The heading is FROZEN here rather than read from self.facing each
+        # tick, because facing follows the current target -- and a rider whose
+        # heading tracked whatever it was next to would curve back into the
+        # press it is trying to leave, which is the bounce again wearing a
+        # different name.
+        self._cycle_heading = self.facing
+        self._cycle_rally = None
+
+    def _begin_wheel(self, battle):
+        """Out the far side: pick the next formation to hit and a bearing to
+        hit it from that is genuinely different from the one just used."""
+        self._cycle_state = "wheel"
+        self._cycle_timer = self.WHEEL_MAX_SECONDS
+        target = battle.densest_enemy(self) or battle.nearest_enemy(self)
+        self.target = target
+        if target is None:
+            self._cycle_state = "run"
+            return
+        # The bearing just used, as an angle. Approach bearings are measured
+        # FROM the target OUT to where the rider comes from, so "a different
+        # angle" is a rotation about the target rather than about the rider.
+        hx, hy = self._cycle_heading or self.facing
+        last = math.atan2(-hy, -hx)
+        here = math.atan2(self.y - target.y, self.x - target.x)
+        # Turn the short way round to the nearest bearing that is far enough
+        # off the last one: a squadron that always wheeled the same way would
+        # trade one predictable angle for another.
+        delta = (here - last + math.pi) % math.tau - math.pi
+        if abs(delta) >= self.WHEEL_MIN_TURN:
+            bearing = here           # riding through already put us elsewhere
+        else:
+            bearing = last + math.copysign(self.WHEEL_MIN_TURN, delta or 1.0)
         r = self.radius
+        rx = target.x + math.cos(bearing) * self.WHEEL_STAGING_DIST
+        ry = target.y + math.sin(bearing) * self.WHEEL_STAGING_DIST
         self._cycle_rally = (min(battle.width - r, max(r, rx)),
                              min(battle.height - r, max(r, ry)))
 
