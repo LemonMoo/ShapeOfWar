@@ -640,10 +640,91 @@ def _assign_starting_footholds(world, capitals, min_cells=MIN_FOOTHOLD_CELLS):
                 world.owner[y][x] = idx
 
 
-_LAKE_DEPTH = 0.016       # filled-minus-original elevation that counts as lake --
-                          # raised from 0.012 (a real, if moderate, cut to lake
-                          # extent/count: fewer shallow depressions clear the
-                          # bar, only genuinely deeper basins still flood)
+_LAKE_DEPTH = 0.022       # filled-minus-original elevation that counts as lake.
+                          # 0.012 -> 0.016 -> 0.022 over time; only genuinely
+                          # deep basins flood now, and the shallow sheets of
+                          # water that made a continent look waterlogged do
+                          # not. Small lakes are barely touched by this (basin
+                          # COUNT falls only ~10%) because a pond is deep for
+                          # its size -- it is the broad shallow ones that go.
+
+# How much of a continent one lake may swallow.
+#
+# Reported from a screenshot of a large world: not that lakes existed, but
+# that there were so many ENORMOUS ones that the land stopped reading as
+# whole. Measured across three seeds, lakes covered 9-15% of all land, with
+# three to six separate basins each over 1% of it -- one was 5.4% of the
+# world's land on its own.
+#
+# _LAKE_DEPTH cannot fix that, because it is a single global threshold: raise
+# it and every pond disappears along with the inland seas, which loses the
+# small lakes that are pure character. The problem is not lake DEPTH, it is
+# the size of individual BASINS, so that is what this caps.
+#
+# One great lake survives at whatever size the terrain gave it. That was
+# explicit in the report -- a single huge lake is a landmark, and a world with
+# a Caspian in it is more interesting than one without. Every other oversized
+# basin recedes to its deepest part, which is also what actually happens to a
+# lake that stops being fed.
+_LAKE_MAX_SHARE = 0.005   # of total land area, per basin
+_GREAT_LAKE_LIMIT = 1     # basins allowed to exceed it, largest first
+
+
+def _lake_basins(lake):
+    """`lake` split into 8-connected components, largest first."""
+    from collections import deque
+    remaining = set(lake)
+    out = []
+    while remaining:
+        start = remaining.pop()
+        queue = deque([start])
+        component = [start]
+        while queue:
+            x, y = queue.popleft()
+            for dx, dy in _NEIGH8:
+                cell = (x + dx, y + dy)
+                if cell in remaining:
+                    remaining.discard(cell)
+                    queue.append(cell)
+                    component.append(cell)
+        out.append(component)
+    out.sort(key=len, reverse=True)
+    return out
+
+
+def _trim_oversized_lakes(lake, filled, H, land_area):
+    """Shrink every basin past the first `_GREAT_LAKE_LIMIT` down to
+    `_LAKE_MAX_SHARE` of the land.
+
+    A lake recedes to its DEEPEST cells, not to an arbitrary subset -- that is
+    both what a drying lake really does and the only way to get a coherent
+    smaller lake rather than a scattering of puddles where a sea used to be.
+    Keeping the largest connected component afterwards is the second half of
+    that: the deepest cells of a long, lumpy basin can still come out as two
+    separate pools, and one lake reading as two is exactly the fractured look
+    this is meant to fix.
+
+    Cells dropped from the lake simply become land again. Nothing downstream
+    needs telling: the filled DEM is unchanged, so rivers still route across
+    the old basin exactly as they did, and a drained basin is a low plain --
+    which is what most of them are in the real world.
+    """
+    cap = max(1, int(land_area * _LAKE_MAX_SHARE))
+    basins = _lake_basins(lake)
+    trimmed = 0
+    for basin in basins[_GREAT_LAKE_LIMIT:]:
+        if len(basin) <= cap:
+            continue
+        basin.sort(key=lambda c: filled[c[1]][c[0]] - H[c[1]][c[0]],
+                   reverse=True)
+        keep = set(basin[:cap])
+        pools = _lake_basins(keep)
+        keep = set(pools[0]) if pools else set()
+        for cell in basin:
+            if cell not in keep:
+                lake.discard(cell)
+        trimmed += 1
+    return trimmed
 
 
 def _generate_hydrology(world, land, rng):
@@ -681,10 +762,18 @@ def _generate_hydrology(world, land, rng):
 
     # 2. lakes: land that had to be raised noticeably to drain sits underwater.
     lake = set()
+    land_area = 0
     for y in range(h):
         for x in range(w):
-            if land[y][x] and filled[y][x] - H[y][x] > _LAKE_DEPTH:
+            if not land[y][x]:
+                continue
+            land_area += 1
+            if filled[y][x] - H[y][x] > _LAKE_DEPTH:
                 lake.add((x, y))
+    # ...and no continent gets more than one inland sea. See
+    # _trim_oversized_lakes: the depth threshold above is global and cannot
+    # tell a landmark apart from a flood.
+    _trim_oversized_lakes(lake, filled, H, land_area)
 
     # 3a. D8 flow direction on the filled DEM (steepest descent).
     land_cells = [(x, y) for y in range(h) for x in range(w) if land[y][x]]
