@@ -19,7 +19,7 @@ from app.core.events import bus
 from app.core.save import (save_game, load_game, has_save, list_saves,
                            new_save_id, delete_save)
 from app.world.worldgen import generate_world
-from app.battle.battle import Battle, Army
+from app.battle.battle import Battle, Army, terrain_note
 from app.battle.unit_types import UNIT_TYPES
 
 _GAME_SCREENS = ("map", "battle")
@@ -440,10 +440,6 @@ class App(tk.Tk):
         w = max(vw, 900)
         h = max(vh, 600)
         battle = Battle(w, h)
-        a_army, a_comp = self._army_for(attacker, 0)
-        d_army, d_comp = self._army_for(defender, 1)
-        battle.deploy(a_army, a_comp, 0)
-        battle.deploy(d_army, d_comp, 1, strength_mult=defender_strength_mult)
 
         # A specific region is normally already chosen by the map's
         # attack-target picker; fall back to a random frontline region (if
@@ -451,6 +447,11 @@ class App(tk.Tk):
         # sandbox worlds with no player nation). Never hit for a wildland
         # claim battle — stage_wildland_battle always supplies `region`, and
         # a _WildlandDefender isn't in world.factions for .index() to find.
+        #
+        # Resolved BEFORE deploying: the ground a battle is fought on is baked
+        # into each unit as it spawns (Battle.set_terrain), so it has to be
+        # known first. It used to be worked out after, when nothing downstream
+        # of it cared.
         if region is None:
             import random
             from app.world.territory import bordering_regions
@@ -458,12 +459,21 @@ class App(tk.Tk):
             defender_idx = self.world.factions.index(defender)
             frontier = bordering_regions(self.world, attacker_idx, defender_idx)
             region = random.choice(frontier) if frontier else None
+        battle.set_terrain(getattr(region, "dominant_biome", None))
+
+        a_army, a_comp = self._army_for(attacker, 0)
+        d_army, d_comp = self._army_for(defender, 1)
+        battle.deploy(a_army, a_comp, 0)
+        battle.deploy(d_army, d_comp, 1, strength_mult=defender_strength_mult)
         self._battle_context = {"attacker": attacker, "defender": defender,
                                 "region": region, "claim_project": claim_project,
                                 "armies": (a_army, d_army)}
 
         msg = (f"{attacker.name} marches on {region.name}, held by {defender.name}."
                if region else f"{attacker.name} marches on {defender.name}.")
+        note = terrain_note(battle.biome)
+        if note:
+            msg += f"  ({battle.biome.capitalize()}: {note}.)"
         self.battle_view.set_battle(battle, msg)
         self.show_screen("battle")
 

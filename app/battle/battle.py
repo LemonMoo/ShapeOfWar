@@ -96,6 +96,86 @@ class Army:
         return [u for u in self.units if u.alive]
 
 
+# --- Terrain in battle (biome overhaul, phase E) -----------------------------
+# Where a battle is fought has never mattered here: the sim had no terrain
+# hooks of any kind, so a fight in a marsh resolved exactly like one on open
+# plains. Three effects, chosen because each is a real, legible thing terrain
+# does to a fight rather than an abstract modifier:
+#
+#   speed    -- broken, wet or steep ground slows everyone equally. Armies
+#               have gone around marshland for as long as there have been
+#               armies.
+#   defender -- high ground favours whoever already holds it. This applies to
+#               the DEFENDING side only, which is the whole point of it.
+#   ranged   -- cover shortens sightlines. Bows need to see what they are
+#               shooting at, and a jungle is where they stop being able to.
+#
+# Applied ONCE at deploy time to each unit's own attributes rather than
+# per-tick in update(). The battle sim runs to a 16.7ms frame budget (see
+# battle_view._EQUIPMENT_DETAIL_MAX_UNITS) and a per-tick terrain lookup for
+# every soldier would spend it for no gain -- terrain does not change mid
+# battle.
+#
+# Deliberately modest. Species balance here is delicate and hard-won (see
+# HANDOFF S4 on how many richer order-AI rules measured WORSE), so these are
+# sized to colour a fight rather than decide it, and are meant to be judged
+# in play.
+BATTLE_TERRAIN = {
+    "swamp":    {"speed": 0.75, "defender": 1.00, "ranged": 0.85},
+    "jungle":   {"speed": 0.80, "defender": 1.05, "ranged": 0.70},
+    "forest":   {"speed": 0.90, "defender": 1.05, "ranged": 0.75},
+    "taiga":    {"speed": 0.90, "defender": 1.05, "ranged": 0.85},
+    "mountain": {"speed": 0.75, "defender": 1.20, "ranged": 1.00},
+    "highland": {"speed": 0.90, "defender": 1.15, "ranged": 1.00},
+    "tundra":   {"speed": 0.95, "defender": 1.00, "ranged": 1.00},
+    "desert":   {"speed": 0.95, "defender": 1.00, "ranged": 1.00},
+    "coastal":  {"speed": 1.00, "defender": 1.00, "ranged": 1.00},
+    "plains":   {"speed": 1.00, "defender": 1.00, "ranged": 1.00},
+    "steppe":   {"speed": 1.00, "defender": 1.00, "ranged": 1.00},
+    "savannah": {"speed": 1.00, "defender": 1.00, "ranged": 1.00},
+}
+NEUTRAL_TERRAIN = {"speed": 1.0, "defender": 1.0, "ranged": 1.0}
+
+# Which side is defending. stage_battle deploys the attacker as side 0 and
+# the defender as side 1, and a wildland garrison is likewise side 1 -- it is
+# being attacked in its own country, which is exactly the case high ground is
+# supposed to reward.
+DEFENDER_SIDE = 1
+
+
+# What each terrain effect does, said plainly, for the banner over the battle.
+# A modifier the player cannot see is a modifier that does not exist -- and
+# the whole point of terrain is that you look at where the fight is happening
+# and think differently about it before it starts.
+_TERRAIN_NOTES = [
+    ("speed", lambda v: "broken ground slows both sides" if v < 0.85
+     else "heavy going underfoot" if v < 0.95
+     else "the going is a little slow"),
+    ("ranged", lambda v: "thick cover blinds the archers" if v < 0.8
+     else "cover spoils the shooting"),
+    ("defender", lambda v: "the high ground strongly favours the defender"
+     if v > 1.1 else "the ground favours the defender"),
+]
+
+
+def terrain_note(biome):
+    """One short clause describing how this ground changes the fight, or ""
+    for open country that changes nothing."""
+    profile = BATTLE_TERRAIN.get(biome)
+    if not profile:
+        return ""
+    parts = [text(profile[key]) for key, text in _TERRAIN_NOTES
+             if profile[key] != 1.0]
+    return "; ".join(parts)
+
+
+def terrain_profile(biome):
+    """The three multipliers for a battle fought on `biome`. Unknown or
+    missing terrain is neutral, so a headless sim or an old save that names
+    no biome fights exactly as it always did."""
+    return dict(BATTLE_TERRAIN.get(biome) or NEUTRAL_TERRAIN)
+
+
 class Battle:
     def __init__(self, width, height):
         self.width = width
@@ -114,6 +194,10 @@ class Battle:
         # sides should be ordered by the same AI, or the numbers mean nothing.
         self.player_side = None
         self._order_ai_cd = 0.0
+        # Where this is being fought (phase E). Set by set_terrain before
+        # deploy; neutral until then, so nothing that never calls it changes.
+        self.biome = None
+        self.terrain = dict(NEUTRAL_TERRAIN)
 
     def spawn_projectile(self, sx, sy, tx, ty, color):
         self.projectiles.append(Projectile(sx, sy, tx, ty, color))
@@ -136,6 +220,30 @@ class Battle:
     # midline/enemy, i.e. further forward.
     _DEPLOY_TIER = {"archer": 0, "infantry": 2}
 
+    def set_terrain(self, biome):
+        """Say what ground this battle is fought on. Must be called BEFORE
+        deploy -- the effects are baked into each unit as it is created, so
+        setting it afterwards would colour nothing."""
+        self.biome = biome
+        self.terrain = terrain_profile(biome)
+
+    def _apply_terrain(self, unit, side):
+        """Bake this battle's ground into one freshly-created unit.
+
+        Ranged reach is scaled rather than ranged damage: cover is about not
+        being able to SEE what you are shooting at, and shortening the bow
+        line is what actually changes how a wood is fought -- archers have to
+        come close enough to be charged. Weakening their damage instead would
+        read as bows mysteriously bouncing off."""
+        t = self.terrain
+        if t["speed"] != 1.0:
+            unit.speed *= t["speed"]
+        if t["ranged"] != 1.0 and getattr(unit, "_ranged", False):
+            unit._range *= t["ranged"]
+        if side == DEFENDER_SIDE and t["defender"] != 1.0:
+            unit.max_hp *= t["defender"]
+            unit.hp = unit.max_hp
+
     def deploy(self, army, composition, side, strength_mult=1.0, with_commander=True):
         """Place an army in a grid along one side from a composition dict
         ``{unit_type: count}``. ``strength_mult`` scales every spawned
@@ -156,8 +264,10 @@ class Battle:
             jitter = lambda: (random.random() - 0.5) * 8
             x = x0 + (col * 16 if side == 0 else -col * 16) + jitter()
             y = self.height / 2 + (row - rows / 2) * 16 + jitter()
-            army.units.append(Unit(type_key, army, x, y, strength_mult,
-                                   species=getattr(army, "species", None)))
+            unit = Unit(type_key, army, x, y, strength_mult,
+                        species=getattr(army, "species", None))
+            self._apply_terrain(unit, side)
+            army.units.append(unit)
 
         if with_commander:
             # Behind his own formation, not in front of it: he reaches the
@@ -168,6 +278,7 @@ class Battle:
             back = x0 - 40 if side == 0 else x0 + 40
             cmd = Unit("commander", army, back, self.height / 2, strength_mult,
                        species=getattr(army, "species", None))
+            self._apply_terrain(cmd, side)
             cmd.is_commander = True
             army.units.append(cmd)
             army.commander = cmd
