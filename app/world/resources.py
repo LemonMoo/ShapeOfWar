@@ -194,9 +194,9 @@ _CATEGORY_PROPERTY_DEFAULTS = {
                            "living": False, "stackable": True,  "luxury": False, "tradable": True},
     "Mining":              {"edible": False, "refined": False, "renewable": False,
                            "living": False, "stackable": True,  "luxury": False, "tradable": True},
-    # Renewable like Forestry (never depletes -- see _node_fish_yield), but
-    # not edible raw the same way a Crop is: it has to be Smoked first,
-    # same as Livestock needs slaughtering into Meat.
+    # Renewable like Forestry (never depletes -- see _node_fish_yield).
+    # Edible raw is set per-resource below rather than here, since the
+    # category is a catch-all for anything landed from water.
     "Fishing":             {"edible": False, "refined": False, "renewable": True,
                            "living": False, "stackable": True,  "luxury": False, "tradable": True},
     "Food Products":       {"edible": True,  "refined": True,  "renewable": True,
@@ -214,6 +214,24 @@ _CATEGORY_PROPERTY_DEFAULTS = {
 
 _PROPERTY_OVERRIDES = {
     "Salt":    {"edible": True},     # the one edible Mining resource
+    # A landed fish IS food. This was False, by analogy to Livestock needing
+    # slaughtering into Meat -- but that analogy breaks: a live sheep isn't
+    # food yet, whereas a fish in the basket is, and historically curing
+    # existed to make a catch STORABLE and TRADEABLE, not edible. Coastal
+    # communities ate theirs fresh.
+    #
+    # It was also the exact bug already found and fixed once for raw Crops
+    # (see _RAW_FOOD_CROPS's note): a Village has no smokehouse, so it could
+    # never turn its own catch into Smoked Fish, and being inedible raw it
+    # could not eat it either -- a fishing village watched its catch rot at
+    # spoil_rate 0.35 while its people went hungry, and a region with no
+    # settlement at all had no path whatsoever. Measured before this fix:
+    # Fish + Smoked Fish were ~50% of EVERYTHING destroyed world-wide.
+    #
+    # The high spoil rate stays, so the pressure to smoke a surplus catch
+    # (and to build the Preserving House that does it well) is unchanged --
+    # fresh fish simply feeds the village that caught it first.
+    "Fish":    {"edible": True},
     "Cotton":  {"edible": False},    # a fiber, not a food
     "Fodder":  {"edible": False},    # animal feed, not human food
     "Bricks":  {"renewable": False},  # fired from Clay -- a Mining (non-renewable) input
@@ -1853,6 +1871,14 @@ def _river_cell_flow(world):
     return flow_by_cell
 
 
+# What fraction of its geographic fish yield a SETTLEMENT actually lands.
+# Villages get the Phase 14 labour model instead (their crews are real hands
+# taken off other work); settlements have no labour model, so without a
+# number here they landed 100% of their yield every turn forever. See
+# _produce_fishing for the measurement that produced this.
+SETTLEMENT_FISHING_SHARE = 0.15
+
+
 def _node_fish_yield(world, pos):
     """How much raw Fish a settlement/village at `pos` produces per turn --
     a short BFS (same 4-directional local-search shape as
@@ -1914,12 +1940,29 @@ def _produce_fishing(world):
             continue
         # A village's boats are crewed by the same hands that work its fields
         # and woods (Phase 14): the catch is whatever share of the workforce
-        # fishing actually got. Settlements have no labor model -- they are
-        # consumers, and their fishing fleet isn't a village's workforce
-        # question -- so they land the full yield, unchanged.
+        # fishing actually got.
         if not hasattr(node, "kind"):
             factors, _raw = village_labor_state(world, node, season)
             yield_amt = yield_amt * factors.get("fishing", 0.0)
+            if yield_amt <= 0:
+                continue
+        else:
+            # A settlement has no labour model at all -- it is a consumer, and
+            # its fishing fleet isn't a workforce question. That exemption was
+            # correct in principle and badly wrong in magnitude: it meant a
+            # coastal settlement landed its FULL geographic yield every turn,
+            # forever, throttled by nothing. Measured on a 14-faction world,
+            # settlements alone landed 1,210 Fish/turn against a total food
+            # demand of 181/turn across every node in the world -- Fish and
+            # Smoked Fish together were ~50% of everything destroyed anywhere.
+            #
+            # A town on a river is not a fishing fleet; the boats that feed a
+            # city are a side trade, and the real fishing economy belongs to
+            # the villages that do nothing else (which is what the labour
+            # model above already expresses properly). Scaled down rather than
+            # removed, so a coastal settlement still puts fish on its own
+            # table -- see SETTLEMENT_FISHING_SHARE.
+            yield_amt = yield_amt * SETTLEMENT_FISHING_SHARE
             if yield_amt <= 0:
                 continue
         if not hasattr(node, "resources"):
@@ -2701,11 +2744,22 @@ _FOOD_PRODUCTS = [name for name, spec in RESOURCES.items()
 # gap for good, on top of the STARVATION_GRACE_TURNS buffer above.
 _RAW_FOOD_CROPS = [name for name, spec in RESOURCES.items()
                   if spec["category"] == "Crops" and spec["edible"]]
+# Raw Fish, for the same reason raw Crops are here -- see Fish's own note
+# in _PROPERTY_OVERRIDES for why a fishing village could previously neither
+# smoke nor eat its own catch.
+#
+# Note this is a CATEGORY filter, not simply "everything flagged edible".
+# That flag means "consumed by mouth", which is broader than "can keep a
+# population alive": Salt (a seasoning), Wine and Beer all carry it too,
+# and sweeping them in would let a village subsist on salt, or double-count
+# Wine as both food and Luxury demand. Staples only.
+_RAW_FOOD_FISH = [name for name, spec in RESOURCES.items()
+                 if spec["category"] == "Fishing" and spec["edible"]]
 # The actual pool consumption/local-logistics/trade-safety-reserve code
 # draws "Food" from -- Food Products first in priority (see
 # _LOCAL_SHIPMENT_PRIORITY) since that's still the intended normal path,
-# raw Crops as a real fallback, not a last-resort hack.
-_FOOD_SOURCES = _FOOD_PRODUCTS + _RAW_FOOD_CROPS
+# raw Crops and raw Fish as a real fallback, not a last-resort hack.
+_FOOD_SOURCES = _FOOD_PRODUCTS + _RAW_FOOD_CROPS + _RAW_FOOD_FISH
 # Every Luxury Good is fully interchangeable for satisfying "luxury
 # demand" -- a settlement with Wine but no Jewelry is just as well
 # provided for as one with the reverse -- same pooled-consumption
@@ -3246,6 +3300,22 @@ STORAGE_POOLS = ("household", "durable", "other", "feed")
 # more attractive than hoarding them. The vault is left alone: "other" is
 # almost entirely Gold at bulk 0.02, so its space number was never really an
 # item count to begin with.
+# Phase 5 REVISITED these numbers and deliberately left them alone. The
+# concern on the list was that space is allocated to pools with nothing to
+# hold -- `other` sat at 2-4% of capacity and `feed` at 8-21% while
+# `durable` p90 was 0.91. That was true when it was written, and the fix
+# turned out to belong on the supply side, not here: once the Timber sink
+# (TIMBER_UPKEEP_PER_CAPITA), the soft throttle floor
+# (STORAGE_THROTTLE_FLOOR) and the settlement fishing cut
+# (SETTLEMENT_FISHING_SHARE) landed, durable p90 fell to 0.76 and `other`
+# reached capacity in 0 of 20,121 sampled node-turns.
+#
+# So there is no longer a binding constraint to relieve. Shrinking `other`
+# or `feed` now would only introduce one, and moving that space to `durable`
+# would work directly against the Timber sink by letting more surplus pile
+# up before the throttle engages. Re-measure with dev/storage_audit.py
+# before touching these -- an over-allocated pool costs nothing but a
+# slightly less exciting Vault.
 STORAGE_POOL_BASE = {
     "city":    {"household": 2100, "durable": 2000, "other": 400, "feed": 200},
     "castle":  {"household": 1300, "durable": 1350, "other": 300, "feed": 200},
@@ -3422,7 +3492,22 @@ OVERFLOW_MIN_RATE = 0.10            # even a spoil_rate-0 good leaks away some
 # rather than adding to it, and throttling them would make a full node worse
 # by stalling the one process that was draining it.
 STORAGE_THROTTLE_START = 0.85   # fraction full at which output starts tapering
-STORAGE_THROTTLE_FLOOR = 0.0    # multiplier once at/over capacity
+# Phase 5 of the economy pass: this was 0.0 -- a hard cliff, where a node
+# pinned at capacity produced literally NOTHING of that class, and stayed
+# there until something else drained it. A small floor keeps a trickle
+# alive instead, so a full node is throttled rather than switched off, and
+# work resumes the moment any room appears rather than waiting a full turn
+# for the next production tick to notice.
+#
+# Measured (dev/storage_audit.py, 3 trials per configuration against one
+# FIXED probe world -- see TIMBER_UPKEEP_PER_CAPITA on why several trials
+# are needed): against a 0.0 baseline, 0.15 cut household throttle-loss
+# from ~4.1% to ~2.8% and lifted delivered production ~3-4% with total
+# destruction flat (within trial noise). 0.25 was also tried and pushed
+# durable production ~9% higher but started adding measurable overflow
+# back, which is the exact failure the throttle was built to remove -- so
+# the conservative value is the one kept.
+STORAGE_THROTTLE_FLOOR = 0.15   # multiplier once at/over capacity
 
 # Throttling on a node's TOTAL fullness was tried first and measurably starved
 # the map: durable Mining/Forestry goods are 88-90% of everything in storage
