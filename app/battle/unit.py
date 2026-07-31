@@ -148,7 +148,9 @@ class Unit:
         self.stance = orders.STANCE_ADVANCE
         self.fire_at_will = True     # ranged only; False = holding, building a volley
         self.volley = 0.0            # 0..1 draw strength built up while holding fire
-        self.wall_slot = None        # (x, y) this unit's place in a shield wall
+        self.formation_slot = None   # (x, y) this unit's assigned place in a
+                                     # formation -- a shield wall or a firing
+                                     # line (see orders.SLOTTED_STANCES)
 
         # --- direct control (right-click move/attack during a live battle,
         # see BattleView) -- generic on any Unit, but in practice only ever
@@ -236,14 +238,14 @@ class Unit:
         """Extra block chance from standing in a CONTIGUOUS shield wall -- see
         orders.WALL_COHESION_*. Counted from live neighbours each time it is
         read, so a wall that gets broken up stops protecting immediately."""
-        if self.stance != orders.STANCE_SHIELD_WALL or self.wall_slot is None:
+        if self.stance != orders.STANCE_SHIELD_WALL or self.formation_slot is None:
             return 0.0
         link2 = orders.WALL_LINK_DIST * orders.WALL_LINK_DIST
         n = 0
         for other in self.faction.units:
             if (other is self or not other.alive
                     or other.stance != orders.STANCE_SHIELD_WALL
-                    or other.wall_slot is None):
+                    or other.formation_slot is None):
                 continue
             dx, dy = other.x - self.x, other.y - self.y
             if dx * dx + dy * dy <= link2:
@@ -380,13 +382,17 @@ class Unit:
         if self.target is None and self.move_point is None:
             return
 
-        # Dressing the line: a unit given Shield Wall walks to its assigned slot
-        # first and only then stands. Until it is in place it is not yet a wall.
-        if self.stance == orders.STANCE_SHIELD_WALL and self.wall_slot is not None:
-            sx, sy = self.wall_slot
+        # Dressing the line: a unit given a slotted stance (a shield wall or a
+        # firing line) walks to its assigned slot first and only then stands.
+        # Until it is in place it is not yet a formation.
+        if self.stance in orders.SLOTTED_STANCES and self.formation_slot is not None:
+            sx, sy = self.formation_slot
             sdx, sdy = sx - self.x, sy - self.y
             sdist = math.hypot(sdx, sdy)
-            if sdist > orders.WALL_SLOT_TOLERANCE:
+            tolerance = (orders.WALL_SLOT_TOLERANCE
+                         if self.stance == orders.STANCE_SHIELD_WALL
+                         else orders.FIRE_SLOT_TOLERANCE)
+            if sdist > tolerance:
                 self.advancing = True
                 move = min(sdist, self.effective_speed * dt)
                 # Steered like any other movement: dressing a line is exactly

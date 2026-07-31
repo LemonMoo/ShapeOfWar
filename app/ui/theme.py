@@ -51,6 +51,7 @@ ORDER_CUE_HOLD = "#7fd6ff"
 ORDER_CUE_CHARGE = "#ff9b57"
 ORDER_CUE_SHIELD_WALL = "#9fe0a8"
 ORDER_CUE_CYCLE_CHARGE = "#ffd166"
+ORDER_CUE_FIRING_LINE = "#d3a6f2"
 
 # Colors for relationship links / labels, keyed by stance.
 STANCE_COLOR = {

@@ -31,14 +31,17 @@ STANCE_ADVANCE = "advance"          # default: the behaviour that predates order
 STANCE_HOLD = "hold"                # stand your ground, braced
 STANCE_CHARGE = "charge"            # press forward hard
 STANCE_SHIELD_WALL = "shield_wall"  # infantry only -- dress a line, shields up
-STANCE_CYCLE_CHARGE = "cycle_charge"  # cavalry only -- hit, withdraw, hit again
+STANCE_CYCLE_CHARGE = "cycle_charge"  # cavalry only -- hit, ride through, again
+STANCE_FIRING_LINE = "firing_line"  # ranged only -- dress a shooting line and
+                                    # shoot from it, rather than each bowman
+                                    # walking at whoever he personally picked
 
 # Which stances a given unit type may be given. Everything gets the two basic
 # ones; the specialised stances are the reason each arm plays differently.
 STANCES_FOR_TYPE = {
     "infantry": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE, STANCE_SHIELD_WALL),
     "cavalry": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE, STANCE_CYCLE_CHARGE),
-    "archer": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE),
+    "archer": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE, STANCE_FIRING_LINE),
     # No shield to raise and no horse to wheel: an Assassin only ever advances,
     # holds, or runs in.
     "assassin": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE),
@@ -52,7 +55,7 @@ STANCES_FOR_TYPE = {
     "shieldwarden": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE, STANCE_SHIELD_WALL),
     "berserker": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE),
     "bladesinger": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE),
-    "sapper": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE),
+    "sapper": (STANCE_ADVANCE, STANCE_HOLD, STANCE_CHARGE, STANCE_FIRING_LINE),
 }
 
 STANCE_LABEL = {
@@ -61,11 +64,18 @@ STANCE_LABEL = {
     STANCE_CHARGE: "Charge",
     STANCE_SHIELD_WALL: "Shield Wall",
     STANCE_CYCLE_CHARGE: "Charge & Regroup",
+    STANCE_FIRING_LINE: "Firing Line",
 }
 
 # Stances in which a unit refuses to walk toward a distant enemy. It still
 # fights whatever comes within reach -- holding ground is not passivity.
-HOLDING_STANCES = (STANCE_HOLD, STANCE_SHIELD_WALL)
+HOLDING_STANCES = (STANCE_HOLD, STANCE_SHIELD_WALL, STANCE_FIRING_LINE)
+
+# Stances that put a unit in an assigned place in a formation (Unit.
+# formation_slot). Both are laid out by the GROUP -- no unit can work out its
+# own place in a line -- so both are formed by a Battle method at the moment
+# the order is issued, and both clear the slot when the order is replaced.
+SLOTTED_STANCES = (STANCE_SHIELD_WALL, STANCE_FIRING_LINE)
 
 # --- stance modifiers ---------------------------------------------------------
 # Multipliers on the unit's own numbers. `block_add` is an addend on block
@@ -87,6 +97,11 @@ STANCE_MODS = {
     STANCE_CYCLE_CHARGE: {
         "speed_mult": 1.15,
     },
+    # Deliberately EMPTY. A firing line changes where bowmen stand, not how
+    # hard they shoot: this whole pass is movement, and quietly hanging a
+    # damage or accuracy bonus off it would re-fit the archer tuning that
+    # HANDOFF S26 is still an open question about.
+    STANCE_FIRING_LINE: {},
 }
 
 # A braced unit takes this fraction of a cavalry charge's impact damage (and of
@@ -111,6 +126,30 @@ WALL_SLOT_TOLERANCE = 4.0  # how close counts as "in position"
 WALL_LINK_DIST = 20.0
 WALL_COHESION_PER_NEIGHBOUR = 0.06
 WALL_COHESION_MAX = 0.12
+
+# --- firing line ---------------------------------------------------------------
+# Wider spacing and a much wider frontage than a shield wall, because the two
+# formations are for opposite things: a wall is a solid face that stops
+# something, a shooting line is frontage -- every bow that can see the enemy is
+# a bow that counts, and men packed shoulder to shoulder mostly block each
+# other. Ranks are staggered by half a spacing so a second-rank bowman is
+# looking down a gap rather than at the back of the man in front.
+FIRE_SPACING = 21.0
+FIRE_MAX_RANK = 26        # bows per rank before another forms behind
+FIRE_RANK_GAP = 19.0
+FIRE_SLOT_TOLERANCE = 5.0
+# How far the line may drift from its slots before the order AI dresses it
+# again -- a line that has been shoved about by a charge should re-form, but
+# re-forming every decision tick would have it permanently walking.
+FIRE_REFORM_DIST = 45.0
+# Hysteresis on entering/leaving the line. Without it archers flapped between
+# "in range, form up" and "out of range, advance" every decision tick as the
+# enemy milled about at the edge of their reach -- measured, a line formed and
+# dissolved three times in twenty-five seconds and spent the whole fight
+# walking. A formed line stays formed until the enemy is this much past its
+# reach, which is also how a real line behaves: it does not dissolve because
+# the enemy stepped back a pace.
+FIRE_HOLD_SLACK = 1.18
 
 # --- volley (fire discipline) -------------------------------------------------
 # Holding fire is not just "stop shooting" -- archers who hold draw and wait,

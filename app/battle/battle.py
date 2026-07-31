@@ -644,14 +644,17 @@ class Battle:
             # Unit.move_point/manual_target).
             u.move_point = None
             u.manual_target = None
-            if stance != orders.STANCE_SHIELD_WALL:
-                u.wall_slot = None
+            if stance not in orders.SLOTTED_STANCES:
+                u.formation_slot = None
             if stance != orders.STANCE_CYCLE_CHARGE:
                 u._cycle_state = "run"
                 u._cycle_rally = None
                 u._cycle_heading = None
-        if stance == orders.STANCE_SHIELD_WALL and taking:
-            self.form_shield_wall(taking)
+        if taking:
+            if stance == orders.STANCE_SHIELD_WALL:
+                self.form_shield_wall(taking)
+            elif stance == orders.STANCE_FIRING_LINE:
+                self.form_firing_line(taking)
         return len(taking)
 
     def issue_fire_discipline(self, units, fire_at_will):
@@ -664,14 +667,23 @@ class Battle:
                 u.volley = 0.0    # start the draw from cold
         return len(ranged)
 
-    def form_shield_wall(self, units):
-        """Lay out a line of slots facing the enemy and assign one per unit.
+    def _lay_out_line(self, units, spacing, max_rank, rank_gap, stagger=0.0):
+        """Lay out a line of slots facing the enemy and assign one per unit --
+        the shared geometry behind both formations (see form_shield_wall and
+        form_firing_line, which differ only in how tightly packed and how wide
+        the resulting line is).
 
         The line runs PERPENDICULAR to the direction of the enemy, centred on
-        the group's own position, so ordering a wall dresses the troops roughly
-        where they already stand rather than marching them somewhere else --
-        a wall that first walks 200px to form up would be broken before it
-        existed."""
+        the group's own position, so ordering a formation dresses the troops
+        roughly where they already stand rather than marching them somewhere
+        else -- a wall that first walks 200px to form up would be broken before
+        it existed.
+
+        `stagger` offsets each successive rank sideways by that fraction of a
+        spacing, so a man in the second rank stands in a gap rather than
+        directly behind the back of the man in front. It is worth nothing to a
+        shield wall (a wall WANTS a solid face) and everything to a shooting
+        line."""
         alive = [u for u in units if u.alive]
         if not alive:
             return
@@ -699,17 +711,33 @@ class Battle:
         # they already are -- otherwise the assignment crosses everyone over
         # each other and the formation tangles itself forming up.
         alive.sort(key=lambda u: (u.x - cx) * px + (u.y - cy) * py)
-        per_rank = min(orders.WALL_MAX_RANK, len(alive))
+        per_rank = min(max_rank, len(alive))
         for i, u in enumerate(alive):
             rank, col = divmod(i, per_rank)
             span = min(per_rank, len(alive) - rank * per_rank)
-            offset = (col - (span - 1) / 2.0) * orders.WALL_SPACING
-            back = rank * orders.WALL_RANK_GAP
+            offset = ((col - (span - 1) / 2.0) + (rank % 2) * stagger) * spacing
+            back = rank * rank_gap
             sx = cx + px * offset - fx * back
             sy = cy + py * offset - fy * back
             r = u.radius
-            u.wall_slot = (min(self.width - r, max(r, sx)),
-                           min(self.height - r, max(r, sy)))
+            u.formation_slot = (min(self.width - r, max(r, sx)),
+                                min(self.height - r, max(r, sy)))
+
+    def form_shield_wall(self, units):
+        """Dress a shield wall: tight frontage, solid face, no stagger."""
+        self._lay_out_line(units, orders.WALL_SPACING, orders.WALL_MAX_RANK,
+                           orders.WALL_RANK_GAP)
+
+    def form_firing_line(self, units):
+        """Dress a shooting line: wide frontage, loose spacing, ranks staggered
+        so the second rank is looking down a gap.
+
+        Massed shooting is a line phenomenon -- what makes it count is
+        frontage, and a clump of archers wastes most of its own while blocking
+        its own shooting. This is the formation half of that; nothing about how
+        hard or how accurately they shoot changes (see orders.STANCE_MODS)."""
+        self._lay_out_line(units, orders.FIRE_SPACING, orders.FIRE_MAX_RANK,
+                           orders.FIRE_RANK_GAP, stagger=0.5)
 
     # --- morale ---------------------------------------------------------------
     # A commander falling does not end the battle -- his soldiers keep fighting,

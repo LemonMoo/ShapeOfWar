@@ -506,6 +506,7 @@ def _init_cue_colors():
         orders.STANCE_CHARGE: hex_rgb("#ff9b57"),
         orders.STANCE_SHIELD_WALL: hex_rgb("#9fe0a8"),
         orders.STANCE_CYCLE_CHARGE: hex_rgb("#ffd166"),
+        orders.STANCE_FIRING_LINE: hex_rgb("#d3a6f2"),
     })
 
 

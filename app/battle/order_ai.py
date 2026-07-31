@@ -41,6 +41,19 @@ def _nearest_dist(unit, group):
     return min(math.hypot(u.x - unit.x, u.y - unit.y) for u in group)
 
 
+def _group_nearest_dist(units, group):
+    """The closest any of `units` is to any of `group`.
+
+    Measured over the whole body rather than off units[0], which is what it
+    used to be. One man's nearest enemy jumps by ninety pixels the moment that
+    enemy dies, and the archers' whole posture turned on that number: the line
+    formed and dissolved three times in twenty-five seconds. The minimum over
+    the line barely moves, because somebody in it is always the nearest."""
+    if not units or not group:
+        return float("inf")
+    return min(_nearest_dist(u, group) for u in units)
+
+
 CLOSING_RANGE = 320.0      # an approaching enemy this close is "coming at us"
 
 
@@ -124,7 +137,7 @@ def decide_for_army(battle, army):
 
     # --- archers -------------------------------------------------------------
     for archers in shot_groups.values():
-        near = _nearest_dist(archers[0], foes)
+        near = _group_nearest_dist(archers, foes)
         reach = archers[0].attack_range
         # Hold the volley while they are still crossing the open ground, then
         # loose it as they come inside range -- the same play a human gets.
@@ -139,8 +152,46 @@ def decide_for_army(battle, army):
         # otherwise close the distance. Comparing against the real reach (not a
         # multiple of it) matters -- holding just outside your own range is the
         # one position where an archer is worth nothing at all.
-        stance = orders.STANCE_HOLD if near <= reach else orders.STANCE_ADVANCE
+        #
+        # Standing to shoot means standing in a LINE. Bowmen each walking at
+        # whoever they personally picked ended up in a knot, which wastes the
+        # frontage that is the whole point of massed shooting -- so the stance
+        # for "we are shooting now" is the firing line, not a plain hold.
+        # Hysteresis, not a bare comparison: see orders.FIRE_HOLD_SLACK for
+        # what a bare one did. But a formed line may only hold SHORT of its own
+        # reach while the enemy is actually coming on -- two lines standing two
+        # hundred pixels apart, neither able to shoot and neither willing to
+        # move, is a battle that never ends, and that is exactly what happened
+        # (dev/test_battle_terrain's swamp fight ran past 200 simulated
+        # seconds). If nothing is in reach and nobody is closing, walk.
+        formed = archers[0].stance == orders.STANCE_FIRING_LINE
+        if near <= reach:
+            stance = orders.STANCE_FIRING_LINE
+        elif formed and approaching and near <= reach * orders.FIRE_HOLD_SLACK:
+            stance = orders.STANCE_FIRING_LINE
+        else:
+            stance = orders.STANCE_ADVANCE
         _apply_stance(battle, archers, stance)
+        # A line that has been shoved about -- by a charge, by its own army
+        # backing into it -- is dressed again. Only when it has genuinely
+        # drifted: re-forming every decision tick would leave it permanently
+        # walking to a new slot instead of standing in one and shooting.
+        if stance == orders.STANCE_FIRING_LINE and _line_has_drifted(archers):
+            battle.form_firing_line(archers)
+
+
+def _line_has_drifted(units):
+    """Is the formation far enough out of its own slots to be worth dressing
+    again? True also when it has no slots at all, which is how a group that was
+    already in this stance before anything laid one out gets one."""
+    drift = 0.0
+    n = 0
+    for u in units:
+        if u.formation_slot is None:
+            return True
+        drift += math.hypot(u.formation_slot[0] - u.x, u.formation_slot[1] - u.y)
+        n += 1
+    return n > 0 and drift / n > orders.FIRE_REFORM_DIST
 
 
 def _is_foot(unit):

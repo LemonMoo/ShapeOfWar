@@ -207,6 +207,7 @@ class BattleView(tk.Frame):
                 ("Charge", "C", "stance", orders.STANCE_CHARGE),
                 ("Advance", "A", "stance", orders.STANCE_ADVANCE),
                 ("Shield Wall", "S", "stance", orders.STANCE_SHIELD_WALL),
+                ("Firing Line", "L", "stance", orders.STANCE_FIRING_LINE),
                 ("Charge & Regroup", "R", "stance", orders.STANCE_CYCLE_CHARGE),
                 ("Fire at Will", "F", "fire", True),
                 ("Hold Fire", "X", "fire", False)):
@@ -396,6 +397,7 @@ class BattleView(tk.Frame):
         "a": ("stance", orders.STANCE_ADVANCE),
         "s": ("stance", orders.STANCE_SHIELD_WALL),
         "r": ("stance", orders.STANCE_CYCLE_CHARGE),
+        "l": ("stance", orders.STANCE_FIRING_LINE),
         "f": ("fire", True),
         "x": ("fire", False),
     }
@@ -783,6 +785,7 @@ class BattleView(tk.Frame):
         orders.STANCE_CHARGE: theme.ORDER_CUE_CHARGE,
         orders.STANCE_SHIELD_WALL: theme.ORDER_CUE_SHIELD_WALL,
         orders.STANCE_CYCLE_CHARGE: theme.ORDER_CUE_CYCLE_CHARGE,
+        orders.STANCE_FIRING_LINE: theme.ORDER_CUE_FIRING_LINE,
     }
 
     def _draw_order_cue(self, c, u):
