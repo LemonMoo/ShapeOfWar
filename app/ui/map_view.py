@@ -966,7 +966,17 @@ class MapView(tk.Frame):
         self._trade_log_expanded = set()   # {(turn, tab, group_label), ...} currently expanded
         self._trade_log_scroll_pending = False   # see _scroll_trade_log_to_end
 
-        self.trade_log_frame = tk.Frame(self.canvas, bg=theme.CANVAS,
+        # Parented to the MapView, NOT to self.canvas -- same as every other
+        # floating panel here (alerts, treasury, the resource bar, and this
+        # log's own reopen tab). It used to hang off the canvas, which worked
+        # only for as long as the canvas was always the thing on screen: the
+        # GPU flat map swaps it out with self.canvas.pack_forget()
+        # (_activate_flatgl), and an unmapped parent takes its children with
+        # it. The tab stayed visible and clickable because it was already
+        # parented to self, so the log simply never appeared when clicked.
+        # Same family as the z-order bug in v0.3.8_7 -- anything that must
+        # survive the canvas/GL swap belongs on the MapView itself.
+        self.trade_log_frame = tk.Frame(self, bg=theme.CANVAS,
                                         highlightbackground=theme.LINE,
                                         highlightthickness=1, height=self._TRADE_LOG_HEIGHT)
         body = tk.Frame(self.trade_log_frame, bg=theme.CANVAS)

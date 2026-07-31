@@ -139,5 +139,37 @@ for name, call in cases:
     root.update_idletasks()
 print("  ok    every panel rebuilds after advance_turn")
 
+print("\n--- every floating panel survives the canvas/GL swap ---")
+# The bug this guards, twice over: the flat map is a GL surface that
+# REPLACES self.canvas (_activate_flatgl does self.canvas.pack_forget()).
+# Anything parented to the canvas goes invisible with it, and Tk gives no
+# error -- the trade log shipped that way and simply never appeared when
+# its tab was clicked, because the tab itself was parented to the MapView
+# and stayed perfectly clickable. Overlays belong on the MapView.
+floating = [("trade log", view.trade_log_frame),
+            ("trade log tab", view._trade_log_btn),
+            ("alerts", view.alerts_frame),
+            ("treasury", view.treasury_frame),
+            ("resource bar", view._resource_bar)]
+for name, widget in floating:
+    assert widget.master is view, (
+        f"the {name} is parented to {widget.master!r}, not the MapView -- it "
+        f"will vanish whenever the canvas is swapped for the GL flat map")
+print(f"  ok    all {len(floating)} floating panels hang off the MapView itself")
+
+view.canvas.pack_forget()          # what _activate_flatgl does
+root.update_idletasks()
+if not view._trade_log_open:
+    view._toggle_trade_log()
+root.update_idletasks()
+# winfo_manager(), not winfo_ismapped(): whether a widget is really on
+# screen depends on the toplevel being realized at a real size, which a
+# headless harness cannot promise. "Did _place_trade_log place it, or
+# place_forget it" is the thing this is actually guarding, and that is
+# exactly what the geometry manager reports.
+assert view.trade_log_frame.winfo_manager() == "place", (
+    "the trade log was not placed with the canvas swapped out")
+print("  ok    the trade log still opens with the canvas swapped out")
+
 root.destroy()
 print("\nPANELS TEST PASSED")
