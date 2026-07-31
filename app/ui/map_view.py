@@ -206,10 +206,16 @@ def _elev_rgb(e):
 # app/world/resources.py (each biome/climate drives what a region yields).
 _BIOME_COLORS = {
     "mountain": (150, 148, 150),
+    "highland": (122, 126, 104),   # foothills: stone greying into grass
     "forest": (40, 110, 58),
+    "taiga": (46, 88, 76),         # colder, bluer conifer
+    "jungle": (26, 128, 62),       # hotter, more saturated green
     "plains": (168, 178, 84),
+    "steppe": (186, 176, 116),     # dry temperate grass, paler than plains
+    "savannah": (198, 166, 78),    # warm grass shading toward the desert
     "coastal": (94, 168, 176),
     "desert": (206, 178, 110),
+    "tundra": (176, 184, 186),     # pale, cold and nearly bare
     "swamp": (78, 96, 66),
 }
 _CLIMATE_COLORS = {

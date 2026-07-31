@@ -523,7 +523,7 @@ def _currency_article():
         "MINING AND MINTING",
         (
             "Gold Ore is a Mining resource like Iron or Gems — it spawns "
-            "on mountain terrain, scarce (rare, the same rarity tier as "
+            "on mountain and highland terrain, scarce (rare, the same rarity tier as "
             "Gems), and comes in via a Gold Mine exactly like any other "
             "ore. A Mint then converts Gold Ore into Gold, 1:1, the same "
             "automatic conversion every other recipe in the game uses "
@@ -706,9 +706,9 @@ def _prosperity_article():
         ),
         "WHEN A REGION HAS NO FOREST AT ALL",
         (
-            "Firewood only comes from Forest-biome land (see Mining & "
-            "Forestry) — a settlement whose own region has zero Forest "
-            "cells can never produce any locally, and if that's also its "
+            "Firewood only comes from wooded land — Forest, Taiga or "
+            "Jungle (see Mining & Forestry). A settlement whose own region "
+            "has none of those can never produce any locally, and if that is also its "
             "faction's ONLY region, Regional Markets has nothing to "
             "redistribute either (there's no second region to draw from). "
             "The only real fix is a foreign trade route with a neighbor "
@@ -854,11 +854,11 @@ def _regional_markets_article():
         ),
         (
             "Gold isn't available here at all, in fact, unless the faction "
-            "owns at least some Mountain-biome land somewhere — the only "
+            "owns at least some Mountain or Highland land somewhere — the only "
             "terrain Gold Ore ever spawns on, and the source a Mint (see "
             "Currency) actually strikes real Gold from, continuously, for "
-            "as long as that access holds. A faction with no Mountain "
-            "land has no ongoing Gold income at all — only its original "
+            "as long as that access holds. A faction with no Mountain or "
+            "Highland land has no ongoing Gold income at all — only its original "
             "starting pile — so letting it spend that down on internal "
             "trade would just be a one-way drain to zero, not real "
             "currency circulating. Regional Markets falls back to pure "

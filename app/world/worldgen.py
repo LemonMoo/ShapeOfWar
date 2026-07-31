@@ -1746,7 +1746,8 @@ def _classify_biomes_and_climate(world):
             moisture = world.moisture[y][x]
             cd = coast_d[y][x] if coast_d is not None else 10 ** 9
             wd = water_d[y][x]
-            world.biome_grid[y][x] = classify_biome(relief, moisture, cd, wd)
+            world.biome_grid[y][x] = classify_biome(relief, moisture, cd, wd,
+                                                    latitude_temp)
             world.climate_grid[y][x] = classify_climate(latitude_temp, moisture)
 
 

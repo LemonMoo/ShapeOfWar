@@ -375,7 +375,13 @@ def resource_bulk(resource):
 # have (each roughly 1.6-1.8x the one before).
 BASE_VALUE_BY_TIER = {1: 2, 2: 3, 3: 5, 4: 9, 5: 15}   # gold/unit before scarcity
 
-BIOMES = ["mountain", "forest", "plains", "coastal", "desert", "swamp"]
+# The six original names are all still here, and that is a hard requirement
+# rather than conservatism: biome_grid and region.biome_counts are computed at
+# worldgen and PICKLED, so every dev world and every player save already holds
+# these strings. Renaming one would silently orphan a region's whole biome
+# profile. New biomes are added around them (see classify_biome).
+BIOMES = ["mountain", "highland", "forest", "taiga", "jungle", "plains",
+          "steppe", "savannah", "coastal", "desert", "tundra", "swamp"]
 CLIMATES = ["temperate", "arid", "cold", "humid"]
 SEASONS = ["Spring", "Summer", "Autumn", "Winter"]
 # 25 turns/season (100 turns/year) -- raised from 8 (32 turns/year) so a
@@ -425,13 +431,13 @@ RESOURCE_SPAWN = {
     "Wheat":    {"biomes": {"plains"}, "elevation": (0.0, 0.35),
                 "climate": {"temperate": 1.3, "arid": 0.4, "cold": 0.5, "humid": 0.9},
                 "fertility_weight": 1.0, "rarity": "common"},
-    "Barley":   {"biomes": {"plains"}, "elevation": (0.0, 0.45),
+    "Barley":   {"biomes": {"plains", "steppe"}, "elevation": (0.0, 0.45),
                 "climate": {"temperate": 1.1, "arid": 0.6, "cold": 0.9, "humid": 0.8},
                 "fertility_weight": 1.0, "rarity": "common"},
-    "Oats":     {"biomes": {"plains"}, "elevation": (0.0, 0.45),
+    "Oats":     {"biomes": {"plains", "steppe", "highland", "taiga"}, "elevation": (0.0, 0.45),
                 "climate": {"temperate": 1.0, "arid": 0.4, "cold": 1.0, "humid": 1.1},
                 "fertility_weight": 1.0, "rarity": "common"},
-    "Rye":      {"biomes": {"plains"}, "elevation": (0.0, 0.50),
+    "Rye":      {"biomes": {"plains", "steppe", "highland", "taiga"}, "elevation": (0.0, 0.50),
                 "climate": {"temperate": 0.9, "arid": 0.7, "cold": 1.2, "humid": 0.7},
                 "fertility_weight": 0.8, "rarity": "uncommon"},   # hardiest grain, tolerates poor/marginal land
     "Potatoes": {"biomes": {"plains"}, "elevation": (0.0, 0.40),
@@ -440,7 +446,7 @@ RESOURCE_SPAWN = {
     "Carrots":  {"biomes": {"plains"}, "elevation": (0.0, 0.35),
                 "climate": {"temperate": 1.2, "arid": 0.6, "cold": 0.7, "humid": 0.9},
                 "fertility_weight": 1.0, "rarity": "common"},
-    "Onions":   {"biomes": {"plains"}, "elevation": (0.0, 0.35),
+    "Onions":   {"biomes": {"plains", "savannah"}, "elevation": (0.0, 0.35),
                 "climate": {"temperate": 1.1, "arid": 0.8, "cold": 0.6, "humid": 0.8},
                 "fertility_weight": 1.0, "rarity": "common"},
     # Grass/hay: the least demanding crop in the registry -- it grows on
@@ -455,19 +461,19 @@ RESOURCE_SPAWN = {
     # "uncommon" halves that to ~5.5%: keeping animals still costs you fields
     # you could have fed people with, which is the intended trade-off, but it
     # doesn't cost you a staple crop's worth of them.
-    "Fodder":   {"biomes": {"plains"}, "elevation": (0.0, 0.60),
+    "Fodder":   {"biomes": {"plains", "steppe", "savannah"}, "elevation": (0.0, 0.60),
                 "climate": {"temperate": 1.2, "arid": 0.7, "cold": 1.1, "humid": 1.0},
                 "fertility_weight": 0.5, "rarity": "uncommon"},
-    "Beans":    {"biomes": {"plains"}, "elevation": (0.0, 0.35),
+    "Beans":    {"biomes": {"plains", "savannah"}, "elevation": (0.0, 0.35),
                 "climate": {"temperate": 1.2, "arid": 0.5, "cold": 0.5, "humid": 1.0},
                 "fertility_weight": 0.9, "rarity": "uncommon"},
     "Peas":     {"biomes": {"plains"}, "elevation": (0.0, 0.35),
                 "climate": {"temperate": 1.2, "arid": 0.5, "cold": 0.7, "humid": 0.9},
                 "fertility_weight": 0.9, "rarity": "uncommon"},
-    "Rice":     {"biomes": {"swamp"}, "elevation": (0.0, 0.15),
+    "Rice":     {"biomes": {"swamp", "jungle"}, "elevation": (0.0, 0.15),
                 "climate": {"temperate": 0.9, "arid": 0.2, "cold": 0.3, "humid": 1.4},
                 "fertility_weight": 1.0, "rarity": "uncommon"},   # flooded paddy land, the one wetland crop
-    "Cotton":   {"biomes": {"plains"}, "elevation": (0.0, 0.35),
+    "Cotton":   {"biomes": {"plains", "savannah"}, "elevation": (0.0, 0.35),
                 "climate": {"temperate": 0.7, "arid": 1.4, "cold": 0.2, "humid": 1.0},
                 "fertility_weight": 1.0, "rarity": "uncommon"},   # warm/arid-favoring -- flips the usual temperate-loving crop pattern
     "Grapes":   {"biomes": {"plains"}, "elevation": (0.0, 0.45),
@@ -479,43 +485,43 @@ RESOURCE_SPAWN = {
     # fertility_weight is lower than Crops across the board (pasture quality
     # matters, but far less directly than tilled soil) and near-zero for the
     # three that don't really graze open farmland at all.
-    "Cattle":   {"biomes": {"plains"}, "elevation": (0.0, 0.35),
+    "Cattle":   {"biomes": {"plains", "steppe", "savannah"}, "elevation": (0.0, 0.35),
                 "climate": {"temperate": 1.2, "arid": 0.5, "cold": 0.7, "humid": 1.0},
                 "fertility_weight": 0.6, "rarity": "common"},
-    "Sheep":    {"biomes": {"plains"}, "elevation": (0.0, 0.45),
+    "Sheep":    {"biomes": {"plains", "steppe", "highland", "tundra"}, "elevation": (0.0, 0.45),
                 "climate": {"temperate": 1.1, "arid": 0.7, "cold": 1.0, "humid": 0.8},
                 "fertility_weight": 0.5, "rarity": "common"},
-    "Horses":   {"biomes": {"plains"}, "elevation": (0.0, 0.35),
+    "Horses":   {"biomes": {"plains", "steppe", "savannah"}, "elevation": (0.0, 0.35),
                 "climate": {"temperate": 1.2, "arid": 0.6, "cold": 0.7, "humid": 0.9},
                 "fertility_weight": 0.6, "rarity": "uncommon"},
-    "Goats":    {"biomes": {"mountain"}, "elevation": (0.35, 0.70),
+    "Goats":    {"biomes": {"mountain", "highland", "tundra"}, "elevation": (0.35, 0.70),
                 "climate": {"temperate": 1.0, "arid": 1.1, "cold": 0.9, "humid": 0.7},
                 "fertility_weight": 0.2, "rarity": "uncommon"},   # rocky/mountain grazers, not farmland
-    "Chickens": {"biomes": {"plains"}, "elevation": (0.0, 0.35),
+    "Chickens": {"biomes": {"plains", "savannah"}, "elevation": (0.0, 0.35),
                 "climate": {"temperate": 1.1, "arid": 0.8, "cold": 0.7, "humid": 0.9},
                 "fertility_weight": 0.2, "rarity": "common"},
-    "Pigs":     {"biomes": {"forest"}, "elevation": (0.0, 0.45),
+    "Pigs":     {"biomes": {"forest", "taiga", "jungle"}, "elevation": (0.0, 0.45),
                 "climate": {"temperate": 1.1, "arid": 0.4, "cold": 0.6, "humid": 1.1},
                 "fertility_weight": 0.2, "rarity": "common"},   # forest pannage, not pasture
-    "Bees":     {"biomes": {"plains", "forest"}, "elevation": (0.0, 0.45),
+    "Bees":     {"biomes": {"plains", "forest", "savannah"}, "elevation": (0.0, 0.45),
                 "climate": {"temperate": 1.2, "arid": 0.5, "cold": 0.4, "humid": 1.1},
                 "fertility_weight": 0.4, "rarity": "uncommon"},   # wildflower meadow or forest clearing, not picky about which
 
     # Forestry -- all forest, all mildly fertility-sensitive (richer ground
     # grows denser/better timber, but nowhere near as directly as a crop).
-    "Logs":     {"biomes": {"forest"}, "elevation": (0.0, 0.55),
+    "Logs":     {"biomes": {"forest", "taiga", "jungle"}, "elevation": (0.0, 0.55),
                 "climate": {"temperate": 1.1, "arid": 0.3, "cold": 0.9, "humid": 1.2},
                 "fertility_weight": 0.2, "rarity": "common"},
-    "Hardwood": {"biomes": {"forest"}, "elevation": (0.0, 0.50),
+    "Hardwood": {"biomes": {"forest", "jungle"}, "elevation": (0.0, 0.50),
                 "climate": {"temperate": 1.2, "arid": 0.2, "cold": 0.6, "humid": 1.1},
                 "fertility_weight": 0.4, "rarity": "uncommon"},
-    "Softwood": {"biomes": {"forest"}, "elevation": (0.0, 0.55),
+    "Softwood": {"biomes": {"forest", "taiga"}, "elevation": (0.0, 0.55),
                 "climate": {"temperate": 0.9, "arid": 0.3, "cold": 1.2, "humid": 0.9},
                 "fertility_weight": 0.2, "rarity": "common"},
-    "Firewood": {"biomes": {"forest"}, "elevation": (0.0, 0.55),
+    "Firewood": {"biomes": {"forest", "taiga", "jungle"}, "elevation": (0.0, 0.55),
                 "climate": {"temperate": 1.0, "arid": 0.5, "cold": 1.0, "humid": 1.0},
                 "fertility_weight": 0.1, "rarity": "common"},
-    "Resin":    {"biomes": {"forest"}, "elevation": (0.0, 0.50),
+    "Resin":    {"biomes": {"forest", "taiga"}, "elevation": (0.0, 0.50),
                 "climate": {"temperate": 1.0, "arid": 0.3, "cold": 0.7, "humid": 1.1},
                 "fertility_weight": 0.3, "rarity": "rare"},
 
@@ -525,29 +531,29 @@ RESOURCE_SPAWN = {
     # mountain, banded by elevation so they don't all read identically;
     # Clay/Sand/Salt are lowland instead, matching where those actually
     # form (floodplains, deserts/beaches).
-    "Iron":     {"biomes": {"mountain"}, "elevation": (0.60, 0.85),
+    "Iron":     {"biomes": {"mountain", "highland"}, "elevation": (0.60, 0.85),
                 "climate": {}, "fertility_weight": 0.0, "rarity": "common"},
-    "Copper":   {"biomes": {"mountain"}, "elevation": (0.55, 0.75),
+    "Copper":   {"biomes": {"mountain", "highland"}, "elevation": (0.55, 0.75),
                 "climate": {}, "fertility_weight": 0.0, "rarity": "uncommon"},
-    "Tin":      {"biomes": {"mountain"}, "elevation": (0.55, 0.75),
+    "Tin":      {"biomes": {"mountain", "highland"}, "elevation": (0.55, 0.75),
                 "climate": {}, "fertility_weight": 0.0, "rarity": "rare"},   # Bronze Age scarcity, deliberate
-    "Coal":     {"biomes": {"mountain"}, "elevation": (0.55, 0.68),
+    "Coal":     {"biomes": {"mountain", "highland"}, "elevation": (0.55, 0.68),
                 "climate": {}, "fertility_weight": 0.0, "rarity": "common"},
-    "Stone":    {"biomes": {"mountain"}, "elevation": (0.55, 1.00),
+    "Stone":    {"biomes": {"mountain", "highland", "tundra"}, "elevation": (0.55, 1.00),
                 "climate": {}, "fertility_weight": 0.0, "rarity": "common"},   # quarried anywhere mountainous
-    "Clay":     {"biomes": {"swamp"}, "elevation": (0.0, 0.15),
+    "Clay":     {"biomes": {"swamp", "jungle"}, "elevation": (0.0, 0.15),
                 "climate": {}, "fertility_weight": 0.0, "rarity": "common"},
     "Sand":     {"biomes": {"desert", "coastal"}, "elevation": (0.0, 0.20),
                 "climate": {}, "fertility_weight": 0.0, "rarity": "common"},
     "Salt":     {"biomes": {"desert", "coastal"}, "elevation": (0.0, 0.20),
                 "climate": {}, "fertility_weight": 0.0, "rarity": "uncommon"},
-    "Gems":     {"biomes": {"mountain", "desert"}, "elevation": (0.0, 1.00),
+    "Gems":     {"biomes": {"mountain", "desert", "highland"}, "elevation": (0.0, 1.00),
                 "climate": {}, "fertility_weight": 0.0, "rarity": "rare"},
                 # Phase 13 -- promoted from the old stale BIOME_YIELDS entry,
                 # which sourced it from the same two biomes (mountain seams,
                 # desert placer deposits) -- kept that geography, just made
                 # it real.
-    "Gold Ore": {"biomes": {"mountain"}, "elevation": (0.55, 0.80),
+    "Gold Ore": {"biomes": {"mountain", "highland"}, "elevation": (0.55, 0.80),
                 "climate": {}, "fertility_weight": 0.0, "rarity": "rare"},
                 # Currency overhaul -- real deposits, mountain seams like
                 # Iron/Coal, but scarcer (rare, same as Gems) so a Mint's
@@ -5158,34 +5164,89 @@ def advance_local_shipments(world):
 # CLIMATE_MODIFIERS/SEASON_MODIFIERS/get_climate_modifier/
 # get_seasonal_modifier, and compute_region_yield's old geography-driven
 # raw-yield loop) is removed along with them rather than kept around empty.
+# --- the biome matrix -------------------------------------------------------
+# Biomes used to come out of a threshold cascade that never saw temperature at
+# all -- only classify_climate did -- so the same moisture produced the same
+# biome at the equator and at the pole. A cold rainforest and a hot one were
+# both just "forest".
+#
+# They now come from a real temperature x moisture matrix, the shape a
+# Whittaker diagram describes: what grows somewhere is decided by how warm it
+# is and how wet it is, and those two axes are close to independent. Relief and
+# water proximity stay as OVERRIDES on top, because a mountain is a mountain
+# whatever the weather.
+#
+# The payoff is not just more biomes, it is that the map now varies by latitude
+# in a way a player can read and plan around: cold north and south, temperate
+# belts, a hot wet middle. It also gives five species genuinely distinct
+# homelands to be placed into, which is what the whole rework is for.
 _MOUNTAIN_RELIEF = 0.55     # elevation (0..1 above sea level) that reads as mountains
+_HIGHLAND_RELIEF = 0.38     # foothills: ore-bearing but still farmable, which is
+                             # what makes a mountain range habitable at all
 _COASTAL_REACH = 3          # cells from open water that still count as coastal
-_DESERT_MOISTURE = 0.32
-_SWAMP_MOISTURE = 0.68
+_SWAMP_MOISTURE = 0.68      # wet + low + beside water, at any temperature
 _SWAMP_RELIEF_MAX = 0.18
 _SWAMP_WATER_REACH = 3
-_FOREST_MOISTURE = 0.5
+
+# Band edges on each axis. Temperature is the latitude gradient worldgen
+# already computes (1.0 at the map's middle, 0.0 at the top and bottom edges).
+_TEMP_BANDS = (0.30, 0.62, 0.82)        # cold | temperate | warm | hot
+_MOISTURE_BANDS = (0.30, 0.48, 0.68)    # arid | dry | moist | wet
+
+# [temperature band][moisture band]. Reading across a row is a rainfall
+# gradient; reading down a column is a latitude gradient.
+#
+# Every one of the six original biome names appears here (see BIOMES), so a
+# pickled world's stored biome strings all remain meaningful.
+_BIOME_MATRIX = (
+    # arid        dry          moist       wet
+    ("tundra",   "tundra",    "taiga",    "taiga"),      # cold
+    ("steppe",   "plains",    "forest",   "forest"),     # temperate
+    ("desert",   "savannah",  "forest",   "jungle"),     # warm
+    ("desert",   "savannah",  "jungle",   "jungle"),     # hot
+)
 
 _COLD_TEMP = 0.32           # latitude "temperature" (0..1) below which climate is cold
 _ARID_MOISTURE = 0.35
 _HUMID_MOISTURE = 0.65
 
 
-def classify_biome(relief, moisture, coast_dist, water_dist):
+def _band(value, edges):
+    """Index of the band `value` falls in, given ascending edge values."""
+    for i, edge in enumerate(edges):
+        if value < edge:
+            return i
+    return len(edges)
+
+
+def classify_biome(relief, moisture, coast_dist, water_dist, temperature=0.6):
     """relief: 0..1 elevation above sea level. moisture: 0..1 rainfall noise.
-    coast_dist/water_dist: cells to the nearest ocean / river-or-lake."""
+    coast_dist/water_dist: cells to the nearest ocean / river-or-lake.
+    temperature: 0..1 latitude warmth, 1.0 at the map's middle.
+
+    Overrides first, then the temperature x moisture matrix (see
+    _BIOME_MATRIX). The overrides are the cases where the landform simply
+    beats the weather: you cannot farm a cliff however much rain falls on it,
+    and a shoreline is a shoreline in any climate.
+
+    `temperature` defaults to a temperate value only so that any caller
+    written before the matrix existed still gets a sensible answer instead of
+    a crash -- worldgen passes the real gradient."""
     if relief > _MOUNTAIN_RELIEF:
         return "mountain"
+    if relief > _HIGHLAND_RELIEF:
+        return "highland"
     if coast_dist <= _COASTAL_REACH:
         return "coastal"
-    if moisture < _DESERT_MOISTURE:
-        return "desert"
+    # Standing water beats the matrix, but only where it is warm enough to
+    # rot: the same low wet ground in the far north is frozen most of the
+    # year, which is tundra, not marsh.
     if (moisture > _SWAMP_MOISTURE and relief < _SWAMP_RELIEF_MAX
-            and water_dist <= _SWAMP_WATER_REACH):
+            and water_dist <= _SWAMP_WATER_REACH
+            and temperature >= _TEMP_BANDS[0]):
         return "swamp"
-    if moisture > _FOREST_MOISTURE:
-        return "forest"
-    return "plains"
+    return _BIOME_MATRIX[_band(temperature, _TEMP_BANDS)][
+        _band(moisture, _MOISTURE_BANDS)]
 
 
 def classify_climate(latitude_temp, moisture):
