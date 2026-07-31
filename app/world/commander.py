@@ -23,13 +23,42 @@ import math
 
 from app.world.worldgen import (OCEAN, _path_dijkstra, _elev_cost, _sea_cost,
                                 _nearest_ocean_cell, _SEA_COAST_REACH,
-                                _NEIGH8, _DIAG)
+                                _NEIGH8, _DIAG, road_cells)
 from app.world.construction import can_afford, _pay_cost
 from app.world import wrap
 from app.world import currents
 
 COMMANDER_CELLS_PER_TURN = 5
 COMMANDER_VISION_RADIUS = 8
+
+# --- Terrain in movement (biome overhaul, phase E) ---------------------------
+# A march was never reckoned in miles, it was reckoned in days through a
+# particular kind of country, and the difference is enormous: armies have gone
+# around marshland rather than through it for as long as there have been
+# armies (the Fens, the Pripet Marshes), and Rome built roads precisely
+# because moving off one cost so much more than moving along it.
+#
+# COMMANDER_CELLS_PER_TURN is now a BUDGET in easy-going cells rather than a
+# flat count, and each cell of path spends its own terrain's share of it. A
+# commander crossing the plains still covers five cells; the same commander in
+# a swamp covers two.
+#
+# Note this is about SPEED, and is separate from worldgen._elev_cost, which
+# already shapes which way a path is drawn. A route can quite reasonably run
+# through hills because going around would be longer -- this is what crossing
+# them then costs.
+TERRAIN_MOVE_COST = {
+    "plains": 1.0, "steppe": 1.0, "savannah": 1.0, "coastal": 1.0,
+    "desert": 1.2, "forest": 1.3, "taiga": 1.3, "tundra": 1.4,
+    "highland": 1.5, "jungle": 1.8, "mountain": 2.0, "swamp": 2.2,
+}
+DEFAULT_MOVE_COST = 1.0
+
+# A road is the whole point of a road. Cheaper than the easiest open country,
+# so a realm that has built its network can move an army across itself far
+# faster than one that has not -- which is what roads were for, and gives the
+# network a military value it never had when it only carried trade.
+ROAD_MOVE_COST = 0.6
 # "Logs" as of Phase 12, not "Wood" -- see construction.py's SETTLEMENT_BUILD_COST
 # comment: "Wood" was never a real registry resource, Logs is its direct
 # new-registry equivalent.
@@ -628,6 +657,37 @@ def commander_speed_mult(world, commander):
     return MOUNTED_SPEED_MULT if is_mounted(world, commander) else 1.0
 
 
+def cell_move_cost(world, pos, roads=None):
+    """What one cell of this ground costs a marching column, in units of
+    easy-going open country. A road beats every kind of terrain it is built
+    on -- that is what it is for -- so the road check comes first."""
+    x, y = pos
+    if roads is None:
+        roads = road_cells(world)
+    if (x, y) in roads:
+        return ROAD_MOVE_COST
+    biome = world.biome_grid[y][x]
+    return TERRAIN_MOVE_COST.get(biome, DEFAULT_MOVE_COST)
+
+
+def _advance_along_path(world, path, start_index, budget, roads):
+    """How far up `path` a column gets on `budget` cells' worth of marching.
+
+    Always at least one cell: a commander ordered to cross a mountain has to
+    be able to actually start, and a budget that rounds to nothing would
+    strand them forever rather than merely slow them down."""
+    index = start_index
+    spent = 0.0
+    limit = len(path) - 1
+    while index < limit:
+        cost = cell_move_cost(world, path[index + 1], roads)
+        if spent + cost > budget and index > start_index:
+            break
+        index += 1
+        spent += cost
+    return index
+
+
 def advance_commanders(world):
     """Called every turn: walk each commander with an active order a few
     cells further along its path (faster while aboard a shipyard-built
@@ -638,12 +698,22 @@ def advance_commanders(world):
             ship = ship_by_id(world, cmd.aboard_ship_id) if cmd.aboard_ship_id is not None else None
             # Mounted only applies on land -- a horse is no help aboard ship,
             # where the hull's own speed governs.
-            cells_this_turn = (round(COMMANDER_CELLS_PER_TURN * ship.speed_mult)
-                              if ship is not None
-                              else round(COMMANDER_CELLS_PER_TURN
-                                         * commander_speed_mult(world, cmd)))
             old_index = cmd.path_index
-            new_index = min(len(cmd.path) - 1, old_index + max(1, cells_this_turn))
+            if ship is not None:
+                # At sea the hull's speed governs and open water is open
+                # water -- terrain is a land question, so this stays the
+                # flat count it always was.
+                cells_this_turn = round(COMMANDER_CELLS_PER_TURN * ship.speed_mult)
+                new_index = min(len(cmd.path) - 1,
+                                old_index + max(1, cells_this_turn))
+            else:
+                # On foot the count is a BUDGET, and each cell of ground
+                # spends its own share of it (phase E): a column crosses the
+                # plains at full speed, a swamp at a crawl, and its own roads
+                # faster than either. See TERRAIN_MOVE_COST.
+                budget = COMMANDER_CELLS_PER_TURN * commander_speed_mult(world, cmd)
+                new_index = _advance_along_path(world, cmd.path, old_index,
+                                                budget, road_cells(world))
 
             if ship is not None:
                 # Scan the whole segment crossed this turn (not just the
