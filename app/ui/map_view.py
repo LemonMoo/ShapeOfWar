@@ -315,8 +315,34 @@ def _biome_rgb(biome):
 # _precompute_colors), so terrain reads at a glance without losing the
 # faction-color-is-primary political view. Other biomes (plains/coastal/
 # desert/swamp) are left alone — subtler and less useful to distinguish here.
-_POL_FOREST_TINT = 0.4
-_POL_MOUNTAIN_TINT = 0.35
+# How strongly each biome tints the political map's faction colour.
+#
+# Only forest and mountain used to tint at all -- that predates the 12-biome
+# overhaul, so ten of the twelve rendered as flat faction colour and the whole
+# new map was invisible on the view people actually play on. A desert and a
+# jungle looked exactly alike.
+#
+# The faction colour still has to win: this is the POLITICAL map, and who owns
+# a place is what it is for. So the strengths are graded by how much a biome
+# needs saying rather than applied evenly -- the extremes (desert, jungle,
+# mountain, tundra) tint hard because they change what a region is worth and
+# how an army moves through it, while plains and coastal barely tint at all
+# because "ordinary green country" is the baseline everything else reads
+# against. Steppe and savannah sit between: dry, but not desert.
+_POL_BIOME_TINT = {
+    "mountain": 0.42,
+    "desert": 0.42,
+    "jungle": 0.40,
+    "forest": 0.38,
+    "tundra": 0.38,
+    "swamp": 0.36,
+    "taiga": 0.34,
+    "highland": 0.30,
+    "savannah": 0.28,
+    "steppe": 0.24,
+    "coastal": 0.18,
+    "plains": 0.12,
+}
 
 # Symbols layered on top of the color tint above (political mode only) —
 # color alone doesn't read clearly enough at a glance, especially at this
@@ -976,10 +1002,9 @@ class MapView(tk.Frame):
                 base = _rgb(*_lighten(base, 0.08 * relief))
 
             biome_here = wd.biome_grid[y][x]
-            if biome_here == "forest":
-                base = _rgb(*_blend(base, _BIOME_COLORS["forest"], _POL_FOREST_TINT))
-            elif biome_here == "mountain":
-                base = _rgb(*_blend(base, _BIOME_COLORS["mountain"], _POL_MOUNTAIN_TINT))
+            tint = _POL_BIOME_TINT.get(biome_here)
+            if tint:
+                base = _rgb(*_blend(base, _BIOME_COLORS[biome_here], tint))
 
             # water-adjacent: any 4-neighbor is ocean, a lake, or a
             # river — every such shoreline/riverbank cell gets the
