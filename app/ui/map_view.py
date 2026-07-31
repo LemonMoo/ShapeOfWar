@@ -57,7 +57,7 @@ _LABEL_FONT = ("Segoe UI", 8, "bold")
 _DRAG_THRESHOLD_PX = 4   # movement past this on a press+move counts as a drag, not a click
 _ZOOM_STEP = 0.9         # view-span multiplier per wheel notch
 _MIN_ZOOM_CELLS = 6      # closest allowed zoom (world-cells across the short viewport edge)
-_VILLAGE_REVEAL_SPAN = 26   # world-cells across the shorter viewport edge -- below
+_VILLAGE_REVEAL_SPAN = 40   # world-cells across the shorter viewport edge -- below
                             # this, villages become visible/clickable within region
                             # view (see MapView._villages_visible). Was previously a
                             # separate click-triggered "village view" mode; region
@@ -65,6 +65,21 @@ _VILLAGE_REVEAL_SPAN = 26   # world-cells across the shorter viewport edge -- be
                             # neighboring regions' worth of villages (~7-10 cells
                             # apart) landed on this as a reasonable starting point --
                             # tune by feel if it reveals villages too early/late.
+
+# How long a turn may take before the busy cover is actually shown. The cover
+# has to EXIST from the instant End Turn is pressed -- it is what absorbs
+# clicks aimed at panels while the worker thread owns `world` -- but a
+# full-screen "Processing turn..." panel appearing and vanishing on every
+# single turn is the most jarring thing in the game. Most turns finish inside
+# this window and now show nothing at all; only a genuinely slow one puts the
+# cover up, which is when it is actually telling the player something.
+#
+# The map's own click handler is gated on `_turn_in_flight` directly (see
+# _on_click), so the map cannot be acted on during the gap. A panel button
+# pressed inside this window is theoretically unguarded, which is a knowingly
+# accepted trade: it needs a deliberate click somewhere else within a sixth of
+# a second of pressing End Turn, with the pointer already on End Turn.
+_TURN_OVERLAY_DELAY_MS = 160
 
 _END_TURN_COOLDOWN_MS = 220   # min gap between End Turns -- the side panels fully
                               # rebuild each turn, so back-to-back turns faster than
@@ -279,14 +294,22 @@ _RIVER_RGB = (64, 112, 152)
 # got any easier to see zoomed in, and looked identically tiny at every
 # zoom level in Village view (the deepest, most-zoomed-in level) as
 # everywhere else.
+# Marker sizes, in world-cell units, scaled to screen by _marker_radius.
+# Raised across the board: at the old sizes a town or village was a few
+# pixels of nothing until you were almost on top of it, and the map reads by
+# its settlements. The RELATIVE ordering is what carries the kind
+# (city > castle > town > village), so they all move together.
 _SETTLE_STYLE = {
-    "city":   {"fill": "#f2e9c9", "outline": "#4a4230", "base": 0.42},
-    "castle": {"fill": "#c9ccd6", "outline": "#3a3f4c", "base": 0.34},
-    "town":   {"fill": "#d9b98a", "outline": "#4a3a24", "base": 0.27},
+    "city":   {"fill": "#f2e9c9", "outline": "#4a4230", "base": 0.58},
+    "castle": {"fill": "#c9ccd6", "outline": "#3a3f4c", "base": 0.47},
+    "town":   {"fill": "#d9b98a", "outline": "#4a3a24", "base": 0.38},
 }
-_VILLAGE_STYLE = {"fill": "#c9a06a", "outline": "#4a3418", "base": 0.20}
-_MARKER_MIN_R = 3.5    # never smaller than this, however far zoomed out
-_MARKER_MAX_R = 18.0   # never larger than this, however far zoomed in
+_VILLAGE_STYLE = {"fill": "#c9a06a", "outline": "#4a3418", "base": 0.28}
+_MARKER_MIN_R = 4.5    # never smaller than this, however far zoomed out
+_MARKER_MAX_R = 26.0   # never larger than this, however far zoomed in --
+                        # raised so a settlement actually reaches a full,
+                        # readable size close in rather than topping out
+                        # while there is still plenty of screen for it
 # Local roads (village/settlement network within a region — see
 # _place_villages_for_region in app/world/worldgen.py): Dirt for a road
 # touching a village, brown; Stone for a road linking two settlements, gray.
@@ -383,7 +406,11 @@ _ALERT_BADGE_GLYPH_MIN_R = 7.0
 # measurement rather than feel: on a 105-village realm it is the difference
 # between ~1000 and ~750 canvas items at the wide end of village view. Lower it
 # to bring dirt roads in earlier, at a proportional cost per frame.
-_DIRT_ROAD_MIN_SCALE = 20.0
+# Zoom scale (screen px per world cell) at which dirt roads start drawing.
+# Lowered so the local network appears while the region is still fully in
+# view -- at 20 you had to be close enough that you could no longer see where
+# a road was going, which is most of what a road tells you.
+_DIRT_ROAD_MIN_SCALE = 13.0
 
 
 def _fmt_amount(n):
@@ -465,6 +492,7 @@ class MapView(tk.Frame):
         # own refresh()/render() calls must go through even though
         # `_end_turn_busy` is still set at that point.
         self._turn_in_flight = False
+        self._turn_overlay_id = None    # pending busy-cover reveal, see _run_end_turn
         self.selected = None            # selected faction (world view)
         self.zoom_faction = None        # faction we've zoomed into (region view --
                                          # villages become visible/clickable once
@@ -3191,6 +3219,24 @@ class MapView(tk.Frame):
             return
         self._compendium_window = CompendiumWindow(self)
 
+    def _show_turn_overlay(self):
+        """Put the busy cover up -- only reached when a turn outlasts
+        _TURN_OVERLAY_DELAY_MS, so a normal turn never shows it at all."""
+        self._turn_overlay_id = None
+        if not self._turn_in_flight:
+            return
+        self._turn_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._turn_overlay.tkraise()
+
+    def _hide_turn_overlay(self):
+        """Take it down, and cancel the reveal if it never fired -- a fast
+        turn must not leave a timer that flashes the cover up afterwards."""
+        pending = getattr(self, "_turn_overlay_id", None)
+        if pending is not None:
+            self.after_cancel(pending)
+            self._turn_overlay_id = None
+        self._turn_overlay.place_forget()
+
     def _clear_end_turn_busy(self):
         self._end_turn_busy = False
 
@@ -3408,8 +3454,8 @@ class MapView(tk.Frame):
         movement = self._movement_snapshot()
         self._turn_pending = (before, prev_year, movement)
         self._turn_token += 1
-        self._turn_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
-        self._turn_overlay.tkraise()
+        self._turn_overlay_id = self.after(_TURN_OVERLAY_DELAY_MS,
+                                            self._show_turn_overlay)
         self._turn_in_flight = True
         threading.Thread(target=self._turn_worker, args=(self._turn_token,),
                          daemon=True).start()
@@ -3454,7 +3500,7 @@ class MapView(tk.Frame):
         releasing the guard. Runs inside try/finally for the same reason
         _on_end_turn's setup half does -- a failure here must still release
         the guard rather than wedging End Turn forever."""
-        self._turn_overlay.place_forget()
+        self._hide_turn_overlay()
         try:
             if exc is not None:
                 raise exc
@@ -5317,6 +5363,11 @@ class MapView(tk.Frame):
 
     # --- interaction -------------------------------------------------------
     def _on_click(self, event):
+        # Nothing may act on `world` while the worker thread owns it. The busy
+        # cover normally absorbs this, but it is deliberately not shown for
+        # the first _TURN_OVERLAY_DELAY_MS of a turn, so the map guards itself.
+        if self._turn_in_flight:
+            return
         if self._animating:
             return
         vx0, vy0, scale = self._place
