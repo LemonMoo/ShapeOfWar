@@ -3,15 +3,16 @@
 Python/Tkinter desktop 4X strategy game. Single developer, turn-based, procedurally
 generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 
-**Last release: v0.8.0, "The Sound of It"** — audio and a settings screen,
-every biome finally visible on the political map, roads branching from
-settlements, and the archer pass. Check
+**Last release: v0.9.0, "Weather You Can See"** — the weather map overlay
+(§29) and the lake basin rework (§30). Check
 `gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting this
 line — this repo ships fast, sometimes several releases in one day.
 
-**Two commits sit on `master` unreleased:** weather phase 4 (the map overlay,
-§29) and the lake rework (§30). Working tree is clean; the **39-script suite
-passes**.
+**Nothing is sitting unreleased.** Working tree is clean; the **39-script
+suite passes**. One caveat found while running it: `dev/test_mining_camp.py`
+fails on `dev560.pkl` specifically (`workers > 0` assertion) and passes on
+`dev160.pkl` and with no world — a world-specific quirk of that late-game
+save, not a regression.
 
 **Two long threads finished since the last handoff.** The **biome overhaul**
 is complete — all six phases, §§19-24. The **weather system** is complete —
@@ -2670,7 +2671,7 @@ wet string does). Mild is exactly half of severe rather than a second table.
 
 ---
 
-## 29. Weather phase 4 — the map overlay (unreleased)
+## 29. Weather phase 4 — the map overlay (v0.9.0)
 
 Weather is per-region and changes every turn, which rules out the obvious
 implementation: the terrain raster is cached and only rebuilt when ownership
@@ -2699,7 +2700,7 @@ whether to march. Separate minimums now.
 
 ---
 
-## 30. Lakes — one great lake, not a flooded continent (unreleased)
+## 30. Lakes — one great lake, not a flooded continent (v0.9.0)
 
 Reported from a screenshot: not that lakes existed, but that there were so
 many ENORMOUS ones that the land stopped reading as whole. Measured across
