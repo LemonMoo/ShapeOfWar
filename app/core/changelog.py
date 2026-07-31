@@ -20,6 +20,21 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 66,
+        "title": "The Long Road Update",
+        "items": [
+            "NEW: weather finally reaches the roads — a storm, a blizzard or a fog slows every caravan and wagon crossing it, and a delayed convoy spends longer exposed to raiders. Drought does nothing out here, because dry ground is good for a wagon",
+            "NEW: roads bend and wander instead of stepping along the grid — an engineered stone road runs truer than a cart track that grew",
+            "CHANGED: a commander holds his ground. He was never being dragged off by enemy cavalry — he was walking in on his own, and now he fights whatever reaches him and stays with his army",
+            "CHANGED: the build menu follows the turn. A building under construction counts down where you can see it, and finishes without you having to close and reopen the window",
+            "CHANGED: bigger build menu, narrower cards, and the scroll wheel works anywhere in it",
+            "REMOVED: the globe view. It never zoomed in a way that made sense and fixing it meant changing too much elsewhere",
+            "FIXED: a commander's route was invisible on the map — giving a move order showed you nothing at all",
+            "FIXED: two commanders could stand face to face unable to land a blow on each other, because their reach was shorter than their own bodies",
+            "FIXED: a stone road no longer leaves the dirt track it was paved over showing through",
+        ],
+    },
+    {
         "version": 65,
         "title": "The Lay of the Land Update",
         "items": [
