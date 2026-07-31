@@ -6,7 +6,7 @@ from collections import Counter
 import numpy as np
 
 from app.core.events import bus
-from app.battle import order_ai, orders
+from app.battle import movement, order_ai, orders
 from app.world import weather
 from app.battle.unit import Unit
 
@@ -278,6 +278,9 @@ class Battle:
         self.on_attack = None  # optional hook set by the view for log/effects
         self._threat = Counter()  # enemy -> # of living units currently targeting
                                   # it; rebuilt each update() for choose_target
+        self._contact = Counter()  # enemy -> # of living units in REACH of it;
+                                   # rebuilt each update() for movement.mobbed
+        self._move_grid = {}       # spatial hash for movement.steer's neighbours
         # Which side the player is giving orders to. Every OTHER side is driven
         # by the order AI (app/battle/order_ai.py). Left None outside a real
         # player battle -- in a headless sim or the balance tournament both
@@ -303,6 +306,35 @@ class Battle:
         """How many living units already target ``enemy`` (see choose_target's
         soft anti-dogpile term). Snapshot from the last update() tick."""
         return self._threat.get(enemy, 0)
+
+    def contact_count(self, enemy):
+        """How many enemies of ``enemy`` are actually IN REACH of it right now
+        -- which is a different question from how many are targeting it, and
+        the one that decides whether another body can usefully join the fight
+        (see movement.mobbed). Snapshot per tick, same as _threat."""
+        return self._contact.get(enemy, 0)
+
+    # Cell size for the movement neighbour grid. Wider than the collision
+    # grid's, because steering looks further than a body's own overlap: it must
+    # cover AVOID_DIST in one ring of nine cells.
+    MOVE_CELL = 32
+
+    def _build_move_grid(self):
+        """One spatial hash of every living unit, built before any unit moves,
+        for movement.steer's neighbour lookup.
+
+        Built here rather than reusing _resolve_collisions' grid because that
+        one is built AFTER the tick's movement, from a different cell size, for
+        a different question. Both are one pass over the field; targeting was
+        the sim's real cost (see _rebuild_target_cache), not passes like this.
+        """
+        grid = {}
+        cell = self.MOVE_CELL
+        for army in self.armies:
+            for u in army.units:
+                if u.alive:
+                    grid.setdefault((int(u.x // cell), int(u.y // cell)), []).append(u)
+        self._move_grid = grid
 
     # Default formation, front-to-back, before the player drags anything
     # during planning: Archers hang back where their range still reaches
@@ -779,8 +811,16 @@ class Battle:
         self._threat = Counter(
             u.target for army in self.armies for u in army.units
             if u.alive and u.target is not None and u.target.alive)
+        # ...and who is actually within reach of whom, which is the question
+        # movement.mobbed asks. One pass, one hypot per living unit.
+        self._contact = Counter(
+            u.target for army in self.armies for u in army.units
+            if u.alive and u.target is not None and u.target.alive
+            and math.hypot(u.target.x - u.x, u.target.y - u.y)
+            <= u.attack_range + u.radius + u.target.radius)
 
         self._rebuild_target_cache()
+        self._build_move_grid()
         self._run_order_ai(dt)
 
         for army in self.armies:

@@ -19,7 +19,7 @@ import itertools
 import math
 import random
 
-from app.battle import orders
+from app.battle import movement, orders
 from app.battle.unit_types import (UNIT_TYPES, COMMANDER_AURA_RADIUS,
                                    COMMANDER_LEASH, COMMANDER_LAST_STAND,
                                    COMMANDER_RETURN_SPEED_MULT,
@@ -386,8 +386,12 @@ class Unit:
             if sdist > orders.WALL_SLOT_TOLERANCE:
                 self.advancing = True
                 move = min(sdist, self.effective_speed * dt)
-                self.x += sdx / sdist * move
-                self.y += sdy / sdist * move
+                # Steered like any other movement: dressing a line is exactly
+                # when soldiers are walking across each other's paths, so this
+                # is where stepping around an ally matters most.
+                ndx, ndy = movement.steer(self, sdx / sdist, sdy / sdist, battle)
+                self.x += ndx * move
+                self.y += ndy * move
 
         # Where to walk vs. what to actually fight are two different
         # questions once a manual move order can exist. A right-click move
@@ -454,10 +458,24 @@ class Unit:
                     or not self._screened(target_dist if target_dist is not None else mdist)):
                 self.charge = 0.0
                 return
+            # Anti-swarm: an enemy that already has as many men on it as can
+            # reach it does not need another. Close up behind the fighting and
+            # stand there -- second rank, not a shoving match -- and ask for a
+            # fresh target sooner than the ordinary throttle would, since
+            # choose_target's crowd penalty is what actually spreads the army
+            # out. Never applies to a player's own explicit order.
+            if (self.move_point is None and not self._player_directed
+                    and target_dist is not None
+                    and target_dist <= reach + movement.SWARM_STANDOFF
+                    and movement.mobbed(self, battle)):
+                self._retarget_cd = min(self._retarget_cd, 0.15)
+                self.charge = 0.0
+                return
             self.advancing = True
             move = self.effective_speed * dt
-            self.x += mdx / mdist * move
-            self.y += mdy / mdist * move
+            ndx, ndy = movement.steer(self, mdx / mdist, mdy / mdist, battle)
+            self.x += ndx * move
+            self.y += ndy * move
             # Galloping toward the enemy builds couched-charge momentum. A
             # bogged-down unit is in the attack branch instead, so its charge
             # decays to nothing -- devastating on impact, weak in a grind.
