@@ -7,8 +7,12 @@ generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 rework (§14), the rest of its plan (§16), and the Cartographer's commissioned
 surveys, released together. Check
 `gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting this
-line — this repo ships fast, sometimes several releases in one day. Working
-tree is clean, everything is pushed to `master`, exe attached to the release.
+line — this repo ships fast, sometimes several releases in one day.
+
+**Three commits sit on `master` unreleased since then — see §17.** The
+domestic logistics chain turned out to be severed in four places (nothing
+manufactured existed anywhere), two reported UI bugs, and the Mining Camp that
+closes §15.5's supply hole. Working tree is clean.
 
 ## HOW THIS PROJECT WANTS TO BE WORKED ON
 
@@ -40,19 +44,22 @@ useful rather than busy.
    built and shipped; nothing since has touched weather. This is the
    biggest coherent unbuilt feature. See **§10**, and read §16 first
    because Phase 2 (logistics) now lands on top of a much-changed economy.
-2. **Mining is structurally broken** and is probably the largest remaining
-   economic hole — villages are sited on farmland, mountain is ~4.5% of the
-   map, so Iron/Coal/Copper/Tin are near-zero and Tools/Weapons/Shields
-   effectively cannot be made. It is a *supply* problem. See §15.5.
+2. **Prosperity is flatlined near 0-2** across every node and has never been
+   investigated. It is a meter the player can see that currently means
+   nothing. `_prosperity_target`/`_update_prosperity`. See §15.5.
 3. **Cartographer D — Charts as a tradeable good.** The last of the four
    approved Guild mechanics; A, B and C all shipped. See §15.4.
-4. **Prosperity is flatlined near 0-2** across every node and has never been
-   investigated. `_prosperity_target`/`_update_prosperity`. See §15.5.
+4. **Supply-driven pricing** — a city's price falling as its stock rises.
+   `unit_price`'s surplus factor already half does it. See §16.2.
 5. **The balance lab has no economy section** — all 217 levers in
    `app/core/tuning.py` are battle-side, so every economy number is
    source-only. Given how much of the economy is now tunable constants,
    adding a `resources` section would pay for itself. See §15.5.
 6. **`Settlement.tax_income` is a dead stat** — wire it up or delete it.
+
+*Mining was #2 on this list and is now addressed — see §17.3. The framing was
+also wrong and worth correcting: it is not that mining is broken, it is that
+ore is unavailable until you claim a mountain region, which takes real time.*
 
 **Two loose ends left deliberately:**
 - `_VILLAGE_REVEAL_SPAN` (map_view.py, `26`) is a first-pass estimate, not
@@ -61,10 +68,10 @@ useful rather than busy.
   still active. The user was asked once whether to strip it or keep it as a
   tripwire and the conversation moved on. Ask before removing. See §12.
 
-**Reading order for the sections below:** §14 and §16 are the current state
-of the economy and the most recently changed code. §12's two methodology
-lessons matter before touching anything GL-related. Everything else is
-stable background.
+**Reading order for the sections below:** §17 is the most recently changed
+code; §14 and §16 are the rest of the economy's current state. §12's two
+methodology lessons matter before touching anything GL-related. Everything
+else is stable background.
 
 ---
 
@@ -1406,14 +1413,14 @@ along with the small local survey. Still to build:
 - **`Settlement.tax_income` is a dead stat.** Rolled at founding, read only for
   prosperity valuation, generating no gold since the Currency overhaul moved
   coin onto minting. Either wire it up or delete it.
-- **Mining is structurally broken by village placement.** Villages are sited on
-  farmland; mountain is 4.5% of the map; only 4 of 185 villages had a single
-  mountain cell in catchment. The entire Mining tier (Iron, Coal, Copper, Tin)
-  is therefore near-zero, which means Tools/Weapons/Shields effectively cannot
-  be made. `BASELINE_INDUSTRY_FLOOR` masks this for Logs and Stone only. This
-  is probably the largest remaining economic hole, and it is a *supply* problem
-  rather than a demand one — likely needs mining villages/camps that can be
-  sited on mountain, or a settlement-level extraction path.
+- ~~**Mining is structurally broken by village placement.**~~ **ADDRESSED —
+  see §17.3 (the Mining Camp).** The diagnosis here was right about the cause
+  (villages are sited on farmland, only 4 of 185 had a mountain cell in
+  catchment) but wrong about the severity: a *fresh* world produces no ore
+  because no mountain region has been claimed yet, while a developed save was
+  already making 57 Iron/turn. It is not "broken", it is "unavailable until you
+  take the mountains". A large part of what looked like this finding was
+  actually §17.1's logistics faults sitting on top of it.
 - **Prosperity is flatlined near 0–2** across every node on both A/B runs. Not
   investigated. `_prosperity_target`/`_update_prosperity` are the entry points.
 - **The balance lab has no economy section.** All 217 levers in
@@ -1642,3 +1649,195 @@ they can be tuned by feel rather than by another sweep.
 and `test_panels` were extended. The ones that take a world take it as
 `argv[1]` (default `dev/worlds/dev560.pkl`; `dev160.pkl` is the faster one
 and is what everything above was verified against).
+
+---
+
+## 17. Unreleased on `master`: the logistics chain, two UI bugs, the Mining Camp
+
+Three commits after v0.4.0. The first is the important one and its lesson
+generalises: **a stock level cannot tell you why something is missing.**
+
+### 17.1 The domestic chain was severed in four places (`a781b95`)
+
+§15.5 called mining the largest remaining economic hole and read it as a
+supply problem. It is one (see §17.3), but sitting on top of it was something
+larger and entirely separate: `Tools`, `Weapons`, `Shields`, `Bricks` and
+`Cloth` all sat at **exactly zero world-wide**, and 16 of ~22 settlement
+recipes were blocked on a zero input — while the raw materials existed in
+quantity a few regions away. Four independent plumbing faults, each invisible
+on its own, all found by walking a unit of ore from the seam to the workshop.
+
+**1. Route discovery was starved by its own budget.**
+`REGIONAL_PATH_BUDGET_PER_TURN` was `1`. On a fresh world at turn 120 — 340
+villages, 32 settlements — only 120 village→city pairs had *ever* been looked
+up, and every one of the 313 unsolved pairs had a perfectly good route the
+moment the budget was refilled. The original reasoning ("a bigger number only
+helps once at startup") had it backwards: a solved pair is cached **forever**,
+so the cost is transient and the benefit permanent.
+
+Now `4`, and that number is measured. On the turn-561 world:
+
+| budget | 1 | 3 | 4 | 8 |
+|---|---|---|---|---|
+| ms/turn | 378 | 424 | **446** | 573 |
+
+8 was tried first and costs **+52%** on a developed map — far more than a
+fresh-world timing predicted, because searches there are much dearer than the
+2.6 ms measured on a small one. 4 buys four times the discovery rate for +18%
+and lands on the same ~424-446 ms this project has benchmarked before.
+
+`LOCAL_PATH_BUDGET_PER_TURN` was deliberately **left alone**: a failed local
+path falls back to a straight line and the shipment still delivers, so that
+budget is cosmetic. Only the regional one blocks goods.
+
+**2. Every node scanned the same order on the same turn.** `rotate_for_turn`
+was keyed on the turn alone, so all 340 villages moved in lockstep and a good
+only had a chance on the one turn its rotation brought it forward — and only
+from nodes under their shipment cap right then. Now offset by the node's own
+id. Still a pure function of `(turn, node)`, so determinism is untouched.
+
+**3. Barely-perishable industrial inputs were classed as perishable.**
+sell-to-city filtered on `spoil_rate <= 0` *exactly*, which excluded Cotton
+(0.02), Wool (0.01), Paper (0.02) and Resin (0.02) alongside Milk (0.40).
+Nothing else could move them either — they are not consumption goods so no
+need-based tier wants them, and local logistics is region-locked. They fell
+through every tier at once, which is why Cloth and Paper were zero. Now
+`SELL_TO_CITY_MAX_SPOIL = 0.02`, with **foods excluded by category rather than
+by rate**: a bean at 0.02 does not need this tier (regional trade already
+moves 18,000 units of grain on need), a bale of cotton has nothing else.
+
+**4. The dispatcher picked cargo by whose turn it was, not by what was needed.**
+The clearest trace in the whole investigation: a village holding 128 spare
+Clay dispatched a shipment **every single turn for 120 turns and never once
+sent Clay**. A bulk good is *always* shippable, so with a dozen of them
+scattered through the order one is always ahead; Clay's index crept down one
+per turn from 23 while Hardwood, then Logs, then Softwood cycled into the low
+slots, and its stock drained faster than the ~33 turns it needed to reach the
+front. **Rotation alone cannot fix this** — that is the transferable lesson.
+
+Cargo is now chosen by what the destination city is short of. City stock alone
+was *not* enough: a working city consumes what arrives, so it holds zero of
+nearly everything and almost every candidate ties at 0, collapsing the sort
+straight back into the rotation. Realm-wide scarcity breaks the tie and
+encodes the right instinct — a cart is a scarce slot, so spend it on the
+scarce cargo. Timber is everywhere and will come anyway; the region's only
+clay will not.
+
+Measured, developed save, 120 turns:
+
+| | before | after |
+|---|---|---|
+| Tools | 0 | 3,671 |
+| Weapons | 0 | 502 |
+| Shields | 0 | 214 |
+| Bricks | 0 | 126 |
+| Paper | 0 | 595 |
+| Clothes | 0 | 1,345 |
+
+Raw arrivals at settlements: Stone 6.6 → 75.5/turn, Sand 52 → 140/turn,
+Cotton 0 → 223/turn. Iron dispatches 0 → 74 per 120 turns, Copper 0 → 88.
+
+**Deliberately not chased further:** Clay never uses the sell-to-city tier
+specifically (it reaches settlements via local logistics instead), and Cloth
+is still zero because Wool has no producer worth the name.
+
+### 17.2 Two reported UI bugs (`24180e6`)
+
+**Folding cards did nothing on the region and faction panels.**
+`_toggle_panel_card` only rebuilt for a selected Settlement or Village, so
+elsewhere the card's open/shut state flipped and nothing was redrawn to show
+it. `refresh()` already had a correct all-four-kinds sequence, so the two are
+now one method (`_rebuild_selection_panel`) and cannot drift apart again —
+which is exactly how they came to disagree.
+
+**E and V worked inconsistently.** Both were bound with `bind` on the App
+root. A root bind only fires while focus is inside the root's **own** widget
+tree, and this game has real child `Toplevel`s: the Compendium, and the Build
+Menu, which additionally takes focus for itself because it is undecorated.
+Open either and E silently stopped ending turns. Now `bind_all`, with two
+things that had to come with it: a guard so a letter typed into a text field
+is a letter (`App._TEXT_ENTRY_CLASSES`), and the Build Menu handing focus back
+to the game on close, since Windows does not reliably return it when an
+`overrideredirect` window is destroyed.
+
+`dev/test_keys.py` asserts the **wiring** (bind_all present, root bind absent
+so nothing double-fires, typing guarded, still inert while paused) rather than
+driving real keystrokes: which widget holds focus needs a window manager a
+headless harness cannot promise, but *where* a binding lives is the thing that
+was wrong and is directly inspectable.
+
+`dev/test_panels.py` now folds a card on all four panel kinds, and caught a
+subtlety worth keeping: the `_show_*` methods only **draw**, while `_on_click`
+is what records the selection — so a test that only calls `_show_*` is testing
+a state the game never actually reaches.
+
+### 17.3 The Mining Camp (`4a6e061`)
+
+§15.5's supply half. Villages are sited on farmland — correctly — while Iron,
+Coal, Copper, Tin and Gold Ore spawn only on mountain, ~4.5% of the map. On a
+fresh world, 4 of 303 villages had a single mountain cell in catchment, 57
+cells in the whole world. Sand, Salt and Clay were fine throughout, which is
+the tell: they spawn where villages actually get placed. Nothing was wrong
+with the mining code — the ore was simply somewhere nobody lived.
+
+A camp works mountain cells in its **region** that lie outside the village's
+own catchment: you send people out to the seam and cart ore back, which is
+what mining settlements historically were (Kutná Hora, Falun, Rammelsberg,
+Potosí — founded on ore, in country that often could not feed them). Gating on
+catchment, as the Gold Mine does, is precisely what left the tier unreachable.
+
+Three properties keep it from being a free upgrade:
+
+- **Dug by the village's own hands.** Cells are added to the terrain offer
+  *before* the Phase 14 labour limit, so a camp competes with the harvest.
+- **The seam is finite and shared.** A second camp in the same region splits
+  it rather than doubling it, and the upper tiers deliberately exceed what a
+  modest region can supply so the share cap starts to bind.
+- **Ore only.** Cells enter the industry sample *after* crops are computed.
+  (Borrowing the village's climate for remote cells is exact, not approximate:
+  every Mining resource has `climate_affinity` 1.0 in all four climates.)
+
+Tier 1 is priced in timber, stone and coin with **no Tools** — Tools are
+smithed from Iron and this is the building that makes Iron exist, so pricing
+it in Tools would gate the cure on the disease (the Preserving-House-and-Stone
+trap, §16.4).
+
+Sized against the seams that exist rather than a village's catchment: a first
+pass at 14/28/45 cells was worth only +17% world Iron across 59 camps, which
+is invisible for a paid multi-turn building. `MINING_CAMP_CELLS` is 25/55/90.
+Measured with one tier-1 camp per mountainous region: Iron 57.2 → 71.7/turn,
+Copper 28.6 → 35.9, Tin 11.5 → 14.3, Gold Ore 169 → 216.
+
+**The §15.5 framing needed correcting.** dev160 already produces 57 Iron/turn;
+the 0.35/turn figure was a *fresh* world where no mountain region had been
+claimed yet. So it is not "mining is broken" but "ore is unavailable until you
+go and take the mountains" — a fair thing for the game to ask. Reachability on
+real saves is comfortable: dev160 has 59 mountain regions across all 10
+factions and 129 of 380 villages eligible; dev560 has 137 and 281 of 609.
+
+**One real pre-existing bug found by the new test, from Phase 14.**
+`village_labor_factors` returned `{}` for a zero workforce, and
+`compute_village_yield` reads a *missing* factor as "this resource has no
+sector, so no labour limit applies" — so a village that had lost every adult
+produced its **full terrain potential** and out-produced a populated one. It
+now returns explicit zeros. It surfaced only because the camp's harness
+asserted a plain-language property ("with no workforce, a mine produces
+nothing") rather than checking a number; guarded in `dev/test_labor.py` too.
+
+### 17.4 Numbers to judge in play
+
+Same contract as §16.7 — first-pass values, named so they can be tuned by feel.
+
+| constant | file | now | if it feels wrong |
+|---|---|---|---|
+| `REGIONAL_PATH_BUDGET_PER_TURN` | trade.py | 4 | goods slow to start moving on a new map / end turn feels heavy |
+| `SELL_TO_CITY_MAX_SPOIL` | trade.py | 0.02 | perishables being carted pointlessly / an input still stranded |
+| `MINING_CAMP_CELLS` | resources.py | 25/55/90 | camps trivial or dominant |
+| `mining_camp` costs | construction.py | tier 1 = 200 Logs, 120 Stone, 160 Gold | first camp out of reach or free |
+
+### 17.5 Regression suite
+
+**25 scripts, all passing.** New here: `test_logistics_reach`,
+`test_mining_camp`, `test_keys`; `test_labor` and `test_panels` extended. The
+ones that take a world take it as `argv[1]` (default `dev/worlds/dev560.pkl`;
+`dev160.pkl` is faster and is what §17 was verified against).
