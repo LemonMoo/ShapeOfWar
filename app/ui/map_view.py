@@ -26,6 +26,7 @@ from app.core import audio
 from app.ui import theme
 from app.ui import widgets
 from app.world.world_map import Stance
+from app.world import weather as weather_mod
 from app.world.worldgen import OCEAN, road_chains
 from app.world.territory import bordering_regions, naval_reachable_regions
 from app.world.resources import RESOURCES
@@ -228,6 +229,33 @@ _GL_PLAYER_COMMANDER = (0.90, 0.52, 1.0)   # the orchid the flat map uses
 # in the region's segment list. Sea lanes go on top of both -- they are drawn
 # dashed and thin, and a lane hidden under a road reads as a broken lane.
 _ROAD_DRAW_ORDER = {"dirt": 0, "stone": 1, "sea": 2}
+
+# --- Weather on the map (weather phase 5) -----------------------------------
+# Weather is per-REGION and changes every turn, so it cannot live in the
+# terrain raster: that image is cached and only rebuilt when ownership
+# changes, and redrawing it once a turn for a handful of storms would be
+# absurd. It is drawn instead from the two things both renderers already
+# share -- a coloured outline around the region (_map_lines) and a label at
+# its centre (_map_labels). No new primitive, no per-cell work, and the Tk
+# canvas and the GPU map cannot disagree about it.
+#
+# Drought is included here even though it does nothing to travel or battle,
+# because it is the one that ruins your HARVEST -- it is arguably the event a
+# player most needs to see coming, and leaving it off the map because it has
+# no combat effect would be reading the mechanics rather than the game.
+_WEATHER_MAP_COLOR = {
+    "drought": "#d1922f",    # dusty gold
+    "storm": "#4d7fb5",      # rain blue
+    "blizzard": "#b9d4e8",   # pale ice
+    "fog": "#9aa3ad",        # flat grey
+}
+# Kind first, severity second: the glyph says WHAT, the ring says how bad.
+_WEATHER_GLYPH = {
+    "drought": "\u2600",     # sun
+    "storm": "\u26c8",       # cloud with lightning
+    "blizzard": "\u2744",    # snowflake
+    "fog": "\u2248",         # approximately-equal, which reads as haze
+}
 
 
 def _lighten(rgb, amt):
@@ -2646,6 +2674,25 @@ class MapView(tk.Frame):
                 width = lw(1.5, 0.14)
             add(remaining, colour, width, dash=2)
 
+        # Weather: the affected region outlined in its own colour. Drawn
+        # before the attack frontier so a region you are about to attack
+        # still reads as a target first -- war beats weather on a war map.
+        for region, event in self._weathered_regions():
+            colour = _WEATHER_MAP_COLOR.get(event.kind)
+            if not colour:
+                continue
+            severe = event.severity == weather_mod.SEVERE
+            # Separate MINIMUMS, not just separate factors. A shared floor
+            # swallowed the difference at world scale -- both severities
+            # clamped to the same width, so from orbit a mild fog and a
+            # severe blizzard drew identically. Severity has to read at the
+            # zoom where you are deciding whether to march.
+            for x0, y0, x1, y1 in self._region_border_segments(region):
+                out.append(([(x0, y0), (x1, y1)], _GL_RGB[colour],
+                            lw(2.4, 0.26, minimum=2.2) if severe
+                            else lw(1.6, 0.17, minimum=1.2),
+                            0 if severe else 3))
+
         if self.attack_mode is not None:
             for region in self._attack_frontier:
                 for x0, y0, x1, y1 in self._region_border_segments(region):
@@ -2777,6 +2824,20 @@ class MapView(tk.Frame):
                      if (alerts.get(id(n)) == "critical") == critical
                      and id(n) in alerts and self._cell_revealed(*n.pos)],
                     14.0, colour, -12.0)
+
+        # Weather badges. Only from region view in: at world scale a dozen
+        # of these over a continent is confetti, and the outline in
+        # _map_lines already says "something is happening here" from orbit.
+        if level >= 1:
+            for region, event in self._weathered_regions():
+                glyph = _WEATHER_GLYPH.get(event.kind)
+                if not glyph:
+                    continue
+                severe = event.severity == weather_mod.SEVERE
+                add([(f"{glyph} {event.label}",
+                      (region.center[0] * wd.w, region.center[1] * wd.h))],
+                    13.0 if severe else 11.0,
+                    _GL_RGB[_WEATHER_MAP_COLOR[event.kind]], 22.0)
 
         # Attack-target region names (see _draw_attack_targets) -- the
         # border highlight itself is in _map_lines, this is just the label.
@@ -6466,6 +6527,39 @@ class MapView(tk.Frame):
                 continue
             c.create_text(lx, ly, text=f.name, fill="#ffffff", font=_LABEL_FONT)
             placed_boxes.append(box)
+
+    def _weathered_regions(self):
+        """(region, event) for every region under weather the player may see.
+
+        Fog-gated on the region's own centre, exactly like its name: weather
+        over a rival's territory you have never explored is not something you
+        would know about, and leaking it would quietly turn the overlay into
+        a scouting tool.
+
+        Cached per turn. Both _map_lines and _map_labels call this, the flat
+        map calls both every rebuild, and walking every region in the world
+        twice a frame to answer a question that changes once a turn is the
+        kind of thing that shows up as a stutter later."""
+        wd = self.world
+        events = getattr(wd, "region_weather", None)
+        if not events:
+            return ()
+        key = (wd.turn, len(events))
+        cached = getattr(self, "_weather_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        out = []
+        for region_id, event in events.items():
+            if not (0 <= region_id < len(wd.regions)) or event is None:
+                continue
+            region = wd.regions[region_id]
+            cx = int(region.center[0] * wd.w)
+            cy = int(region.center[1] * wd.h)
+            if not self._cell_revealed(cx, cy):
+                continue
+            out.append((region, event))
+        self._weather_cache = (key, out)
+        return out
 
     def _region_border_segments(self, region):
         """Screen-space-independent (x,y) edge list tracing a region's
