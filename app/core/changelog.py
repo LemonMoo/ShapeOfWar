@@ -20,6 +20,18 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 67,
+        "title": "The Sound of It",
+        "items": [
+            "NEW: the game has sound. Music on the map and in battle, and effects for the things you actually do — a chain as a turn is submitted, pages turning in the build menu, timber for a project started, steel when a battle begins",
+            "NEW: a Settings screen, from the main menu or while paused: music and effects volumes, and a mute. Everything applies as you move it and is remembered next time",
+            "NEW: every biome now shows on the political map. Ten of the twelve were rendering as flat faction colour, so a desert and a jungle looked exactly alike",
+            "CHANGED: roads branch from cities and towns instead of each new settlement hanging off the single nearest one. A realm's road network now has junctions rather than one long chain",
+            "CHANGED: archers are less dominant — accuracy 80% to 60% and slightly less damage. An archer army won every clear-weather fight against foot; now it wins most of them",
+            "FIXED: two commanders could stand face to face unable to land a blow, because a commander's reach was shorter than two commanders' bodies",
+        ],
+    },
+    {
         "version": 66,
         "title": "The Long Road Update",
         "items": [

@@ -5,7 +5,8 @@ from app.ui import theme
 
 
 class PauseMenuView(tk.Frame):
-    def __init__(self, master, on_resume, on_save, on_return_to_menu, on_exit):
+    def __init__(self, master, on_resume, on_save, on_return_to_menu, on_exit,
+                 on_settings=None):
         super().__init__(master, bg=theme.BG)
         self._msg_after_id = None
 
@@ -26,6 +27,8 @@ class PauseMenuView(tk.Frame):
 
         btn("Resume", on_resume)
         btn("Save Game", on_save)
+        if on_settings is not None:
+            btn("Settings", on_settings)
         btn("Return to Menu", on_return_to_menu)
         btn("Exit Game", on_exit)
 

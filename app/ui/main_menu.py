@@ -13,7 +13,7 @@ _CHANGELOG_PANEL_WIDTH = 320
 
 class MainMenuView(tk.Frame):
     def __init__(self, master, on_new_game, on_load_game, on_quit, has_save,
-                 on_balance_lab=None):
+                 on_settings=None, on_balance_lab=None):
         super().__init__(master, bg=theme.BG)
         self._has_save = has_save
 
@@ -34,6 +34,11 @@ class MainMenuView(tk.Frame):
             bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
             relief="flat", font=theme.FONT_BOLD, pady=10)
         self.load_btn.pack(pady=6)
+
+        if on_settings is not None:
+            tk.Button(center, text="Settings", command=on_settings, width=22,
+                      bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                      relief="flat", font=theme.FONT_BOLD, pady=10).pack(pady=6)
 
         tk.Button(center, text="Quit", command=on_quit, width=22,
                   bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,

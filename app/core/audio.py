@@ -22,6 +22,7 @@ assets/audio/LICENSES.md for provenance. That was a deliberate choice over
 the larger CC-BY libraries: CC-BY obliges a credits screen forever, and it is
 not an obligation you can undo once you have shipped.
 """
+import json
 import os
 import random
 import sys
@@ -222,6 +223,40 @@ class _Audio:
                 pass
 
 
+    # --- persistence -----------------------------------------------------
+    # Next to saves/, not next to __file__: a --onefile exe unpacks into a
+    # throwaway temp dir every launch, so anything written relative to the
+    # module vanishes when the game closes. Same reasoning (and the same
+    # helper) as save.py and the changelog's seen-file.
+    def _settings_path(self):
+        from app.core.save import _app_root
+        return _app_root() / "audio_settings.json"
+
+    def load_settings(self):
+        """Read volumes and mute back. A corrupt or missing file means the
+        defaults, never an error -- losing your volume setting is a shrug,
+        failing to start the game over it is not."""
+        try:
+            data = json.loads(self._settings_path().read_text(encoding="utf-8"))
+        except Exception:
+            return
+        try:
+            self.set_music_volume(float(data.get("music", self.music_volume)))
+            self.set_sfx_volume(float(data.get("sfx", self.sfx_volume)))
+            self.set_muted(bool(data.get("muted", self.muted)))
+        except Exception:
+            pass
+
+    def save_settings(self):
+        try:
+            self._settings_path().write_text(json.dumps(
+                {"music": round(self.music_volume, 3),
+                 "sfx": round(self.sfx_volume, 3),
+                 "muted": self.muted}), encoding="utf-8")
+        except Exception:
+            pass   # read-only install, no disk, no permission: not our problem
+
+
 _audio = _Audio()
 
 # The module-level API the rest of the game uses. Free functions rather than
@@ -234,6 +269,8 @@ stop_music = _audio.stop_music
 set_music_volume = _audio.set_music_volume
 set_sfx_volume = _audio.set_sfx_volume
 set_muted = _audio.set_muted
+load_settings = _audio.load_settings
+save_settings = _audio.save_settings
 
 
 def state():

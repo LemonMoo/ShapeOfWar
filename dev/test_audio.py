@@ -163,4 +163,102 @@ for path in glob.glob("app/**/*.py", recursive=True):
 assert not offenders, f"call sites naming audio files directly: {offenders}"
 print("  ok    no call site names a sound file")
 
+print("\n--- settings survive a restart ---")
+before = (audio.state()["music"], audio.state()["sfx"], audio.state()["muted"])
+try:
+    audio.set_music_volume(0.23)
+    audio.set_sfx_volume(0.77)
+    audio.set_muted(True)
+    audio.save_settings()
+    audio.set_music_volume(0.99)
+    audio.set_sfx_volume(0.01)
+    audio.set_muted(False)
+    audio.load_settings()
+    assert abs(audio.state()["music"] - 0.23) < 1e-6, audio.state()
+    assert abs(audio.state()["sfx"] - 0.77) < 1e-6, audio.state()
+    assert audio.state()["muted"] is True
+    print("  ok    volumes and mute round-trip through disk")
+finally:
+    audio.set_music_volume(before[0])
+    audio.set_sfx_volume(before[1])
+    audio.set_muted(before[2])
+    audio.save_settings()
+
+print("\n--- ...and a corrupt settings file is not fatal ---")
+path = audio._audio._settings_path()
+backup = path.read_bytes() if path.exists() else None
+try:
+    path.write_text("{not json at all", encoding="utf-8")
+    audio.load_settings()      # must not raise
+    print("  ok    a corrupt file falls back to whatever is already loaded")
+finally:
+    if backup is not None:
+        path.write_bytes(backup)
+    elif path.exists():
+        path.unlink()
+
+print("\n--- the settings panel builds and drives the mixer ---")
+import tkinter as tk
+
+try:
+    root = tk.Tk()
+except tk.TclError as exc:
+    print(f"  skip  no display ({exc})")
+else:
+    from app.ui.settings import SettingsPanel
+
+    # A REAL, mapped window. Tk defers a Scale's command until the widget is
+    # realized, so against a withdrawn root every slider silently reports that
+    # nothing is wired up -- which is how this nearly shipped untested.
+    root.geometry("640x520+40+40")
+    closed = []
+    # An earlier section above shuts the mixer down on purpose. Bring it back
+    # before building the panel, or this silently takes the no-device branch
+    # and the sliders go untested -- which is exactly what happened first.
+    audio.init()
+    audio.set_music_volume(0.5)
+    audio.set_sfx_volume(0.5)
+    audio.set_muted(False)
+    panel = SettingsPanel(root, on_close=lambda: closed.append(True))
+    panel.place(relx=0, rely=0, relwidth=1, relheight=1)
+    root.update()
+
+    def walk(widget):
+        yield widget
+        for child in widget.winfo_children():
+            yield from walk(child)
+
+    assert abs(audio.state()["music"] - 0.5) < 1e-6, (
+        "merely opening the panel changed the volume -- the initial Scale.set "
+        "fired the handler")
+    scales = [w for w in walk(panel) if isinstance(w, tk.Scale)]
+    buttons = [w for w in walk(panel) if isinstance(w, tk.Button)]
+    if audio.state()["available"]:
+        assert len(scales) == 2, f"expected two sliders, got {len(scales)}"
+        scales[0].set(20)
+        root.update()
+        assert abs(audio.state()["music"] - 0.20) < 1e-6, audio.state()
+        scales[1].set(80)
+        root.update()
+        assert abs(audio.state()["sfx"] - 0.80) < 1e-6, audio.state()
+        mute = [b for b in buttons if "Sound is" in str(b.cget("text"))]
+        assert mute, [b.cget("text") for b in buttons]
+        was = audio.state()["muted"]
+        mute[0].invoke()
+        root.update()
+        assert audio.state()["muted"] is not was, "the mute button did nothing"
+        mute[0].invoke()
+        root.update()
+        print("  ok    both sliders and the mute button drive the mixer live")
+    else:
+        assert not scales, "dead sliders shown on a machine with no audio"
+        print("  ok    no device: the panel says so instead of showing dead sliders")
+
+    back = [b for b in buttons if b.cget("text") == "Back"]
+    assert back, "no way out of the settings panel"
+    back[0].invoke()
+    assert closed, "Back did not call on_close"
+    print("  ok    Back saves and hands control back to the caller")
+    root.destroy()
+
 print("\nAUDIO TEST PASSED")

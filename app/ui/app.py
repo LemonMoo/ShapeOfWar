@@ -20,6 +20,7 @@ from app.core.save import (save_game, load_game, has_save, list_saves,
                            new_save_id, delete_save)
 from app.world.worldgen import generate_world
 from app.core import audio
+from app.ui.settings import SettingsPanel
 from app.battle.battle import (Battle, Army, terrain_note,
                                weather_note)
 from app.battle.unit_types import UNIT_TYPES
@@ -53,6 +54,7 @@ class App(tk.Tk):
         # device and everything downstream of it no-ops, so the game plays
         # exactly as it did before rather than refusing to start.
         audio.init()
+        audio.load_settings()
 
         self.world = None
         self.map_view = None
@@ -75,6 +77,7 @@ class App(tk.Tk):
         self.menu_view = MainMenuView(
             self.content, on_new_game=self._goto_new_game,
             on_load_game=self._goto_load_menu, on_quit=self.destroy, has_save=has_save,
+            on_settings=self._open_settings,
             on_balance_lab=self._open_balance_lab if self._balance_lab_path() else None)
         self.new_game_view = NewGameView(
             self.content, on_play=self._start_new_game, on_back=self._goto_menu)
@@ -84,13 +87,19 @@ class App(tk.Tk):
             on_cancel=self._cancel_load_menu)
         self.pause_view = PauseMenuView(
             self.content, on_resume=self._resume_from_pause,
-            on_save=self._save_from_pause,
+            on_save=self._save_from_pause, on_settings=self._open_settings,
             on_return_to_menu=self._return_to_menu_from_pause, on_exit=self.destroy)
         self.game_over_view = GameOverView(
             self.content, on_return_to_menu=self._return_to_menu_from_defeat,
             on_exit=self.destroy)
+        # One settings panel, not one per menu -- two would drift apart. It
+        # remembers which screen asked for it so Back goes where you came
+        # from rather than always dumping you at the main menu.
+        self._settings_return = "menu"
+        self.settings_view = SettingsPanel(
+            self.content, on_close=self._close_settings)
         for view in (self.menu_view, self.new_game_view, self.load_game_view,
-                     self.pause_view, self.game_over_view):
+                     self.pause_view, self.game_over_view, self.settings_view):
             view.place(relx=0, rely=0, relwidth=1, relheight=1)
 
         bus.on("battle:over", self._on_battle_over)
@@ -303,6 +312,21 @@ class App(tk.Tk):
         self.status = tk.Label(bar, text="", bg=theme.PANEL, fg=theme.MUTED,
                                font=theme.FONT)
         self.status.pack(side="right", padx=14)
+
+    def _open_settings(self):
+        self._settings_return = self._current_screen
+        self.settings_view.tkraise()
+        self._current_screen = "settings"
+
+    def _close_settings(self):
+        back = self._settings_return
+        if back in ("map", "battle") and self.map_view is None:
+            back = "menu"      # settings opened before a game existed
+        if back == "pause":
+            self.pause_view.tkraise()
+            self._current_screen = "pause"
+            return
+        self.show_screen(back if back != "settings" else "menu")
 
     def show_screen(self, name):
         view = {"menu": self.menu_view, "new_game": self.new_game_view,
