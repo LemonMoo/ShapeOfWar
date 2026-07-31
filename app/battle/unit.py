@@ -19,7 +19,7 @@ import itertools
 import math
 import random
 
-from app.battle import movement, orders
+from app.battle import movement, orders, roles
 from app.battle.unit_types import (UNIT_TYPES, COMMANDER_AURA_RADIUS,
                                    COMMANDER_LEASH, COMMANDER_LAST_STAND,
                                    COMMANDER_RETURN_SPEED_MULT,
@@ -408,10 +408,19 @@ class Unit:
         # get dragged off toward whatever's fightable along the way -- but
         # whether we're close enough to fight is always judged against the
         # real TARGET, never the clicked ground point.
+        station = None
         if self.move_point is not None:
             mx, my = self.move_point
         else:
-            mx, my = self.target.x, self.target.y
+            # A station-keeping role (an anchor, a banner -- see roles.py)
+            # walks to its place with its own army rather than at the enemy it
+            # is fighting. It still SWINGS at whatever comes into reach: only
+            # where it walks changes, exactly like a right-click move order.
+            station = self._role_station()
+            if station is not None:
+                mx, my = station
+            else:
+                mx, my = self.target.x, self.target.y
         mdx, mdy = mx - self.x, my - self.y
         mdist = math.hypot(mdx, mdy) or 1e-6
 
@@ -473,7 +482,11 @@ class Unit:
             # fresh target sooner than the ordinary throttle would, since
             # choose_target's crowd penalty is what actually spreads the army
             # out. Never applies to a player's own explicit order.
+            # A Berserker is exempt: going where the fighting is thickest is
+            # the whole unit, and holding him at the back of a scrum for good
+            # order would be the opposite of what he is.
             if (self.move_point is None and not self._player_directed
+                    and self.type.get("role") != roles.FRENZIED
                     and target_dist is not None
                     and target_dist <= reach + movement.SWARM_STANDOFF
                     and movement.mobbed(self, battle)):
@@ -481,7 +494,13 @@ class Unit:
                 self.charge = 0.0
                 return
             self.advancing = True
-            move = self.effective_speed * dt
+            speed = self.effective_speed
+            if station is not None:
+                # Hurrying to its place in the line -- see
+                # roles.STATION_CATCHUP_MAX. Capped by the army's own pace, so
+                # this closes a gap and never becomes a speed bonus.
+                speed *= roles.STATION_CATCHUP_MAX
+            move = speed * dt
             ndx, ndy = movement.steer(self, mdx / mdist, mdy / mdist, battle)
             self.x += ndx * move
             self.y += ndy * move
@@ -554,6 +573,37 @@ class Unit:
                                         self.faction.color)
             if battle.on_attack:
                 battle.on_attack(self, self.target, outcome)
+
+    def _role_station(self):
+        """Where a station-keeping role should stand, or None.
+
+        Measured from its own army's centre of mass along the direction of the
+        enemy (see roles.station): an anchor in front of the line, a banner
+        behind it. Both centres are computed once per tick for the whole field
+        (Battle._update_army_centres), so this is a couple of arithmetic ops.
+
+        Returns None once it is close enough (STATION_TOLERANCE), so a unit
+        stands still instead of jittering after a point that moves every tick,
+        and None when there is no army left to keep station with -- at which
+        point it fights like anyone else."""
+        offset = roles.station(self)
+        if offset is None:
+            return None
+        centre = getattr(self.faction, "centre", None)
+        enemy = getattr(self.faction, "enemy_centre", None)
+        if centre is None or enemy is None:
+            return None
+        if getattr(self.faction, "line_strength", 0) <= roles.STATION_LAST_STAND:
+            return None   # nothing left to stand with -- see STATION_LAST_STAND
+        dx, dy = enemy[0] - centre[0], enemy[1] - centre[1]
+        mag = math.hypot(dx, dy)
+        if mag < 1e-6:
+            return None
+        px = centre[0] + dx / mag * offset
+        py = centre[1] + dy / mag * offset
+        if math.hypot(px - self.x, py - self.y) <= roles.STATION_TOLERANCE:
+            return None
+        return px, py
 
     def _screened(self, dist_to_target):
         """Whether a commander may CLOSE on his target. For an AI-run

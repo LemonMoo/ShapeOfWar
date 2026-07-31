@@ -6,7 +6,7 @@ from collections import Counter
 import numpy as np
 
 from app.core.events import bus
-from app.battle import movement, order_ai, orders
+from app.battle import movement, order_ai, orders, roles
 from app.world import weather
 from app.battle.unit import Unit
 
@@ -91,6 +91,14 @@ class Army:
         # Battle.deploy; membership never changes, since a dead source is
         # skipped by the alive check at the point of use.
         self.aura_sources = []
+        # Where this army's body of men is, and where the enemy's is --
+        # recomputed once per tick by Battle._update_army_centres, read by the
+        # station-keeping roles (see roles.py). None until the first tick, and
+        # None again once there is nobody left to average.
+        self.centre = None
+        self.enemy_centre = None
+        self.pace = 0.0
+        self.line_strength = 0
 
     @property
     def living(self):
@@ -319,6 +327,57 @@ class Battle:
     # cover AVOID_DIST in one ring of nine cells.
     MOVE_CELL = 32
 
+    def _update_army_centres(self):
+        """Where each army's body of men actually is, and where the enemy's is.
+
+        Computed once per tick for the whole field rather than per unit: a
+        station-keeping role (see roles.py) needs both every tick, and working
+        them out per soldier would be the O(n^2) mistake choose_target already
+        had to be rescued from. Commanders are excluded from the centre for the
+        same reason Unit._army_anchor excludes them -- one 270 HP body is not
+        the army.
+
+        `army.centre` / `army.enemy_centre` are None when there is nobody to
+        average, and every caller must cope with that."""
+        centres = {}
+        for army in self.armies:
+            xs = ys = speeds = 0.0
+            n = 0
+            line = 0
+            for u in army.units:
+                if u.alive and not u.is_commander:
+                    xs += u.x
+                    ys += u.y
+                    speeds += u.effective_speed
+                    n += 1
+                    if roles.station(u) is None:
+                        line += 1
+            # How many soldiers there are for a station-keeper to keep station
+            # WITH. Once this runs out, an anchor or a banner has nothing to
+            # anchor and fights like anyone else -- without it, an army down to
+            # its last few Standard Bearers walked backwards from the enemy
+            # forever, each holding station behind a centre of mass that was
+            # itself, and the battle never ended (caught in
+            # dev/test_special_roles).
+            army.line_strength = line
+            army.centre = (xs / n, ys / n) if n else None
+            # The pace of the body of the army -- the ceiling on how fast a
+            # station-keeping unit may hurry to its place (see
+            # roles.STATION_CATCHUP_MAX).
+            army.pace = speeds / n if n else 0.0
+            centres[army] = (xs, ys, n)
+        for army in self.armies:
+            xs = ys = 0.0
+            n = 0
+            for other in self.armies:
+                if other.side == army.side:
+                    continue
+                ox, oy, on = centres[other]
+                xs += ox
+                ys += oy
+                n += on
+            army.enemy_centre = (xs / n, ys / n) if n else None
+
     def enemy_within(self, unit, radius):
         """Is any living enemy within `radius` of `unit`? Answered off the
         per-tick movement grid, so a rider can ask it every tick while riding
@@ -518,6 +577,25 @@ class Battle:
         cy = sum(u.y for u in best) / len(best)
         return min(best, key=lambda u: (u.x - cx) ** 2 + (u.y - cy) ** 2)
 
+    def _densest_among(self, units, xs, ys, mask):
+        """Of the candidates `mask` selects, the one with the most company
+        within _DENSITY_CELL -- the target a splash weapon should be aimed at.
+
+        Same coarse-bin approximation densest_enemy uses, and for the same
+        reason: an approximate answer for one pass beats an exact one for
+        several, on something asked repeatedly mid-fight."""
+        idx = np.flatnonzero(mask)
+        if not idx.size:
+            return None
+        cell = self._DENSITY_CELL
+        bins = {}
+        for i in idx:
+            bins.setdefault((int(xs[i] // cell), int(ys[i] // cell)), []).append(int(i))
+        best = max(bins.values(), key=len)
+        cx = sum(xs[i] for i in best) / len(best)
+        cy = sum(ys[i] for i in best) / len(best)
+        return units[min(best, key=lambda i: (xs[i] - cx) ** 2 + (ys[i] - cy) ** 2)]
+
     # --- vectorised target selection ------------------------------------------
     # choose_target was the single biggest cost in the simulation -- 64% of it
     # at 2,400 units -- because every re-targeting unit looped over every living
@@ -558,7 +636,12 @@ class Battle:
                 # can be kept honest without an O(n) rescan (see mark_dead).
                 u._cache_key = side
                 u._cache_idx = i
-            self._target_cache[side] = (units, xs, ys, hpf, rng, thr, alive)
+            # The enemy's centre of mass, computed here because the arrays are
+            # already to hand -- a flanker scores candidates by how far out of
+            # that centre they stand, which is what "work the flanks" means
+            # when there is no formation object to point at.
+            self._target_cache[side] = (units, xs, ys, hpf, rng, thr, alive,
+                                        float(xs.mean()), float(ys.mean()))
 
     def mark_dead(self, unit):
         """Drop a unit from the target snapshot the instant it falls.
@@ -584,11 +667,36 @@ class Battle:
         cache = self._target_cache.get(unit.faction.side)
         if not cache:
             return self.nearest_enemy(unit)
-        units, xs, ys, hpf, rng, thr, alive = cache
+        units, xs, ys, hpf, rng, thr, alive, ecx, ecy = cache
         if not alive.any():
             return self.nearest_enemy(unit)
 
         dist = np.hypot(xs - unit.x, ys - unit.y)
+
+        # A bombardier picks the thickest knot it can reach, not the nearest
+        # man: its damage is nearly all splash, and one bomb on the edge of a
+        # formation is most of that thrown away. Falls through to the ordinary
+        # scoring when nothing is in range, so it still closes rather than
+        # standing about waiting for a crowd to form.
+        role = unit.type.get("role")
+        if role == roles.BOMBARD:
+            in_range = alive & (dist <= unit.attack_range)
+            if in_range.any():
+                packed = self._densest_among(units, xs, ys, in_range)
+                if packed is not None:
+                    return packed
+        elif role == roles.FRENZIED:
+            # Straight at the thickest knot within reach of a short run. Doing
+            # this as a SCORE bonus on how many allies were already fighting a
+            # candidate was tried first and measured backwards: the berserkers
+            # all converged on one man, killed him in a second, and were
+            # measured a moment later standing among fresh, uncrowded enemies.
+            # Where the press IS, not who is being ganged up on.
+            near = alive & (dist <= roles.FRENZY_SEEK_RANGE)
+            if near.any():
+                packed = self._densest_among(units, xs, ys, near)
+                if packed is not None:
+                    return packed
 
         # An Assassin hunts bowmen and nothing else. Deliberately scoped to the
         # WHOLE battlefield rather than "no archer nearby": they are meant to
@@ -618,6 +726,12 @@ class Battle:
         score = -dist + _FINISH_WEIGHT * (1.0 - hpf) - _CROWD_PENALTY * thr
         if unit.type.get("charge"):
             score = score + _CAVALRY_ARCHER_BONUS * rng
+        if role == roles.FLANKER:
+            # Prefer whoever stands furthest out of the enemy's own centre --
+            # the edge of a formation, which is where a fast evasive
+            # skirmisher is worth something and the middle of a shield line is
+            # where it dies.
+            score = score + roles.FLANK_WEIGHT * np.hypot(xs - ecx, ys - ecy)
         score = np.where(alive, score, -np.inf)
         best = int(np.argmax(score))
         if score[best] == -np.inf:
@@ -875,6 +989,7 @@ class Battle:
 
         self._rebuild_target_cache()
         self._build_move_grid()
+        self._update_army_centres()
         self._run_order_ai(dt)
 
         for army in self.armies:

@@ -41,6 +41,17 @@ Speeds/ranges are in canvas pixels; times in seconds.
   ``aura``/``aura_radius``: this unit projects a commander-style aura over
                     friendly soldiers within the radius. Auras do NOT stack --
                     see Unit._aura.
+  ``role``        : what this unit DOES on the field, as opposed to what its
+                    numbers are. Until this existed every special walked at its
+                    own nearest enemy exactly like a swordsman, so a
+                    Shieldwarden whose whole value is protecting a line would
+                    walk out of the line, and a Sapper built to break up a
+                    packed formation would bomb whichever single soldier
+                    happened to be closest. See app/battle/roles.py for what
+                    each one means; the stats here are unchanged by it.
+  ``no_cohesion`` : this unit ignores the formation spacing everyone else keeps
+                    (movement.steer). Only the Berserker has it, and it is
+                    character rather than a bonus.
 """
 UNIT_TYPES = {
     "infantry": {
@@ -139,6 +150,8 @@ UNIT_TYPES = {
         # bowmen. Taken as a MAX against the species trait (see Unit.__init__),
         # so it is a floor for the type rather than a replacement for it.
         "dodge_chance": 0.22,
+        # Slips AROUND a formation rather than through it -- see roles.py.
+        "role": "infiltrator",
         # First strike: the opening blow on each victim lands for this much.
         # Awarded once per DISTINCT target (tracked by uid, see Unit._struck),
         # never once per engagement -- otherwise a unit could flick its target
@@ -171,6 +184,8 @@ UNIT_TYPES = {
         "max_hp": 16, "speed": 40, "range": 110, "damage": 7, "cooldown": 2.6,
         "ranged": True, "accuracy": 0.65, "equipment": [],
         "splash_radius": 26, "splash_share": 0.70,
+        # Bombs the thickest knot within reach, not the nearest man.
+        "role": "bombard",
     },
     # --- The Shieldwarden (Dwarves only) ------------------------------------
     # This slot held an Arbalest first -- a heavy crossbow, higher damage than
@@ -196,6 +211,8 @@ UNIT_TYPES = {
         "block_chance": 0.45, "block_arc_deg": 170,
         "aura": {"damage_taken_mult": 0.88},
         "aura_radius": 80,
+        # Holds the front of its own line so the aura covers it.
+        "role": "anchor",
     },
     # --- The Berserker (Orcs only) ------------------------------------------
     # The Orcish trade taken to its end: no shield whatsoever, and damage that
@@ -213,6 +230,8 @@ UNIT_TYPES = {
         "max_hp": 34, "speed": 40, "range": 14, "damage": 12, "cooldown": 0.50,
         "ranged": False, "equipment": ["sword"],
         "frenzy": 0.8,
+        # Seeks the thickest of the fighting, and keeps no line while doing it.
+        "role": "frenzied", "no_cohesion": True,
     },
     # --- The Bladesinger (Elves only) ---------------------------------------
     # The one special on the roster paid for entirely out of its own species'
@@ -236,6 +255,8 @@ UNIT_TYPES = {
         "max_hp": 22, "speed": 46, "range": 13, "damage": 9, "cooldown": 0.45,
         "ranged": False, "equipment": ["sword"],
         "dodge_chance": 0.20,
+        # Works the flanks instead of grinding at the centre of a formed line.
+        "role": "flanker",
     },
     # --- The Standard Bearer (Humans only) ----------------------------------
     # The rank-and-file form of the Marshal. Humans' identity is that the line
@@ -259,6 +280,8 @@ UNIT_TYPES = {
         "block_chance": 0.35, "block_arc_deg": 150,
         "aura": {"damage_mult": 1.14, "block_add": 0.08, "cooldown_mult": 0.94},
         "aura_radius": 125,
+        # Stands where the banner covers the most men, and never chases.
+        "role": "banner",
     },
 }
 

@@ -36,6 +36,8 @@ Two properties worth keeping if this is ever rewritten:
 """
 import math
 
+from app.battle import roles
+
 # --- separation ---------------------------------------------------------------
 # Measured centre to centre, ON TOP of the two bodies' radii, so this is real
 # elbow room rather than a bigger collision radius. At 11px between two ordinary
@@ -71,24 +73,43 @@ CONTACT_CAP = 3
 # fight, which is not what is being asked for.
 SWARM_STANDOFF = 16.0
 
+# --- infiltration ---------------------------------------------------------------
+# An Assassin's whole value is arriving among the bowmen, and what has always
+# killed it is crossing the line in front of them (HANDOFF S4 #3: "they die
+# crossing the field"). So for this role ENEMY bodies -- every one except the
+# one it is going for -- are obstacles to swing wide around too. Wider than the
+# ally cone, because going around a formation means committing to the detour
+# early rather than brushing along its face.
+INFILTRATE_AVOID_DIST = 52.0
+INFILTRATE_WEIGHT = 1.9
 
-def _neighbours(unit, battle):
-    """Living allies near enough to matter, from the battle's per-tick grid.
 
-    Same-SIDE rather than same-army: two allied armies on one side are one
-    formation as far as walking into each other is concerned."""
+def _neighbours(unit, battle, enemies=False):
+    """Living units near enough to matter, from the battle's per-tick grid.
+
+    Allies are same-SIDE rather than same-army: two allied armies on one side
+    are one formation as far as walking into each other is concerned. Enemies
+    are included only for an infiltrator, and its own target never counts as an
+    obstacle -- it is where the unit is trying to get to.
+
+    Yields (other, is_ally) pairs."""
     grid = getattr(battle, "_move_grid", None)
     if not grid:
         return ()
     cell = battle.MOVE_CELL
     cx, cy = int(unit.x // cell), int(unit.y // cell)
     side = unit.faction.side
+    target = unit.target
     near = []
     for gx in (cx - 1, cx, cx + 1):
         for gy in (cy - 1, cy, cy + 1):
             for other in grid.get((gx, gy), ()):
-                if other is not unit and other.alive and other.faction.side == side:
-                    near.append(other)
+                if other is unit or not other.alive:
+                    continue
+                if other.faction.side == side:
+                    near.append((other, True))
+                elif enemies and other is not target:
+                    near.append((other, False))
     return near
 
 
@@ -98,35 +119,40 @@ def steer(unit, dx, dy, battle):
 
     A unit type may opt out with `no_cohesion` (the Orcish Berserker, whose
     whole character is that he does not keep a line)."""
-    if unit.type.get("no_cohesion"):
+    infiltrating = unit.type.get("role") == roles.INFILTRATOR
+    if unit.type.get("no_cohesion") and not infiltrating:
         return dx, dy
 
     sx = sy = 0.0          # separation
     ax = ay = 0.0          # avoidance
-    for other in _neighbours(unit, battle):
+    for other, is_ally in _neighbours(unit, battle, enemies=infiltrating):
         ox, oy = other.x - unit.x, other.y - unit.y
         d2 = ox * ox + oy * oy
         if d2 < 1e-9:
             continue
         d = math.sqrt(d2)
         space = unit.radius + other.radius + PERSONAL_SPACE
-        if d < space:
+        if is_ally and d < space:
             # Linear falloff: an ally at arm's length barely registers, one
-            # standing on top of you dominates.
+            # standing on top of you dominates. Enemies are never pushed away
+            # from -- backing off an enemy is retreating, not spacing.
             push = (space - d) / space
             sx -= ox / d * push
             sy -= oy / d * push
-        if d < AVOID_DIST:
+        reach = AVOID_DIST if is_ally else INFILTRATE_AVOID_DIST
+        if d < reach:
             # Only what is genuinely in front, and only close enough to be an
             # obstacle rather than a distant body in the same direction.
             ahead = (ox * dx + oy * dy) / d
             if ahead >= AVOID_CONE_COS:
-                # Step to the side the ally is NOT on: the sign of the cross
+                # Step to the side the body is NOT on: the sign of the cross
                 # product says which side it stands, and the perpendicular
                 # away from it is where the gap is.
                 cross = dx * oy - dy * ox
                 side = -1.0 if cross > 0 else 1.0
-                weight = (AVOID_DIST - d) / AVOID_DIST * ahead
+                weight = (reach - d) / reach * ahead
+                if not is_ally:
+                    weight *= INFILTRATE_WEIGHT
                 ax += -dy * side * weight
                 ay += dx * side * weight
 
