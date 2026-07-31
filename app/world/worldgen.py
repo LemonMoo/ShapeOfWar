@@ -1148,7 +1148,7 @@ ROAD_MIGRATION_VERSION = 1   # bump if a future road-repair pass needs to re-run
 
 def repair_ocean_crossing_roads(world):
     """One-time migration for saves written before construction.
-    _find_road_path/_bridge_region_to_kingdom stopped faking a straight
+    _find_road_routes/_bridge_region_to_kingdom stopped faking a straight
     road across open water whenever no land route existed: any "stone" or
     "dirt" segment whose straight line crosses an OCEAN cell can ONLY be
     that old bug -- a real Dijkstra-routed road never touches open water
@@ -1158,7 +1158,7 @@ def repair_ocean_crossing_roads(world):
     Replaces each one with a genuine sea lane where a coastal connection
     actually exists between its two endpoints, or simply drops it where
     none does -- the same policy a brand new connection follows today
-    (see _find_road_path's own docstring). Versioned like
+    (see _find_road_routes's own docstring). Versioned like
     resources.migrate_legacy_overflow: idempotent, and cheap to skip
     entirely on saves already repaired or created after the fix."""
     if getattr(world, "_road_migration_version", 0) >= ROAD_MIGRATION_VERSION:

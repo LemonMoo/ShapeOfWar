@@ -178,8 +178,18 @@ def test_no_fake_road_across_ocean():
     home_region.meta_settlements.append(coastal_st.id)
     faction.meta.setdefault("settlements", []).append(coastal_st.id)
 
-    tier, path = construction._find_road_path(world, 0, target)
+    # _find_road_routes returns EVERY road a new settlement should open, best
+    # first (roads branch from a settlement now instead of hanging off one
+    # neighbour). The first entry keeps the old meaning exactly -- it is the
+    # one the settlement's construction waits on -- and the sea-lane fallback
+    # this whole test is about is still all-or-nothing, so route[0] is the
+    # right thing to assert on.
+    routes = construction._find_road_routes(world, 0, target)
+    tier, path = routes[0] if routes else (None, None)
     check("a route was found at all (land or sea)", tier is not None, str(tier))
+    check("a sea fallback is never mixed with land branches",
+          not routes or len({t for t, _ in routes}) == 1,
+          str([t for t, _ in routes]))
     if tier is not None:
         check("it's tagged 'sea', not 'land' (no land bridge exists)",
               tier == "sea", tier)

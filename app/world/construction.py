@@ -236,7 +236,7 @@ class SettlementProject:
         self.kind = kind            # "city" | "town" | "castle"
         # Open-water path to the nearest existing settlement, set instead of
         # `road` when no land connection exists at all (a new coastal city on
-        # a different landmass) -- see _find_road_path. No construction phase
+        # a different landmass) -- see _find_road_routes. No construction phase
         # of its own (nothing physical to build across open water, same
         # reasoning trade.py's sea trade routes use), so it's just folded
         # straight into the road network once the settlement itself finishes
@@ -551,7 +551,7 @@ def _path_between(world, origin, dest_pos, faction_idx=None, allow_fallback=True
     """Terrain-aware path between two specific points — the same Dijkstra +
     elevation-cost machinery worldgen already uses for trade routes/roads,
     so this can't cross a mountain or river any more than anything else in
-    the game does. Shared by _find_road_path (nearest existing settlement
+    the game does. Shared by _find_road_routes (nearest existing settlement
     to a new one) and expansion.ensure_interregion_roads (village to
     village across a region border).
 
@@ -564,7 +564,7 @@ def _path_between(world, origin, dest_pos, faction_idx=None, allow_fallback=True
     all: True (the default, used by every caller for whom the two points
     are guaranteed to share a landmass, e.g. neighboring regions) returns
     the straight two-point segment rather than fail outright, on the
-    assumption any miss is a rare local pathfinding quirk. _find_road_path
+    assumption any miss is a rare local pathfinding quirk. _find_road_routes
     passes False, because for it a miss can mean the two points genuinely
     sit on different landmasses -- and drawing a straight "road" across
     open ocean was exactly the reported bug this exists to avoid."""
@@ -596,7 +596,7 @@ def _sea_lane_between(world, a_pos, b_pos):
     or None if either isn't within reach of the sea or no water connection
     exists in the search box -- the same dock-to-dock Dijkstra
     trade._capital_sea_path uses for cross-faction sea trade, reused here
-    for _find_road_path's same-faction case. Not cached: unlike the AI's
+    for _find_road_routes's same-faction case. Not cached: unlike the AI's
     per-turn trade lookups, this only ever runs once, at the moment a
     settlement is founded."""
     dock_a = _nearest_ocean_cell(world, a_pos)
@@ -618,43 +618,73 @@ def _sea_lane_between(world, a_pos, b_pos):
     return [a_pos] + sea_path + [b_pos]
 
 
-def _find_road_path(world, faction_idx, dest_pos):
-    """("land"|"sea", path) connecting one of this faction's existing
-    settlements to `dest_pos`, or (None, None) if nothing connects at all.
+# How many stone roads one new settlement may open at once. A safety rail
+# rather than the shaping force -- the relative-neighbourhood rule below
+# usually returns fewer -- but a capital planted in the middle of a dense old
+# realm should not start a dozen simultaneous road projects.
+SETTLEMENT_MAX_ROADS = 3
 
-    Tries every candidate settlement, nearest first, for a land route; only
-    if NONE of them has one -- a new coastal city on a different landmass
-    from every settlement this faction already owns -- does it try again,
-    nearest first, for a sea lane instead. Checking every candidate (not
-    just the single nearest) matters because "nearest" and "coastal" don't
-    have to be the same settlement: a faction's capital is often well
-    inland, and it'd be wrong to call a new island city unreachable just
-    because the closest existing settlement by raw distance happens to have
-    no coast of its own, when a farther one does.
 
-    Never fakes a straight road across open ocean when no land route
-    exists -- that was the reported bug: a brand new settlement used to
-    get a literal straight "stone" road drawn through the sea to whichever
-    existing settlement happened to be nearest as the crow flies. If even
-    a sea lane fails for every candidate (no coast anywhere, or every water
-    route is out of search range), the settlement still gets built, it
-    just starts with no connector at all, same as any other genuinely
-    isolated case in this game."""
-    candidates = [st.pos for st in world.settlements if st.faction_idx == faction_idx]
-    candidates = sorted((p for p in candidates if p != dest_pos),
-                        key=lambda p: wrap.dist2_wrap(p, dest_pos, world.w))
-    if not candidates:
-        return None, None
-    for origin in candidates:
+def _find_road_routes(world, faction_idx, dest_pos):
+    """Every stone road a new settlement should open, best first.
+
+    A settlement used to get exactly ONE road, to whichever of its owner's
+    settlements happened to be nearest. Repeated over a growing realm that
+    builds a CHAIN: every new town hangs off one older town, nothing ever
+    joins two branches, and a city with three towns around it is connected to
+    one of them. Roads in a real country branch, and a city is the place they
+    branch FROM.
+
+    So: the same relative-neighbourhood rule the village mesh uses
+    (resources._connect_new_village_to_region). A link to B is kept only when
+    no third settlement C is closer to BOTH ends than they are to each other
+    -- because then the road already goes to B via C, and a second one buys a
+    shortcut nobody needs. It is the rule that produces junctions instead of
+    parallel roads, and it means a town joins its true neighbours in every
+    direction rather than only the nearest one.
+
+    The first route returned keeps the old meaning exactly: it is the one the
+    settlement's own construction waits on, and it still falls back to a sea
+    lane when no land route exists anywhere (the reported bug about roads
+    drawn straight through open ocean -- see _find_road_routes's own note, which
+    this replaces).
+    """
+    others = [st.pos for st in world.settlements if st.faction_idx == faction_idx]
+    others = sorted((p for p in others if p != dest_pos),
+                    key=lambda p: wrap.dist2_wrap(p, dest_pos, world.w))
+    if not others:
+        return []
+
+    keep = []
+    for origin in others:
+        span = wrap.dist2_wrap(origin, dest_pos, world.w)
+        if any(third is not origin
+               and wrap.dist2_wrap(third, dest_pos, world.w) < span
+               and wrap.dist2_wrap(third, origin, world.w) < span
+               for third in others):
+            continue      # already reachable via `third`, at no real detour
+        keep.append(origin)
+        if len(keep) >= SETTLEMENT_MAX_ROADS:
+            break
+
+    routes = []
+    for origin in keep:
         land = _path_between(world, origin, dest_pos, faction_idx=faction_idx,
                              allow_fallback=False)
         if land is not None:
-            return "land", land
-    for origin in candidates:
+            routes.append(("land", land))
+    if routes:
+        return routes
+
+    # No land route to ANY of them -- a new coastal city on a landmass this
+    # faction has not reached before. Try every settlement for a sea lane,
+    # nearest first, not just the pruned set: "nearest" and "has a coast" are
+    # not the same settlement, and a capital is often well inland.
+    for origin in others:
         sea = _sea_lane_between(world, origin, dest_pos)
         if sea is not None:
-            return "sea", sea
-    return None, None
+            return [("sea", sea)]
+    return []
 
 
 def _faction_nodes(nation, world):
@@ -760,7 +790,8 @@ def start_settlement(world, nation, pos, kind):
 
     _pay_cost(nation, cost, world)
 
-    tier, road_path = _find_road_path(world, faction_idx, pos)
+    routes = _find_road_routes(world, faction_idx, pos)
+    tier, road_path = routes[0] if routes else (None, None)
     road = RoadProject(faction_idx, road_path) if tier == "land" else None
     sea_lane = road_path if tier == "sea" else None
     project = SettlementProject(faction_idx, pos, region_id, road, kind,
@@ -768,6 +799,14 @@ def start_settlement(world, nation, pos, kind):
     world.settlement_projects.append(project)
     if road is not None:
         world.road_projects.append(road)
+    # Any further routes are BRANCHES: a city joins every neighbour it is
+    # genuinely nearest to, not just the single closest one. See
+    # _find_road_routes. They are ordinary road projects, so they get built at
+    # the usual rate and do not gate the settlement's own construction the way
+    # its first road does.
+    for extra_tier, extra_path in routes[1:]:
+        if extra_tier == "land":
+            world.road_projects.append(RoadProject(faction_idx, extra_path))
     return (f"Construction begins on a new {kind} — estimated "
             f"{project.total_turns} turns.")
 

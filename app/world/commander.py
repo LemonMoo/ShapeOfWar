@@ -356,7 +356,7 @@ def _path_dijkstra_nearest(cellset, cost_fn, start, dest, width, edge_cost_fn=No
 def _bbox_cellset(world, a, b, include_ocean):
     """Every cell in a padded bounding box around two points — the same
     'pad the rectangle between start/dest, not a fixed window' approach
-    construction._find_road_path already uses, which is why it scales fine
+    construction._find_road_routes already uses, which is why it scales fine
     to any distance. include_ocean=False restricts to land only. Uses
     wrap.bbox_span_wrap for the x-span so a route between two points near
     opposite edges of the map can be found through the (shorter) seam
