@@ -382,14 +382,20 @@ def species_trait_summary(species):
 
 # --- faction names: "<Adj> <Noun>" ------------------------------------------
 _FACTION_NAMES = {
+    # Humans draw on the naming CONVENTIONS of Sanderson's Stormlight
+    # Archive rather than anything from it: storm-shaped descriptive
+    # compounds, oath and highland vocabulary, and a fondness for symmetry.
+    # Every name here is original -- no proper noun of his is reused, which
+    # is the whole point of taking a convention rather than a name.
     "Humans": (
-        ["Ashen", "Iron", "Golden", "Crimson", "Verdant", "Frost", "Storm",
-         "Obsidian", "Radiant", "Hollow", "Thorned", "Gilded", "Pale",
-         "Scarlet", "Ember", "Duskward", "Sunder", "Wintered", "Cobalt", "Umber"],
-        ["Covenant", "Dominion", "Hegemony", "Reach", "Concord", "Legion",
-         "Accord", "Imperium", "Coalition", "Clanhold", "Ascendancy", "Compact",
-         "Marches", "Syndicate", "Enclave", "Protectorate", "Sovereignty",
-         "Banner", "Throne", "Confluence"],
+        ["Stormward", "Oathbound", "Highstone", "Windswept", "Riven",
+         "Tempered", "Sunlit", "Leeward", "Stormcalled", "Unbroken",
+         "Stonebound", "Skyward", "Weathered", "Ninefold", "Sworn",
+         "Cragbound", "Shorn", "Everward", "Bright", "Sundered"],
+        ["Princedom", "Highmarch", "Oathhold", "Conclave", "Dominion",
+         "Warcamp", "Covenant", "Accord", "Bulwark", "Reach",
+         "Stormseat", "Protectorate", "Sovereignty", "Throne", "Highcourt",
+         "Compact", "Bastionry", "Marches", "Concord", "Waymarch"],
     ),
     "Elves": (
         ["Silver", "Moonlit", "Starlit", "Verdant", "Whispering", "Gilded",
@@ -477,16 +483,22 @@ _REGION_QUALIFIERS = [
 
 # --- settlement names: "<Root><suffix>", suffix picked by settlement kind ---
 _SETTLE_NAMES = {
+    # See the note on the Human faction bank above. Roots lean on the
+    # th/kh/sh/l/n phonetics and the symmetry the convention prizes
+    # (Nomon, Tevet, Kanak, Halah and Sasas all read the same both ways);
+    # suffixes trade the Anglo-Saxon -ton/-thorpe/-by village endings for
+    # storm-and-stone ones, because on a coast the weather carves the map
+    # and people name places for how exposed they are to it.
     "Humans": (
-        ["Karn", "Vel", "Thal", "Bren", "Ost", "Myr", "Dun", "Fal",
-         "Grim", "Hale", "Ithil", "Corv", "Ashen", "Bright", "Stone",
-         "Wolf", "Raven", "Ember", "Frost", "Gild"],
-        {"city": ["haven", "spire", "gate", "reach", "hold", "crown", "port", "vast"],
-         "castle": ["keep", "watch", "guard", "bastion", "fort", "wall", "aerie"],
-         "town": ["stead", "ford", "mill", "brook", "field", "market",
-                   "crossing", "hollow", "wick", "dale"],
-         "village": ["ton", "by", "worth", "leigh", "combe", "end", "holt",
-                     "thorpe", "wick", "bury"]},
+        ["Khal", "Thal", "Vesh", "Nalath", "Torath", "Shael", "Kavel",
+         "Denar", "Elith", "Marath", "Sevath", "Halan", "Nomon", "Tevet",
+         "Kanak", "Halah", "Sasas", "Storm", "Lee", "Stone"],
+        {"city": ["nar", "kar", "eth", "seat", "spire", "reach", "cradle", "vast"],
+         "castle": ["watch", "bulwark", "hold", "ward", "bastion", "wall", "stand"],
+         "town": ["vah", "eth", "market", "crossing", "rill", "gate",
+                   "hollow", "run", "quarter", "dale"],
+         "village": ["in", "al", "lee", "shelter", "hollow", "rest",
+                     "walk", "row", "fold", "burrow"]},
     ),
     "Elves": (
         ["Sil", "Ela", "Thal", "Ain", "Lir", "Fae", "Mira", "Ithi", "Ely",
@@ -563,15 +575,25 @@ def make_settlement_namer(rng):
     to Human if unknown)."""
     used = set()
 
+    def _join(root, suffix):
+        """Glue a root to a suffix, collapsing a letter doubled across the
+        seam -- "Sasas" + "shelter" should read Sasashelter, not
+        Sasasshelter, and "Stone" + "eth" Stoneth rather than Stoneeth. Only
+        at the join, so a doubling that belongs to either part on its own
+        (Ostt-, -rrow) is left alone."""
+        if root and suffix and root[-1].lower() == suffix[0].lower():
+            return f"{root}{suffix[1:]}"
+        return f"{root}{suffix}"
+
     def namer(kind, species="Humans"):
         roots, suffix_map = _SETTLE_NAMES.get(species, _SETTLE_NAMES["Humans"])
         suffixes = suffix_map.get(kind, suffix_map["town"])
         for _ in range(200):
-            name = f"{rng.choice(roots)}{rng.choice(suffixes)}"
+            name = _join(rng.choice(roots), rng.choice(suffixes))
             if name not in used:
                 used.add(name)
                 return name
-        name = f"{rng.choice(roots)}{rng.choice(suffixes)} {len(used)}"
+        name = f"{_join(rng.choice(roots), rng.choice(suffixes))} {len(used)}"
         used.add(name)
         return name
 
@@ -597,13 +619,17 @@ RULER_TITLES = {
 # faction banks above so a species missing an entry falls back to Human rather
 # than crashing -- the rule every namer in this module follows.
 _RULER_NAMES = {
+    # See the note on the Human faction bank above. Given names carry the
+    # same th/l/n sound and symmetry; epithets swear by storms and oaths
+    # rather than by chivalric virtue.
     "Humans": (
-        ["Aldric", "Bertran", "Cedric", "Roland", "Gareth", "Halvard", "Emeric",
-         "Rowan", "Tristan", "Odric", "Mathias", "Percival", "Alaric", "Edmund",
-         "Isolde", "Aveline", "Rosamund", "Elayne", "Maribel", "Constance",
-         "Seraphine", "Beatrix", "Adelaide", "Guinevere"],
-        ["the Bold", "the Just", "the Grey", "the Elder", "the Younger",
-         "the Steadfast", "the Wise", "the Undaunted", "the Fair"],
+        ["Nalath", "Tevalen", "Shaleth", "Kavaran", "Elthar", "Torenal",
+         "Vashen", "Halavar", "Renath", "Sevaren", "Dalneth", "Malaren",
+         "Ithara", "Naveth", "Shalira", "Elenath", "Ravana", "Talavi",
+         "Nomon", "Kanak", "Tevet", "Sasas"],
+        ["the Stormward", "Oathkeeper", "the Unbroken", "Stormcalled",
+         "the Tempered", "who Held the Wall", "the Twicesworn",
+         "the Windward", "the Steadfast"],
     ),
     "Elves": (
         ["Aerandir", "Caelith", "Elrohir", "Faelar", "Ithilwen", "Lorindel",
