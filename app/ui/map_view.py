@@ -3049,8 +3049,11 @@ class MapView(tk.Frame):
         self.render()
 
     def _update_turn_label(self):
-        year = resources.current_year(self.world.turn)
-        self.turn_lbl.config(text=f"Year {year} — Turn {self.world.turn} — {self.world.season}")
+        """One label, one writer. It used to say "Year 6 - Turn 568 - Autumn",
+        which was the truth in a game whose unit of time was a button press;
+        now it is the date AND what the clock is doing, and that lives in
+        _refresh_time_controls."""
+        self._refresh_time_controls()
 
     def open_compendium(self):
         """Create-or-raise: repeated presses (button or the F1 shortcut in

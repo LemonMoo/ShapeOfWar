@@ -20,6 +20,18 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 70,
+        "title": "The World Does Not Wait",
+        "items": [
+            "NEW: the world runs in real time. There is no End Turn any more — time passes on its own, and you pause it, or run it at 1x, 2x or 4x, from where that button used to be",
+            "NEW: the clock stops itself when something matters — a battle, losing ground, or work you ordered finishing — and the date line tells you which",
+            "CHANGED: armies, caravans and shipments are always moving. Travel used to be a three-quarter-second replay after each turn and then stillness; now a day's march takes exactly as long as the day does",
+            "CHANGED: the map no longer freezes while the world thinks. A day is worked through in slices between frames, so nothing is ever hidden behind a 'processing' cover — that cover is gone",
+            "CHANGED: Space stops and starts the world. E still runs a single day, for when you want to step it by hand",
+            "NOTE: a day is what a turn was, exactly — every save carries over, and nothing about the economy, the seasons or the balance has been re-scaled",
+        ],
+    },
+    {
         "version": 69,
         "title": "Armies That Fight Like Armies",
         "items": [
