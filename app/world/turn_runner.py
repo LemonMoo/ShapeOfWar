@@ -73,6 +73,13 @@ class TurnRunner:
         self._steps = None            # live generator while a day is in progress
         self.phase = None             # name of the last phase completed
         self.phases_done = 0
+        # True only while a phase is actually executing. World code can reach
+        # the UI mid-phase (a region changing hands emits an event the app
+        # listens to), and anything that reacts by trying to finish the day
+        # would be calling next() on a generator that is already running --
+        # ValueError, from the middle of a territory transfer. Callers check
+        # this and defer instead; see App._pause_world_for.
+        self.stepping = False
         self.slowest_phase = (None, 0.0)   # (name, ms) seen this session
 
     @property
@@ -103,11 +110,14 @@ class TurnRunner:
         deadline = time.perf_counter() + budget / 1000.0
         while True:
             started = time.perf_counter()
+            self.stepping = True
             try:
                 self.phase = next(self._steps)
             except StopIteration:
                 self._steps = None
                 return True
+            finally:
+                self.stepping = False
             ms = (time.perf_counter() - started) * 1000.0
             self.phases_done += 1
             if ms > self.slowest_phase[1]:

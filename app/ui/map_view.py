@@ -3302,6 +3302,16 @@ class MapView(tk.Frame):
                               self._movement_snapshot())
         self.runner.begin_day()
 
+    def reset_frame_clock(self):
+        """Forget how long it has been since the last frame.
+
+        Anything that stops the driver for a stretch -- a battle, a load, a
+        pause menu -- must call this on the way back, or the first frame
+        afterwards reports the whole gap as elapsed time and the world lurches
+        forward. The 0.25s clamp in _on_frame bounds the damage; this removes
+        it."""
+        self._last_frame = time.monotonic()
+
     def skip_a_day(self):
         """Run the rest of today and one more, whatever the clock is doing --
         the turn-based cadence, kept for testing and for anyone who wants to

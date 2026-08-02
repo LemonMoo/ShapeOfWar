@@ -13,6 +13,7 @@ run_settlement_ai, wired into the turn loop alongside advance_projects.
 import math
 import random
 
+from app.core.events import bus
 from app.world.worldgen import (OCEAN, Settlement, SETTLEMENT_TYPES,
                                 add_road_segments,
                                 SETTLEMENT_TAX_INCOME, _roll_population, _path_dijkstra,
@@ -867,6 +868,13 @@ def advance_projects(world):
     for project in finished_projects:
         _finish_settlement(world, project)
         world.settlement_projects.remove(project)
+        # Real time needs to know when work the PLAYER ordered lands: in a
+        # turn-based game a finished settlement was waiting in the panel next
+        # time you looked, and in a running world it scrolls past. See
+        # app/core/clock.py's PROJECT_DONE and App._on_work_finished.
+        bus.emit("work:finished", {"faction_idx": project.faction_idx,
+                                   "kind": "settlement",
+                                   "name": getattr(project, "name", "A settlement")})
 
     finished_roads = [r for r in world.road_projects if r.complete]
     for road in finished_roads:

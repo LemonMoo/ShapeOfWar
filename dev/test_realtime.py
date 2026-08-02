@@ -137,6 +137,30 @@ try:
         "day every couple of seconds that is a permanent flicker")
     print("  ok    throttled, as _PANEL_REFRESH_MS intends")
 
+    print("\n--- an auto-pause fired from INSIDE a day does not re-enter it ---")
+    # Two of the three rules fire from world code running mid-phase: a region
+    # changing hands and a settlement finishing. Reacting by finishing the day
+    # from in there would call next() on the generator currently executing -- a
+    # ValueError thrown from the middle of a territory transfer. This stands in
+    # for that, by pausing while `stepping` is set, exactly as the bus listener
+    # does.
+    view.clock.resume()
+    view._set_speed(1.0)
+    view._advance_world(C.SECONDS_PER_DAY)
+    view.runner.step(budget_ms=0.1)
+    assert view.runner.busy, "the probe needs a day actually in progress"
+    view.runner.stepping = True
+    try:
+        view.clock.auto_pause_for(C.PROJECT_DONE)
+        assert view.clock.paused, "the clock did not stop"
+        assert view.runner.busy, "the day was ended from inside itself"
+    finally:
+        view.runner.stepping = False
+    view.runner.finish_day()
+    view._finish_day()
+    assert not view.runner.busy
+    print("  ok    the clock stops; the day in progress finishes on its own")
+
     print("\n--- a day is never left half-finished behind a save or a battle ---")
     view._set_speed(1.0)
     view._advance_world(C.SECONDS_PER_DAY)     # start one

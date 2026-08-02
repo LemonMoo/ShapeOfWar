@@ -20,6 +20,7 @@ from app.core.save import (save_game, load_game, has_save, list_saves,
                            new_save_id, delete_save)
 from app.world.worldgen import generate_world
 from app.core import audio
+from app.core import clock
 from app.ui.settings import SettingsPanel
 from app.battle.battle import (Battle, Army, terrain_note,
                                weather_note)
@@ -104,6 +105,11 @@ class App(tk.Tk):
 
         bus.on("battle:over", self._on_battle_over)
         bus.on("faction:eliminated", self._on_faction_eliminated)
+        # The other two auto-pause rules. Both exist because a running world
+        # scrolls past things a turn-based one left sitting in a panel until
+        # you looked.
+        bus.on("region:transferred", self._on_region_transferred)
+        bus.on("work:finished", self._on_work_finished)
         self.bind("<Escape>", self._on_escape)
         self.bind("<F1>", self._on_f1)
         # bind_all, not bind: a plain bind on the root only fires while focus
@@ -485,6 +491,11 @@ class App(tk.Tk):
 
     def stage_battle(self, attacker, defender, region=None, claim_project=None,
                      defender_strength_mult=1.0):
+        # The world stops for a battle. Strongest of the auto-pause rules and
+        # the one that makes real time survivable at all: a fight takes real
+        # minutes, and a map that kept running through them would hand back a
+        # world the player had no chance to act in.
+        self._pause_world_for(clock.BATTLE)
         # Via viewport_size, not .canvas: the battlefield surface may be the
         # GPU frame rather than a Tk canvas (see BattleView._make_viewport).
         vw, vh = self.battle_view.viewport_size()
@@ -647,6 +658,48 @@ class App(tk.Tk):
             if commander_mod.kill_commander(self.world, fac_idx):
                 self._commander_losses.append((fac_idx, nation.name))
 
+    def _on_region_transferred(self, payload):
+        """Territory changed hands. Stop the clock if it was OURS -- losing a
+        province while reading a panel is exactly the failure real time
+        introduces, and the one the player asked to be protected from."""
+        if self.world is None or self.world.player_faction_idx is None:
+            return
+        old_faction = payload.get("old_faction")
+        if old_faction is None:
+            return
+        player = self.world.factions[self.world.player_faction_idx]
+        if old_faction is player:
+            self._pause_world_for(clock.ATTACKED)
+
+    def _on_work_finished(self, payload):
+        """Something the player ordered built is finished."""
+        if self.world is None:
+            return
+        if payload.get("faction_idx") == self.world.player_faction_idx:
+            self._pause_world_for(clock.PROJECT_DONE)
+
+    def _pause_world_for(self, reason):
+        """Stop the clock because something happened, and leave the world in a
+        state it is safe to walk away from.
+
+        The part-done day is FINISHED first rather than left mid-phase. A
+        battle can change territory and kill commanders, and resuming a day
+        that was half-run before all that happened would apply the rest of it
+        to a world it was no longer written against."""
+        if self.map_view is None:
+            return
+        # Only when we are NOT inside a phase. Two of the three rules fire
+        # from world code running mid-day (a region changing hands, a
+        # settlement finishing), and finishing the day from in there means
+        # calling next() on the generator currently executing. Pausing the
+        # clock is enough by itself -- it stops the NEXT day, and the one in
+        # progress completes on its own on the following frame.
+        if self.map_view.runner.busy and not self.map_view.runner.stepping:
+            self.map_view.runner.finish_day()
+            self.map_view._finish_day()
+        self.map_view.clock.auto_pause_for(reason)
+        self.map_view._refresh_time_controls()
+
     def _return_from_battle(self):
         """Called once the player dismisses the battle-over screen (click or
         keypress) — back to the map, blinking the contested region's border
@@ -662,6 +715,11 @@ class App(tk.Tk):
         self._commander_losses = []
         if outcome is not None:
             self.map_view.refresh()
+        # Real minutes spent fighting are not days the world owes. The clock
+        # stays PAUSED -- coming back from a battle to a world already running
+        # is how you lose the province you just won without seeing it happen.
+        self.map_view.clock.forgive_backlog()
+        self.map_view.reset_frame_clock()
         self.show_screen("map")
         if outcome is None:
             return
