@@ -3,8 +3,9 @@
 Python/Tkinter desktop 4X strategy game. Single developer, turn-based, procedurally
 generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
 
-**Last release: v0.10.0, "Armies That Fight Like Armies"** — the battle
-movement rework (§32) and the fix for packaged audio (§33). Check
+**Last release: v0.11.0, "The World Does Not Wait"** — the real-time
+overhaul (§34). The game is no longer turn-based. Before that, v0.10.0 was the
+battle movement rework (§32) and the fix for packaged audio (§33). Check
 `gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting this
 line — this repo ships fast, sometimes several releases in one day.
 
@@ -2886,3 +2887,92 @@ cannot see a packaging bug, and packaging is a place where a silent failure is
 the default.** `dev/test_audio.py` now asserts `build.bat` bundles `assets/`,
 which is the only place this could ever have been caught. Anything else that
 ever lives under `assets/` is covered by the same line.
+
+---
+
+## 34. Real time — the turn is gone (v0.11.0)
+
+The user's ask, in their words: a live world map like Mount & Blade's, with
+pause, slow down and speed up. `REALTIME_PLAN.md` is the plan as written before
+any code; three decisions were taken with them up front and they shaped
+everything:
+
+1. **A day IS the old turn.** Not rescaled, not approximated. `world.turn` is
+   still the day counter, all 111 per-turn rate constants keep their exact
+   meaning, every save carries over with no migration, and no balance was
+   re-fitted. This is the decision that made the rest survivable.
+2. **The clock stops for a battle, for losing ground, and for work finishing.**
+3. **End Turn is replaced outright** by pause / 1x / 2x / 4x and a date line.
+
+### The shape of it
+
+- **`app/core/clock.py`** — DEMAND. Real seconds in, days owed out. No World,
+  no Tk, no simulation, so it is testable alone and the sim stays runnable
+  without it. The backlog is CAPPED and overflow counted, not queued: a world
+  that cannot keep up runs steadily slower and says so, rather than banking
+  days that arrive in a burst.
+- **`app/world/turn_runner.py`** — SUPPLY. Steps `resources.day_steps` under a
+  millisecond budget. **Not a thread.** It was one, for exactly this cost, and
+  threading is the wrong tool the moment the map must be readable while the
+  world moves — rendering another thread's half-updated dicts is a race
+  CPython turns into a RuntimeError mid-frame. Stepping between frames on the
+  main thread has no such window, needs no lock, and makes speed a budget.
+- **`resources.day_steps`** — `advance_turn`'s body as a generator that yields
+  a phase name between phases. `advance_turn` drains it, so every dev harness,
+  the tournament and the benchmark kept the exact function they had.
+
+### What deleting the turn deleted
+
+The worker thread, the result queue, the token, `_end_turn_busy`, the cooldown,
+the click gate, the render gate, and the full-frame "Processing turn…" overlay.
+Every one of them existed only to keep hands off a world another thread owned.
+That is worth remembering as a general shape: **a large amount of defensive
+machinery can be a symptom of one structural choice, and deleting the choice
+deletes all of it.**
+
+### The gate, and what it cost to pass
+
+`dev/test_turn_slice.py` is the load-bearing test: ten days run whole and ten
+run in slices must fingerprint identically. They do, at +2-4% total cost.
+
+Getting the slices short enough took chunking four things, in this order,
+each one found by measuring rather than guessed: the region production sweep
+(`REGION_CHUNK`), domestic trade by faction and then again by node
+(`REGIONAL_TRADE_NODE_CHUNK` — one faction alone was 130ms), claim resolution
+one claim at a time, and the AI commander pass by faction. Median slice
+**1.0ms, p95 12ms**, from a single 425ms block.
+
+**Two phases are declared atomic** (`turn_runner.ATOMIC_PHASES`) with the
+argument written down: a region changing hands cannot be half-transferred, and
+a single Dijkstra has no break inside it to take. Anything added there needs
+the same argument made for it.
+
+### Three traps, all of which generalise
+
+1. **Re-entrancy.** Two of the three auto-pause rules fire from world code
+   running MID-PHASE (a region changing hands, a settlement finishing).
+   Reacting by finishing the day means calling `next()` on the generator
+   currently executing — a ValueError thrown from the middle of a territory
+   transfer. `TurnRunner.stepping` makes that visible; callers defer instead.
+2. **A per-phase worst-case behind an assert is a flaky build.** A 100ms spike
+   on a loaded machine failed the suite once. The test now asserts on each
+   phase's MEDIAN. This is the third time this project has been bitten by a
+   noisy measurement behind an assert.
+3. **Time not simulated is not time owed.** Pausing, fighting a battle, or
+   loading must call `clock.forgive_backlog()` and `reset_frame_clock()`, or
+   the world pays out the whole gap the moment it resumes.
+
+### What is open
+
+- **`SECONDS_PER_DAY = 2.4` is a first pass** and the number most worth
+  judging in play — a season is 25 days and a year 100, so a year takes about
+  four minutes at 1x. `_PANEL_REFRESH_MS` (how often the side panels rebuild)
+  and `_MAX_BUDGET_MS` are the other two feel constants.
+- **A late-game world will not hold 4x.** That is intended and visible
+  ("running slowly" on the date line), but it has not been watched in a real
+  session yet.
+- **Saving mid-day is prevented by finishing the day first**, which is the
+  simple answer. Nobody has yet checked what a save/load does to a world with
+  a part-run day if that path is ever reached another way.
+- **Alerts are still a per-day dump** into the log rather than a running feed.
+  In a world that runs, several days' worth can scroll past between glances.
