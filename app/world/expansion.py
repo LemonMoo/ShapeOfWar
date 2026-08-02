@@ -555,6 +555,13 @@ def resolve_claim_loss(world, region):
 
 
 def advance_claims(world):
+    """One day of claim growth and resolution, run whole -- see
+    advance_claims_steps, which this drains."""
+    for _ in advance_claims_steps(world):
+        pass
+
+
+def advance_claims_steps(world):
     """Called every turn (alongside construction.advance_projects): grow
     claim progress. An AI-owned claim resolves instantly (win/loss formula)
     the moment it completes, same as before; the player's own claims
@@ -578,6 +585,11 @@ def advance_claims(world):
             resolve_claim_win(world, region, project.faction_idx)
         else:
             resolve_claim_loss(world, region)
+        # One resolved claim at a time: taking a region rebuilds its
+        # settlements and roads, so on the day several land at once this was
+        # the spikiest phase of the whole day (124ms measured). Each claim is
+        # independent of the next, so the break changes nothing.
+        yield "claims"
 
 
 # --- AI commander movement ---------------------------------------------------
@@ -591,8 +603,23 @@ def advance_claims(world):
 # toward the nearest frontier region it could claim from. That is enough to
 # keep expansion moving without pretending to be a general.
 def run_commander_ai(world):
+    """One day of AI commander orders, run whole -- see
+    run_commander_ai_steps, which this drains."""
+    for _ in run_commander_ai_steps(world):
+        pass
+
+
+def run_commander_ai_steps(world):
+    """Walk each AI faction's commander toward the frontier.
+
+    Yields between factions: working out where a commander should march
+    involves a real frontier scan and a path search, and as one call across
+    every faction it measured 99ms on a developed world -- past what a slice
+    of a day may cost (see turn_runner.SLOW_PHASE_MS). One faction's orders
+    touch only its own commander, so the breaks change nothing."""
     from app.world import commander as commander_mod
     for fac_idx, nation in enumerate(world.factions):
+        yield "commander orders"
         if fac_idx == world.player_faction_idx or is_eliminated(nation):
             continue
         cmds = commander_mod.faction_commanders(world, fac_idx)

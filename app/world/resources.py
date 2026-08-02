@@ -391,6 +391,12 @@ SEASONS = ["Spring", "Summer", "Autumn", "Winter"]
 # fraction of a year now that the map itself has gotten larger (multi-
 # continent worldgen) without movement speed itself changing.
 TURNS_PER_SEASON = 25
+# How many regions the day's production sweep does before it offers the caller
+# a break (see day_steps). Regions are independent of one another in that loop,
+# so this changes nothing about the result -- only how long the longest
+# uninterruptible slice of a day is, which is what decides whether the map
+# stutters while the world runs.
+REGION_CHUNK = 40
 YEAR_LENGTH_TURNS = TURNS_PER_SEASON * len(SEASONS)
 
 # --- Phase 3: where a resource actually appears -----------------------------
@@ -6313,21 +6319,49 @@ def migrate_legacy_overflow(world):
 
 
 def advance_turn(world):
-    """The turn loop: cycle the season, recompute every region's yield for
-    it (including Crops, see compute_region_yield -- production lands at
-    the region's own Villages first, Phase 10), run every Village's herd
-    for the season (advance_herds), spoil perishables, add production to
-    each faction's stockpile, clamp to storage capacity (so nothing piles
-    up forever), and recompute military from the new stockpiles -- then
-    deliver/convert/redistribute/consume the household economy (see
-    advance_local_shipments/advance_production_chains/
+    """One whole day of world, run to completion.
+
+    The body lives in `day_steps` below, which is the same sequence expressed
+    as a generator that pauses between phases. This drains it, so every
+    caller that wants a finished day -- the dev harnesses, the tournament,
+    dev/bench_turn.py, a headless sim -- keeps the exact function it always
+    had, with the same signature and the same behaviour.
+
+    The real-time driver (app/world/turn_runner.py) steps `day_steps` instead,
+    a slice at a time under a millisecond budget, so the map stays live while
+    the day happens. Same phases, same order, same result: `bench_turn.py
+    --fingerprint` is the proof, and it is asserted in dev/test_turn_slice.py.
+    """
+    for _ in day_steps(world):
+        pass
+
+
+def day_steps(world):
+    """The turn loop, as a resumable sequence of phases.
+
+    Cycle the season, recompute every region's yield for it (including Crops,
+    see compute_region_yield -- production lands at the region's own Villages
+    first, Phase 10), run every Village's herd for the season (advance_herds),
+    spoil perishables, add production to each faction's stockpile, clamp to
+    storage capacity (so nothing piles up forever), and recompute military
+    from the new stockpiles -- then deliver/convert/redistribute/consume the
+    household economy (see advance_local_shipments/advance_production_chains/
     advance_settlement_production_chains/run_local_logistics/
-    advance_settlement_consumption) so nothing just teleports into place
-    or accumulates forever. There's no separate flat settlement-upkeep
-    draw any more (see the module docstring) --
-    advance_settlement_consumption is the entire settlement-drain story
-    now, and its returned consumption value feeds prosperity below the
-    same way the old upkeep value used to."""
+    advance_settlement_consumption) so nothing just teleports into place or
+    accumulates forever. There's no separate flat settlement-upkeep draw any
+    more (see the module docstring) -- advance_settlement_consumption is the
+    entire settlement-drain story now, and its returned consumption value
+    feeds prosperity below the same way the old upkeep value used to.
+
+    Yields the NAME of each phase as it completes. A caller may stop between
+    any two of them and come back later; it may not stop inside one, and that
+    is the contract the whole real-time design rests on -- a phase is the
+    atom, and the world is coherent at every yield.
+
+    Local state (the gold ledger's marks, the production tally) simply lives
+    across the yields, which is the whole reason this is a generator rather
+    than a list of callables that would have had to pass it all around.
+    """
     world.turn += 1
     world.season = SEASONS[((world.turn - 1) // TURNS_PER_SEASON) % len(SEASONS)]
     # Weather: rolled/advanced before production, so this turn's harvest
@@ -6341,22 +6375,31 @@ def advance_turn(world):
     # adds up to the real change with nothing unaccounted for.
     world._gold_turn = defaultdict(dict)
     _gold_mark = _gold_snapshot(world)
+    yield "season"
 
     production_value = defaultdict(float)
-    for region in world.regions:
-        # Real per-village production now (see recompute_region_resources) --
-        # each village produces from its own local land instead of one
-        # region-wide number split evenly across however many happen to
-        # exist. Value what was actually taken in (delivered), not the raw
-        # yield -- a village that idled its harvest for want of storage
-        # shouldn't still be credited with the prosperity of bringing it in.
-        _raw, delivered = recompute_region_resources(world, region, world.season)
-        production_value[region.faction_idx] += _resource_bundle_value(delivered)
+    for start in range(0, len(world.regions), REGION_CHUNK):
+        for region in world.regions[start:start + REGION_CHUNK]:
+            # Real per-village production now (see recompute_region_resources)
+            # -- each village produces from its own local land instead of one
+            # region-wide number split evenly across however many happen to
+            # exist. Value what was actually taken in (delivered), not the raw
+            # yield -- a village that idled its harvest for want of storage
+            # shouldn't still be credited with the prosperity of bringing it in.
+            _raw, delivered = recompute_region_resources(world, region, world.season)
+            production_value[region.faction_idx] += _resource_bundle_value(delivered)
+        # Chunked rather than one sweep: on a 300-region world this loop alone
+        # is a sixth of the day, which at 60fps is a visible hitch. Regions are
+        # independent of each other here -- each one reads its own land and
+        # writes its own villages -- so where the breaks fall changes nothing
+        # about the result, which dev/test_turn_slice.py asserts by fingerprint.
+        yield "production"
 
     # Herds run seasonally at the village now (see advance_herds) -- the old
     # once-a-year region-level path is gone, along with the meat spike it made.
     for fac_idx, value in advance_herds(world).items():
         production_value[fac_idx] += value
+    yield "herds"
 
     for fac_idx, nation in enumerate(world.factions):
         res = nation.stats.setdefault("resources", {})
@@ -6364,20 +6407,27 @@ def advance_turn(world):
         _apply_spoilage(res)
         _clamp_to_storage(nation)
         _recompute_military(nation, world, fac_idx)
+    yield "stockpiles"
 
     advance_local_shipments(world)          # deliver anything in transit before it's needed
     _produce_fishing(world)                 # Fish lands directly at water-adjacent nodes
     advance_preservation(world)             # cure perishables before they spoil
+    yield "shipments"
+
     advance_production_chains(world)
     advance_settlement_production_chains(world)
     _record_gold(world, "minted", _gold_mark)   # Gold struck from Gold Ore
     _gold_mark = _gold_snapshot(world)
+    yield "workshops"
+
     run_local_logistics(world)              # dispatch new shipments from this turn's fresh stock
     advance_settlement_storage(world)
     consumption_value = advance_settlement_consumption(world)
+    yield "households"
 
     _update_prosperity(world, production_value, consumption_value)
     _grow_city_villages(world)
+    yield "prosperity"
 
     # Autonomous trade (app/world/trade.py): move existing caravans first —
     # freeing a faction's trade "slot" on delivery — then let factions
@@ -6395,11 +6445,14 @@ def advance_turn(world):
     from app.world import trade
     trade.advance_trade_route_projects(world)   # land routes under construction
     events = trade.advance_caravans(world)
+    yield "caravans"
     events += trade.run_trade_ai(world)
+    yield "trade offers"
     events += trade.run_trade_route_ai(world)   # AI proposes new routes
     world.trade_events = events
     _record_gold(world, "foreign trade", _gold_mark)
     _gold_mark = _gold_snapshot(world)
+    yield "foreign trade"
 
     # Phase 11: domestic cross-region settlement trade -- run after
     # run_local_logistics (above) has already had first crack at covering
@@ -6410,11 +6463,16 @@ def advance_turn(world):
     # trading with itself (a single faction_idx), not the seller_idx/
     # buyer_idx shape every foreign-trade event has, and map_view's
     # _report_trade_events reads that shape unconditionally.
-    world.regional_trade_events = (trade.advance_regional_shipments(world)
-                                   + trade.run_regional_trade(world)
-                                   + trade.run_sell_to_city(world))
+    world.regional_trade_events = trade.advance_regional_shipments(world)
+    yield "convoys"
+    # The single heaviest phase of the day on a developed world -- about a
+    # third of it -- which is why it gets a yield to itself on either side
+    # rather than being folded in with its neighbours.
+    world.regional_trade_events += yield from trade.run_regional_trade_steps(world)
+    world.regional_trade_events += trade.run_sell_to_city(world)
     _record_gold(world, "domestic trade", _gold_mark)
     _gold_mark = _gold_snapshot(world)
+    yield "sell to city"
 
     # Player/AI-built settlements + their connecting roads
     # (app/world/construction.py).
@@ -6424,20 +6482,28 @@ def advance_turn(world):
     construction.advance_granary_projects(world)     # legacy, pre-tier saves
     construction.advance_warehouse_projects(world)   # legacy, pre-tier saves
     construction.advance_storage_projects(world)
+    yield "building"
     construction.run_settlement_ai(world)
     construction.run_storage_ai(world)
     _record_gold(world, "construction", _gold_mark)
     _gold_mark = _gold_snapshot(world)
+    yield "construction"
 
     # Progressive expansion: claims-in-progress on UNCLAIMED land
     # (app/world/expansion.py).
     from app.world import expansion
-    expansion.advance_claims(world)
-    expansion.run_commander_ai(world)   # walk AI commanders to the frontier
+    yield from expansion.advance_claims_steps(world)
+    # walk AI commanders to the frontier
+    yield from expansion.run_commander_ai_steps(world)
     expansion.run_expansion_ai(world)
+    yield "expansion"
+    # A yield of its own because it is the spikiest thing in the day: it lays
+    # roads between regions with a real Dijkstra search, so on the day a
+    # frontier moves it costs many times what it does on a quiet one.
     expansion.ensure_interregion_roads(world)
     _record_gold(world, "expansion", _gold_mark)
     _gold_mark = _gold_snapshot(world)
+    yield "interregion roads"
 
     # Commanders: walk any active move order, count down ship construction
     # (app/world/commander.py) — before vision.recompute so this turn's
@@ -6446,12 +6512,14 @@ def advance_turn(world):
     commander.advance_commanders(world)
     # Successors take the field (see kill_commander); stashed for the UI.
     world.commander_successions = commander.advance_commander_succession(world)
+    yield "commanders"
 
     # Cartographers survey a little further before the fog is recomputed, so
     # this turn's work shows up this turn rather than one turn late. Same for
     # any surveying parties out in the field.
     advance_cartographers(world)
     world.survey_events = advance_surveys(world)
+    yield "surveys"
 
     # Fog of war: reveal whatever's now in range as territory changes hands
     # (app/world/vision.py).
@@ -6464,3 +6532,4 @@ def advance_turn(world):
     # that's a genuine signal there's a gold flow worth naming.
     _record_gold(world, "other", _gold_mark)
     _close_gold_ledger(world)
+    yield "day end"

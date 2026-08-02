@@ -1731,7 +1731,28 @@ def _faction_regional_nodes(world, fac_idx, nation):
     return nodes
 
 
+# How many of a faction's nodes the domestic-trade matcher works through
+# before it offers the caller a break. See run_regional_trade_steps: the
+# breaks change nothing about the result, only the length of the longest
+# uninterruptible slice of a day.
+REGIONAL_TRADE_NODE_CHUNK = 20
+
+
 def run_regional_trade(world):
+    """Every faction's domestic cross-region trade for one day, run whole.
+
+    The body is `run_regional_trade_steps` below, which pauses between
+    factions. This drains it, so every caller that just wants the day's
+    events keeps the function it always had."""
+    steps = run_regional_trade_steps(world)
+    while True:
+        try:
+            next(steps)
+        except StopIteration as done:
+            return done.value or []
+
+
+def run_regional_trade_steps(world):
     """Called every turn, after run_local_logistics has already had its
     shot at satisfying need within each region: for each faction, greedily
     match a Settlement or Village sitting on cross-region-worthy surplus
@@ -1740,7 +1761,16 @@ def run_regional_trade(world):
     it, and dispatch a paid RegionalShipment — same greedy-first-match
     style as run_trade_ai/run_local_logistics, not an optimizer. Returns
     "regional_dispatched" event dicts (see advance_regional_shipments for
-    the delivered/lost counterparts)."""
+    the delivered/lost counterparts).
+
+    Yields between FACTIONS, because at about a third of the day this is the
+    single heaviest thing the world does and as one atomic call it was a 210ms
+    freeze -- three times the ceiling a slice is allowed (see
+    turn_runner.SLOW_PHASE_MS). A faction's trade reads and writes only its own
+    nodes, so where the breaks fall changes nothing; dev/test_turn_slice.py
+    holds that to a fingerprint. `world._regional_path_budget` is deliberately
+    set once, before the first faction, and spent across all of them exactly as
+    it was when this ran in one go."""
     world._regional_path_budget = REGIONAL_PATH_BUDGET_PER_TURN
     events = []
     season = world.season
@@ -1763,13 +1793,25 @@ def run_regional_trade(world):
         # matching loop below only ever looks at nodes actually wanting
         # the specific resource in hand.
         wants_by_resource = {}
-        for wkind, wnode in nodes:
+        for scanned, (wkind, wnode) in enumerate(nodes):
+            # Chunked for the same reason the matching below is: on the
+            # largest faction of a developed world this scan alone measured
+            # 97ms, which is past what one slice of a day may cost.
+            if scanned and not scanned % REGIONAL_TRADE_NODE_CHUNK:
+                yield "domestic trade"
             wneeds = needs_by_node[(wkind, wnode.id)]
             for resource in _LOCAL_SHIPMENT_PRIORITY:
                 if _node_wants(wkind, wnode, resource, wneeds):
                     wants_by_resource.setdefault(resource, []).append((wkind, wnode))
 
-        for kind, node in nodes:
+        yield "domestic trade"
+
+        for seen, (kind, node) in enumerate(nodes):
+            # ...and the matching below is chunked again, because one large
+            # faction's nodes alone measured 130ms -- a faction is not a fine
+            # enough break on a developed world.
+            if seen and not seen % REGIONAL_TRADE_NODE_CHUNK:
+                yield "domestic trade"
             if _active_regional_shipments(world, node.id, kind) >= MAX_ACTIVE_REGIONAL_SHIPMENTS_PER_SETTLEMENT:
                 continue
             own_needs = needs_by_node[(kind, node.id)]
