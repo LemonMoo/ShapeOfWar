@@ -13,8 +13,6 @@ level at a time. Regions are the future unit of control for territory
 reassignment.
 """
 import math
-import queue
-import threading
 import time
 import contextlib
 import tkinter as tk
@@ -23,6 +21,7 @@ import numpy as np
 from PIL import Image, ImageTk
 
 from app.core import audio
+from app.core import clock
 from app.ui import theme
 from app.ui import widgets
 from app.world.world_map import Stance
@@ -31,6 +30,7 @@ from app.world.worldgen import OCEAN, road_chains
 from app.world.territory import bordering_regions, naval_reachable_regions
 from app.world.resources import RESOURCES
 from app.world import resources
+from app.world import turn_runner
 from app.world import diplomacy
 from app.world import construction
 from app.world import trade
@@ -68,25 +68,23 @@ _VILLAGE_REVEAL_SPAN = 40   # world-cells across the shorter viewport edge -- be
                             # apart) landed on this as a reasonable starting point --
                             # tune by feel if it reveals villages too early/late.
 
-# How long a turn may take before the busy cover is actually shown. The cover
-# has to EXIST from the instant End Turn is pressed -- it is what absorbs
-# clicks aimed at panels while the worker thread owns `world` -- but a
-# full-screen "Processing turn..." panel appearing and vanishing on every
-# single turn is the most jarring thing in the game. Most turns finish inside
-# this window and now show nothing at all; only a genuinely slow one puts the
-# cover up, which is when it is actually telling the player something.
-#
-# The map's own click handler is gated on `_turn_in_flight` directly (see
-# _on_click), so the map cannot be acted on during the gap. A panel button
-# pressed inside this window is theoretically unguarded, which is a knowingly
-# accepted trade: it needs a deliberate click somewhere else within a sixth of
-# a second of pressing End Turn, with the pointer already on End Turn.
-_TURN_OVERLAY_DELAY_MS = 160
+# The world driver's frame period (see MapView._on_frame). ~30fps: the world
+# map is not an action game, and every frame costs a slice of the day plus
+# whatever the map redraws.
+_FRAME_MS = 33
 
-_END_TURN_COOLDOWN_MS = 220   # min gap between End Turns -- the side panels fully
-                              # rebuild each turn, so back-to-back turns faster than
-                              # a repaint leave them caught mid-teardown (flicker /
-                              # white flashes / vanishing panels). See _on_end_turn.
+# Ceiling on how much of a frame the world may take, however high the speed.
+# Past this the map stops feeling like something you are watching and starts
+# feeling like something that is thinking. A world that cannot keep up at 4x
+# runs slower instead -- and says so (see clock.keeping_up).
+_MAX_BUDGET_MS = 22.0
+
+# How often the panels are rebuilt while time runs. A day used to end with a
+# full teardown and rebuild of the realm/resource/trade panels, which at a day
+# every couple of seconds would be a permanent flicker -- so the heavy rebuild
+# is throttled to this, and only the cheap readouts (the date, the treasury
+# figure) update every day.
+_PANEL_REFRESH_MS = 900
 
 _OCEAN_DEEP = (18, 30, 58)
 _OCEAN_SHALLOW = (44, 74, 120)
@@ -602,27 +600,16 @@ class MapView(tk.Frame):
         # App._on_faction_eliminated). Optional: dev harnesses that build a
         # MapView standalone have nothing that needs the hook.
         self.on_turn_settled = on_turn_settled
-        self._end_turn_busy = False     # re-entrancy/cooldown guard so mashing
-                                         # End Turn can't stack panel rebuilds
-                                         # mid-teardown (flicker) -- see _on_end_turn
-        # Background end-turn processing (see _run_end_turn/_turn_worker/
-        # _turn_drain): advance_turn runs on a worker thread so the ~300-500ms
-        # it costs on a late-game world stops freezing the window every single
-        # turn. _turn_token invalidates any in-flight result that isn't the
-        # most recent End Turn (defensive -- _end_turn_busy already prevents
-        # a second one from starting, but a stale result must never be able
-        # to land regardless).
-        self._turn_queue = queue.Queue()
-        self._turn_token = 0
+        # The world clock and the thing that works off what it owes. Time
+        # starts PAUSED: a world that begins running the moment the map opens
+        # would spend the player's first look at it doing things.
+        self.clock = clock.Clock(speed=clock.PAUSED)
+        self.clock.pause_reason = None
+        self.runner = turn_runner.TurnRunner(world)
         self._turn_pending = None    # (before_snapshot, prev_year, movement_snapshot)
-        # True for the narrower window the worker thread actually owns
-        # `world` -- as opposed to `_end_turn_busy`, which stays True through
-        # the safe main-thread-only post-processing, animation and cooldown
-        # too. render() gates on this one specifically: _finish_end_turn's
-        # own refresh()/render() calls must go through even though
-        # `_end_turn_busy` is still set at that point.
-        self._turn_in_flight = False
-        self._turn_overlay_id = None    # pending busy-cover reveal, see _run_end_turn
+        self._last_frame = time.monotonic()
+        self._frame_id = None
+        self._last_panel_refresh = 0.0
         self.selected = None            # selected faction (world view)
         self.zoom_faction = None        # faction we've zoomed into (region view --
                                          # villages become visible/clickable once
@@ -772,10 +759,6 @@ class MapView(tk.Frame):
         # sitting on top absorbs every click meant for anything underneath,
         # so nothing can act on `world` while the worker thread owns it,
         # without having to gate each individual button/handler by hand.
-        self._turn_overlay = tk.Frame(self, bg=theme.CANVAS)
-        tk.Label(self._turn_overlay, text="Processing turn…", bg=theme.CANVAS,
-                fg=theme.INK, font=("Segoe UI", 16, "bold")).place(
-                    relx=0.5, rely=0.5, anchor="center")
 
         # Terrain legend for the GPU flat map (see _sync_flatgl): the
         # canvas draws its own corner legend as vector items every frame
@@ -805,7 +788,11 @@ class MapView(tk.Frame):
         self._right_collapsed = False
         self._apply_panel_layout()
         self.set_world(world)
-        self.after(120, self._turn_drain)
+        self._refresh_time_controls()
+        # The world driver. Runs for the life of the view, paused or not: it is
+        # what keeps the date, the speed buttons and the movement animation
+        # honest even while nothing is advancing.
+        self._frame_id = self.after(_FRAME_MS, self._on_frame)
 
     # --- world binding -----------------------------------------------------
     def set_world(self, world):
@@ -2252,8 +2239,22 @@ class MapView(tk.Frame):
         self.currents_btn = widgets.button(foot, "Currents: Off", self._toggle_currents)
         self.currents_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 4))
 
-        widgets.button(foot, "End Turn", self._on_end_turn, kind="accent"
-                       ).pack(side="bottom", fill="x", padx=14, pady=(4, 6))
+        # --- the time controls, where End Turn used to be -------------------
+        # The world runs on its own now; this is the throttle. Pause is the
+        # accent button because it is the one that matters -- in a real-time
+        # game the important control is the one that stops it.
+        times = tk.Frame(foot, bg=theme.PANEL)
+        times.pack(side="bottom", fill="x", padx=14, pady=(4, 6))
+        self._speed_btns = {}
+        self.pause_btn = widgets.button(times, "Pause", self._toggle_pause,
+                                        kind="accent")
+        self.pause_btn.pack(side="left", fill="x", expand=True)
+        for mult in clock.SPEEDS:
+            label = f"{mult:g}x"
+            btn = widgets.button(times, label,
+                                 lambda m=mult: self._set_speed(m))
+            btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
+            self._speed_btns[mult] = btn
         self.turn_lbl = tk.Label(foot, text="", bg=theme.PANEL, fg=theme.MUTED,
                                  font=theme.FONT_BOLD)
         self.turn_lbl.pack(side="bottom", padx=14, pady=(8, 0))
@@ -3045,26 +3046,53 @@ class MapView(tk.Frame):
             return
         self._compendium_window = CompendiumWindow(self)
 
-    def _show_turn_overlay(self):
-        """Put the busy cover up -- only reached when a turn outlasts
-        _TURN_OVERLAY_DELAY_MS, so a normal turn never shows it at all."""
-        self._turn_overlay_id = None
-        if not self._turn_in_flight:
+    # --- driving the clock from the panel ------------------------------------
+    def _toggle_pause(self):
+        self.clock.toggle_pause()
+        if not self.clock.paused:
+            # Real time spent paused is not world time owed. Without this,
+            # coming back from a long pause pays out every second of it at
+            # once (the clock caps the backlog, so it is a burst rather than
+            # a flood -- but a burst is still not what pausing meant).
+            self.clock.forgive_backlog()
+            self._last_frame = time.monotonic()
+        audio.play("click")
+        self._refresh_time_controls()
+
+    def _set_speed(self, mult):
+        was_paused = self.clock.paused
+        self.clock.set_speed(mult)
+        if was_paused:
+            self.clock.forgive_backlog()
+            self._last_frame = time.monotonic()
+        audio.play("click")
+        self._refresh_time_controls()
+
+    def _refresh_time_controls(self):
+        """Say what the clock is doing, including when it is not keeping up.
+
+        A world quietly running at half the speed on the button reads as the
+        game being broken, so `keeping_up` is surfaced rather than hidden."""
+        if not hasattr(self, "pause_btn"):
             return
-        self._turn_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
-        self._turn_overlay.tkraise()
+        paused = self.clock.paused
+        self.pause_btn.config(text="Resume" if paused else "Pause")
+        for mult, btn in self._speed_btns.items():
+            live = (not paused) and abs(self.clock.speed - mult) < 1e-9
+            btn.config(fg=theme.INK if live else theme.MUTED)
+        if paused:
+            reason = clock.PAUSE_REASON_TEXT.get(self.clock.pause_reason,
+                                                 "Paused")
+            self.turn_lbl.config(text=f"{self._date_text()} — {reason}")
+        elif not self.clock.keeping_up:
+            self.turn_lbl.config(text=f"{self._date_text()} — running slowly")
+        else:
+            self.turn_lbl.config(text=self._date_text())
 
-    def _hide_turn_overlay(self):
-        """Take it down, and cancel the reveal if it never fired -- a fast
-        turn must not leave a timer that flashes the cover up afterwards."""
-        pending = getattr(self, "_turn_overlay_id", None)
-        if pending is not None:
-            self.after_cancel(pending)
-            self._turn_overlay_id = None
-        self._turn_overlay.place_forget()
-
-    def _clear_end_turn_busy(self):
-        self._end_turn_busy = False
+    def _date_text(self):
+        year = resources.current_year(self.world.turn)
+        day = (self.world.turn - 1) % resources.TURNS_PER_SEASON + 1
+        return f"{self.world.season} {day}, Year {year}"
 
     # --- end-turn movement animation -----------------------------------------
     # Caravans, shipments, commanders and ships used to TELEPORT: End Turn
@@ -3227,113 +3255,71 @@ class MapView(tk.Frame):
         x, y = self._display_pos(obj)
         return wrap.wrap_x(int(x), self.world.w), max(0, min(self.world.h - 1, int(y)))
 
-    def _on_end_turn(self):
-        # Rate-limit + re-entrancy guard: the side panels (realm info,
-        # resources, trade log) fully tear down and rebuild every turn, so a
-        # second End Turn arriving before the first finished painting catches
-        # them half-built -- the flicker/white-flash/vanishing-panel jank when
-        # mashing the button or holding E. Drop any End Turn while one is still
-        # settling; a short cooldown after each keeps the cadence civilized.
-        # Held for the WHOLE background turn now, not just the synchronous
-        # part -- see _run_end_turn.
-        if self._end_turn_busy:
-            return
-        self._end_turn_busy = True
+    # --- the world clock ------------------------------------------------------
+    # The turn-based build ran a whole day in one 425ms call on a worker
+    # thread, behind a full-frame overlay that ate every click, because
+    # nothing could safely look at the world while it moved. Real time deletes
+    # all of that: the day is stepped a slice at a time on THIS thread between
+    # frames (app/world/turn_runner.py), so there is never a moment when the
+    # world is half-updated and something else is reading it.
+    #
+    # One driver, running for the life of the view: tick the clock, spend what
+    # it owes on the day in progress, and draw. Speed is a budget, not a
+    # negotiation -- see app/core/clock.py's demand/supply note.
+    def _on_frame(self):
         try:
-            self._run_end_turn()
-        except Exception:
-            # Only the synchronous setup below (snapshots, cancelling other
-            # animations) can raise here -- advance_turn itself runs on the
-            # worker thread and is never allowed to propagate past
-            # _turn_worker. A failure this early never got as far as
-            # spawning that thread, so nothing will ever clear the guard on
-            # its own; release it here instead of wedging End Turn forever.
-            self._end_turn_busy = False
-            raise
-
-    def _run_end_turn(self):
-        """Kick off a turn and return immediately -- advance_turn() itself
-        runs on a worker thread (see _turn_worker) so its ~300-500ms cost on
-        a late-game world stops freezing the window on every single End
-        Turn. _turn_drain picks the result back up on the main thread and
-        runs _finish_end_turn, which is everything this function used to do
-        synchronously after on_end_turn() returned.
-
-        Nothing else may touch `world` while the worker owns it: the busy
-        overlay (raised below) absorbs every click aimed at the canvas or
-        either side panel, App gates the Escape/mode-toggle hotkeys on
-        `_end_turn_busy`, and render() no-ops while it's set -- see that
-        function and app.py's _on_escape/_on_toggle_mode_key."""
-        before = self._current_resource_snapshot()
-        prev_year = resources.current_year(self.world.turn)
-        self._stop_move_animation()
-        # Camera-zoom easing and the battle-outcome border flash both call
-        # render() on their own timer, independent of anything the player
-        # does -- cancelled here so nothing is left mid-animation for the
-        # whole processing window (render()'s guard would no-op them
-        # regardless, this just avoids the pointless reschedule-and-skip).
-        self._cancel_animation()
-        if self._flash_id is not None:
-            self.after_cancel(self._flash_id)
-            self._flash_id = None
-            self._flash_region = None
-        movement = self._movement_snapshot()
-        self._turn_pending = (before, prev_year, movement)
-        self._turn_token += 1
-        self._turn_overlay_id = self.after(_TURN_OVERLAY_DELAY_MS,
-                                            self._show_turn_overlay)
-        self._turn_in_flight = True
-        # Played on the UI thread as the turn STARTS, not when it finishes:
-        # the sound is feedback that the button did something, and feedback
-        # that arrives after the work is not feedback.
-        audio.play("end_turn")
-        threading.Thread(target=self._turn_worker, args=(self._turn_token,),
-                         daemon=True).start()
-
-    def _turn_worker(self, token):
-        """Background thread: advance_turn and nothing else. No Tk call of
-        any kind is safe here -- see _turn_drain for why, and app.py's
-        _on_faction_eliminated for the one indirect path (bus.emit) that
-        needed guarding because of this."""
-        try:
-            self.on_end_turn()
-            self._turn_queue.put((token, None))
-        except Exception as exc:
-            self._turn_queue.put((token, exc))
-
-    def _turn_drain(self):
-        """Polls for a finished background turn, same idiom as
-        NewGameView's worker/queue/after(120, ...) loop. Runs for the whole
-        life of the view, not just while a turn is in flight -- cheap when
-        the queue is empty, and simpler than starting/stopping it per turn."""
-        try:
-            while True:
-                try:
-                    token, exc = self._turn_queue.get_nowait()
-                except queue.Empty:
-                    break
-                if token != self._turn_token:
-                    continue    # superseded result -- shouldn't happen given
-                                # _end_turn_busy, but never trust a stale one
-                # The worker thread is done touching `world` the moment its
-                # result is on the queue (the put happens after on_end_turn()
-                # returns) -- clear this before _finish_end_turn so its own
-                # refresh()/render() calls aren't caught by render()'s guard.
-                self._turn_in_flight = False
-                self._finish_end_turn(exc)
+            now = time.monotonic()
+            dt = min(0.25, now - self._last_frame)   # a stall (a battle, a
+            self._last_frame = now                   # drag, a load) must not
+            self._advance_world(dt)                  # cash in as world time
         finally:
-            self.after(120, self._turn_drain)
+            self._frame_id = self.after(_FRAME_MS, self._on_frame)
 
-    def _finish_end_turn(self, exc):
-        """Back on the main thread: everything _run_end_turn used to do
-        after on_end_turn() returned, plus lowering the busy overlay and
-        releasing the guard. Runs inside try/finally for the same reason
-        _on_end_turn's setup half does -- a failure here must still release
-        the guard rather than wedging End Turn forever."""
-        self._hide_turn_overlay()
+    def _advance_world(self, dt):
+        if self.world is None:
+            return
+        self.clock.tick(dt)
+        if not self.runner.busy and self.clock.pending < 1.0:
+            return
+        if not self.runner.busy:
+            self._begin_day()
+        if self.runner.step(self._budget_ms()):
+            self.clock.day_done()
+            self._finish_day()
+
+    def _budget_ms(self):
+        """How much of this frame the world may have. Higher speeds get more,
+        because they are asking for more days per second -- but never the
+        whole frame: the map has to be drawn, and a world that advances in a
+        window nobody can see move is not the point."""
+        return min(_MAX_BUDGET_MS, turn_runner.DEFAULT_BUDGET_MS
+                   * max(1.0, self.clock.speed))
+
+    def _begin_day(self):
+        """Everything that has to be captured BEFORE the day happens."""
+        self._turn_pending = (self._current_resource_snapshot(),
+                              resources.current_year(self.world.turn),
+                              self._movement_snapshot())
+        self.runner.begin_day()
+
+    def skip_a_day(self):
+        """Run the rest of today and one more, whatever the clock is doing --
+        the turn-based cadence, kept for testing and for anyone who wants to
+        step the world by hand while it is paused."""
+        if self.runner.busy:
+            self.runner.finish_day()
+            self._finish_day()
+        self._begin_day()
+        self.runner.finish_day()
+        self._finish_day()
+
+    def _finish_day(self):
+        """A day has just finished: report it, refresh the panels, and set the
+        movers going toward where the day put them.
+
+        This is what used to run when the background turn came back, minus
+        everything that existed only to manage the worker and its overlay."""
         try:
-            if exc is not None:
-                raise exc
             before, prev_year, movement = self._turn_pending
             after = self._current_resource_snapshot()
             self._resource_deltas = {r: after.get(r, 0) - before.get(r, 0)
@@ -3352,26 +3338,25 @@ class MapView(tk.Frame):
                 self._year_start_snapshot = after
                 self._year_start_population = pop_now
 
-            self.refresh()
-            # After refresh: refresh() renders, and the first animated frame has to
-            # be the one that lands on screen or movers flash at their destination
-            # before setting off back to where they came from.
+            # The full panel rebuild is THROTTLED now. It tears down and
+            # rebuilds the realm/resource/trade panels, which was fine once a
+            # turn on a button press and is a permanent flicker at a day every
+            # couple of seconds. The cheap readouts still update every day.
+            now = time.monotonic()
+            if (now - self._last_panel_refresh) * 1000.0 >= _PANEL_REFRESH_MS:
+                self._last_panel_refresh = now
+                self.refresh()
+            else:
+                self._refresh_time_controls()
+                self.render()
+            # After the redraw: the first animated frame has to be the one that
+            # lands on screen or movers flash at their destination before
+            # setting off back to where they came from.
             self._start_move_animation(self._movement_tracks(movement))
             if self.on_turn_settled is not None:
                 self.on_turn_settled()
         finally:
             self._turn_pending = None
-            # Force the freshly-rebuilt panels to actually paint before we
-            # allow another End Turn (so there's never a visible half-built
-            # frame), then hold the guard for a short cooldown.
-            self.update_idletasks()
-            # The guard is held for the whole movement animation as well as the
-            # cooldown: ending another turn mid-slide would animate the next
-            # one from positions the world has already left behind.
-            delay = _END_TURN_COOLDOWN_MS
-            if self._move_anim is not None:
-                delay = max(delay, int(_MOVE_ANIM_SECONDS * 1000) + 40)
-            self.after(delay, self._clear_end_turn_busy)
 
     def _report_regional_trade_events(self):
         """Same idea as _report_trade_events, for Phase 11's domestic
@@ -5226,11 +5211,12 @@ class MapView(tk.Frame):
 
     # --- interaction -------------------------------------------------------
     def _on_click(self, event):
-        # Nothing may act on `world` while the worker thread owns it. The busy
-        # cover normally absorbs this, but it is deliberately not shown for
-        # the first _TURN_OVERLAY_DELAY_MS of a turn, so the map guards itself.
-        if self._turn_in_flight:
-            return
+        # No guard against the world being mid-day any more: the day is
+        # stepped between frames on this very thread (see _on_frame), so a
+        # click can only ever land between two whole phases. That is the
+        # entire reason for slicing it -- the turn-based build needed a
+        # full-frame overlay here to keep hands off `world` while a worker
+        # owned it.
         if self._animating:
             return
         vx0, vy0, scale = self._place
@@ -5570,15 +5556,10 @@ class MapView(tk.Frame):
         return segments
 
     def render(self):
-        if self._turn_in_flight:
-            # A background turn currently owns `world` (see _run_end_turn) --
-            # nothing on the main thread may read it until the worker hands
-            # it back. The only callers that can reach render() during this
-            # window are the camera-zoom and battle-flash timers, which fire
-            # on their own schedule regardless of user input; both are
-            # cancelled when the turn starts, but this is the actual
-            # correctness guarantee, not that cancellation.
-            return
+        # No mid-turn guard: the world is only ever advanced between frames,
+        # from _on_frame, and a phase is never split (see
+        # app/world/turn_runner.py). Whenever anything gets to draw, the world
+        # it is drawing is coherent.
         # GPU flat map: not a player-facing toggle -- swapped in for the
         # canvas automatically whenever GL is available, and dynamically
         # fallen back from rather than only checked once at startup.

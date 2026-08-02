@@ -113,8 +113,9 @@ class App(tk.Tk):
         # working after opening either one, and started again if you happened
         # to click back on the map, which is exactly the "works sometimes"
         # this fixes. bind_all reaches every window in the application.
-        for key, handler in (("e", self._on_end_turn_key),
-                             ("E", self._on_end_turn_key),
+        for key, handler in (("e", self._on_skip_day_key),
+                             ("E", self._on_skip_day_key),
+                             ("space", self._on_time_key),
                              ("v", self._on_toggle_mode_key),
                              ("V", self._on_toggle_mode_key)):
             self.bind_all(f"<{key}>", handler)
@@ -255,7 +256,14 @@ class App(tk.Tk):
             # instantly clobbered. Flushed there instead.
             self._pending_elimination = payload
             return
-        if self.map_view is not None and self.map_view._end_turn_busy:
+        if False:   # was: a background turn thread owned `world` and could
+                    # reach this listener off the main thread. There is no
+                    # such thread any more -- the day is stepped between
+                    # frames on the main thread (MapView._on_frame) -- so
+                    # after_idle here is always safe. Kept as a branch rather
+                    # than deleted so the stash/flush path below, which is
+                    # still exercised by the battle case above, reads the
+                    # same as it always did.
             # advance_turn can reach eliminate_faction (and this listener)
             # from MapView's background turn-processing thread, through
             # ordinary AI claim resolution -- after_idle must never be
@@ -389,14 +397,26 @@ class App(tk.Tk):
         except (AttributeError, tk.TclError):
             return False
 
-    def _on_end_turn_key(self, event):
-        """E: End Turn -- only while actually looking at the map (not
-        paused, not mid-battle, not on a menu where 'e' should just be a
-        letter -- e.g. typing a faction name on the New Game screen)."""
+    def _on_time_key(self, event):
+        """Space: stop or start the world. The one control that matters in a
+        real-time game is the one that stops it, so it gets the biggest key.
+
+        Same gating End Turn had: only while actually looking at the map, and
+        never while typing (a faction name on the New Game screen contains
+        spaces)."""
         if self._is_typing(event):
             return
         if self._current_screen == "map" and not self._paused:
-            self.map_view._on_end_turn()
+            self.map_view._toggle_pause()
+
+    def _on_skip_day_key(self, event):
+        """E: run one whole day right now, whatever the clock is doing --
+        the old End Turn cadence, kept because stepping the world by hand is
+        how most of this project's testing is done."""
+        if self._is_typing(event):
+            return
+        if self._current_screen == "map" and not self._paused:
+            self.map_view.skip_a_day()
 
     def _on_toggle_mode_key(self, event):
         """V: cycle the map's view mode (Political/Fertility/Elevation/
@@ -406,8 +426,7 @@ class App(tk.Tk):
         feeling inert rather than silently swallowed)."""
         if self._is_typing(event):
             return
-        if (self._current_screen == "map" and not self._paused
-                and not self.map_view._end_turn_busy):
+        if self._current_screen == "map" and not self._paused:
             self.map_view._toggle_mode()
 
     # --- pause menu (world map only) ----------------------------------------
@@ -417,9 +436,6 @@ class App(tk.Tk):
         # (whose Save writes `world` to disk) and _resume_from_pause's
         # map_view.render() call -- are both unsafe while the worker thread
         # in MapView still owns `world`. See MapView._run_end_turn.
-        if (self.map_view is not None and self._current_screen == "map"
-                and self.map_view._end_turn_busy):
-            return
         if self._paused:
             self._resume_from_pause()
         elif self._current_screen == "map":
