@@ -161,6 +161,24 @@ try:
     assert not view.runner.busy
     print("  ok    the clock stops; the day in progress finishes on its own")
 
+    print("\n--- movement fills the day, so travel never stops ---")
+    from app.ui import map_view as MV
+    view.clock.pause()
+    assert abs(view._move_anim_seconds() - MV._MOVE_ANIM_SECONDS) < 1e-9, (
+        "a hand-stepped day should use the fixed window")
+    view._set_speed(1.0)
+    at_1x = view._move_anim_seconds()
+    assert abs(at_1x - C.SECONDS_PER_DAY) < 1e-9, (
+        f"movement takes {at_1x:.2f}s of a {C.SECONDS_PER_DAY:.2f}s day -- "
+        "movers will stand still for the rest of it")
+    view._set_speed(4.0)
+    at_4x = view._move_anim_seconds()
+    assert at_4x < at_1x, "a faster clock did not shorten the travel window"
+    assert at_4x >= MV._MOVE_ANIM_MIN_SECONDS - 1e-9, (
+        "the window shrank past the floor, where sliding reads as jitter")
+    print(f"  ok    {MV._MOVE_ANIM_SECONDS:.2f}s stepped by hand, "
+          f"{at_1x:.2f}s at 1x, {at_4x:.2f}s at 4x")
+
     print("\n--- a day is never left half-finished behind a save or a battle ---")
     view._set_speed(1.0)
     view._advance_world(C.SECONDS_PER_DAY)     # start one

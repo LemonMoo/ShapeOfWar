@@ -156,11 +156,27 @@ def _rgb(r, g, b):
     return (clamp(r), clamp(g), clamp(b))
 
 
-# End-turn movement animation. A fixed wall-clock window rather than a fixed
-# number of frames, so a heavy world animates in the same time a light one does
-# -- it just draws fewer frames doing it.
+# Movement animation. A wall-clock window rather than a fixed number of frames,
+# so a heavy world animates in the same time a light one does -- it just draws
+# fewer frames doing it.
+#
+# Under the turn-based build this was a REPLAY: the turn resolved, then movers
+# slid over their day's travel in 0.75s and stood still until the next button
+# press. In a running world that is worse than teleporting, because the
+# stop-start is now on a rhythm you can watch -- three quarters of a second
+# moving, a second and a half standing. So the window is the DAY: an army
+# animating over exactly as long as the day takes is an army that never stops
+# moving, and the interpolation stops being a flourish and becomes how travel
+# looks (see MapView._move_anim_seconds).
+#
+# This one still applies when the world is not running on a clock at all --
+# stepping a day by hand with E, where there is no day-length to match.
 _MOVE_ANIM_SECONDS = 0.75
 _MOVE_ANIM_FRAME_MS = 33          # ~30fps; the map redraws fully per frame
+# At 4x a day goes by in 0.6s, and past that the sliding reads as jitter rather
+# than as travel -- so a fast clock stops shortening the window and lets the
+# movers simply cover more ground per day instead.
+_MOVE_ANIM_MIN_SECONDS = 0.45
 
 
 def _path_point(path, frac, world_w):
@@ -3188,11 +3204,24 @@ class MapView(tk.Frame):
                 tracks.append((obj, _Lerp(pos0, tuple(obj.pos), w)))
         return tracks
 
+    def _move_anim_seconds(self):
+        """How long this day's movement should take to draw: exactly as long
+        as the day itself, so movers are still travelling when the next day's
+        travel is handed to them and the motion never stops.
+
+        Falls back to the fixed window whenever there is no running clock to
+        match -- paused, or a day stepped by hand."""
+        if self.clock.paused or self.clock.speed <= 0:
+            return _MOVE_ANIM_SECONDS
+        return max(_MOVE_ANIM_MIN_SECONDS,
+                   self.clock.seconds_per_day / self.clock.speed)
+
     def _start_move_animation(self, tracks):
         self._stop_move_animation()
         if not tracks:
             return
         self._move_tracks = tracks
+        self._move_seconds = self._move_anim_seconds()
         self._move_t0 = time.monotonic()
         # Run the first frame SYNCHRONOUSLY, not via after(0, ...). _run_end_turn
         # calls refresh() (which renders movers at their real, final positions)
@@ -3218,10 +3247,14 @@ class MapView(tk.Frame):
         self._step_move_animation()
 
     def _step_move_animation(self):
-        t = min(1.0, (time.monotonic() - self._move_t0) / _MOVE_ANIM_SECONDS)
-        # Smoothstep: a caravan pulls away and settles rather than snapping
-        # into motion and stopping dead on the same frame.
-        eased = t * t * (3.0 - 2.0 * t)
+        window = getattr(self, "_move_seconds", None) or _MOVE_ANIM_SECONDS
+        t = min(1.0, (time.monotonic() - self._move_t0) / window)
+        # Smoothstep while the world is stepped by hand -- a caravan pulls away
+        # and settles rather than snapping into motion and stopping dead on the
+        # same frame. NOT while the clock is running: easing every day would
+        # put a stop and a start into travel that is supposed to be continuous,
+        # which is the very rhythm this phase exists to remove.
+        eased = t if window > _MOVE_ANIM_SECONDS * 1.5 else t * t * (3.0 - 2.0 * t)
         self._anim_pos = {id(obj): walk(eased) for obj, walk in self._move_tracks}
         if t >= 1.0:
             self._move_anim = None
