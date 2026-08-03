@@ -20,6 +20,16 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 77,
+        "title": "A World Worth the Name",
+        "items": [
+            "CHANGED: worlds form four or five real continents now, instead of a scatter of look-alike islands.",
+            "CHANGED: far fewer stray islands — the ones that remain are real land, not noise flung off a coastline.",
+            "CHANGED: lakes are smaller and there are more of them, dotted through the interior, with one great lake per world and no more flooded continents.",
+            "CHANGED: new worlds generate noticeably faster.",
+        ],
+    },
+    {
         "version": 76,
         "title": "A Legible Hand",
         "items": [

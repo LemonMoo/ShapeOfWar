@@ -59,28 +59,30 @@ assert len(WG._lake_basins(big | small)[0]) == 5, "basins must come back largest
 print("  ok    8-connected, largest first, empty is empty")
 
 print("\n--- receding a lake leaves ONE lake, not a scatter of puddles ---")
-# The deepest cells of a long lumpy basin can easily come out as two separate
-# pools, and one lake reading as two is the fractured look this is fixing.
-# Depth here is a valley: deepest at each end, shallow in the middle.
+# A long lumpy basin, deep at BOTH ends and shallow in the middle -- the case
+# that can come out as two separate pools, which is the fractured look this is
+# fixing. The left end is the deeper of the two, so trimming to the deepest
+# cells keeps the left pool and drops the rest: one lake, on the deep end.
 H = [[0.0] * 12 for _ in range(6)]
 filled = [[0.0] * 12 for _ in range(6)]
 basin = set()
 for x in range(12):
-    depth = 0.10 if x in (1, 2, 9, 10) else 0.03
+    depth = 0.14 if x in (1, 2, 3, 4) else 0.10 if x in (8, 9) else 0.03
     filled[1][x] = depth
     basin.add((x, 1))
-# A bigger basin elsewhere, so the trough is NOT the one great lake that is
-# allowed to keep whatever size the terrain gave it. Without this the trough
-# is simply exempt and nothing is trimmed -- which is correct behaviour and a
-# useless test.
+# A bigger basin elsewhere, so the trough is NOT the one GREAT lake (the
+# largest, which gets the roomier great-lake cap). land_area is chosen so the
+# 20-cell great basin fits its cap (great_cap = 0.028 * area = 20) while the
+# 12-cell trough exceeds the medium cap (0.006 * area = 4) and gets trimmed.
 great = set()
-for x in range(12):
+for x in range(10):
     for y in (4, 5):
         filled[y][x] = 0.20
         great.add((x, y))
+land_area = 720                # great_cap = 20 (== great), medium_cap = 4 (< 12)
 lake = set(basin) | great
-WG._trim_oversized_lakes(lake, filled, H, land_area=12 * 6)
-assert great <= lake, "the great lake was trimmed; it is meant to be exempt"
+WG._trim_oversized_lakes(lake, filled, H, land_area=land_area)
+assert great <= lake, "the great lake fits its cap and should be untouched"
 lake -= great
 assert lake, "the whole lake was drained"
 assert len(WG._lake_basins(lake)) == 1, (
@@ -89,10 +91,21 @@ assert len(WG._lake_basins(lake)) == 1, (
 assert lake < basin, "nothing was trimmed at all"
 print(f"  ok    a 12-cell trough receded to one {len(lake)}-cell pool")
 
+# ...and the great lake is CAPPED now, not exempt -- a basin big enough to be
+# an inland sea is brought back to the great-lake cap. This is the change that
+# stops a smooth continent's one basin flooding to 17% of the land.
+sea = {(x, y) for x in range(40) for y in range(3)}   # 120 cells
+sfilled = [[0.30] * 40 for _ in range(3)]
+sH = [[0.0] * 40 for _ in range(3)]
+sea_lake = set(sea)
+WG._trim_oversized_lakes(sea_lake, sfilled, sH, land_area=1000)  # great_cap=28
+assert 0 < len(sea_lake) <= int(1000 * WG._GREAT_LAKE_MAX_SHARE) + 1, (
+    f"the great lake was not capped: {len(sea_lake)} cells")
+print(f"  ok    a would-be inland sea capped to {len(sea_lake)} cells")
+
 print("\n--- ...and it recedes to the DEEP end, not an arbitrary one ---")
 deep_x = {x for x, _ in lake}
-assert deep_x <= {1, 2, 9, 10} or all(
-    filled[1][x] >= 0.10 for x in deep_x), (
+assert all(filled[1][x] >= 0.10 for x in deep_x), (
     f"the lake survived in the shallows: kept {sorted(deep_x)}")
 print(f"  ok    what remains sits on the deepest cells")
 

@@ -640,7 +640,7 @@ def _assign_starting_footholds(world, capitals, min_cells=MIN_FOOTHOLD_CELLS):
                 world.owner[y][x] = idx
 
 
-_LAKE_DEPTH = 0.022       # filled-minus-original elevation that counts as lake.
+_LAKE_DEPTH = 0.011       # filled-minus-original elevation that counts as lake.
                           # 0.012 -> 0.016 -> 0.022 over time; only genuinely
                           # deep basins flood now, and the shallow sheets of
                           # water that made a continent look waterlogged do
@@ -666,8 +666,10 @@ _LAKE_DEPTH = 0.022       # filled-minus-original elevation that counts as lake.
 # a Caspian in it is more interesting than one without. Every other oversized
 # basin recedes to its deepest part, which is also what actually happens to a
 # lake that stops being fed.
-_LAKE_MAX_SHARE = 0.005   # of total land area, per basin
+_LAKE_MAX_SHARE = 0.006   # of total land area, per basin
 _GREAT_LAKE_LIMIT = 1     # basins allowed to exceed it, largest first
+_GREAT_LAKE_MAX_SHARE = 0.028  # ...and even those are capped HERE, so the one
+                              # great lake is a landmark, not a second ocean
 
 
 def _lake_basins(lake):
@@ -709,10 +711,15 @@ def _trim_oversized_lakes(lake, filled, H, land_area):
     the old basin exactly as they did, and a drained basin is a low plain --
     which is what most of them are in the real world.
     """
-    cap = max(1, int(land_area * _LAKE_MAX_SHARE))
+    medium_cap = max(1, int(land_area * _LAKE_MAX_SHARE))
+    great_cap = max(1, int(land_area * _GREAT_LAKE_MAX_SHARE))
     basins = _lake_basins(lake)
     trimmed = 0
-    for basin in basins[_GREAT_LAKE_LIMIT:]:
+    for i, basin in enumerate(basins):
+        # The largest few are "great" and get the roomier cap; everything
+        # after them is held to medium. Neither is exempt any more -- an
+        # uncapped great lake is exactly how a smooth basin becomes a sea.
+        cap = great_cap if i < _GREAT_LAKE_LIMIT else medium_cap
         if len(basin) <= cap:
             continue
         basin.sort(key=lambda c: filled[c[1]][c[0]] - H[c[1]][c[0]],
@@ -2287,7 +2294,7 @@ def _order_capitals_by_affinity(world, capitals, roster):
 # from; too low and coastlines lose the local irregularity (fjords, small
 # bays) that kept the OLD system from looking like smooth ellipses. Tune
 # against dev/coastline_metrics.py's irregularity number.
-DETAIL_AMPLITUDE = 0.6
+DETAIL_AMPLITUDE = 0.30
 
 
 def _pick_n_plates(rng, width, height):
@@ -2301,6 +2308,62 @@ def _pick_n_plates(rng, width, height):
     area_ratio = (width * height) / (1100 * 660)
     base = 11 * math.sqrt(area_ratio)
     return max(6, round(base * rng.uniform(0.85, 1.15)))
+
+
+# Minimum island size, as a fraction of total land. Anything smaller is sunk
+# back below sea level before hydrology or regions ever see it. This is the
+# direct lever for "fewer islands": the plate amplitudes decide how much land
+# tries to poke up out of the ocean, and this decides how much of that is big
+# enough to keep. Set to leave real islands (an arc, a large offshore body)
+# while removing the noise-specks that make a map read as scattered.
+_MIN_ISLAND_SHARE = 0.010
+
+
+def _cull_small_islands(world_height, land, sea_level, w, h,
+                        keep_largest, share=_MIN_ISLAND_SHARE):
+    """Sink every land component smaller than `share` of total land, EXCEPT
+    the `keep_largest` biggest (the continents, which must never be culled
+    however the number is set). Mutates `world_height` (culled cells drop just
+    below sea level, so every downstream height>sea test agrees with the land
+    mask) and returns the cleaned land grid and cell list.
+
+    One flood-fill pass, O(w*h); it removes land, so hydrology and region
+    growth downstream see slightly fewer cells, not more."""
+    seen = [[False] * w for _ in range(h)]
+    comps = []
+    for y0 in range(h):
+        for x0 in range(w):
+            if not land[y0][x0] or seen[y0][x0]:
+                continue
+            stack = [(x0, y0)]
+            seen[y0][x0] = True
+            cells = []
+            while stack:
+                x, y = stack.pop()
+                cells.append((x, y))
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        if dx or dy:
+                            nx, ny = x + dx, y + dy
+                            if 0 <= nx < w and 0 <= ny < h and land[ny][nx] and not seen[ny][nx]:
+                                seen[ny][nx] = True
+                                stack.append((nx, ny))
+            comps.append(cells)
+    if not comps:
+        return land, [(x, y) for y in range(h) for x in range(w) if land[y][x]]
+    total = sum(len(c) for c in comps)
+    floor = max(1, int(total * share))
+    comps.sort(key=len, reverse=True)
+    protected = set(range(min(keep_largest, len(comps))))
+    drop = 1e-4
+    for i, cells in enumerate(comps):
+        if i in protected or len(cells) >= floor:
+            continue
+        for x, y in cells:
+            land[y][x] = False
+            world_height[y][x] = sea_level - drop
+    cells = [(x, y) for y in range(h) for x in range(w) if land[y][x]]
+    return land, cells
 
 
 def generate_world(width=1100, height=660, seed=None, n_factions=14,
@@ -2328,7 +2391,7 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     rng = random.Random(seed)
     nseed = rng.randint(0, 2 ** 31 - 1)
     if _target_n is None:
-        _target_n = rng.randint(4, 7)
+        _target_n = rng.randint(4, 6)
     if _n_plates is None:
         _n_plates = _pick_n_plates(rng, width, height)
     world = World(width, height)
@@ -2392,7 +2455,7 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     # 60%" the scalar version used, not np.percentile's default interpolation,
     # so the land fraction this produces is exactly what it always was.
     flat_sorted = np.sort(world_height, axis=None)
-    world.sea_level = float(flat_sorted[int(flat_sorted.size * 0.60)])
+    world.sea_level = float(flat_sorted[int(flat_sorted.size * 0.58)])
     land_mask = world_height > world.sea_level
     land = land_mask.tolist()
     land_cells = [(x, y) for y in range(height) for x in range(width) if land[y][x]]
@@ -2457,6 +2520,16 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     # them exactly as traced (see currents.build_streamlines).
     world.current_streamlines = currents.build_streamlines(
         world.current_u, world.current_v, land, width, height)
+
+    # Sink the noise-speck islands (see _cull_small_islands). Done here, after
+    # carving and after the multi-landmass check, so the continents the retry
+    # bar just guaranteed are protected -- keep_largest is the count that must
+    # survive no matter what the size floor says.
+    land, land_cells = _cull_small_islands(
+        world_height, land, world.sea_level, width, height,
+        keep_largest=max(2, _target_n))
+    land_mask = world_height > world.sea_level
+    world.height = world_height.tolist()
 
     world.total_land_cells = len(land_cells)
 

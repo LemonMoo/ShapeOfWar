@@ -73,7 +73,7 @@ TRANSFORM = "transform"                           # sliding past: texture only
 # necessarily disconnected from any continental body -- showed up as many
 # more separate small landmasses than intended (9-19 across 15 seeds against
 # the ~6-7 this project already tuned the old blob system to).
-FRACTION_CONTINENTAL = 0.40
+FRACTION_CONTINENTAL = 0.45
 
 # A boundary cell is classified by the RATIO of how much of the relative
 # drift is along the normal (opening/closing) vs along the tangent
@@ -83,7 +83,7 @@ FRACTION_CONTINENTAL = 0.40
 _TRANSFORM_RATIO = 0.55
 
 HOTSPOT_OCEANIC_BIAS = 0.85    # fraction of hotspots seeded on oceanic plates
-HOTSPOT_CHAIN_LINKS = 6        # islands per chain, current vent to oldest/weakest
+HOTSPOT_CHAIN_LINKS = 3        # islands per chain, current vent to oldest/weakest
 HOTSPOT_STEP_FRAC = 0.028      # spacing between chain links, as a fraction of map width
 
 
@@ -347,7 +347,7 @@ def generate_plates(width, height, seed=None, n_plates=16, n_hotspots=None):
     py_rng = random.Random(seed)
     seed_val = py_rng.randint(0, 2 ** 31 - 1)
     if n_hotspots is None:
-        n_hotspots = max(1, round(n_plates / 4))
+        n_hotspots = max(1, round(n_plates / 8))
 
     seeds = _scatter_seeds(py_rng, width, height, n_plates)
     plate_id = _grow_plate_ids(width, height, seeds, py_rng, seed_val)
@@ -405,15 +405,15 @@ AMP_SUBDUCTION_TRENCH = -0.85     # trench on the oceanic side of the same bound
 # island-chain effect from these is still real and desired -- an oceanic
 # arc/ridge occasionally breaking the surface is exactly the point -- just
 # not enough of them to read as a dozen extra "continents".
-AMP_CONVERGENT_OO = 0.40          # island arc
+AMP_CONVERGENT_OO = 0.22          # island arc
 AMP_DIVERGENT_CC = -0.65          # rift valley
-AMP_DIVERGENT_OTHER = 0.15        # mid-ocean ridge
+AMP_DIVERGENT_OTHER = 0.06        # mid-ocean ridge
 
 # Base elevation bias by plate kind -- this is what makes continental plates
 # LAND-biased and oceanic ones SEA-biased at all, before any boundary or
 # fine-detail noise is added on top.
-BASE_CONTINENTAL = 0.75
-BASE_OCEANIC = -0.75
+BASE_CONTINENTAL = 0.90
+BASE_OCEANIC = -0.90
 
 # Hotspot islands: a small radial bump per chain link, scaled by that link's
 # age-based strength (see _place_hotspots) -- a fresh vent (strength 1) is a
