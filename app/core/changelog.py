@@ -20,6 +20,16 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 71,
+        "title": "Marching Orders",
+        "items": [
+            "CHANGED: ordering an attack sends your army marching. The battle is fought when the column arrives, not the moment you click — so an attack can be seen coming, and met",
+            "FIXED: the build menu no longer rebuilds itself every day. It stays where you left it, scrolled where you scrolled it, and only redraws when something on it actually changes",
+            "FIXED: the map runs far smoother. A day's work is now spread evenly across the time that day has, instead of being done flat out and then idling",
+            "CHANGED: everything is counted in days now — marches, building, claims and ship yards. Turns are gone, so nothing should still be measured in them",
+        ],
+    },
+    {
         "version": 70,
         "title": "The World Does Not Wait",
         "items": [
