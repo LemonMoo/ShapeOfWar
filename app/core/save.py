@@ -105,6 +105,10 @@ def load_game(save_id):
     # across open ocean between two landmasses -- repair or drop it.
     from app.world.worldgen import repair_ocean_crossing_roads
     repair_ocean_crossing_roads(world)
+    # Saves predating the underworld have no layer fields at all. They come
+    # back as worlds with an empty one, which is precisely what they were.
+    from app.world.layers import ensure_layers
+    ensure_layers(world)
     return world
 
 

@@ -2051,6 +2051,32 @@ class World:
         self.world_map = WorldMap()    # holds factions + relationships
         self.seed = 0
         self.player_faction_idx = None  # index into self.factions, or None
+        # The underworld (app/world/layers.py). Sparse and keyed by cell,
+        # because it exists only under the mountains and their skirts -- a
+        # dense mirror of the grids above would be 726,000 cells of mostly
+        # solid rock. Absent means rock. Empty here until worldgen carves
+        # anything, which is also exactly what an older save comes back as
+        # (layers.ensure_layers).
+        self.under_cells = set()      # (x, y) open space
+        self.under_kind = {}          # (x, y) -> layers.UNDER_KINDS
+        self.under_owner = {}         # (x, y) -> faction index
+        self.under_region = {}        # (x, y) -> region id
+        self.gates = []               # the only join between the layers
+        # Lookup for gates by cell, rebuilt on demand (layers.gate_at) and
+        # dropped from the save -- see __getstate__.
+        self._gate_index = None
+
+
+    def __getstate__(self):
+        """Keep derived caches out of the save.
+
+        `_gate_index` is rebuilt from `gates` on first use. Pickling it would
+        persist a second copy of the same truth, and a stale index sitting
+        beside the gates it indexes is a bug waiting for somebody to move a
+        gate."""
+        state = self.__dict__.copy()
+        state["_gate_index"] = None
+        return state
 
 
 def _has_multiple_landmasses(land, width, height, land_cells, min_count=2):
