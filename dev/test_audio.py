@@ -149,6 +149,61 @@ for word in ("rubberduck", "cynicmusic", "opengameart.org"):
     assert word in text, f"{word} is not credited in the licence record"
 print("  ok    LICENSES.md names every source, and all of it is CC0")
 
+print("\n--- every event maps to files that are actually there ---")
+missing = [(event, name) for event, names in audio.SFX.items() for name in names
+           if not os.path.exists(os.path.join(root, "sfx", name))]
+assert not missing, f"events naming files that do not exist: {missing}"
+used = {name for names in audio.SFX.values() for name in names}
+have = {f for f in os.listdir(os.path.join(root, "sfx")) if f.endswith(".ogg")}
+print(f"  ok    {len(audio.SFX)} events over {len(used)} of {len(have)} files")
+
+print("\n--- the battle has a voice, and it is throttled ---")
+# A fight resolves hundreds of blows a second. Every battle event needs a
+# minimum gap, or "a sword hit makes a sound" becomes a solid tone that eats
+# every channel the mixer has.
+for event in ("sword_hit", "shield_block", "unit_down", "charge_hit", "arrow"):
+    assert event in audio.SFX, f"the battle cannot say {event}"
+    assert audio.THROTTLE_MS.get(event, 0) > 0, (
+        f"{event} fires from the simulation and is not throttled")
+# ...and nothing the PLAYER does is throttled: dropped feedback is worse than
+# no feedback at all.
+for event in ("click", "panel", "end_turn", "build_start"):
+    assert not audio.THROTTLE_MS.get(event), (
+        f"{event} is player feedback; it must never be dropped")
+print(f"  ok    {len(audio.THROTTLE_MS)} throttled events, none of them player feedback")
+
+mixer = audio._Audio()
+mixer.available = True
+mixer.muted = False
+played = []
+mixer._sound = lambda name: type("S", (), {
+    "set_volume": lambda self, v: None,
+    "play": lambda self: played.append(name)})()
+for _ in range(50):
+    mixer.play("sword_hit")
+assert len(played) == 1, f"{len(played)} sword hits got through the throttle"
+mixer._last_played.clear()
+mixer.play("sword_hit")
+assert len(played) == 2, "the throttle never lets go"
+played.clear()
+for _ in range(20):
+    mixer.play("click")
+assert len(played) == 20, "player feedback is being dropped"
+print("  ok    50 blows in an instant sound once; 20 clicks sound 20 times")
+
+print("\n--- the credits screen names everyone, and matches the record ---")
+from app.ui import credits as CR
+record = open(os.path.join(root, "LICENSES.md"), encoding="utf-8").read()
+for entry in CR.CREDITS:
+    assert entry["author"] in record, (
+        f"{entry['author']} is credited on screen but not in LICENSES.md")
+    assert entry["url"] in record, f"{entry['title']}'s source is not recorded"
+    assert entry["licence"] in ("CC0", "CC-BY", "CC-BY-SA"), entry["licence"]
+for author in ("rubberduck", "cynicmusic"):
+    assert any(e["author"] == author for e in CR.CREDITS), (
+        f"{author} is in the licence record and not on the credits screen")
+print(f"  ok    {len(CR.CREDITS)} entries, all present in LICENSES.md")
+
 print("\n--- ...and the build actually PACKS them into the exe ---")
 # The bug this guards is the one that made v0.8.0 -- the release called "The
 # Sound of It" -- and v0.9.0 completely silent. Every test above passes from

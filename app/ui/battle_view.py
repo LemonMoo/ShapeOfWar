@@ -12,6 +12,7 @@ and starts the fight in the same click.
 import math
 import tkinter as tk
 
+from app.core import audio
 from app.ui import theme
 from app.ui import widgets
 from app.ui import gl_battle
@@ -462,6 +463,25 @@ class BattleView(tk.Frame):
 
     def _on_attack(self, attacker, target, outcome="hit"):
         import random
+        # The battle has a voice now. Every one of these is throttled inside
+        # audio.play (see THROTTLE_MS) rather than here: hundreds of blows a
+        # second land in a real fight, and the rate limit belongs where the
+        # mixer is, not repeated at each call site that might make a noise.
+        if outcome == "hit":
+            if not target.alive:
+                audio.play("unit_down")
+                if getattr(target, "is_commander", False):
+                    audio.play("commander_falls")
+            elif attacker.type.get("charge") and attacker.charge > 0.0:
+                audio.play("charge_hit")
+            elif attacker.type.get("splash_radius"):
+                audio.play("bomb")
+            elif attacker._ranged:
+                audio.play("arrow")
+            else:
+                audio.play("sword_hit")
+        elif outcome == "block":
+            audio.play("shield_block")
         if outcome == "block":
             if random.random() < 0.15:   # sample blocks so the log isn't spammed
                 self._add_log(f"{target.faction.name} {target.type['name']} "

@@ -23,6 +23,7 @@ the larger CC-BY libraries: CC-BY obliges a credits screen forever, and it is
 not an obligation you can undo once you have shipped.
 """
 import json
+import time
 import os
 import random
 import sys
@@ -76,6 +77,45 @@ SFX = {
     "battle_start": ["blade_01.ogg", "blade_02.ogg"],
     "victory":      ["item_gem_02.ogg"],
     "defeat":       ["creature_die_01.ogg"],
+    # --- the battle itself ----------------------------------------------
+    # The library already held all of this and the game never played a note
+    # of it: a battle was one sword-draw at the start and then silence, while
+    # eighty files sat in the folder. These are the ones a fight actually
+    # needs, and every one of them is throttled (see THROTTLE_MS) because a
+    # real battle lands hundreds of blows a second and playing them all is
+    # not a sound, it is a wall.
+    "sword_hit":    ["blade_01.ogg", "blade_02.ogg", "blade_03.ogg"],
+    "shield_block": ["metal_01.ogg", "metal_02.ogg", "metal_03.ogg"],
+    "unit_down":    ["creature_die_01.ogg", "creature_hurt_01.ogg",
+                     "creature_hurt_02.ogg"],
+    "charge_hit":   ["stones_01.ogg", "stones_02.ogg", "stones_03.ogg"],
+    "arrow":        ["item_wood_01.ogg", "item_wood_02.ogg"],
+    "bomb":         ["spell_fire_01.ogg", "spell_fire_02.ogg",
+                     "spell_fire_03.ogg"],
+    "commander_falls": ["creature_roar_01.ogg", "creature_roar_02.ogg"],
+    # --- interface ------------------------------------------------------
+    "select":       ["item_misc_03.ogg", "item_misc_04.ogg"],
+    "order":        ["lock_01.ogg", "lock_02.ogg"],
+    "march":        ["item_wood_03.ogg", "wood_03.ogg"],
+}
+
+# The least time between two plays of the SAME event, in milliseconds. A
+# battle lands hundreds of blows a second across hundreds of soldiers; without
+# this, "a sword hit makes a sound" turns the mixer into a solid tone and eats
+# every channel the game has. With it, a melee reads as a rolling clash --
+# which is what a battle sounds like from where the player is standing anyway.
+#
+# Zero means unthrottled: a deliberate choice per event, not an oversight. The
+# things the PLAYER does are all zero, because feedback that gets dropped is
+# worse than no feedback at all.
+THROTTLE_MS = {
+    "sword_hit": 90,
+    "shield_block": 130,
+    "unit_down": 160,
+    "charge_hit": 200,
+    "arrow": 110,
+    "bomb": 240,
+    "commander_falls": 1500,
 }
 
 MUSIC = {
@@ -101,6 +141,7 @@ class _Audio:
         self._sounds = {}          # filename -> Sound, loaded lazily
         self._missing = set()      # complained about once, then left alone
         self._current_music = None
+        self._last_played = {}     # event -> when it last sounded (see play)
         self._root = _asset_root()
 
     def init(self):
@@ -151,12 +192,23 @@ class _Audio:
     def play(self, event, volume=1.0):
         """Play the sound for `event` (a key of SFX). Unknown events are
         silently ignored rather than raising -- a typo in a call site should
-        cost a sound, not a turn."""
+        cost a sound, not a turn.
+
+        Throttled per event (see THROTTLE_MS): the battle events fire from a
+        simulation that resolves hundreds of blows a second, and the honest
+        way to say "a sword hit makes a sound" is to let one through every so
+        often rather than to try to play them all."""
         if not self.available or self.muted:
             return
         options = SFX.get(event)
         if not options:
             return
+        gap = THROTTLE_MS.get(event, 0)
+        if gap:
+            now = time.monotonic() * 1000.0
+            if now - self._last_played.get(event, -1e9) < gap:
+                return
+            self._last_played[event] = now
         sound = self._sound(random.choice(options))
         if sound is None:
             return

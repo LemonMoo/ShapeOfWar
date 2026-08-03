@@ -21,6 +21,7 @@ from app.core.save import (save_game, load_game, has_save, list_saves,
 from app.world.worldgen import generate_world
 from app.core import audio
 from app.core import clock
+from app.ui.credits import CreditsView
 from app.ui.settings import SettingsPanel
 from app.battle.battle import (Battle, Army, terrain_note,
                                weather_note)
@@ -78,7 +79,7 @@ class App(tk.Tk):
         self.menu_view = MainMenuView(
             self.content, on_new_game=self._goto_new_game,
             on_load_game=self._goto_load_menu, on_quit=self.destroy, has_save=has_save,
-            on_settings=self._open_settings,
+            on_settings=self._open_settings, on_credits=self._open_credits,
             on_balance_lab=self._open_balance_lab if self._balance_lab_path() else None)
         self.new_game_view = NewGameView(
             self.content, on_play=self._start_new_game, on_back=self._goto_menu)
@@ -97,10 +98,12 @@ class App(tk.Tk):
         # remembers which screen asked for it so Back goes where you came
         # from rather than always dumping you at the main menu.
         self._settings_return = "menu"
+        self.credits_view = CreditsView(self, on_close=self._close_credits)
         self.settings_view = SettingsPanel(
             self.content, on_close=self._close_settings)
         for view in (self.menu_view, self.new_game_view, self.load_game_view,
-                     self.pause_view, self.game_over_view, self.settings_view):
+                     self.pause_view, self.game_over_view, self.settings_view,
+                     self.credits_view):
             view.place(relx=0, rely=0, relwidth=1, relheight=1)
 
         bus.on("battle:over", self._on_battle_over)
@@ -332,6 +335,24 @@ class App(tk.Tk):
         self._settings_return = self._current_screen
         self.settings_view.tkraise()
         self._current_screen = "settings"
+
+    def _open_credits(self):
+        """The credits screen is what makes attribution-required assets
+        usable at all -- see app/ui/credits.py. Remembers where it was opened
+        from, the same as settings."""
+        self._credits_return = self._current_screen
+        self.credits_view.tkraise()
+        self._current_screen = "credits"
+
+    def _close_credits(self):
+        back = getattr(self, "_credits_return", "menu")
+        if back == "settings":
+            self.settings_view.tkraise()
+            self._current_screen = "settings"
+            return
+        if back in ("map", "battle") and self.map_view is None:
+            back = "menu"
+        self.show_screen(back if back in ("menu", "map") else "menu")
 
     def _close_settings(self):
         back = self._settings_return

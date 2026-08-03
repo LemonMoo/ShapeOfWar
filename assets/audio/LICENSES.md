@@ -1,13 +1,27 @@
 # Audio assets
 
-Everything in this folder is **CC0 / public domain**. No attribution is
-legally required, and none of it obliges a credits screen.
+Everything in this folder is currently **CC0 / public domain**, but that is no
+longer a constraint: **the game has a credits screen** (see
+`app/ui/credits.py`), so attribution-required work can be used.
 
-That was a deliberate choice over the larger CC-BY libraries. CC-BY is free
-too, but it is an obligation you cannot undo once you have shipped: every
-future build has to keep carrying the credit. CC0 keeps the licence story to
-one line. If a CC-BY track is ever added, it needs a visible credits screen
-before it ships, and it should be listed separately from everything here.
+The original decision was to avoid CC-BY because a credit is an obligation you
+cannot undo once you have shipped -- every future build has to keep carrying
+it. That reasoning still holds, and the answer to it is simply that there is
+now somewhere for the credit to live, and a test that keeps it honest.
+
+## Adding CC-BY work
+
+Three things, and the third is the one that gets forgotten:
+
+1. Drop the files in `sfx/` or `music/`, and name them the way the existing
+   ones are named (`family_NN.ogg`).
+2. Add them to the section below, with the author, the licence, and the URL
+   the file came from.
+3. **Add an entry to `CREDITS` in `app/ui/credits.py`**, with
+   `"requires_credit": True`. `dev/test_audio.py` asserts the screen and this
+   file agree -- a credit that lives only in a markdown file nobody ships is
+   not a credit, and a screen that has drifted from this record is worse than
+   no screen at all.
 
 ## Sound effects — `sfx/`
 
@@ -26,8 +40,8 @@ https://opengameart.org/content/battle-theme-a
 CC0. Used as the battle theme.
 
 Both authors ask (but do not require) credit as *cynicmusic.com /
-pixelsphere.org*. It costs nothing to honour that and it is the decent thing
-to do, so if a credits screen is ever added, they belong on it.
+pixelsphere.org*. That is honoured on the credits screen, exactly as worded --
+see `COURTESY_LINES` in `app/ui/credits.py`.
 
 ## Adding more
 
