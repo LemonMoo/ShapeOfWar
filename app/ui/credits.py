@@ -38,6 +38,38 @@ CREDITS = [
                 "line.",
     },
     {
+        "section": "Sound effects",
+        "title": "20 Sword Sound Effects (Attacks and Clashes)",
+        "author": "StarNinjas",
+        "licence": "CC0",
+        "requires_credit": False,
+        "url": "https://opengameart.org/content/20-sword-sound-effects-attacks-and-clashes",
+        "note": "Ten sword attacks and ten clashes — what a melee actually "
+                "sounds like, and what a shield turning a blow sounds like.",
+    },
+    {
+        "section": "Sound effects",
+        "title": "100 CC0 SFX #2 and 100 CC0 metal and wood SFX",
+        "author": "rubberduck",
+        "licence": "CC0",
+        "requires_credit": False,
+        "url": "https://opengameart.org/content/100-cc0-sfx-2",
+        "note": "Footsteps, impacts, rubble, thunder, doors, hammers and "
+                "gates. The same hands as the library above, which is why "
+                "none of it sounds borrowed.",
+    },
+    {
+        "section": "Sound effects",
+        "title": "Fantasy Sound Effects Library",
+        "author": "Little Robot Sound Factory",
+        "licence": "CC-BY 3.0",
+        "requires_credit": True,
+        "url": "https://opengameart.org/content/fantasy-sound-effects-library",
+        "note": "Goblin voices, the roar of something in the wildland, the "
+                "cave you hear when you go below the mountains, and the "
+                "sound of winning and losing a battle.",
+    },
+    {
         "section": "Music",
         "title": "Town Theme RPG",
         "author": "cynicmusic",
@@ -60,6 +92,9 @@ CREDITS = [
 # Authors who ask for a particular form of words. Honoured exactly as asked.
 COURTESY_LINES = {
     "cynicmusic": "cynicmusic.com / pixelsphere.org",
+    # NOT a courtesy: CC-BY 3.0, and this is the wording and the link they ask
+    # for. It is the reason this screen exists at all.
+    "Little Robot Sound Factory": "www.littlerobotsoundfactory.com",
 }
 
 

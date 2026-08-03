@@ -29,6 +29,36 @@ Three things, and the third is the one that gets forgotten:
 CC0. 80 OGG files: blades, book/page flips, chains, creature sounds, coins,
 gems, stone, wood, locks, metal and spells.
 
+**20 Sword Sound Effects (Attacks and Clashes)** by *StarNinjas* —
+https://opengameart.org/content/20-sword-sound-effects-attacks-and-clashes
+CC0. Ten sword attacks and ten clashes; the author notes the clashes double as
+shield blocks, and they do. `sword_attack_*.ogg`, `sword_clash_*.ogg`.
+
+**100 CC0 SFX #2** by *rubberduck* —
+https://opengameart.org/content/100-cc0-sfx-2
+CC0. Footsteps, impacts, stones, thunder and doors. `step_*`, `hit_*`,
+`rubble_*`, `thunder_*`, `door_*`, `metal_hit_*`.
+
+**100 CC0 metal and wood SFX** by *rubberduck* —
+https://opengameart.org/content/100-cc0-metal-and-wood-sfx
+CC0. Hammers, gates, breaking timber, mechanisms. `hammer_*`, `gate_*`,
+`wood_break_*`, `mechanism_*`.
+
+**Fantasy Sound Effects Library** by *Little Robot Sound Factory* —
+https://opengameart.org/content/fantasy-sound-effects-library
+**CC-BY 3.0 — ATTRIBUTION REQUIRED.** The first attribution-licensed work in
+the game, and the reason the credits screen exists. Their asked-for wording is
+"Little Robot Sound Factory" plus the link www.littlerobotsoundfactory.com,
+and it is honoured verbatim (see `COURTESY_LINES` in `app/ui/credits.py`).
+Used for: goblin voices, the wildland roar, the cave ambience below the
+mountains, and the victory/defeat jingles. `goblin_*`, `dragon_*`,
+`cave_ambience_*`, `jingle_win_*`, `jingle_lose_*`, `menu_select_*`,
+`spell2_*`.
+
+Only a curated selection of each pack is shipped, converted to nothing and
+renamed to this project's `family_NN.ext` convention. The originals stay where
+they came from; every URL above is the place to get the whole thing.
+
 ## Music — `music/`
 
 **Town Theme RPG** (`town_theme.mp3`) by *cynicmusic* —

@@ -145,16 +145,22 @@ assert os.path.exists(licences), (
     "no LICENSES.md -- shipped audio with no record of where it came from")
 text = open(licences, encoding="utf-8").read()
 assert "CC0" in text
-for word in ("rubberduck", "cynicmusic", "opengameart.org"):
+for word in ("rubberduck", "cynicmusic", "opengameart.org", "StarNinjas",
+             "Little Robot Sound Factory"):
     assert word in text, f"{word} is not credited in the licence record"
-print("  ok    LICENSES.md names every source, and all of it is CC0")
+# Not all CC0 any more, and the record has to say which is which -- the whole
+# licence story now depends on the CC-BY entry being marked as one.
+assert "ATTRIBUTION REQUIRED" in text, (
+    "the record does not flag the attribution-licensed work as such")
+print(f"  ok    LICENSES.md names every source, and marks what needs crediting")
 
 print("\n--- every event maps to files that are actually there ---")
 missing = [(event, name) for event, names in audio.SFX.items() for name in names
            if not os.path.exists(os.path.join(root, "sfx", name))]
 assert not missing, f"events naming files that do not exist: {missing}"
 used = {name for names in audio.SFX.values() for name in names}
-have = {f for f in os.listdir(os.path.join(root, "sfx")) if f.endswith(".ogg")}
+have = {f for f in os.listdir(os.path.join(root, "sfx"))
+        if f.endswith((".ogg", ".mp3"))}
 print(f"  ok    {len(audio.SFX)} events over {len(used)} of {len(have)} files")
 
 print("\n--- the battle has a voice, and it is throttled ---")
@@ -198,8 +204,15 @@ for entry in CR.CREDITS:
     assert entry["author"] in record, (
         f"{entry['author']} is credited on screen but not in LICENSES.md")
     assert entry["url"] in record, f"{entry['title']}'s source is not recorded"
-    assert entry["licence"] in ("CC0", "CC-BY", "CC-BY-SA"), entry["licence"]
-for author in ("rubberduck", "cynicmusic"):
+    assert entry["licence"].startswith(("CC0", "CC-BY")), entry["licence"]
+# The whole point of the screen: anything requiring credit MUST be on it, and
+# with the wording its author asked for.
+required = [e for e in CR.CREDITS if e["requires_credit"]]
+for entry in required:
+    assert entry["author"] in CR.COURTESY_LINES, (
+        f"{entry['author']} requires attribution and has no credit line")
+print(f"  {len(required)} of {len(CR.CREDITS)} entries legally require the credit")
+for author in ("rubberduck", "cynicmusic", "Little Robot Sound Factory"):
     assert any(e["author"] == author for e in CR.CREDITS), (
         f"{author} is in the licence record and not on the credits screen")
 print(f"  ok    {len(CR.CREDITS)} entries, all present in LICENSES.md")

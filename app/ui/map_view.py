@@ -5638,6 +5638,14 @@ class MapView(tk.Frame):
         self.selected_region = None
         self._base_key = None
         audio.play("panel")
+        # The sound of the place changes with the place. This is most of what
+        # makes descending feel like going somewhere rather than switching a
+        # view -- and it is on the music channel, so it replaces the map theme
+        # rather than playing over it.
+        if self.layer == layers.UNDER:
+            audio.play_ambience("underworld")
+        else:
+            audio.play_music("map")
         if hasattr(self, "layer_btn"):
             self.layer_btn.config(text=("View: Surface"
                                         if self.layer == layers.UNDER

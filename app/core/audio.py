@@ -75,8 +75,8 @@ SFX = {
     "build_done":   ["item_stone_02.ogg", "item_stone_03.ogg"],
     # War
     "battle_start": ["blade_01.ogg", "blade_02.ogg"],
-    "victory":      ["item_gem_02.ogg"],
-    "defeat":       ["creature_die_01.ogg"],
+    "victory":      ["jingle_win_01.mp3"],
+    "defeat":       ["jingle_lose_01.mp3"],
     # --- the battle itself ----------------------------------------------
     # The library already held all of this and the game never played a note
     # of it: a battle was one sword-draw at the start and then silence, while
@@ -84,19 +84,32 @@ SFX = {
     # needs, and every one of them is throttled (see THROTTLE_MS) because a
     # real battle lands hundreds of blows a second and playing them all is
     # not a sound, it is a wall.
-    "sword_hit":    ["blade_01.ogg", "blade_02.ogg", "blade_03.ogg"],
-    "shield_block": ["metal_01.ogg", "metal_02.ogg", "metal_03.ogg"],
+    # Ten real sword attacks and ten real clashes, recorded as such, instead
+    # of three generic blade noises doing all the work.
+    "sword_hit":    [f"sword_attack_{i:02d}.ogg" for i in range(1, 11)],
+    "shield_block": ([f"sword_clash_{i:02d}.ogg" for i in range(1, 11)]
+                     + ["metal_01.ogg", "metal_02.ogg", "metal_03.ogg"]),
     "unit_down":    ["creature_die_01.ogg", "creature_hurt_01.ogg",
                      "creature_hurt_02.ogg"],
-    "charge_hit":   ["stones_01.ogg", "stones_02.ogg", "stones_03.ogg"],
+    "charge_hit":   ["stones_01.ogg", "stones_02.ogg", "stones_03.ogg",
+                     "rubble_01.ogg", "rubble_02.ogg", "rubble_03.ogg"],
     "arrow":        ["item_wood_01.ogg", "item_wood_02.ogg"],
     "bomb":         ["spell_fire_01.ogg", "spell_fire_02.ogg",
                      "spell_fire_03.ogg"],
     "commander_falls": ["creature_roar_01.ogg", "creature_roar_02.ogg"],
     # --- interface ------------------------------------------------------
-    "select":       ["item_misc_03.ogg", "item_misc_04.ogg"],
-    "order":        ["lock_01.ogg", "lock_02.ogg"],
-    "march":        ["item_wood_03.ogg", "wood_03.ogg"],
+    "order":        ["lock_01.ogg", "lock_02.ogg", "mechanism_01.ogg"],
+    "march":        ["step_01.ogg", "step_02.ogg", "step_wood_01.ogg",
+                     "step_wood_02.ogg"],
+    "select":       ["menu_select_01.mp3"],
+    # Voices. Who is fighting changes what a battle sounds like at the moment
+    # it begins -- goblins jabber, a wildland garrison is something worse.
+    "goblin_voice": [f"goblin_{i:02d}.mp3" for i in range(1, 6)],
+    "beast_roar":   ["dragon_01.mp3", "dragon_02.mp3"],
+    # Building and breaking
+    "hammer":       ["hammer_01.ogg", "hammer_02.ogg"],
+    "gate":         ["gate_01.ogg", "door_01.ogg", "door_02.ogg"],
+    "breaking":     ["wood_break_01.ogg", "wood_break_02.ogg"],
 }
 
 # The least time between two plays of the SAME event, in milliseconds. A
@@ -121,6 +134,13 @@ THROTTLE_MS = {
 MUSIC = {
     "map": "town_theme.mp3",
     "battle": "battle_theme.mp3",
+}
+
+# Ambience loops, played on the music channel because that is what they are:
+# a bed, not an event. The underworld gets one, and it is most of what makes
+# descending feel like going somewhere rather than switching a view.
+AMBIENCE = {
+    "underworld": "cave_ambience_01.mp3",
 }
 
 DEFAULT_MUSIC_VOLUME = 0.35   # music sits UNDER everything; it is background
@@ -217,6 +237,32 @@ class _Audio:
             sound.play()
         except Exception:
             pass
+
+    def play_ambience(self, key, loop=True):
+        """Play an AMBIENCE loop in place of the music.
+
+        Same channel as the music on purpose: a cave ambience and a town theme
+        are competing for the same ears, and layering them turns "you are
+        underground" into "you are underground at a fair"."""
+        if not self.available:
+            return
+        if key == self._current_music:
+            return
+        name = AMBIENCE.get(key)
+        if not name:
+            return
+        # Ambience lives in sfx/ because that is where it was shipped; the
+        # music CHANNEL is what plays it, which is the part that matters.
+        path = os.path.join(self._root, "sfx", name)
+        if not os.path.exists(path):
+            return
+        try:
+            pygame.mixer.music.load(path)
+            pygame.mixer.music.set_volume(0.0 if self.muted else self.music_volume)
+            pygame.mixer.music.play(-1 if loop else 0)
+            self._current_music = key
+        except Exception:
+            self._current_music = None
 
     # --- music -----------------------------------------------------------
     def play_music(self, track, loop=True):
@@ -317,6 +363,7 @@ init = _audio.init
 shutdown = _audio.shutdown
 play = _audio.play
 play_music = _audio.play_music
+play_ambience = _audio.play_ambience
 stop_music = _audio.stop_music
 set_music_volume = _audio.set_music_volume
 set_sfx_volume = _audio.set_sfx_volume

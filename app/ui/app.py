@@ -518,6 +518,16 @@ class App(tk.Tk):
         # minutes, and a map that kept running through them would hand back a
         # world the player had no chance to act in.
         self._pause_world_for(clock.BATTLE)
+        # Who is fighting changes what the opening sounds like. Goblins
+        # jabber; a wildland garrison is something you would rather not have
+        # woken. Played here rather than in BattleView because this is where
+        # the two sides are known.
+        species = {getattr(attacker, "species", None),
+                   getattr(defender, "species", None)}
+        if None in species or not species - {None}:
+            audio.play("beast_roar")
+        elif "Goblins" in species:
+            audio.play("goblin_voice")
         # Via viewport_size, not .canvas: the battlefield surface may be the
         # GPU frame rather than a Tk canvas (see BattleView._make_viewport).
         vw, vh = self.battle_view.viewport_size()

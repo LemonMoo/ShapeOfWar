@@ -20,6 +20,17 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 72,
+        "title": "The Sound of Steel",
+        "items": [
+            "NEW: a battle is loud now. Swords ring off shields, bows loose, bombs go off, a cavalry charge lands like one, and a commander falling is something you hear",
+            "NEW: 61 new sounds — ten real sword attacks and ten clashes, marching feet, rubble, gates, hammers, thunder, goblin voices and the roar of whatever holds the wildland",
+            "NEW: go below the mountains and you hear the cave. The map theme gives way to it while you are down there",
+            "NEW: a Credits screen from the main menu, naming everyone whose work the game is built on",
+            "CHANGED: winning and losing a battle now sound like winning and losing a battle",
+        ],
+    },
+    {
         "version": 71,
         "title": "Marching Orders",
         "items": [
