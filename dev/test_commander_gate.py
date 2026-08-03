@@ -53,7 +53,12 @@ if enemy is not None:
     mv._begin_attack_setup(enemy)
     root.update()
     picked = len(mv._attack_frontier)
-    info = " ".join(mv.info.cget("text").split())
+    # The panel is a drawn page now (app/ui/parchment.py), not an `info`
+    # Label, so its message lives in canvas text items rather than a widget.
+    canvas = mv._panel_canvas
+    info = " ".join(
+        " ".join(canvas.itemcget(i, "text") for i in canvas.find_all()
+                 if canvas.type(i) == "text" and canvas.itemcget(i, "text")).split())
     print(f"\nattack setup vs {enemy.name}: {picked} targets offered")
     if picked == 0:
         print("  message:", info[:110])

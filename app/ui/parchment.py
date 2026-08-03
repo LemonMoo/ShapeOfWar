@@ -570,6 +570,25 @@ class Page:
         self.canvas.tag_lower(rect)
         self._bind(tag, lambda _e=None: command())
 
+    def mark(self):
+        """The current y cursor, to bound a clickable region with (see
+        hit_region)."""
+        return self.y
+
+    def hit_region(self, y0, command, pad=2):
+        """Make everything drawn since `y0` a single clickable region.
+
+        For a list entry that is more than one row -- a save with a name line
+        and a date line under it -- where the whole block is the control, not
+        any one line of it. hit_last_row only covers the last row; this covers
+        the whole entry."""
+        tag = self._tag()
+        rect = self.canvas.create_rectangle(0, y0 - pad, self.width,
+                                            self.y - pad, fill="", outline="",
+                                            tags=(tag,))
+        self.canvas.tag_lower(rect)
+        self._bind(tag, lambda _e=None: command())
+
     def gap(self, amount=8):
         self.y += amount
 

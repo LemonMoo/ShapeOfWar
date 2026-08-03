@@ -48,10 +48,16 @@ MIN_RIVALS, MAX_RIVALS = 3, 24
 # it, so the column and the map can never disagree about how wide they are.
 PREVIEW_W, PREVIEW_H = 430, 258
 
-_CARD_BG = "#1b2029"
-_FIELD_BG = "#0d1017"
-_ROW_BG = "#171c25"
-_ROW_SEL = "#243244"
+# Was a blue-grey set (#1b2029, #0d1017, ...) left from before the palette
+# existed -- the New Game screen was the last place in the game still painted
+# in the pre-theme colours. Now derived from the parchment theme so it matches
+# the drawn HUD and menus rather than looking like a different program.
+_CARD_BG = theme.PANEL
+_FIELD_BG = theme.METER_TRACK
+_ROW_BG = theme.PANEL_ALT
+_ROW_SEL = theme.ACCENT
+_BTN_BG = theme.PANEL_ALT        # the old blue-grey button face
+_BTN_SEL_INK = theme.ACCENT_INK  # text on an accent/selected control
 
 
 class NewGameView(tk.Frame):
@@ -157,7 +163,7 @@ class NewGameView(tk.Frame):
         self._title_var = tk.StringVar()
         self._title_btn = tk.Button(ruler_row, textvariable=self._title_var,
                                     command=self._cycle_title, width=10,
-                                    bg="#232a36", fg=theme.INK, relief="flat",
+                                    bg=_BTN_BG, fg=theme.INK, relief="flat",
                                     font=theme.FONT, activebackground=theme.ACCENT)
         self._title_btn.pack(side="left", padx=(0, 6))
         self._ruler_var = tk.StringVar()
@@ -189,7 +195,7 @@ class NewGameView(tk.Frame):
 
     def _dice(self, parent, command):
         return tk.Button(parent, text="⟳", command=command, width=3,
-                         bg="#232a36", fg=theme.INK, relief="flat",
+                         bg=_BTN_BG, fg=theme.INK, relief="flat",
                          font=theme.FONT, activebackground=theme.ACCENT)
 
     def _build_world(self, parent):
@@ -201,7 +207,7 @@ class NewGameView(tk.Frame):
         for i, (label, _w, _h, _rivals, blurb) in enumerate(WORLD_SIZES):
             b = tk.Button(row, text=f"{label}\n{blurb}", width=16,
                           command=lambda i=i: self._pick_size(i),
-                          bg="#232a36", fg=theme.INK, relief="flat",
+                          bg=_BTN_BG, fg=theme.INK, relief="flat",
                           font=("Segoe UI", 9), activebackground=theme.ACCENT)
             b.pack(side="left", padx=(0, 6))
             self._size_buttons.append(b)
@@ -261,7 +267,7 @@ class NewGameView(tk.Frame):
                                       anchor="w", justify="left", wraplength=PREVIEW_W)
         self._preview_note.pack(fill="x", pady=(6, 0))
         self._reroll_btn = tk.Button(parent, text="⟳  Roll a different world",
-                                     command=self._reroll, bg="#232a36",
+                                     command=self._reroll, bg=_BTN_BG,
                                      fg=theme.INK, relief="flat",
                                      font=theme.FONT,
                                      activebackground=theme.ACCENT)
@@ -271,11 +277,11 @@ class NewGameView(tk.Frame):
         actions = tk.Frame(self, bg=theme.BG)
         actions.pack(fill="x", padx=28, pady=14, side="bottom")
         tk.Button(actions, text="← Back", command=self.on_back, width=10,
-                  bg="#232a36", fg=theme.INK, relief="flat", font=theme.FONT,
+                  bg=_BTN_BG, fg=theme.INK, relief="flat", font=theme.FONT,
                   activebackground=theme.ACCENT).pack(side="left")
         self._play_btn = tk.Button(actions, text="Play Game", width=18,
                                    command=self._play, bg=theme.ACCENT,
-                                   fg="#06121f", relief="flat",
+                                   fg=_BTN_SEL_INK, relief="flat",
                                    font=theme.FONT_BOLD,
                                    activebackground=theme.ACCENT)
         self._play_btn.pack(side="right")
@@ -356,8 +362,8 @@ class NewGameView(tk.Frame):
         self._size_var.set(index)
         for i, b in enumerate(self._size_buttons):
             picked = i == index
-            b.config(bg=theme.ACCENT if picked else "#232a36",
-                     fg="#06121f" if picked else theme.INK)
+            b.config(bg=theme.ACCENT if picked else _BTN_BG,
+                     fg=_BTN_SEL_INK if picked else theme.INK)
         self._suppress = True
         self._rivals_var.set(WORLD_SIZES[index][3] - 1)
         self._suppress = False

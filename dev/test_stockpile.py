@@ -136,17 +136,11 @@ else:
     mv._show_settlement(st)
     root.update()
 
-    texts = []
-
-    def walk(widget):
-        try:
-            texts.append(str(widget.cget("text")))
-        except Exception:
-            pass
-        for child in widget.winfo_children():
-            walk(child)
-
-    walk(mv.actions)
+    # The selection panel is a drawn page now (app/ui/parchment.py), so what
+    # it says lives in canvas text items rather than a tree of Labels.
+    canvas = mv._panel_canvas
+    texts = [str(canvas.itemcget(i, "text")) for i in canvas.find_all()
+             if canvas.type(i) == "text" and canvas.itemcget(i, "text")]
     assert any("STOCKPILE" in t for t in texts), "no STOCKPILE card in the panel"
     assert any("Stone" in t for t in texts), "the held good isn't listed"
     print("  ok    STOCKPILE card renders with the node's eligible goods")

@@ -90,12 +90,15 @@ class BattleView(tk.Frame):
         # plain Label placed on top works for either renderer and inherits
         # the "all" bindtag, so a click on the label itself still reaches
         # the globally-bound continue handler.
-        self.over_banner = tk.Frame(self, bg="#000000")
-        self.over_title = tk.Label(self.over_banner, text="", bg="#000000",
-                                   fg="#ffffff", font=theme.FONT_TITLE)
+        # Warm near-black (theme.CANVAS), not pure #000000: the battle-over
+        # banner sat over the battlefield in a cold black that belonged to no
+        # palette. Gold title to match the rest of the game's headings.
+        self.over_banner = tk.Frame(self, bg=theme.CANVAS)
+        self.over_title = tk.Label(self.over_banner, text="", bg=theme.CANVAS,
+                                   fg=theme.ACCENT, font=theme.FONT_TITLE)
         self.over_title.pack(pady=(10, 2), padx=40)
         self.over_sub = tk.Label(self.over_banner, text="Click anywhere to continue...",
-                                 bg="#000000", fg=theme.MUTED,
+                                 bg=theme.CANVAS, fg=theme.MUTED,
                                  font=theme.FONT_BOLD)
         self.over_sub.pack(pady=(0, 10))
 

@@ -18,8 +18,8 @@ nothing. They asked nicely, and it costs nothing to say so.
 """
 import tkinter as tk
 
+from app.ui import parchment
 from app.ui import theme
-from app.ui import widgets
 
 # One entry per source. `licence` is the actual licence, `requires_credit`
 # says whether this screen is an obligation or a courtesy -- kept explicit
@@ -111,53 +111,59 @@ def sections():
 
 
 class CreditsView(tk.Frame):
-    """A plain, scrollable list. Reached from the main menu and from the
-    settings screen, because that is where somebody wondering about the music
-    goes looking."""
+    """A scrolling page of who made what. Reached from the main menu and from
+    the settings screen, because that is where somebody wondering about the
+    music goes looking. Drawn on app/ui/parchment.py's Page -- a colophon,
+    which is exactly the manuscript-page idiom the kit is for."""
 
     def __init__(self, master, on_close=None, title="Credits"):
         super().__init__(master, bg=theme.BG)
         self.on_close = on_close
+        self._title = title
 
-        tk.Label(self, text=title, bg=theme.BG, fg=theme.INK,
-                 font=("Segoe UI", 22, "bold")).pack(pady=(28, 6))
-        tk.Label(self, text="Shapes of War is built on work other people gave "
-                            "away. This is who.",
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT).pack(pady=(0, 18))
+        body = tk.Frame(self, bg=theme.PANEL)
+        body.pack(fill="both", expand=True, padx=60, pady=24)
+        canvas = tk.Canvas(body, bg=theme.PANEL, highlightthickness=0)
+        scrollbar = tk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        self._canvas = canvas
+        self._page = parchment.Page(None, 720, seed=61, canvas=canvas)
+        canvas.bind("<Enter>", lambda e: canvas.bind_all(
+            "<MouseWheel>", lambda ev: canvas.yview_scroll(int(-ev.delta / 120), "units")))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        canvas.bind("<Configure>", lambda e: self._render())
+        self._render()
 
-        body = tk.Frame(self, bg=theme.BG)
-        body.pack(fill="both", expand=True, padx=60)
+    def _render(self):
+        page = self._page
+        page.begin(max(400, self._canvas.winfo_height() or 400))
+        page.title(self._title, "Shapes of War is built on work other people "
+                                "gave away. This is who.")
         for name, entries in sections():
-            tk.Label(body, text=name.upper(), bg=theme.BG, fg=theme.ACCENT,
-                     font=theme.FONT_HEADER, anchor="w").pack(
-                         fill="x", pady=(14, 4))
+            page.gap(6)
+            page.text(name.upper(), fill=theme.ACCENT, font=theme.FONT_HEADER)
+            page.divider()
             for entry in entries:
-                self._entry(body, entry)
+                self._entry(page, entry)
+        page.gap(6)
+        page.button("Back", self._close, kind="accent")
+        page.finish()
 
-        widgets.button(self, "Back", self._close, kind="accent").pack(
-            pady=(24, 30), ipadx=30)
-
-    def _entry(self, parent, entry):
-        card = tk.Frame(parent, bg=theme.PANEL, relief=theme.BORDER_RELIEF,
-                        borderwidth=theme.BORDER_WIDTH)
-        card.pack(fill="x", pady=3)
+    def _entry(self, page, entry):
         line = f"{entry['title']} — {entry['author']}"
         courtesy = COURTESY_LINES.get(entry["author"])
         if courtesy:
             line += f" ({courtesy})"
-        tk.Label(card, text=line, bg=theme.PANEL, fg=theme.INK,
-                 font=theme.FONT_BOLD, anchor="w").pack(
-                     fill="x", padx=12, pady=(8, 0))
+        page.text(line, font=theme.FONT_BOLD)
         tag = entry["licence"]
         if entry["requires_credit"]:
             tag += " — credit required"
-        tk.Label(card, text=f"{tag} · {entry['url']}", bg=theme.PANEL,
-                 fg=theme.MUTED, font=theme.FONT_SMALL, anchor="w").pack(
-                     fill="x", padx=12)
+        page.text(f"{tag} · {entry['url']}", fill=theme.MUTED, indent=6)
         if entry.get("note"):
-            tk.Label(card, text=entry["note"], bg=theme.PANEL, fg=theme.MUTED,
-                     font=theme.FONT_SMALL, anchor="w", justify="left",
-                     wraplength=760).pack(fill="x", padx=12, pady=(0, 8))
+            page.text(entry["note"], fill=theme.MUTED, indent=6)
+        page.gap(6)
 
     def _close(self):
         if self.on_close is not None:

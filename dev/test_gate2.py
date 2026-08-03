@@ -54,7 +54,12 @@ cmd.pos = far.cells[0]; cmd.path = None
 mv.attack_mode = None; mv._attack_frontier = []
 mv._begin_attack_setup(enemy); root.update()
 offered = len(mv._attack_frontier)
-info = " ".join(mv.info.cget("text").split())
+# The panel is a drawn page now (app/ui/parchment.py): its message is in
+# canvas text items rather than an `info` Label.
+_c = mv._panel_canvas
+info = " ".join(
+    " ".join(_c.itemcget(i, "text") for i in _c.find_all()
+             if _c.type(i) == "text" and _c.itemcget(i, "text")).split())
 print(f"commander in '{far.name}' (far): {offered} targets offered")
 print("  message:", info[:130])
 
