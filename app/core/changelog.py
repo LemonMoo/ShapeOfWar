@@ -20,6 +20,14 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 76,
+        "title": "A Legible Hand",
+        "items": [
+            "FIXED: the selected people on the New Game screen were gold text on a gold row and could not be read. The pick is marked with a gold edge and gold name on a dark row now",
+            "FIXED: the resource groups (Food, Industry, and the rest) would not open when clicked",
+        ],
+    },
+    {
         "version": 75,
         "title": "An Illuminated Hand",
         "items": [
