@@ -539,8 +539,8 @@ class BuildMenuWindow(tk.Toplevel):
             return ""
         elapsed, total = option.in_progress
         left = max(0, total - elapsed)
-        when = ("finishes this turn" if left <= 0
-                else "1 turn left" if left == 1 else f"{left} turns left")
+        when = ("finishes today" if left <= 0
+                else "1 day left" if left == 1 else f"{left} days left")
         return f"Under construction — {when}"
 
     def _countdown_for(self, building):
@@ -575,7 +575,7 @@ class BuildMenuWindow(tk.Toplevel):
                  fg=theme.INK if option.affordable else theme.BAD,
                  font=theme.FONT_SMALL, anchor="w", justify="left",
                  wraplength=_CARD_W - 30).pack(fill="x", padx=10)
-        tk.Label(frame, text=f"{option.turns} turns to build", bg=theme.PANEL,
+        tk.Label(frame, text=f"{option.turns} days to build", bg=theme.PANEL,
                  fg=theme.MUTED, font=theme.FONT_SMALL, anchor="w"
                  ).pack(fill="x", padx=10, pady=(0, 4))
         verb = "Upgrade" if option.current_tier > 0 else "Build"

@@ -4787,7 +4787,7 @@ class MapView(tk.Frame):
         else:
             lines.append("On foot")
         if cmd.ship_turns_left is not None:
-            lines.append(f"Building ship: {cmd.ship_turns_left} turns left")
+            lines.append(f"Building ship: {cmd.ship_turns_left} days left")
         elif cmd.path is not None:
             remaining = len(cmd.path) - 1 - cmd.path_index
             lines.append(f"Moving — {remaining} cells left")
@@ -5028,10 +5028,26 @@ class MapView(tk.Frame):
         self._base_key = None
         if self.selected:
             self._show_faction(self.selected)
-        # Camera is deliberately left zoomed on the border so, on return from
-        # battle, flash_region() can highlight the (possibly newly-won)
-        # region right where the player is already looking.
-        self.on_attack(player, enemy, region)
+        # THE ARMY MARCHES. It used to fight the instant this was clicked,
+        # wherever the commander happened to be standing -- which is how an
+        # order reads when a turn is the only thing that makes "later" mean
+        # anything. With a running clock, ordering an attack starts a march:
+        # the column crosses the ground, the days pass, and the battle is
+        # fought on arrival (commander.order_attack -> the
+        # "commander:attack_arrived" event -> App._on_attack_arrived). Which
+        # also means an attack can now be seen coming, and met.
+        #
+        # The camera is deliberately left where it is, so the player watches
+        # the column leave rather than being thrown at a battle they have not
+        # arrived at yet.
+        cmds = commander.faction_commanders(self.world,
+                                            self.world.factions.index(player))
+        if not cmds:
+            self.show_bottom_message("You have no commander to lead an attack.",
+                                     ms=5000)
+            return
+        message = commander.order_attack(self.world, cmds[0], region)
+        self.show_bottom_message(f"Marching on {region.name}. {message}", ms=6000)
 
     # --- settlement placement -------------------------------------------------
     def _begin_settlement_placement(self, region, kind):

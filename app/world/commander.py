@@ -21,6 +21,8 @@ new machinery.
 """
 import math
 
+from app.core.events import bus
+
 from app.world.worldgen import (OCEAN, _path_dijkstra, _elev_cost, _sea_cost,
                                 _nearest_ocean_cell, _SEA_COAST_REACH,
                                 _NEIGH8, _DIAG, road_cells)
@@ -86,6 +88,12 @@ class Commander:
         self.faction_idx = faction_idx
         self.pos = pos                  # (x, y), current cell
         self.path = None                # queued route, or None if idle
+        # A region this commander is marching on with intent to attack. The
+        # battle happens when he ARRIVES, not when the order is given -- see
+        # order_attack. None for a commander simply travelling, and read
+        # through getattr everywhere so a commander pickled before attacks
+        # were marches is just one with no attack order.
+        self.attack_order = None
         self.path_index = 0             # how far along `path` so far
         self.aboard_ship_id = None      # id of the Ship carrying it, or None (on foot)
         self.ship_turns_left = None     # None unless currently building a (non-free) ship
@@ -546,7 +554,7 @@ def set_move_order(world, commander, dest):
                             * commander_speed_mult(world, commander)))
     turns = max(1, math.ceil((len(path) - 1) / per_turn))
     mounted = " (mounted)" if is_mounted(world, commander) else ""
-    return f"The commander sets out{mounted} — estimated {turns} turns."
+    return f"The commander sets out{mounted} — about {turns} days."
 
 
 def can_build_ship(world, commander):
@@ -592,7 +600,7 @@ def start_ship(world, commander):
     commander.path = None   # building locks the commander in place
     commander.path_index = 0
     commander.ship_turns_left = SHIP_BUILD_TURNS
-    return f"Shipwrights set to work — estimated {SHIP_BUILD_TURNS} turns."
+    return f"Shipwrights set to work — about {SHIP_BUILD_TURNS} days."
 
 
 def board_ship(world, commander):
@@ -688,6 +696,61 @@ def _advance_along_path(world, path, start_index, budget, roads):
     return index
 
 
+ATTACK_ARRIVAL_CELLS = 2      # close enough to the target to fall on it
+
+
+def order_attack(world, commander, region):
+    """March on `region`, and fight when you get there.
+
+    Attacking used to resolve the instant it was clicked, wherever the
+    commander happened to be standing -- a turn-based reading of an order,
+    where the turn was the thing that made "later" mean anything. With a
+    running clock the order is the start of a march: the column moves, the
+    days pass, and the battle is fought on arrival. Which also means it can
+    be seen coming, and met.
+
+    Returns a message describing what was ordered."""
+    dest = _region_target_cell(world, region, commander.pos)
+    message = set_move_order(world, commander, dest)
+    commander.attack_order = region.id
+    return message
+
+
+def _region_target_cell(world, region, from_pos):
+    """The cell of `region` a commander should march to: the one nearest him,
+    so an army attacks the near edge of a province rather than crossing it to
+    reach a notional centre."""
+    fx, fy = from_pos
+    return min(region.cells, key=lambda p: (p[0] - fx) ** 2 + (p[1] - fy) ** 2)
+
+
+def _attack_arrivals(world):
+    """Commanders whose march has brought them to what they set out to
+    attack. Clears the order as it reports it, so a battle is staged once."""
+    out = []
+    for cmd in world.commanders:
+        region_id = getattr(cmd, "attack_order", None)
+        if region_id is None:
+            continue
+        region = world.regions[region_id]
+        if region.faction_idx == cmd.faction_idx:
+            cmd.attack_order = None      # somebody else took it first
+            continue
+        cx, cy = cmd.pos
+        near = any(abs(px - cx) <= ATTACK_ARRIVAL_CELLS
+                   and abs(py - cy) <= ATTACK_ARRIVAL_CELLS
+                   for px, py in region.cells)
+        if not near and cmd.path is not None:
+            continue                     # still marching
+        cmd.attack_order = None
+        if near:
+            out.append((cmd, region))
+        # A commander whose path ran out WITHOUT reaching the region simply
+        # loses the order: the ground would not let him through, and standing
+        # there re-trying every day is not an army, it is a loop.
+    return out
+
+
 def advance_commanders(world):
     """Called every turn: walk each commander with an active order a few
     cells further along its path (faster while aboard a shipyard-built
@@ -755,3 +818,12 @@ def advance_commanders(world):
                 world.ships.append(ship)
                 cmd.aboard_ship_id = ship.id
                 cmd.ship_turns_left = None
+
+    # A march that set out to attack, and has arrived. Emitted rather than
+    # resolved here: this runs inside a day (see resources.day_steps), and
+    # staging a battle switches the whole screen -- app.py stashes it and
+    # raises it once the day is finished, the same way it already handles a
+    # faction eliminated mid-day.
+    for cmd, region in _attack_arrivals(world):
+        bus.emit("commander:attack_arrived",
+                 {"faction_idx": cmd.faction_idx, "region_id": region.id})

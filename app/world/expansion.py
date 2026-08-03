@@ -331,7 +331,7 @@ def start_claim(world, faction_idx, region):
     project = ClaimProject(faction_idx, region, sea_only)
     world.claim_projects.append(project)
     return (f"Expansion begins into {region.name} — estimated "
-            f"{project.total_turns} turns.")
+            f"{project.total_turns} days.")
 
 
 _NO_FREE_SETTLEMENT = {"city": 0, "town": 0, "castle": 0}   # see _place_settlements_for_faction

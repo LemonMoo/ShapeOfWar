@@ -397,9 +397,9 @@ else:
     reopened.update_idletasks()
     joined = " | ".join(texts(reopened))
     assert "Under construction" in joined, joined[:300]
-    assert "turns left" in joined or "finishes this turn" in joined, (
-        "the countdown should say how much longer, not make the player "
-        "subtract elapsed from total every turn")
+    assert "days left" in joined or "finishes today" in joined, (
+        "the countdown should say how much longer, in the days the world "
+        "actually runs in, not in turns nobody takes any more")
     first_read = joined
     for _ in range(2):
         R.advance_turn(w)

@@ -110,6 +110,7 @@ class App(tk.Tk):
         # you looked.
         bus.on("region:transferred", self._on_region_transferred)
         bus.on("work:finished", self._on_work_finished)
+        bus.on("commander:attack_arrived", self._on_attack_arrived)
         self.bind("<Escape>", self._on_escape)
         self.bind("<F1>", self._on_f1)
         # bind_all, not bind: a plain bind on the root only fires while focus
@@ -670,6 +671,38 @@ class App(tk.Tk):
         player = self.world.factions[self.world.player_faction_idx]
         if old_faction is player:
             self._pause_world_for(clock.ATTACKED)
+
+    def _on_attack_arrived(self, payload):
+        """A commander who marched on a region has got there.
+
+        Stashed rather than fought on the spot: this fires from inside a day
+        (resources.day_steps -> commander.advance_commanders), and staging a
+        battle switches the entire screen. Raising it from in there would tear
+        the map out from under a day that is still running -- the same reason
+        _on_faction_eliminated defers. after_idle puts it on the far side of
+        the current frame, by which time the day has finished."""
+        if self.world is None or payload.get("faction_idx") != self.world.player_faction_idx:
+            return          # AI armies resolve their own attacks elsewhere
+        if getattr(self, "_pending_attack", None) is not None:
+            return          # one battle at a time
+        self._pending_attack = payload["region_id"]
+        self.after_idle(self._flush_pending_attack)
+
+    def _flush_pending_attack(self):
+        region_id = getattr(self, "_pending_attack", None)
+        self._pending_attack = None
+        if region_id is None or self.world is None:
+            return
+        region = self.world.regions[region_id]
+        defender_idx = region.faction_idx
+        player = self.world.factions[self.world.player_faction_idx]
+        if defender_idx == self.world.player_faction_idx:
+            return          # taken by somebody else while the column marched
+        if defender_idx < 0:
+            self.map_view.show_bottom_message(
+                f"Your army reaches {region.name}.", ms=5000)
+            return
+        self.stage_battle(player, self.world.factions[defender_idx], region)
 
     def _on_work_finished(self, payload):
         """Something the player ordered built is finished."""
