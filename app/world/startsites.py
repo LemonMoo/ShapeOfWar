@@ -209,3 +209,29 @@ def candidate_sites(world, count, species=None, rng=None, min_spacing=None):
     if species:
         picked.sort(key=lambda p: -(p[2]["affinity"] or 0.0))
     return [(x, y, ev) for x, y, ev in picked]
+
+
+def regenerate_with_start(world, cell, species=None, name=None, color=None,
+                          ruler=None):
+    """The world previewed, re-grown with the player founded at `cell`.
+
+    Generation is deterministic, and terrain does not depend on where the
+    player sits (worldgen Part B1) -- but world.seed alone does not reproduce a
+    world that retried internally, so this regenerates from the resolved
+    parameters stashed at generation time (world._gen_params). Same terrain,
+    cell for cell; only the player's capital moves to `cell`.
+
+    Falls back to a plain seed-based regenerate for a world with no stashed
+    params (an older save loaded into a picker, say) -- not cell-perfect for a
+    retried world, but never wrong, just possibly a slightly different map."""
+    from app.world.worldgen import generate_world
+    g = getattr(world, "_gen_params", None)
+    kw = dict(player_species=species, player_name=name, player_color=color,
+              player_ruler=ruler, player_start=tuple(cell))
+    if g is not None:
+        return generate_world(g["width"], g["height"], seed=g["seed"],
+                              n_factions=len(world.factions),
+                              _target_n=g["target_n"], _n_plates=g["n_plates"],
+                              **kw)
+    return generate_world(world.w, world.h, seed=world.seed,
+                          n_factions=len(world.factions), **kw)

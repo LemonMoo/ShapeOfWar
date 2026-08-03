@@ -2396,6 +2396,16 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
         _n_plates = _pick_n_plates(rng, width, height)
     world = World(width, height)
     world.seed = nseed if seed is None else seed
+    # The fully-resolved generation parameters for THIS attempt. world.seed
+    # alone does not reproduce a world that retried internally (the retry
+    # replaces the seed, while _target_n/_n_plates were rolled from the
+    # original) -- so choosing a start and regenerating must use these, not
+    # world.seed. See startsites.regenerate_with_start / new_game's
+    # _settle_chosen_start. `seed` here is exactly what this attempt was
+    # seeded from, so passing it back with the same target/plates and NO
+    # retry reproduces this terrain cell-for-cell.
+    world._gen_params = {"seed": seed, "target_n": _target_n,
+                         "n_plates": _n_plates, "width": width, "height": height}
 
     # 1. height field: PLATE-DRIVEN (see app/world/plates.py) -- this is what
     #    replaced _pick_continent_centers + a falloff from the nearest of a

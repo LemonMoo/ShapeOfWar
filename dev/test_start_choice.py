@@ -88,4 +88,19 @@ assert a2.factions[0].meta["capital"] == player_cap, (
     "generate_world without player_start changed behaviour")
 print("  ok    same seed, no start given -> same auto-placement as before")
 
+print("\n--- _gen_params reproduces terrain even for a retried world ---")
+# world.seed alone is not enough for a world that retried internally (the retry
+# replaces the seed; _target_n/_n_plates came from the original). The stashed
+# params are, and startsites.regenerate_with_start uses them.
+from app.world import startsites
+base = generate_world(W, H, seed=SEED, n_factions=6, player_species="Humans",
+                      player_name="Test")
+assert hasattr(base, "_gen_params"), "generation params were not stashed"
+cell = base.factions[0].meta["capital"]
+repro = startsites.regenerate_with_start(base, cell, species="Humans", name="Test")
+assert terrain_signature(base) == terrain_signature(repro), (
+    "regenerate_with_start did not reproduce the terrain")
+assert tuple(repro.factions[0].meta["capital"]) == tuple(cell)
+print("  ok    same terrain cell-for-cell, player at the chosen cell")
+
 print("\nSTART CHOICE TEST PASSED")

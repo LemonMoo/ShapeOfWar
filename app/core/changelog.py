@@ -20,6 +20,16 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 78,
+        "title": "Where You Make Your Stand",
+        "items": [
+            "NEW: choose where your realm begins. The New Game map shows good starting sites as gold marks — click one, or click anywhere you like.",
+            "NEW: before you commit, see what the land offers: its country, the goods it can raise, its farmland, whether it has a coast or a river, and how it suits your people.",
+            "NEW: pick barren ground and the game warns you it cannot feed a realm — but lets you do it anyway.",
+            "CHANGED: press Play without choosing and you are placed in your people's best homeland, as before.",
+        ],
+    },
+    {
         "version": 77,
         "title": "A World Worth the Name",
         "items": [

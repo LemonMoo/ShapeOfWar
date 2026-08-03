@@ -24,14 +24,15 @@ import random
 import threading
 import tkinter as tk
 
-from PIL import ImageTk
+from PIL import ImageDraw, ImageTk
 
 from app.ui import theme
 from app.ui.world_preview import land_summary, render_world
 from app.world.lexicon import (RULER_TITLES, SPECIES, make_faction_namer,
                                make_ruler_namer, species_palette,
                                species_stat_chips, species_units)
-from app.world.worldgen import apply_player_identity, generate_world
+from app.world.worldgen import apply_player_identity, generate_world, OCEAN
+from app.world import startsites
 
 # (label, width, height, rivals, blurb). Measured generation cost is 8s / 18s /
 # 37s respectively -- which is exactly why the preview generates in the
@@ -87,6 +88,10 @@ class NewGameView(tk.Frame):
         # Background world generation (see the module docstring).
         self._world = None            # the world Play will actually use
         self._pending = 0             # token of the in-flight request, 0 = idle
+        self._start_cell = None       # player's chosen start, or None = auto-place
+        self._start_ok = True         # is the chosen start sustainable
+        self._candidates = []         # [(x, y, eval), ...] good sites to offer
+        self._preview_scale = 1.0     # world->preview px, for mapping clicks
         self._results = queue.Queue()
         self._preview_img = None      # ImageTk ref; Tk drops unreferenced ones
 
@@ -273,10 +278,24 @@ class NewGameView(tk.Frame):
                                  font=theme.FONT, text="Charting a world…",
                                  justify="center")
         self._preview.place(relx=0.5, rely=0.5, anchor="center")
+        # Click the map to choose where your realm begins. The gold dots are
+        # good, spread-out sites; you may also click anywhere else, and be
+        # warned if the ground cannot feed a realm (see startsites).
+        self._preview.bind("<Button-1>", self._on_preview_click)
         self._preview_note = tk.Label(parent, text="", bg=theme.BG,
                                       fg=theme.MUTED, font=("Segoe UI", 9),
                                       anchor="w", justify="left", wraplength=PREVIEW_W)
         self._preview_note.pack(fill="x", pady=(6, 0))
+        self._start_note = tk.Label(parent, text="Click the map to choose your "
+                                    "start — or press Play to be placed for you.",
+                                    bg=theme.BG, fg=theme.ACCENT,
+                                    font=("Segoe UI", 9, "bold"), anchor="w",
+                                    justify="left", wraplength=PREVIEW_W)
+        self._start_note.pack(fill="x", pady=(4, 0))
+        self._start_warn = tk.Label(parent, text="", bg=theme.BG, fg=theme.BAD,
+                                    font=("Segoe UI", 9, "bold"), anchor="w",
+                                    justify="left", wraplength=PREVIEW_W)
+        self._start_warn.pack(fill="x")
         self._reroll_btn = tk.Button(parent, text="⟳  Roll a different world",
                                      command=self._reroll, bg=_BTN_BG,
                                      fg=theme.INK, relief="flat",
@@ -501,6 +520,17 @@ class NewGameView(tk.Frame):
             self._preview_note.config(text=str(exc))
         else:
             self._world = world
+            self._start_cell = None
+            self._start_warn.config(text="")
+            self._start_note.config(
+                text="Click the map to choose your start — or press Play to be "
+                     "placed for you.")
+            # The dots to offer. Cells only; affinity/order is recomputed per
+            # species when the card is shown, so switching people needs no
+            # rebuild here.
+            import random as _random
+            self._candidates = startsites.candidate_sites(
+                world, 6, self.species, rng=_random.Random(world.seed))
             self._apply_identity()
         self._set_busy(False)
 
@@ -518,12 +548,94 @@ class NewGameView(tk.Frame):
         world = self._world
         if world is None:
             return
-        img = render_world(world, (PREVIEW_W, PREVIEW_H))
+        img = render_world(world, (PREVIEW_W, PREVIEW_H)).copy()
+        # render_world takes the aspect from the world, so the image can be
+        # letterboxed inside the box; this is the exact scale it used, and the
+        # one _on_preview_click inverts to turn a click back into a cell.
+        scale = min(PREVIEW_W / world.w, PREVIEW_H / world.h)
+        self._preview_scale = scale
+        draw = ImageDraw.Draw(img)
+        for cx, cy, _ev in self._candidates:
+            px, py = cx * scale, cy * scale
+            draw.ellipse([px - 2, py - 2, px + 2, py + 2],
+                         fill="#e8c24a", outline="#3a2c10")
+        if self._start_cell is not None:
+            px, py = self._start_cell[0] * scale, self._start_cell[1] * scale
+            ok = self._start_ok
+            ring = "#5fd06a" if ok else theme.BAD
+            draw.ellipse([px - 5, py - 5, px + 5, py + 5], outline=ring, width=2)
+            draw.ellipse([px - 2, py - 2, px + 2, py + 2], fill=ring)
         self._preview_img = ImageTk.PhotoImage(img)
         self._preview.config(image=self._preview_img, text="")
         idx = world.player_faction_idx
         self._preview_note.config(
             text=land_summary(world, idx) if idx is not None else "")
+
+    def _nearest_land(self, wx, wy, reach=20):
+        """The nearest settleable land cell to a click, or None if the click
+        is far out to sea. Mirrors generate_world's own snap so the marker
+        sits where the realm would actually be founded."""
+        world = self._world
+        if (0 <= wx < world.w and 0 <= wy < world.h
+                and world.owner[wy][wx] != OCEAN and (wx, wy) not in world.lake_cells):
+            return (wx, wy)
+        best = None
+        for dy in range(-reach, reach + 1):
+            cy = wy + dy
+            if not (0 <= cy < world.h):
+                continue
+            for dx in range(-reach, reach + 1):
+                cx = wx + dx
+                if not (0 <= cx < world.w):
+                    continue
+                if world.owner[cy][cx] != OCEAN and (cx, cy) not in world.lake_cells:
+                    d = dx * dx + dy * dy
+                    if best is None or d < best[0]:
+                        best = (d, cx, cy)
+        return (best[1], best[2]) if best else None
+
+    def _on_preview_click(self, event):
+        """Choose a start. Snap to the nearest offered site if the click is
+        close to one; otherwise free-place wherever there is land, warning if
+        the ground cannot feed a realm."""
+        world = self._world
+        if world is None:
+            return
+        wx = int(event.x / self._preview_scale)
+        wy = int(event.y / self._preview_scale)
+        # Snap to a candidate dot if the click is within a few cells of one.
+        snap = None
+        snap_d = (12 / self._preview_scale) ** 2
+        for cx, cy, ev in self._candidates:
+            d = (cx - wx) ** 2 + (cy - wy) ** 2
+            if d <= snap_d and (snap is None or d < snap[0]):
+                snap = (d, cx, cy, ev)
+        if snap is not None:
+            _d, cx, cy, ev = snap
+            self._start_cell = (cx, cy)
+        else:
+            land = self._nearest_land(wx, wy)
+            if land is None:
+                return                       # clicked far out to sea; ignore
+            self._start_cell = land
+            ev = startsites.evaluate_site(world, land[0], land[1], self.species)
+        self._start_ok = ev["sustain"]["ok"]
+        self._show_start_card(ev)
+        self._draw_preview()
+
+    def _show_start_card(self, ev):
+        biome = ev["dominant_biome"] or "open water"
+        water = " · ".join(w for w, on in (("coast", ev["coast"]),
+                                           ("river", ev["river"])) if on)
+        goods = ", ".join(ev["resources"][:6]) or "little of note"
+        parts = [f"Chosen start: {biome}, {int(ev['farmland_pct'] * 100)}% farmland"]
+        if water:
+            parts.append(water)
+        if ev["room"]:
+            parts.append(ev["room"])
+        self._start_note.config(text=" · ".join(parts) + "\n" + f"Goods: {goods}")
+        self._start_warn.config(
+            text="" if ev["sustain"]["ok"] else "⚠  " + ev["sustain"]["reason"])
 
     # --- play -----------------------------------------------------------------
     def _play(self):
@@ -547,7 +659,37 @@ class NewGameView(tk.Frame):
                 if self._world is None:     # generation failed -- let them retry
                     return
             self._apply_identity()
+            self._settle_chosen_start()
             self.on_play(self._world)
         finally:
             self._play_btn.config(state="normal")
             self._status.config(text="")
+
+    def _settle_chosen_start(self):
+        """If the player picked a start, regenerate the world with them founded
+        there before handing it over.
+
+        Regenerated rather than re-homed: generation is deterministic from the
+        seed, and terrain does not depend on where the player sits (Part B1),
+        so the same seed yields the SAME map the preview showed -- only the
+        player's capital moves to the chosen cell. Re-homing an already-settled
+        world (moving its settlements, villages, foothold and commander) would
+        be far more code and far more ways to be wrong. The cost is one more
+        generation, behind a 'founding' status line; it only runs when a start
+        was actually chosen."""
+        world = self._world
+        if world is None or self._start_cell is None:
+            return
+        current = (world.factions[world.player_faction_idx].meta.get("capital")
+                   if world.player_faction_idx is not None else None)
+        if current is not None and tuple(current) == tuple(self._start_cell):
+            return                         # already founded there
+        self._status.config(text="founding your realm…")
+        self.update()
+        # regenerate_with_start reproduces the previewed terrain from the
+        # stashed generation params (world.seed alone cannot, for a world that
+        # retried internally) and founds the player at the chosen cell.
+        self._world = startsites.regenerate_with_start(
+            world, self._start_cell, species=self.species,
+            name=self._name_var.get().strip() or None,
+            color=self.color, ruler=self._ruler_dict())
