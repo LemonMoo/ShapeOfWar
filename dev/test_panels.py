@@ -292,6 +292,44 @@ assert len(view._resource_canvas.find_all()) == len(items), (
     "redrawing the resource bar grew the canvas -- it is appending, not "
     "clearing")
 print("  ok    both pages redraw in one pass, and neither accumulates")
+
+# A resource GROUP header (Food, Industry, ...) actually folds when clicked.
+# It stopped: the page card flips the fold state through the _SetAsDict
+# adapter, and _toggle_resource_group flipped the SAME set again, so a click
+# was a double-flip that netted to no change and the group never opened.
+# Driven the way a real click does -- the card's own toggle, then its
+# on_toggle -- rather than by calling _toggle_resource_group alone, because
+# calling it alone is exactly the half that must NOT change state.
+rcanvas = view._resource_canvas
+
+
+def group_header_tag(name):
+    """The clickable tag of a resource group header (Food, Industry, ...),
+    re-found each time because the tag changes when the bar is redrawn."""
+    for item in rcanvas.find_all():
+        if rcanvas.type(item) != "text":
+            continue
+        txt = str(rcanvas.itemcget(item, "text"))
+        if txt[:1] in ("▸", "▾") and name.upper() in txt.upper():
+            return next((t for t in rcanvas.gettags(item)
+                         if t.startswith("hit")), None)
+    return None
+
+
+group_name = next((g for g in ("Food", "Industry")
+                   if group_header_tag(g) is not None), None)
+assert group_name is not None, "no Food/Industry group header on the resource bar"
+was_open = group_name in view._resource_groups_open
+view._resource_page.click(group_header_tag(group_name))
+root.update_idletasks()
+assert (group_name in view._resource_groups_open) != was_open, (
+    f"clicking the {group_name} group header did not change its fold state -- "
+    "the double-flip regression is back")
+view._resource_page.click(group_header_tag(group_name))
+root.update_idletasks()
+assert (group_name in view._resource_groups_open) == was_open, (
+    f"a second click on {group_name} did not fold it back")
+print(f"  ok    the {group_name} resource group folds and unfolds on click")
 print("  ok    the container comes back even if the rebuild raises")
 
 print("\n--- a commander's march is drawn on the GPU map, not only the canvas ---")

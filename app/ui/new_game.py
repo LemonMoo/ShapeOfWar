@@ -55,7 +55,14 @@ PREVIEW_W, PREVIEW_H = 430, 258
 _CARD_BG = theme.PANEL
 _FIELD_BG = theme.METER_TRACK
 _ROW_BG = theme.PANEL_ALT
-_ROW_SEL = theme.ACCENT
+# Selection is a MARKER, not a fill. A full bright-gold row (the first pass)
+# left white text stranded on gold and unreadable; it also shouts, which is
+# wrong for a dense list you read five rows of to compare. So a picked row
+# keeps a dark background -- lifted a shade so it still reads as "this one" --
+# and is flagged by a gold bar down its left edge and its name in gold, both
+# of which stay legible because the background under them is still dark.
+_ROW_SEL_BG = "#40301c"          # a warm lift on _ROW_BG, not the accent
+_ROW_MARK = theme.ACCENT         # the left-edge selection bar
 _BTN_BG = theme.PANEL_ALT        # the old blue-grey button face
 _BTN_SEL_INK = theme.ACCENT_INK  # text on an accent/selected control
 
@@ -124,8 +131,12 @@ class NewGameView(tk.Frame):
         for sp in SPECIES:
             row = tk.Frame(parent, bg=_ROW_BG, cursor="hand2")
             row.pack(fill="x", pady=2)
+            # The selection marker: a thin strip down the left edge, gold when
+            # this row is picked and the row's own colour (invisible) otherwise.
+            mark = tk.Frame(row, bg=_ROW_BG, width=4)
+            mark.pack(side="left", fill="y")
             inner = tk.Frame(row, bg=_ROW_BG)
-            inner.pack(fill="x", padx=10, pady=5)
+            inner.pack(side="left", fill="x", expand=True, padx=10, pady=5)
             name = tk.Label(inner, text=sp, bg=_ROW_BG, fg=theme.INK,
                             font=theme.FONT_BOLD, width=9, anchor="w")
             name.pack(side="left")
@@ -137,10 +148,10 @@ class NewGameView(tk.Frame):
                               font=("Segoe UI", 8), anchor="w", justify="left",
                               wraplength=500)
             detail.pack(side="left", fill="x", expand=True)
-            self._species_rows[sp] = (row, inner, name, detail)
+            self._species_rows[sp] = (row, mark, inner, name, detail)
             # Bind the frame AND its children: a click landing on the label
             # would otherwise do nothing, which reads as a broken row.
-            for widget in (row, inner, name, detail):
+            for widget in (row, mark, inner, name, detail):
                 widget.bind("<Button-1>", lambda e, s=sp: self._pick_species(s))
 
     def _build_identity(self, parent):
@@ -301,12 +312,15 @@ class NewGameView(tk.Frame):
 
     def _pick_species(self, species, regenerate=True):
         self.species = species
-        for sp, (row, inner, name, detail) in self._species_rows.items():
+        for sp, (row, mark, inner, name, detail) in self._species_rows.items():
             picked = sp == species
-            bg = _ROW_SEL if picked else _ROW_BG
+            bg = _ROW_SEL_BG if picked else _ROW_BG
             for widget in (row, inner, name, detail):
                 widget.config(bg=bg)
-            name.config(fg=theme.ACCENT if picked else theme.INK)
+            # The marker is the one thing that turns gold; the row stays dark,
+            # so name (gold) and detail (muted) both stay readable on it.
+            mark.config(bg=_ROW_MARK if picked else bg)
+            name.config(bg=bg, fg=theme.ACCENT if picked else theme.INK)
         self._title_var.set(RULER_TITLES.get(species, RULER_TITLES["Humans"])[0])
         self._build_swatches()
         if not self._name_is_custom:

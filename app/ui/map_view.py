@@ -1976,7 +1976,13 @@ class MapView(tk.Frame):
         return _SetAsDict(self)
 
     def _toggle_resource_group(self, group):
-        self._resource_groups_open ^= {group}
+        # Only redraw -- do NOT flip the state here. The page card already
+        # flipped it through the _SetAsDict adapter before calling this
+        # on_toggle (see parchment.Page.card's own _toggle). Flipping it again
+        # was a double-flip that netted to no change, so Food/Industry and the
+        # rest never actually opened. The selection panel's _toggle_panel_card
+        # gets this right for the same reason: the card owns the flip, the
+        # callback owns the redraw.
         self._update_resource_bar()
 
     def _draw_resource_row(self, resource, amount, delta, gold=False,
