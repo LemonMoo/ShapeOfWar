@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 74,
+        "title": "Let Us Out",
+        "items": [
+            "FIXED: the game opened straight into the Credits screen and would not leave it. It has been doing that since v0.12.0",
+        ],
+    },
+    {
         "version": 73,
         "title": "The Deep Places",
         "items": [

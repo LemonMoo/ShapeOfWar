@@ -98,7 +98,14 @@ class App(tk.Tk):
         # remembers which screen asked for it so Back goes where you came
         # from rather than always dumping you at the main menu.
         self._settings_return = "menu"
-        self.credits_view = CreditsView(self, on_close=self._close_credits)
+        # PARENTED TO content, like every other screen. It was parented to the
+        # App itself, which put it in a different stacking context: a sibling
+        # of `content`, created after it, so it sat above the entire content
+        # frame permanently. The game booted straight into the credits, and
+        # Back did nothing -- show_screen() raises a view INSIDE content, and
+        # nothing inside content can rise above a sibling stacked over it.
+        # Shipped in v0.12.0 and found in a v0.13.0 launch check.
+        self.credits_view = CreditsView(self.content, on_close=self._close_credits)
         self.settings_view = SettingsPanel(
             self.content, on_close=self._close_settings)
         for view in (self.menu_view, self.new_game_view, self.load_game_view,
