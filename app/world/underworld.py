@@ -196,6 +196,12 @@ def _carve_blob(world, cx, cy, radius, kind):
         for y in range(cy - radius, cy + radius + 1):
             if not (0 <= x < world.w and 0 <= y < world.h):
                 continue
+            # Never under the sea or a lake bed. A chamber centre is always on
+            # the massif, but a blob around one near the coast reaches past the
+            # shore -- caught the moment the land test was corrected (`height >
+            # 0` is true of the seabed too, so the old one could not see it).
+            if world.owner[y][x] == OCEAN or (x, y) in world.lake_cells:
+                continue
             if (x - cx) ** 2 + (y - cy) ** 2 <= limit:
                 L.carve(world, x, y, kind)
 
@@ -296,8 +302,7 @@ def _skirt(world, massif, margin=SKIRT_MARGIN):
                 continue
             if world.owner[ny][nx] == OCEAN or (nx, ny) in world.lake_cells:
                 continue
-            if world.height[ny][nx] <= 0.0:
-                continue
+            # (owner, not height: the seabed is above zero -- see layers._is_land)
             allowed.add((nx, ny))
             frontier.append((nx, ny, d + 1))
     return allowed
@@ -416,7 +421,7 @@ def _place_gates(world, massif, network, rng):
                   and p not in massif_set                     # out on the skirt
                   and world.owner[p[1]][p[0]] != OCEAN
                   and p not in world.lake_cells
-                  and world.height[p[1]][p[0]] > 0.0]
+                  ]
     if not candidates:
         # A range with no skirt cells carved (a small one, or one hemmed in by
         # water): fall back to its own lowest carved cell, so a network is

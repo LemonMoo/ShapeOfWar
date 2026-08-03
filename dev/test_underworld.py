@@ -93,7 +93,8 @@ for seed, world in worlds.items():
         ux, uy = gate["under"]
         assert world.owner[gy][gx] != OCEAN, f"a gate opens into the sea at {gate['pos']}"
         assert (gx, gy) not in world.lake_cells, "a gate opens into a lake"
-        assert world.height[gy][gx] > 0.0, "a gate opens onto no land at all"
+        assert L.is_open(world, gx, gy, L.SURFACE), (
+            "a gate opens onto no land at all")
         assert L.kind_at(world, ux, uy, L.UNDER) in L.PASSABLE_KINDS, (
             "a gate's inner mouth is rock, water or a drop")
     print(f"  seed {seed}: all {len(world.gates)} gates open onto dry land")
@@ -104,7 +105,7 @@ for seed, world in worlds.items():
             if world.biome_grid[y][x] in U.UNDER_BIOMES}
     far = 0
     for x, y in world.under_cells:
-        assert world.height[y][x] > 0.0, f"a gallery under the ocean at {(x, y)}"
+        assert world.owner[y][x] != OCEAN, f"a gallery under the ocean at {(x, y)}"
         near = any((x + dx, y + dy) in rock
                    for dx in range(-U.SKIRT_MARGIN, U.SKIRT_MARGIN + 1)
                    for dy in range(-U.SKIRT_MARGIN, U.SKIRT_MARGIN + 1))

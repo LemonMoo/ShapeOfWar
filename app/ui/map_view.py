@@ -31,6 +31,7 @@ from app.world.territory import bordering_regions, naval_reachable_regions
 from app.world.resources import RESOURCES
 from app.world import resources
 from app.world import turn_runner
+from app.world import layers
 from app.world import diplomacy
 from app.world import construction
 from app.world import trade
@@ -89,6 +90,21 @@ _MIN_BUDGET_MS = 1.5
 # is throttled to this, and only the cheap readouts (the date, the treasury
 # figure) update every day.
 _PANEL_REFRESH_MS = 900
+
+# --- the underworld (see app/world/layers.py) ---------------------------------
+# Solid rock is the BACKGROUND down here, not the exception: the layer exists
+# only under the mountains, so most of the view is stone and the network is
+# what you are looking for in it. Warm light against cold rock, which is also
+# how anybody has ever drawn a mine.
+_UNDER_ROCK = (30, 28, 32)        # unexcavated
+_UNDER_ABOVE_LAND = (44, 42, 46)  # rock that has open country above it
+_UNDER_KIND_RGB = {
+    "cavern": (206, 168, 84),
+    "gallery": (140, 100, 46),
+    "water": (52, 96, 150),
+    "chasm": (8, 8, 12),
+}
+_UNDER_GATE_RGB = (226, 92, 70)
 
 _OCEAN_DEEP = (18, 30, 58)
 _OCEAN_SHALLOW = (44, 74, 120)
@@ -633,6 +649,12 @@ class MapView(tk.Frame):
         # What a day of this world costs, learned rather than assumed -- see
         # _budget_ms. Seeded at the runner's own slice budget so the very first
         # day is paced sensibly before anything has been measured.
+        # WHICH LAYER IS BEING LOOKED AT. One piece of state, deliberately:
+        # selection, the raster, the click handler and the panels all read
+        # this, and the moment there are two answers to "where am I" it gets
+        # patched into twenty places.
+        self.layer = layers.SURFACE
+        self._px_under = None           # underworld raster, built on demand
         self._day_ms_estimate = 0.0
         self._day_started = 0.0
         self.selected = None            # selected faction (world view)
@@ -2263,6 +2285,8 @@ class MapView(tk.Frame):
         self.view_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 8))
         self.currents_btn = widgets.button(foot, "Currents: Off", self._toggle_currents)
         self.currents_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 4))
+        self.layer_btn = widgets.button(foot, "View: Underworld", self.toggle_layer)
+        self.layer_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 4))
 
         # --- the time controls, where End Turn used to be -------------------
         # The world runs on its own now; this is the throttle. Pause is the
@@ -2892,6 +2916,15 @@ class MapView(tk.Frame):
         wd = self.world
         scale = self._place[2]
         marks = []
+
+        # Gates, on BOTH layers. A door you cannot find is a door that does
+        # not exist -- and on the surface it is the only sign that there is
+        # anything under that mountain at all.
+        for gate in getattr(wd, "gates", ()):
+            gx, gy = gate["pos" if self.layer == layers.SURFACE else "under"]
+            marks.append((gx, gy, max(2.0, 6.0 / scale),
+                          tuple(c / 255.0 for c in _UNDER_GATE_RGB),
+                          SHAPE_DIAMOND))
 
         def px(screen_r):
             """Screen-pixel radius -> world-unit size for set_markers: the
@@ -5318,6 +5351,25 @@ class MapView(tk.Frame):
         if not (0 <= gy < wd.h):
             return
 
+        if self.layer == layers.UNDER:
+            # Below ground the only thing to pick is a hall. Attacking,
+            # settling and every other surface mode are simply not offered
+            # here yet -- there is nothing down here to attack or build on
+            # until the phases that put people in the galleries.
+            rid = layers.region_at(wd, gx, gy, layers.UNDER)
+            gate = layers.gate_at(wd, gx, gy, layers.UNDER)
+            if rid is not None:
+                self._show_region(wd.regions[rid])
+                self.selected_region = wd.regions[rid]
+                self._base_key = None
+                self.render()
+            elif gate is not None:
+                self.show_bottom_message(
+                    f"A gate to the surface at {gate['pos']}.", ms=4000)
+            else:
+                self.show_bottom_message("Solid rock.", ms=2500)
+            return
+
         if self.attack_mode is not None:
             # --- ATTACK-TARGET PICKING: zoomed to a shared border ---------
             cid = wd.region_grid[gy][gx]
@@ -5480,6 +5532,20 @@ class MapView(tk.Frame):
         # that drill-down state. Either alone is enough: a caller can ask for
         # a region highlight without also pulling in zoom_faction's other
         # side effects (back-button visibility, _zoom_is_foreign, ...).
+        # The underworld is a PLACE, not a mode of the surface: it has its own
+        # raster and its own cache key, and none of the surface's view modes
+        # (fertility, climate, biome) mean anything in a gallery.
+        if self.layer == layers.UNDER:
+            sc = self.selected_region.id if self.selected_region else -1
+            key = ("under", len(wd.under_cells), wd.turn // 8, sc)
+            if key == self._base_key and self._base_img is not None:
+                return
+            img = Image.new("RGB", (wd.w, wd.h))
+            img.putdata(self._under_pixels(sc))
+            self._base_img = img
+            self._base_key = key
+            return
+
         region_mode = self.zoom_faction is not None or self.selected_region is not None
         if region_mode:
             sc = self.selected_region.id if self.selected_region else -1
@@ -5519,6 +5585,67 @@ class MapView(tk.Frame):
         img.putdata(data)
         self._base_img = img
         self._base_key = key
+
+    def _under_pixels(self, selected_id=-1):
+        """The underworld as a flat pixel list.
+
+        Rebuilt rather than cached per cell: the network is a fraction of a
+        per cent of the map, so this is a fill plus a few thousand pokes, and
+        it changes rarely enough (ownership, a selection) that the base-image
+        cache key above absorbs it. `_precompute_colors`' incremental patching
+        exists because the SURFACE is 726,000 cells; this is not that problem.
+        """
+        wd = self.world
+        n = wd.w * wd.h
+        # Two shades of rock, so the coastline and the shape of the land above
+        # are still readable while you are below it -- otherwise descending
+        # drops you into a black void with a squiggle in it and no way to tell
+        # where on the map you are.
+        rock, above = _UNDER_ROCK, _UNDER_ABOVE_LAND
+        data = [rock] * n
+        for y in range(wd.h):
+            row = wd.owner[y]
+            base = y * wd.w
+            for x in range(wd.w):
+                # Ownership, not elevation: `height` is raw and the seabed is
+                # above zero, so testing it paints the entire ocean as land.
+                if row[x] != OCEAN:
+                    data[base + x] = above
+        fcolors, _ = self._color_context()
+        for (x, y), kind in wd.under_kind.items():
+            colour = _UNDER_KIND_RGB.get(kind, (255, 0, 255))
+            owner = layers.owner_at(wd, x, y, layers.UNDER)
+            if owner is not None and 0 <= owner < len(wd.factions):
+                # Held ground takes its holder's colour, mixed with the rock so
+                # a gallery still reads as a gallery.
+                fc = fcolors[owner]
+                colour = tuple((c * 2 + f) // 3 for c, f in zip(colour, fc))
+            if selected_id >= 0 and layers.region_at(wd, x, y, layers.UNDER) == selected_id:
+                colour = tuple(min(255, int(c * 1.45)) for c in colour)
+            data[y * wd.w + x] = colour
+        for gate in wd.gates:
+            gx, gy = gate["under"]
+            data[gy * wd.w + gx] = _UNDER_GATE_RGB
+        return data
+
+    def toggle_layer(self):
+        """Go below, or come back up.
+
+        One switch, and everything that draws or picks reads `self.layer`
+        rather than being told separately."""
+        self.layer = (layers.UNDER if self.layer == layers.SURFACE
+                      else layers.SURFACE)
+        self.selected_region = None
+        self._base_key = None
+        audio.play("panel")
+        if hasattr(self, "layer_btn"):
+            self.layer_btn.config(text=("View: Surface"
+                                        if self.layer == layers.UNDER
+                                        else "View: Underworld"))
+        self.show_bottom_message(
+            "Below the mountains. Gates are the only way in or out."
+            if self.layer == layers.UNDER else "Back on the surface.", ms=4000)
+        self.refresh()
 
     def _ensure_fog_overlay(self):
         """Rebuild the cached fog mask ("L" image, 255=hidden/0=revealed)

@@ -105,10 +105,13 @@ def is_open(world, x, y, layer):
 
 
 def _is_land(world, x, y):
-    """Land regardless of who owns it -- `owner` carries OCEAN for sea cells and
-    an unclaimed-land marker for the rest, so ownership alone cannot answer
-    this."""
-    return world.height[y][x] > 0.0 and (x, y) not in world.lake_cells
+    """Land regardless of who owns it.
+
+    `owner` is the test, NOT elevation: `height` is raw elevation and the
+    seabed is above zero, so `height > 0` is true for very nearly every cell on
+    the map. Rendered, that made the whole ocean read as ground with rock under
+    it."""
+    return world.owner[y][x] != OCEAN and (x, y) not in world.lake_cells
 
 
 def kind_at(world, x, y, layer):
