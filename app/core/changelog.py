@@ -20,6 +20,16 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 75,
+        "title": "An Illuminated Hand",
+        "items": [
+            "CHANGED: the whole interface is drawn on parchment now — real aged vellum with fibres in it, gold frames with corner flourishes, illuminated capitals at every heading, and a dotted ledger leader on every figure",
+            "CHANGED: warnings arrive under a wax seal, meters read as ink cut into a channel, and buttons are carved plaques rather than grey rectangles",
+            "CHANGED: the title screen, the load and credits screens, the pause and defeat screens, the treasury, the trade log and every card in the build menu all wear the new hand",
+            "CHANGED: the New Game screen and the battle banner lose the last of the old slate-blue colours they were painted in before the game had a palette",
+        ],
+    },
+    {
         "version": 74,
         "title": "Let Us Out",
         "items": [
