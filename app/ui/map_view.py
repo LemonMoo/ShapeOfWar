@@ -1801,86 +1801,41 @@ class MapView(tk.Frame):
             wdg.bind("<Button-1>", lambda e: self._toggle_left_panel())
 
         scroll_area = tk.Frame(rb, bg=theme.PANEL)
-        scroll_area.pack(fill="both", expand=True, padx=(12, 0))
+        scroll_area.pack(fill="both", expand=True, padx=(10, 0))
         canvas = tk.Canvas(scroll_area, bg=theme.PANEL, highlightthickness=0)
         canvas.pack(side="left", fill="both", expand=True)
         vbar = tk.Scrollbar(scroll_area, orient="vertical", command=canvas.yview)
         vbar.pack(side="right", fill="y")
         canvas.configure(yscrollcommand=vbar.set)
         self._resource_canvas = canvas
-
-        self._resource_rows = tk.Frame(canvas, bg=theme.PANEL)
-        window = canvas.create_window((0, 0), window=self._resource_rows, anchor="nw")
-        # Kept so _update_resource_bar can hide the rows while it rebuilds
-        # them. This frame lives in a canvas window rather than being packed,
-        # so the pack_forget trick _quiet_rebuild uses does not apply here --
-        # hiding the canvas ITEM is the equivalent.
-        self._resource_rows_window = window
-        self._resource_rows.bind(
-            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(window, width=e.width))
+        # A drawn page on the bar's own scrolling canvas, same as the
+        # selection panel (app/ui/parchment.py). The rows were thirty-odd
+        # Frames and Labels destroyed and rebuilt every turn, which is why
+        # they had to be hidden mid-rebuild; a page is cleared by drawing it.
+        self._resource_page = parchment.Page(None, _LEFT_PANEL_W - 22, seed=6,
+                                             canvas=canvas)
         canvas.bind("<Enter>", lambda e: canvas.bind_all(
             "<MouseWheel>", lambda ev: canvas.yview_scroll(int(-ev.delta / 120), "units")))
         canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
-    def _current_resource_snapshot(self):
-        """This turn's REAL totals for the player faction: every resource
-        summed across every Settlement AND Village it owns (see
-        construction._faction_nodes) -- "our country's whole pool of
-        resources," matching what construction.can_afford/_pay_cost
-        actually draw on, not the old national-pool number (nation.stats
-        ["resources"]) that's empty in practice now that almost
-        everything lives in per-node storage (still included too, for
-        whatever narrow legacy case might still land there). This used
-        to only ever surface Gold this way and otherwise show the stale,
-        near-always-empty national pool -- which is why the sidebar used
-        to look basically blank."""
-        player = self._player_faction()
-        if player is None:
-            return {}
-        snap = dict(player.stats.get("resources", {}))
-        for node in construction._faction_nodes(player, self.world):
-            for resource, amount in getattr(node, "resources", {}).items():
-                snap[resource] = snap.get(resource, 0) + amount
-        return snap
-
-    def _current_population_total(self):
-        """The player faction's total living population right now -- every
-        Settlement and Village added together (same construction.
-        _faction_nodes pool _current_resource_snapshot uses), for the
-        year-end banner's population line (see _on_end_turn/
-        _show_year_banner). Separate from the resource snapshot since
-        population isn't a resource entry on any node."""
-        player = self._player_faction()
-        if player is None:
-            return 0
-        return sum(getattr(node, "population", 0)
-                  for node in construction._faction_nodes(player, self.world))
-
     def _update_resource_bar(self):
-        # Hidden while it is torn down and rebuilt, for the same reason the
-        # selection panel is (see _quiet_rebuild): thirty-odd rows destroyed
-        # and recreated in place is the left side of the screen blinking
-        # every turn. Wrapped so an exception mid-rebuild cannot leave the
-        # bar permanently invisible.
-        canvas = self._resource_canvas
-        window = getattr(self, "_resource_rows_window", None)
-        if window is not None:
-            canvas.itemconfigure(window, state="hidden")
-        try:
-            self._rebuild_resource_rows()
-        finally:
-            if window is not None:
-                canvas.itemconfigure(window, state="normal")
+        """Redraw the whole bar.
+
+        No hide-while-rebuilding any more: the rows are drawn onto a page, so
+        the rebuild is one canvas clear and one draw with no half-built
+        intermediate state for Tk to paint. That is what the hidden window
+        existed to prevent."""
+        page = getattr(self, "_resource_page", None)
+        if page is None:
+            return
+        page.begin(max(320, self._resource_canvas.winfo_height() or 320))
+        self._rebuild_resource_rows()
+        page.finish()
 
     def _rebuild_resource_rows(self):
-        for w in self._resource_rows.winfo_children():
-            w.destroy()
         current = self._current_resource_snapshot()
         if self._player_faction() is None:
-            tk.Label(self._resource_rows, text="No realm selected.",
-                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                     wraplength=160, justify="left").pack(anchor="w", pady=4)
+            self._resource_page.text("No realm selected.", fill=theme.MUTED)
             return
 
         # Thirty-odd rows at equal weight is not a list, it's a wall: Gold sat
@@ -1934,22 +1889,72 @@ class MapView(tk.Frame):
                 out.append(resource)
         return out[:5]
 
+    def _current_resource_snapshot(self):
+        """This turn's REAL totals for the player faction: every resource
+        summed across every Settlement AND Village it owns (see
+        construction._faction_nodes) -- "our country's whole pool of
+        resources," matching what construction.can_afford/_pay_cost
+        actually draw on, not the old national-pool number (nation.stats
+        ["resources"]) that's empty in practice now that almost
+        everything lives in per-node storage (still included too, for
+        whatever narrow legacy case might still land there). This used
+        to only ever surface Gold this way and otherwise show the stale,
+        near-always-empty national pool -- which is why the sidebar used
+        to look basically blank."""
+        player = self._player_faction()
+        if player is None:
+            return {}
+        snap = dict(player.stats.get("resources", {}))
+        for node in construction._faction_nodes(player, self.world):
+            for resource, amount in getattr(node, "resources", {}).items():
+                snap[resource] = snap.get(resource, 0) + amount
+        return snap
+
+    def _current_population_total(self):
+        """The player faction's total living population right now -- every
+        Settlement and Village added together (same construction.
+        _faction_nodes pool _current_resource_snapshot uses), for the
+        year-end banner's population line (see _on_end_turn/
+        _show_year_banner). Separate from the resource snapshot since
+        population isn't a resource entry on any node."""
+        player = self._player_faction()
+        if player is None:
+            return 0
+        return sum(getattr(node, "population", 0)
+                  for node in construction._faction_nodes(player, self.world))
+
     def _draw_resource_header(self, text):
-        tk.Label(self._resource_rows, text=text, bg=theme.PANEL, fg=theme.WARN,
-                 font=theme.FONT_SMALL_BOLD,
-                 anchor="w").pack(fill="x", pady=(8, 1))
+        page = self._resource_page
+        page.gap(4)
+        page.canvas.create_text(parchment.PAD_X, page.y, anchor="w", text=text,
+                                fill=theme.WARN, font=theme.FONT_SMALL_BOLD)
+        page.y += 16
 
     def _draw_resource_group_header(self, group, total, expanded, count):
-        row = tk.Frame(self._resource_rows, bg=theme.PANEL_ALT, cursor="hand2")
-        row.pack(fill="x", pady=1)
-        arrow = "▾" if expanded else "▸"
-        tk.Label(row, text=f"{arrow} {group}", bg=theme.PANEL_ALT, fg=theme.INK,
-                 font=theme.FONT_SMALL_BOLD, anchor="w",
-                 padx=4).pack(side="left")
-        tk.Label(row, text=_fmt_amount(total), bg=theme.PANEL_ALT, fg=theme.MUTED,
-                 font=theme.FONT_SMALL).pack(side="right", padx=(0, 6))
-        for wdg in (row,) + tuple(row.winfo_children()):
-            wdg.bind("<Button-1>", lambda e, g=group: self._toggle_resource_group(g))
+        self._resource_page.card(
+            group, group, self._resource_groups_open_state(), _fmt_amount(total),
+            on_toggle=lambda g=group: self._toggle_resource_group(g),
+            default_open=False)
+
+    def _resource_groups_open_state(self):
+        """The group-fold state as the dict a page card expects. The bar has
+        always kept it as a SET of open groups; this is the one adapter rather
+        than changing how the bar stores it."""
+        class _SetAsDict(dict):
+            def __init__(self, owner):
+                super().__init__({g: True for g in owner._resource_groups_open})
+                self._owner = owner
+
+            def get(self, key, default=None):
+                return key in self._owner._resource_groups_open
+
+            def __setitem__(self, key, value):
+                if value:
+                    self._owner._resource_groups_open.add(key)
+                else:
+                    self._owner._resource_groups_open.discard(key)
+
+        return _SetAsDict(self)
 
     def _toggle_resource_group(self, group):
         self._resource_groups_open ^= {group}
@@ -1957,32 +1962,22 @@ class MapView(tk.Frame):
 
     def _draw_resource_row(self, resource, amount, delta, gold=False,
                            warn=False, indent=False):
-        row = tk.Frame(self._resource_rows, bg=theme.PANEL)
-        row.pack(fill="x", pady=1)
+        page = self._resource_page
         fg = theme.INK if (gold or not indent) else theme.MUTED
         if warn:
             fg = theme.WARN
-        tk.Label(row, text=("   " if indent else "") + resource, bg=theme.PANEL,
-                 fg=fg, font=theme.FONT_SMALL_BOLD if gold
-                 else theme.FONT_SMALL, anchor="w").pack(side="left")
+        value = _fmt_amount(amount)
         if delta:
-            colour = theme.GOOD if delta > 0 else theme.BAD
             sign = "+" if delta > 0 else "-"
-            tk.Label(row, text=f"{sign}{_fmt_amount(abs(delta))}", bg=theme.PANEL,
-                     fg=colour, font=theme.FONT_SMALL_BOLD
-                     ).pack(side="right")
-        tk.Label(row, text=_fmt_amount(amount), bg=theme.PANEL, fg=theme.MUTED,
-                 font=theme.FONT_SMALL).pack(side="right", padx=(0, 6))
+            value = f"{value}   {sign}{_fmt_amount(abs(delta))}"
+        page.kv(("  " if indent else "") + resource, value, fg=fg,
+                indent=6 if indent else 0)
         if gold:
-            for wdg in (row,) + tuple(row.winfo_children()):
-                wdg.bind("<Button-1>", lambda e: self.toggle_treasury())
-                wdg.configure(cursor="hand2")
             # Gold is the one row whose headline number regularly fails to
             # explain itself: most of it is minted silently from Gold Ore, some
             # is out on a caravan's return leg, and some is held back by the
             # trade reserve. Click through for the real accounting.
-            tk.Label(row, text="ⓘ", bg=theme.PANEL, fg=theme.ACCENT,
-                     font=theme.FONT_SMALL).pack(side="right", padx=(0, 2))
+            page.hit_last_row(self.toggle_treasury)
 
     # --- treasury ------------------------------------------------------------
     def _build_treasury_panel(self):
@@ -2205,45 +2200,66 @@ class MapView(tk.Frame):
         pcanvas.bind("<Leave>", lambda e: pcanvas.unbind_all("<MouseWheel>"))
 
         # --- pinned controls: these live on the OUTER panel, below the
-        # scrolling body, so End Turn and the view toggle are always on
-        # screen no matter how much detail the selection has.
+        # scrolling body, so the time controls and the view toggles are always
+        # on screen no matter how much detail the selection has.
+        #
+        # A page of its own rather than part of the one above: this is pinned
+        # and that one scrolls, so they cannot share a canvas. It is redrawn
+        # from state by _render_foot -- every control here has a label that
+        # changes (paused/running, which speed, which view, which layer), and
+        # a drawn control has no .config() to change one in place.
         foot = tk.Frame(self._panel, bg=theme.PANEL)
         foot.pack(side="bottom", fill="x")
-        widgets.button(foot, "Compendium (F1)", self.open_compendium
-                       ).pack(side="bottom", fill="x", padx=14, pady=(0, 6))
-        self.view_btn = widgets.button(foot, "View: Political", self._toggle_mode)
-        self.view_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 8))
-        self.currents_btn = widgets.button(foot, "Currents: Off", self._toggle_currents)
-        self.currents_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 4))
-        self.layer_btn = widgets.button(foot, "View: Underworld", self.toggle_layer)
-        self.layer_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 4))
-
-        # --- the time controls, where End Turn used to be -------------------
-        # The world runs on its own now; this is the throttle. Pause is the
-        # accent button because it is the one that matters -- in a real-time
-        # game the important control is the one that stops it.
-        times = tk.Frame(foot, bg=theme.PANEL)
-        times.pack(side="bottom", fill="x", padx=14, pady=(4, 6))
-        self._speed_btns = {}
-        self.pause_btn = widgets.button(times, "Pause", self._toggle_pause,
-                                        kind="accent")
-        self.pause_btn.pack(side="left", fill="x", expand=True)
-        for mult in clock.SPEEDS:
-            label = f"{mult:g}x"
-            btn = widgets.button(times, label,
-                                 lambda m=mult: self._set_speed(m))
-            btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
-            self._speed_btns[mult] = btn
-        self.turn_lbl = tk.Label(foot, text="", bg=theme.PANEL, fg=theme.MUTED,
-                                 font=theme.FONT_BOLD)
-        self.turn_lbl.pack(side="bottom", padx=14, pady=(8, 0))
-        self.back_btn = widgets.button(foot, "← Back to World", self._exit_region_view)
+        self._foot_page = parchment.Page(foot, _RIGHT_PANEL_W - 8, seed=9)
+        self._foot_page.canvas.pack(fill="x")
         self._panel_foot = foot
-        # back_btn is packed only while zoomed in.
+        self._back_label = None
+        self._back_command = None
+        self._render_foot()
+
+    def _render_foot(self):
+        """Draw the pinned controls from the current state of the world clock,
+        the view mode and the zoom level."""
+        page = getattr(self, "_foot_page", None)
+        if page is None:
+            return
+        paused = self.clock.paused if getattr(self, "clock", None) else True
+        page.begin(240)
+        page.heading(self._foot_date_text(), fill=theme.MUTED)
+        page.gap(2)
+        # The throttle. Pause reads as the accent because in a real-time game
+        # the control that matters is the one that stops it.
+        row = [("Resume" if paused else "Pause", self._toggle_pause, "accent")]
+        for mult in clock.SPEEDS:
+            active = (not paused and getattr(self.clock, "speed", 1.0) == mult)
+            row.append((f"{mult:g}x", lambda m=mult: self._set_speed(m),
+                        "active" if active else "default"))
+        page.button_row(row)
+        if self._back_label:
+            page.button(self._back_label, self._back_command)
+        page.button(f"View: {self.mode.capitalize()}", self._toggle_mode)
+        page.button(f"Currents: {'On' if self.show_currents else 'Off'}",
+                    self._toggle_currents)
+        page.button("View: Surface" if self.layer == layers.UNDER
+                    else "View: Underworld", self.toggle_layer)
+        page.button("Compendium (F1)", self.open_compendium)
+        page.finish()
+
+    def _foot_date_text(self):
+        """The date line, and why the world is not moving if it is not."""
+        if not getattr(self, "world", None) or not getattr(self, "clock", None):
+            return ""
+        if self.clock.paused:
+            reason = clock.PAUSE_REASON_TEXT.get(self.clock.pause_reason,
+                                                 "Paused")
+            return f"{self._date_text()} — {reason}"
+        if not self.clock.keeping_up:
+            return f"{self._date_text()} — running slowly"
+        return self._date_text()
 
     def _toggle_currents(self):
         self.show_currents = not self.show_currents
-        self.currents_btn.config(text=f"Currents: {'On' if self.show_currents else 'Off'}")
+        self._render_foot()
         self.render()
 
     def _bind_map_events(self, widget):
@@ -3017,7 +3033,7 @@ class MapView(tk.Frame):
 
     def _toggle_mode(self):
         self.mode = self._MODES[(self._MODES.index(self.mode) + 1) % len(self._MODES)]
-        self.view_btn.config(text=f"View: {self.mode.capitalize()}")
+        self._render_foot()
         self._base_key = None
         self.render()
 
@@ -3064,22 +3080,12 @@ class MapView(tk.Frame):
         """Say what the clock is doing, including when it is not keeping up.
 
         A world quietly running at half the speed on the button reads as the
-        game being broken, so `keeping_up` is surfaced rather than hidden."""
-        if not hasattr(self, "pause_btn"):
-            return
-        paused = self.clock.paused
-        self.pause_btn.config(text="Resume" if paused else "Pause")
-        for mult, btn in self._speed_btns.items():
-            live = (not paused) and abs(self.clock.speed - mult) < 1e-9
-            btn.config(fg=theme.INK if live else theme.MUTED)
-        if paused:
-            reason = clock.PAUSE_REASON_TEXT.get(self.clock.pause_reason,
-                                                 "Paused")
-            self.turn_lbl.config(text=f"{self._date_text()} — {reason}")
-        elif not self.clock.keeping_up:
-            self.turn_lbl.config(text=f"{self._date_text()} — running slowly")
-        else:
-            self.turn_lbl.config(text=self._date_text())
+        game being broken, so `keeping_up` is surfaced rather than hidden.
+
+        One call now: the pinned controls are a drawn page, so "update the
+        pause button, the four speed buttons and the date line" is "draw the
+        foot again" -- there is nothing to config() in place."""
+        self._render_foot()
 
     def _date_text(self):
         year = resources.current_year(self.world.turn)
@@ -4741,11 +4747,12 @@ class MapView(tk.Frame):
         """Switch the panel into a zoomed mode: clear relationships/attack,
         show a Back button configured for the current level."""
         self._panel_section = section_label
-        self.back_btn.config(text=back_label, command=back_command)
-        self.back_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 2))
+        self._back_label, self._back_command = back_label, back_command
+        self._render_foot()
 
     def _exit_ui(self):
-        self.back_btn.pack_forget()
+        self._back_label = self._back_command = None
+        self._render_foot()
 
     def _enter_region_view(self, faction):
         """Zooms into one faction's territory. Villages aren't a separate
@@ -5466,10 +5473,7 @@ class MapView(tk.Frame):
             audio.play_ambience("underworld")
         else:
             audio.play_music("map")
-        if hasattr(self, "layer_btn"):
-            self.layer_btn.config(text=("View: Surface"
-                                        if self.layer == layers.UNDER
-                                        else "View: Underworld"))
+        self._render_foot()
         self.show_bottom_message(
             "Below the mountains. Gates are the only way in or out."
             if self.layer == layers.UNDER else "Back on the surface.", ms=4000)

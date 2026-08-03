@@ -265,15 +265,33 @@ class Page:
         self._height = 400
         self._next_tag = 0
         self._handlers = {}
+        self._pending_finish = None
 
     # -- surface -----------------------------------------------------------
     def begin(self, height=None):
-        """Clear the page and lay a fresh sheet on it."""
+        """Clear the page and lay a fresh sheet on it.
+
+        Also queues finish() for the next idle moment. A caller that forgets
+        to close its page would otherwise get a sheet drawn to the height it
+        GUESSED at, with the rest of the content spilling onto bare
+        background and a scrollbar that does not know the page is longer than
+        the window -- which is exactly what the five selection panels did on
+        their first render, and it is invisible until you look (see
+        dev/alerts_shot.py). finish() is idempotent, so an explicit call
+        still works and simply wins the race."""
         self.canvas.delete("all")
         self._handlers.clear()
         self.y = 12
         self._height = height or self._height
         self._sheet()
+        self._pending_finish = self.canvas.after_idle(self._auto_finish)
+
+    def _auto_finish(self):
+        self._pending_finish = None
+        try:
+            self.finish()
+        except tk.TclError:
+            pass          # the canvas went away before idle came round
 
     def _sheet(self):
         self.canvas.create_image(0, 0, anchor="nw", tags="sheet",
@@ -290,6 +308,12 @@ class Page:
         A page on its OWN canvas resizes that canvas to fit. A page on a
         borrowed scrolling canvas must not: its height is the viewport's, and
         what changes is the scrollregion."""
+        if getattr(self, "_pending_finish", None) is not None:
+            try:
+                self.canvas.after_cancel(self._pending_finish)
+            except tk.TclError:
+                pass
+            self._pending_finish = None
         used = int(self.y + 14)
         self.canvas.delete("sheet")
         self.canvas.delete("sheet_frame")
@@ -483,6 +507,46 @@ class Page:
                                                                fill=self.pal["muted"]))
         self._bind(tag, lambda _e=None: command())
         self.y += 16
+
+    def button_row(self, items):
+        """Several plaques side by side, sharing the width.
+
+        `items` is [(text, command, kind), ...]. Its own method rather than a
+        flag on button(), because a row is a different thing: the speed
+        controls are one control with four settings, and reading them as four
+        separate buttons stacked down the page loses that.
+        """
+        if not items:
+            return
+        x0, x1 = PAD_X + 4, self.width - PAD_X - 4
+        each = (x1 - x0) / len(items)
+        y0, y1 = self.y, self.y + 26
+        pal = self.pal
+        for i, (text, command, kind) in enumerate(items):
+            bx0 = x0 + each * i
+            bx1 = bx0 + each - 3
+            face = {"accent": pal["gold"], "active": pal["gold"],
+                    "danger": "#5c241d"}.get(kind, pal["cap_bg"])
+            ink = "#241a0a" if kind in ("accent", "active") else pal["ink"]
+            tag = self._tag()
+            self.canvas.create_rectangle(bx0, y0, bx1, y1, fill=face,
+                                         outline=pal["gold_dim"], tags=(tag,))
+            self.canvas.create_line(bx0 + 1, y1 - 1, bx1 - 1, y1 - 1,
+                                    fill=pal["rule"], tags=(tag,))
+            self.canvas.create_text((bx0 + bx1) / 2, (y0 + y1) / 2, text=text,
+                                    fill=ink,
+                                    font=(theme.FONT_FAMILY_HEAD, 10, "bold"),
+                                    tags=(tag,))
+            self._bind(tag, lambda _e=None, c=command: c())
+        self.y += 32
+
+    def heading(self, text, fill=None):
+        """A centred line in the display face -- the date, and anything else
+        that is a statement rather than a row of data."""
+        self.canvas.create_text(self.width / 2, self.y + 7, text=text,
+                                fill=fill or self.pal["ink"],
+                                font=(theme.FONT_FAMILY_HEAD, 10, "bold"))
+        self.y += 20
 
     def hit_last_row(self, command):
         """Make the row just drawn clickable.

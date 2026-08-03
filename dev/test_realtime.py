@@ -105,7 +105,9 @@ try:
     view.clock.auto_pause_for(C.BATTLE)
     assert view.clock.paused and view.clock.pause_reason == C.BATTLE
     view._refresh_time_controls()
-    label = view.turn_lbl.cget("text")
+    # The date line is drawn on the pinned page now, not a Label -- ask the
+    # view what it says rather than asking a widget.
+    label = view._foot_date_text()
     assert "battle" in label.lower(), f"the date line does not say why: {label!r}"
     view.clock.resume()
     assert view.clock.speed == 4.0
@@ -113,7 +115,7 @@ try:
 
     print("\n--- the date line reads like a date ---")
     view._refresh_time_controls()
-    text = view.turn_lbl.cget("text")
+    text = view._foot_date_text()
     assert str(world.season) in text and "Year" in text, text
     print(f"  ok    {text!r}")
 

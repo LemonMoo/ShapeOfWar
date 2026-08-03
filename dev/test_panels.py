@@ -270,20 +270,28 @@ for fn in (_widgets.bar_row, _parchment.Page.bar, _parchment.Page.begin,
         f"panels flash. A drawn page never needs to ask Tk for a size.")
 print("  ok    nothing on the page forces a layout pass to draw itself")
 
-# 2. The selection panel no longer tears a widget tree down at all: it is a
-#    drawn page, cleared by being drawn again (one canvas delete plus one
-#    draw), so there is no half-built intermediate state to paint and no
-#    unmap-and-restore dance left to check. What IS still checked is that the
-#    resource bar -- still a widget tree -- hides itself first.
+# 2. Neither panel tears a widget tree down any more. Both are drawn pages,
+#    cleared by being drawn again -- one canvas delete and one draw, with no
+#    half-built intermediate state for Tk to paint and nothing to hide while
+#    it happens. What is checked instead is that both really do redraw from
+#    scratch rather than appending to what was already there.
 src = inspect.getsource(view._rebuild_selection_panel)
 assert "self._show_" in src, "the selection panel no longer rebuilds anything"
-src = inspect.getsource(view._update_resource_bar)
-assert "hidden" in src, (
-    "the resource bar rebuilds its rows while visible")
-print("  ok    the page redraws in one pass; the resource bar still hides first")
+assert "begin(" in inspect.getsource(view._update_resource_bar), (
+    "the resource bar does not clear its page before redrawing it -- rows "
+    "will pile up on top of each other")
 
-state = view._resource_canvas.itemcget(view._resource_rows_window, "state")
-assert state == "normal", state
+before = len(page_texts(view))
+view._update_resource_bar()
+view._update_resource_bar()
+root.update_idletasks()
+items = view._resource_canvas.find_all()
+view._update_resource_bar()
+root.update_idletasks()
+assert len(view._resource_canvas.find_all()) == len(items), (
+    "redrawing the resource bar grew the canvas -- it is appending, not "
+    "clearing")
+print("  ok    both pages redraw in one pass, and neither accumulates")
 print("  ok    the container comes back even if the rebuild raises")
 
 print("\n--- a commander's march is drawn on the GPU map, not only the canvas ---")

@@ -59,6 +59,8 @@ if target is not None:
     view.selected_settlement = target
     view._show_settlement(target)
 view.view = [0.0, 0.0, world.w, world.h]
+view._resource_groups_open = {"Food"}
+view._update_resource_bar()
 view._apply_panel_layout()
 # On top, or the grab catches whatever window happens to be over it -- which
 # is exactly what happened the first time this ran.
@@ -74,13 +76,11 @@ try:
     # Grab the PANELS, not the window. The map canvas asks for a size of its
     # own, so on a small test window the right-hand panel is placed past the
     # window's own right edge and a whole-window grab simply misses it.
-    panel = view._panel
-    x0 = min(view.alerts_frame.winfo_rootx(), panel.winfo_rootx())
-    y0 = min(view.alerts_frame.winfo_rooty(), panel.winfo_rooty())
-    x1 = max(view.alerts_frame.winfo_rootx() + view.alerts_frame.winfo_width(),
-             panel.winfo_rootx() + panel.winfo_width())
-    y1 = max(view.alerts_frame.winfo_rooty() + view.alerts_frame.winfo_height(),
-             panel.winfo_rooty() + panel.winfo_height())
+    parts = [view._resource_bar, view.alerts_frame, view._panel]
+    x0 = min(w.winfo_rootx() for w in parts)
+    y0 = min(w.winfo_rooty() for w in parts)
+    x1 = max(w.winfo_rootx() + w.winfo_width() for w in parts)
+    y1 = max(w.winfo_rooty() + w.winfo_height() for w in parts)
     grab = ImageGrab.grab((x0, y0, x1, y1))
     grab.save(OUT)
     print(f"wrote {OUT} ({grab.width}x{grab.height}), "
