@@ -409,6 +409,32 @@ else:
         "two turns passed and the open menu said exactly the same thing")
     print(f"  ok    {target.label} shows a countdown that moves with the turn")
 
+print("\n--- ...but the menu is NOT rebuilt under the player every day ---")
+# The real-time bug: _render tore down and rebuilt every widget in the window,
+# and in a running world that happens every day. A menu that reconstructs
+# itself under the pointer cannot be read, never mind clicked.
+rebuilds = []
+real_inner = build_menu.BuildMenuWindow._render_inner
+build_menu.BuildMenuWindow._render_inner = (
+    lambda self: (rebuilds.append(1), real_inner(self))[1])
+try:
+    for _ in range(4):
+        R.advance_turn(w)
+        build_menu.refresh_open(_root)
+        reopened.update_idletasks()
+    quiet = len(rebuilds)
+    # ...and a player action still answers immediately.
+    reopened._set_scope("village" if reopened._scope != "village" else "region")
+    reopened.update_idletasks()
+finally:
+    build_menu.BuildMenuWindow._render_inner = real_inner
+print(f"  {quiet} rebuild(s) over 4 days, {len(rebuilds) - quiet} on a click")
+assert quiet <= 1, (
+    f"{quiet} full rebuilds in four days -- the menu is still being torn "
+    "down under the player")
+assert len(rebuilds) > quiet, "a player action did not rebuild the menu"
+print("  ok    quiet while time passes, immediate when acted on")
+
 print("\n--- refreshing drops windows that have been closed ---")
 ghost = build_menu.open_for(_root, w, settlement, nation)
 ghost.destroy()

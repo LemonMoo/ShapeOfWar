@@ -76,13 +76,19 @@ def _weather_rate(world, pos):
     return severe if event.severity == weather.SEVERE else mild
 
 
-def _cell_cost(world, pos):
+def _cell_cost(world, pos, roads=None):
     """What one cell of this ground costs a wagon, in units of easy-going
     open country. Same table the marching column uses -- a road is a road
-    whoever is on it, and a marsh is a marsh."""
+    whoever is on it, and a marsh is a marsh.
+
+    `roads` is the world's road-cell set, passed in by callers that are about
+    to ask this for a whole route: fetching it per cell was the single
+    biggest cost in the real-time frame loop."""
     x, y = int(pos[0]), int(pos[1])
+    if roads is None:
+        roads = road_cells(world)
     try:
-        if (x, y) in road_cells(world):
+        if (x, y) in roads:
             return ROAD_MOVE_COST
         biome = world.biome_grid[y][x]
     except (IndexError, TypeError):
@@ -111,7 +117,8 @@ def route_pace(world, convoy):
     if not path:
         pace = 1.0
     else:
-        pace = sum(_cell_cost(world, p) for p in path) / len(path)
+        roads = road_cells(world)
+        pace = sum(_cell_cost(world, p, roads) for p in path) / len(path)
     pace = max(0.01, pace)
     convoy._route_pace = pace
     return pace

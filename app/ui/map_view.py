@@ -79,6 +79,10 @@ _FRAME_MS = 33
 # runs slower instead -- and says so (see clock.keeping_up).
 _MAX_BUDGET_MS = 22.0
 
+# ...and the least. A day must always creep forward, or a world whose cost
+# estimate has collapsed could stall entirely.
+_MIN_BUDGET_MS = 1.5
+
 # How often the panels are rebuilt while time runs. A day used to end with a
 # full teardown and rebuild of the realm/resource/trade panels, which at a day
 # every couple of seconds would be a permanent flicker -- so the heavy rebuild
@@ -626,6 +630,11 @@ class MapView(tk.Frame):
         self._last_frame = time.monotonic()
         self._frame_id = None
         self._last_panel_refresh = 0.0
+        # What a day of this world costs, learned rather than assumed -- see
+        # _budget_ms. Seeded at the runner's own slice budget so the very first
+        # day is paced sensibly before anything has been measured.
+        self._day_ms_estimate = 0.0
+        self._day_started = 0.0
         self.selected = None            # selected faction (world view)
         self.zoom_faction = None        # faction we've zoomed into (region view --
                                          # villages become visible/clickable once
@@ -3319,17 +3328,39 @@ class MapView(tk.Frame):
             return
         if not self.runner.busy:
             self._begin_day()
-        if self.runner.step(self._budget_ms()):
+            self._day_started = time.monotonic()
+        if self.runner.step(self._budget_ms(dt)):
+            # Rolling estimate of what a day costs on this world, which is what
+            # paces the slices. Weighted toward the recent past so it follows a
+            # world that is growing rather than averaging over its whole life.
+            cost = (time.monotonic() - self._day_started) * 1000.0
+            self._day_ms_estimate = (self._day_ms_estimate * 0.7 + cost * 0.3
+                                     if self._day_ms_estimate else cost)
             self.clock.day_done()
             self._finish_day()
 
-    def _budget_ms(self):
-        """How much of this frame the world may have. Higher speeds get more,
-        because they are asking for more days per second -- but never the
-        whole frame: the map has to be drawn, and a world that advances in a
-        window nobody can see move is not the point."""
-        return min(_MAX_BUDGET_MS, turn_runner.DEFAULT_BUDGET_MS
-                   * max(1.0, self.clock.speed))
+    def _budget_ms(self, dt):
+        """How much of this frame the world may have.
+
+        PACED to the day's own deadline rather than spent as fast as it will
+        go. Taking a fixed slice every frame until the day is finished and
+        then idling is bursty by construction: at 1x a day is due every 2.4s
+        and costs about 400ms, so the world would work flat out for half a
+        second and then do nothing for two -- and the half second is where
+        every dropped frame lives.
+
+        Instead each frame gets the fraction of the day that this frame is
+        worth. The estimate is a rolling average of what days have actually
+        cost on THIS world, so a small map is cheap and a late-game one is
+        not, without anybody guessing.
+
+        Floored, so a day always creeps forward and cannot stall; capped, so
+        the map is still drawn on a world that cannot keep up (the clock
+        reports that separately -- see clock.keeping_up)."""
+        day_seconds = self.clock.seconds_per_day / max(0.001, self.clock.speed)
+        share = min(1.0, dt / day_seconds) if day_seconds > 0 else 1.0
+        want = self._day_ms_estimate * share
+        return max(_MIN_BUDGET_MS, min(_MAX_BUDGET_MS, want))
 
     def _begin_day(self):
         """Everything that has to be captured BEFORE the day happens."""

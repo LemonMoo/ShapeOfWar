@@ -111,7 +111,7 @@ class BuildMenuWindow(tk.Toplevel):
         self._shell.pack(fill="both", expand=True, padx=1, pady=1)
 
         self._build_chrome()
-        self._render()
+        self._render(force=True)
         self.bind("<Escape>", lambda e: self.destroy())
         # On the Toplevel, NOT bind_all. Every widget inside a window has its
         # toplevel in its own bindtags, so one binding here reaches the whole
@@ -203,7 +203,7 @@ class BuildMenuWindow(tk.Toplevel):
         cols = max(1, min(_CARD_MAX_COLS, event.width // (_CARD_W + 14)))
         if cols != getattr(self, "_cols", None):
             self._cols = cols
-            self._render()
+            self._render(force=True)
 
     def _begin_drag(self, event):
         self._drag_from = (event.x_root - self.winfo_x(),
@@ -242,7 +242,53 @@ class BuildMenuWindow(tk.Toplevel):
             pass   # the whole app is going away
 
     # --- content ---------------------------------------------------------
-    def _render(self):
+    def _content_signature(self):
+        """A cheap description of everything this menu DEPICTS.
+
+        Same idea as MapView._flat_content_signature: rebuild when the answer
+        would differ, and not otherwise. Under the turn-based build a full
+        teardown once per End Turn was fine; in a running world it happens
+        every day, and a menu that reconstructs itself under the pointer
+        cannot be read, let alone used.
+
+        Deliberately excludes the countdown NUMBERS -- those change every
+        single day by definition, and they are updated in place instead (see
+        _refresh_countdowns). What is in here is structure: what exists, what
+        is being built, and what the player can currently afford, which are
+        the things that actually change what the menu looks like."""
+        options = B.build_options(self.world, self.node, self.nation)
+        # What each card LOOKS like, minus the number of days left on it: the
+        # building, what tier it would go to, whether it is startable, whether
+        # it is affordable right now, why it is being recommended, and whether
+        # something is under way on it at all.
+        return tuple((o.building, o.current_tier, o.to_tier, o.priority,
+                      bool(o.affordable), o.blocked,
+                      o.in_progress is not None)
+                     for o in options)
+
+    def _refresh_countdowns(self):
+        """Update just the numbers that tick, without touching the widgets
+        around them. Registered by whatever draws a countdown."""
+        for label, source in list(getattr(self, "_countdowns", ())):
+            try:
+                if not label.winfo_exists():
+                    continue
+                label.config(text=source())
+            except tk.TclError:
+                pass
+
+    def _render(self, force=False):
+        signature = self._content_signature()
+        if not force and signature == getattr(self, "_content_sig", None):
+            # Nothing structural moved: leave the widgets, and the player's
+            # place in them, exactly where they are.
+            self._refresh_countdowns()
+            return
+        self._content_sig = signature
+        self._countdowns = []
+        self._render_inner()
+
+    def _render_inner(self):
         # Where the player was looking, so a turn-end refresh does not throw
         # them back to the top of a menu they were reading. Captured before
         # the teardown because an empty body reports a scrollregion of 0.
@@ -393,7 +439,7 @@ class BuildMenuWindow(tk.Toplevel):
 
     def _set_scope(self, scope):
         self._scope = scope
-        self._render()
+        self._render(force=True)
 
     def _set_labor(self, policy):
         changed = resources.apply_labor_policy(self.world, self.node, policy,
@@ -406,7 +452,7 @@ class BuildMenuWindow(tk.Toplevel):
                          f"{'s' if changed != 1 else ''} in {where} reassigned.")
         else:
             self._notice(f"Every village in {where} was already set to {policy}.")
-        self._render()
+        self._render(force=True)
         if self.on_change:
             self.on_change()
 
@@ -485,18 +531,39 @@ class BuildMenuWindow(tk.Toplevel):
         return ("●" * option.current_tier
                 + "○" * max(0, option.max_tier - option.current_tier))
 
+    @staticmethod
+    def _countdown_text(option):
+        """Counting DOWN, not up. "3 of 8 days" makes you do the subtraction
+        yourself; what you want to know is how much longer you are waiting."""
+        if not option.in_progress:
+            return ""
+        elapsed, total = option.in_progress
+        left = max(0, total - elapsed)
+        when = ("finishes this turn" if left <= 0
+                else "1 turn left" if left == 1 else f"{left} turns left")
+        return f"Under construction — {when}"
+
+    def _countdown_for(self, building):
+        """Today's countdown for one building, re-read from the world."""
+        for option in B.build_options(self.world, self.node, self.nation):
+            if option.building == building:
+                return self._countdown_text(option)
+        return ""
+
     def _card_footer(self, frame, option):
         if option.in_progress:
             # Counting DOWN, not up. "3 of 8 turns" makes you do the
             # subtraction yourself every turn; what you actually want to know
             # is how much longer you are waiting.
-            elapsed, total = option.in_progress
-            left = max(0, total - elapsed)
-            when = "finishes this turn" if left <= 0 else (
-                "1 turn left" if left == 1 else f"{left} turns left")
-            tk.Label(frame, text=f"Under construction — {when}",
-                     bg=theme.PANEL, fg=theme.WARN, font=theme.FONT_SMALL_BOLD,
-                     anchor="w").pack(fill="x", padx=8, pady=(0, 8))
+            label = tk.Label(frame, text=self._countdown_text(option),
+                             bg=theme.PANEL, fg=theme.WARN,
+                             font=theme.FONT_SMALL_BOLD, anchor="w")
+            label.pack(fill="x", padx=8, pady=(0, 8))
+            # Registered so the number can be re-read WITHOUT rebuilding the
+            # card around it. This is the half of the signature that ticks --
+            # see _content_signature for why it is deliberately not in there.
+            building = option.building
+            self._countdowns.append((label, lambda b=building: self._countdown_for(b)))
             return
         if option.blocked:
             tk.Label(frame, text=option.blocked, bg=theme.PANEL, fg=theme.MUTED,
@@ -540,7 +607,7 @@ class BuildMenuWindow(tk.Toplevel):
                    {o.building for o in B.build_options(self.world, self.node,
                                                         self.nation)
                     if o.in_progress} else "denied")
-        self._render()
+        self._render(force=True)
         self._notice(message)
         if self.on_change:
             self.on_change()
@@ -566,6 +633,10 @@ def refresh_open(master):
         if window is None or not window.winfo_exists():
             menus.pop(key, None)
             continue
+        # NOT forced: this is the periodic call, and the whole point is that
+        # it does nothing when nothing it depicts has changed. Every call that
+        # follows a player ACTION forces, because an action is exactly the
+        # case where the menu must answer immediately.
         window._render()
 
 
