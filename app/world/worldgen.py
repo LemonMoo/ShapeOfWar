@@ -2368,8 +2368,8 @@ def _cull_small_islands(world_height, land, sea_level, w, h,
 
 def generate_world(width=1100, height=660, seed=None, n_factions=14,
                     player_species=None, player_name=None, player_color=None,
-                    player_ruler=None, _attempt=0, _target_n=None,
-                    _n_plates=None):
+                    player_ruler=None, player_start=None, _attempt=0,
+                    _target_n=None, _n_plates=None):
     """Generate a world. If `player_species`/`player_name` are given, faction
     0 is forced to that species and given that exact name (instead of a
     random roll) and `world.player_faction_idx` is set to 0, so a "New Game"
@@ -2462,7 +2462,7 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     if not land_cells and _attempt < 6:      # extremely unlucky seed; retry
         return generate_world(width, height, rng.random(), n_factions,
                               player_species, player_name, player_color,
-                              player_ruler, _attempt=_attempt + 1,
+                              player_ruler, player_start, _attempt=_attempt + 1,
                               _target_n=_target_n, _n_plates=_n_plates)
     # Tolerate one incidental merge (_target_n - 1) rather than demanding
     # the full requested count survive noise-bridging every single time --
@@ -2484,7 +2484,7 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
         # than accepting a badly-collapsed one.
         return generate_world(width, height, rng.random(), n_factions,
                               player_species, player_name, player_color,
-                              player_ruler, _attempt=_attempt + 1,
+                              player_ruler, player_start, _attempt=_attempt + 1,
                               _target_n=_target_n, _n_plates=_n_plates)
 
     # 1b. ocean currents, and the coastline they carve. Run only once the
@@ -2551,7 +2551,17 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
                   if not land[y][x]]
     coast_d = _bfs_distance(world, ocean_cells)
     mseed = _moisture_seed(nseed)
+    # A player-chosen start is pinned first, so rivals space away from it and
+    # it survives the affinity ordering below. It is NOT farmland-gated: free
+    # placement onto poor ground is allowed on purpose (the New Game screen
+    # warns rather than forbids). Clamped to a real land cell so a click just
+    # off the coast still founds a realm on the nearest ground.
     capitals = []
+    if player_start is not None:
+        px, py = player_start
+        if not (0 <= px < width and 0 <= py < height and land[py][px]):
+            px, py = min(land_cells, key=lambda c: (c[0] - px) ** 2 + (c[1] - py) ** 2)
+        capitals.append((px, py))
     tries = 0
     while len(capitals) < n_factions and tries < 6000:
         tries += 1
@@ -2594,7 +2604,14 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     roster = [player_species if (player_species is not None and i == 0)
               else rng.choice(species_names)
               for i in range(len(capitals))]
-    capitals = _order_capitals_by_affinity(world, capitals, roster)
+    if player_start is not None and len(capitals) > 1:
+        # The player's cell stays slot 0; only the rivals are matched to
+        # homelands among themselves. Without this the ordering could hand the
+        # player's chosen ground to a rival and move the player elsewhere.
+        capitals = [capitals[0]] + _order_capitals_by_affinity(
+            world, capitals[1:], roster[1:])
+    else:
+        capitals = _order_capitals_by_affinity(world, capitals, roster)
 
     # 6. bisect the *entire* landmass into regions — the fixed unit of
     #    territory, decoupled from ownership (see UNCLAIMED-land progressive
