@@ -884,10 +884,9 @@ class MapView(tk.Frame):
         self._exit_ui()
         self._hide_prosperity_bar()
         self._hide_storage_bar()
-        self.info.config(fg=theme.MUTED, text="Click a faction to inspect it.")
-        for frame in (self.rel_frame, self.actions):
-            for w in frame.winfo_children():
-                w.destroy()
+        self._page_begin(None)
+        self._panel_text("Click a faction to inspect it.", fg=theme.MUTED)
+        self._page_end()
         self._resource_deltas = {}
         self._year_start_snapshot = self._current_resource_snapshot()
         self._year_start_population = self._current_population_total()
@@ -2089,10 +2088,7 @@ class MapView(tk.Frame):
                                  on_toggle=self._refresh_treasury)
 
         def line(parent, text, fg=None, bold=False):
-            tk.Label(parent, text=text, bg=theme.PANEL, fg=fg or theme.INK,
-                     font=theme.FONT_BOLD if bold else theme.FONT_SMALL,
-                     justify="left", anchor="w", wraplength=_TREASURY_W - 26
-                     ).pack(anchor="w", padx=12)
+            self._panel_text(text, fg=fg or theme.INK)
 
         total = resources.faction_gold(wd, fac_idx)
         transit = resources.gold_in_transit(wd, fac_idx)
@@ -2184,11 +2180,16 @@ class MapView(tk.Frame):
         collapse.pack(side="right")
         collapse.bind("<Button-1>", lambda e: self._toggle_right_panel())
 
-        # Everything between the title and the pinned bottom controls scrolls.
+        # Everything between the title and the pinned bottom controls scrolls,
+        # and it is a DRAWN PAGE rather than a widget tree (app/ui/parchment.py).
+        # The page borrows this canvas instead of owning one, which is what
+        # gives it scrolling for free: there is no inner Frame any more, and so
+        # nothing opaque sitting on top of the parchment.
+        #
         # The old panel packed straight into the frame, so on an information-
         # dense selection (a village with storage, a herd and seven buildable
         # things) the Build buttons fell off the bottom of the window with no
-        # way to reach them at all.
+        # way to reach them at all. That is still what the scrolling is for.
         body = tk.Frame(p, bg=theme.PANEL)
         body.pack(fill="both", expand=True, pady=(6, 0))
         pcanvas = tk.Canvas(body, bg=theme.PANEL, highlightthickness=0)
@@ -2197,69 +2198,11 @@ class MapView(tk.Frame):
         pbar.pack(side="right", fill="y")
         pcanvas.configure(yscrollcommand=pbar.set)
         self._panel_canvas = pcanvas
-        inner = tk.Frame(pcanvas, bg=theme.PANEL)
-        pwin = pcanvas.create_window((0, 0), window=inner, anchor="nw")
-        inner.bind("<Configure>",
-                   lambda e: pcanvas.configure(scrollregion=pcanvas.bbox("all")))
-        pcanvas.bind("<Configure>", lambda e: pcanvas.itemconfig(pwin, width=e.width))
+        self._page = parchment.Page(None, _RIGHT_PANEL_W - 20, seed=2,
+                                    canvas=pcanvas)
         pcanvas.bind("<Enter>", lambda e: pcanvas.bind_all(
             "<MouseWheel>", lambda ev: pcanvas.yview_scroll(int(-ev.delta / 120), "units")))
         pcanvas.bind("<Leave>", lambda e: pcanvas.unbind_all("<MouseWheel>"))
-        self._panel_body = inner
-        p = inner   # everything below builds into the scrolling body
-
-        self.info = tk.Label(p, text="Click a faction to inspect it.",
-                             bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                             justify="left", wraplength=_RIGHT_PANEL_W - 40, anchor="w")
-        self.info.pack(anchor="w", padx=14)
-
-        # Prosperity meter — a settlement/village-only bar (see
-        # _show_prosperity_bar/_hide_prosperity_bar), left unpacked here so
-        # it's hidden by default for every other panel type.
-        self.prosperity_frame = tk.Frame(p, bg=theme.PANEL)
-        tk.Label(self.prosperity_frame, text="Prosperity", bg=theme.PANEL,
-                 fg=theme.MUTED, font=theme.FONT_SMALL_BOLD).pack(anchor="w")
-        self._prosperity_canvas = tk.Canvas(self.prosperity_frame, height=14,
-                                            bg=theme.PANEL, highlightthickness=0)
-        self._prosperity_canvas.pack(fill="x", pady=(2, 2))
-        # Redraw on resize instead of forcing a layout pass at draw time.
-        self._prosperity_value = 0.0
-        self._prosperity_canvas.bind(
-            "<Configure>",
-            lambda e: self._draw_prosperity_bar(self._prosperity_value))
-        self._prosperity_pct_lbl = tk.Label(self.prosperity_frame, text="",
-                                            bg=theme.PANEL, fg=theme.MUTED,
-                                            font=theme.FONT_SMALL)
-        self._prosperity_pct_lbl.pack(anchor="w")
-
-        # Storage meter — a settlement/village-only bar (see
-        # _show_storage_bar/_hide_storage_bar), same shape as the
-        # prosperity meter above; unlike prosperity this can exceed its
-        # own scale (overflowing storage), so its fill/color logic is its
-        # own, not shared with _draw_prosperity_bar.
-        self.storage_frame = tk.Frame(p, bg=theme.PANEL)
-        tk.Label(self.storage_frame, text="Storage", bg=theme.PANEL,
-                 fg=theme.MUTED, font=theme.FONT_SMALL_BOLD).pack(anchor="w")
-        self._storage_canvas = tk.Canvas(self.storage_frame, height=14,
-                                         bg=theme.PANEL, highlightthickness=0)
-        self._storage_canvas.pack(fill="x", pady=(2, 2))
-        self._storage_values = (0, 0)
-        self._storage_canvas.bind(
-            "<Configure>",
-            lambda e: self._draw_storage_bar(*self._storage_values))
-        self._storage_pct_lbl = tk.Label(self.storage_frame, text="",
-                                         bg=theme.PANEL, fg=theme.MUTED,
-                                         font=theme.FONT_SMALL)
-        self._storage_pct_lbl.pack(anchor="w")
-
-        self.rel_header = tk.Label(p, text="RELATIONSHIPS", bg=theme.PANEL,
-                                   fg=theme.MUTED, font=("Segoe UI", 8, "bold"))
-        self.rel_header.pack(anchor="w", padx=14, pady=(16, 4))
-        self.rel_frame = tk.Frame(p, bg=theme.PANEL)
-        self.rel_frame.pack(fill="x", padx=14)
-
-        self.actions = tk.Frame(p, bg=theme.PANEL)
-        self.actions.pack(fill="x", padx=14, pady=16)
 
         # --- pinned controls: these live on the OUTER panel, below the
         # scrolling body, so End Turn and the view toggle are always on
@@ -3704,32 +3647,21 @@ class MapView(tk.Frame):
         # else moves into the SUMMARY card below so this doesn't read as one
         # long paragraph of stats.
         crown = ruler_label(nation)
-        self.info.config(
-            fg=theme.INK,
-            text=f"{nation.name}\n"
-                 + (f"{crown}\n" if crown else "")
-                 + f"{nation.meta['species']} — {nation.meta['trait']}")
+        self._page_begin(nation.name, crown or None)
+        self._panel_text(f"{nation.meta['species']} — {nation.meta['trait']}",
+                         fg=theme.MUTED)
+        self._panel_gap(4)
 
-        self.rel_header.config(text="RELATIONSHIPS")
-        for w in self.rel_frame.winfo_children():
-            w.destroy()
         rels = [r for r in self.world.world_map.relationships_of(nation.id)
                 if self._is_known(r["other"])]
-        if not rels:
-            tk.Label(self.rel_frame, text="Isolated — no bordering factions.",
-                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT).pack(anchor="w")
-        for rel in rels:
-            row = tk.Frame(self.rel_frame, bg=theme.PANEL)
-            row.pack(fill="x", pady=1)
-            tk.Label(row, text=rel["other"].name, bg=theme.PANEL, fg=theme.INK,
-                     font=theme.FONT).pack(side="left")
-            tag = rel["stance"] + (f" ({rel['tension']})" if rel["tension"] else "")
-            tk.Label(row, text=tag, bg=theme.PANEL,
-                     fg=theme.STANCE_COLOR.get(rel["stance"], theme.MUTED),
-                     font=theme.FONT).pack(side="right")
-
-        for w in self.actions.winfo_children():
-            w.destroy()
+        if self._card("Relationships", key="rels") is not None:
+            if not rels:
+                self._panel_text("Isolated — no bordering factions.",
+                                 fg=theme.MUTED)
+            for rel in rels:
+                tag = rel["stance"] + (f" ({rel['tension']})" if rel["tension"] else "")
+                self._kv(None, rel["other"].name, tag,
+                         fg=theme.STANCE_COLOR.get(rel["stance"], theme.MUTED))
 
         body = self._card("SUMMARY")
         if body is not None:
@@ -3748,83 +3680,64 @@ class MapView(tk.Frame):
             fac_idx = self.world.factions.index(nation)
             waiting = commander.commander_respawn_turns(self.world, fac_idx)
             if waiting:
-                tk.Label(self.actions, text="No commander — a successor takes "
+                self._panel_text("No commander — a successor takes "
                          f"the field in {waiting} turn{'s' if waiting != 1 else ''}. "
-                         "Your realm cannot attack or claim until then.",
-                         bg=theme.PANEL, fg=theme.WARN, font=theme.FONT,
-                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 8))
+                         "Your realm cannot attack or claim until then.", fg=theme.WARN)
             elif not commander.faction_commanders(self.world, fac_idx):
-                tk.Label(self.actions, text="No commander. Your realm cannot "
-                         "attack or claim.",
-                         bg=theme.PANEL, fg=theme.WARN, font=theme.FONT,
-                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 8))
+                self._panel_text("No commander. Your realm cannot "
+                         "attack or claim.", fg=theme.WARN)
 
-        tk.Label(self.actions, text=zoom_hint, bg=theme.PANEL, fg=theme.MUTED,
-                 font=theme.FONT_SMALL).pack(anchor="w", pady=(0, 10))
+        self._panel_text(zoom_hint, fg=theme.MUTED, font=theme.FONT_SMALL)
 
         if player is None:
             # No player nation on this world (sandbox/legacy save) — keep the
             # old behavior of managing any faction directly.
             enemies = [r for r in rels if r["stance"] == Stance.ENEMY]
             if not enemies:
-                tk.Label(self.actions, text="No enemies to fight.", bg=theme.PANEL,
-                         fg=theme.MUTED, font=theme.FONT).pack(anchor="w")
+                self._panel_text("No enemies to fight.", fg=theme.MUTED)
             for r in enemies:
                 other = r["other"]
-                widgets.button(self.actions, f"Attack {other.name}",
-                                lambda o=other, n=nation: self.on_attack(n, o)
-                                ).pack(fill="x", pady=2)
+                self._panel_button(f"Attack {other.name}",
+                                lambda o=other, n=nation: self.on_attack(n, o))
         elif own:
-            tk.Label(self.actions, text="This is your realm. Select a rival "
-                     "nation on the map to consider attacking it.",
-                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w")
+            self._panel_text("This is your realm. Select a rival "
+                     "nation on the map to consider attacking it.", fg=theme.MUTED)
         else:
             rel = self.world.world_map.get_relationship(player.id, nation.id)
             if rel["stance"] == Stance.ENEMY:
                 player_idx = self.world.factions.index(player)
                 target_idx = self.world.factions.index(nation)
                 if bordering_regions(self.world, player_idx, target_idx):
-                    widgets.button(self.actions, f"Attack {nation.name}",
-                                    lambda n=nation: self._begin_attack_setup(n)
-                                    ).pack(fill="x", pady=2)
+                    self._panel_button(f"Attack {nation.name}",
+                                    lambda n=nation: self._begin_attack_setup(n))
                 elif naval_reachable_regions(self.world, player_idx, target_idx):
-                    widgets.button(self.actions, f"Naval Attack on {nation.name}",
-                                    lambda n=nation: self._begin_attack_setup(n, naval=True)
-                                    ).pack(fill="x", pady=2)
+                    self._panel_button(f"Naval Attack on {nation.name}",
+                                    lambda n=nation: self._begin_attack_setup(n, naval=True))
                 else:
-                    tk.Label(self.actions, text=f"No route to {nation.name} — you'd "
-                             "need a shared border or a coastal port.",
-                             bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                             justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w")
+                    self._panel_text(f"No route to {nation.name} — you'd "
+                             "need a shared border or a coastal port.", fg=theme.MUTED)
             else:
                 standing = rel.get("standing", 0)
-                tk.Label(self.actions, text=f"You are {rel['stance']} with "
-                         f"{nation.name}. Standing: {standing}",
-                         bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
+                self._panel_text(f"You are {rel['stance']} with "
+                         f"{nation.name}. Standing: {standing}", fg=theme.MUTED)
 
                 can_act = diplomacy.can_act_this_turn(self.world, player, nation)
-                widgets.button(self.actions, "Improve Relations",
+                self._panel_button("Improve Relations",
                                 lambda n=nation: self._do_diplomacy(
-                                    diplomacy.improve_relations, n),
-                                state="normal" if can_act else "disabled"
-                                ).pack(fill="x", pady=2)
+                                    diplomacy.improve_relations, n))
                 if not can_act:
-                    tk.Label(self.actions, text="Already acted with them this turn.",
-                             bg=theme.PANEL, fg=theme.MUTED,
-                             font=theme.FONT_SMALL).pack(anchor="w")
+                    self._panel_text("Already acted with them this turn.", fg=theme.MUTED, font=theme.FONT_SMALL)
 
                 if standing <= diplomacy.WAR_THRESHOLD:
-                    widgets.button(self.actions, f"Declare War on {nation.name}",
+                    self._panel_button(f"Declare War on {nation.name}",
                                     lambda n=nation: self._do_diplomacy(
                                         diplomacy.declare_war, n),
-                                    kind="danger").pack(fill="x", pady=(8, 2))
+                                    kind="danger")
                 if standing >= diplomacy.ALLY_THRESHOLD and rel["stance"] != Stance.ALLY:
-                    widgets.button(self.actions, f"Form Alliance with {nation.name}",
+                    self._panel_button(f"Form Alliance with {nation.name}",
                                     lambda n=nation: self._do_diplomacy(
                                         diplomacy.form_alliance, n),
-                                    kind="success").pack(fill="x", pady=(8, 2))
+                                    kind="success")
 
                 self._show_trade_route_status(player, nation)
 
@@ -3842,18 +3755,14 @@ class MapView(tk.Frame):
         key = frozenset((player_idx, target_idx))
 
         if key in wd.trade_routes_by_pair:
-            tk.Label(self.actions, text="Trade route established.",
-                     bg=theme.PANEL, fg=theme.GOOD, font=theme.FONT,
-                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 2))
+            self._panel_text("Trade route established.", fg=theme.GOOD)
             return
 
         project = next((p for p in wd.trade_route_projects
                         if frozenset((p.a_idx, p.b_idx)) == key), None)
         if project is not None:
-            tk.Label(self.actions, text=f"Trade route under construction: "
-                     f"{project.built_cells}/{project.total_cells} cells",
-                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 2))
+            self._panel_text(f"Trade route under construction: "
+                     f"{project.built_cells}/{project.total_cells} cells", fg=theme.MUTED)
             return
 
         pending = next((p for p in getattr(wd, "incoming_trade_proposals", [])
@@ -3863,33 +3772,26 @@ class MapView(tk.Frame):
             return
 
         if not trade.eligible_to_trade(wd, player_idx, target_idx):
-            tk.Label(self.actions, text=f"Standing needs to reach "
+            self._panel_text(f"Standing needs to reach "
                      f"{diplomacy.TRADE_STANDING_THRESHOLD} before you can "
-                     "propose a trade route.",
-                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 2))
+                     "propose a trade route.", fg=theme.MUTED)
             return
 
         decline_until = getattr(wd, "trade_route_decline_until", {}).get(key, -1)
         if wd.turn < decline_until:
-            tk.Label(self.actions, text=f"{nation.name} recently declined a trade "
-                     "proposal — try again later.",
-                     bg=theme.PANEL, fg=theme.BAD, font=theme.FONT,
-                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 2))
+            self._panel_text(f"{nation.name} recently declined a trade "
+                     "proposal — try again later.", fg=theme.BAD)
             return
 
         if not trade.route_path_possible(wd, player_idx, target_idx):
-            tk.Label(self.actions, text=f"No land or sea connection exists "
-                     f"to {nation.name}'s capital — a route isn't possible.",
-                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 2))
+            self._panel_text(f"No land or sea connection exists "
+                     f"to {nation.name}'s capital — a route isn't possible.", fg=theme.MUTED)
             return
 
         self._show_trade_complementarity(player_idx, target_idx, nation)
 
-        widgets.button(self.actions, f"Propose Trade Route with {nation.name}",
-                        lambda: self._do_propose_trade_route(player_idx, target_idx)
-                        ).pack(fill="x", pady=(8, 2))
+        self._panel_button(f"Propose Trade Route with {nation.name}",
+                        lambda: self._do_propose_trade_route(player_idx, target_idx))
 
     def _show_trade_complementarity(self, viewer_idx, other_idx, nation):
         """What `nation` brings to the table that the player doesn't already
@@ -3904,23 +3806,17 @@ class MapView(tk.Frame):
         if summary["access"]:
             lines.append("Could produce: " + ", ".join(summary["access"]))
         text = "\n".join(lines) if lines else "Nothing you don't already have access to."
-        tk.Label(self.actions, text=text, bg=theme.PANEL, fg=theme.MUTED,
-                 font=theme.FONT_SMALL, justify="left",
-                 wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(4, 2))
+        self._panel_text(text, fg=theme.MUTED, font=theme.FONT_SMALL)
 
     def _show_incoming_trade_proposal(self, player_idx, target_idx, nation):
-        tk.Label(self.actions, text=f"{nation.name} proposes a trade route with you.",
-                 bg=theme.PANEL, fg=theme.INK, font=theme.FONT,
-                 justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 2))
+        self._panel_text(f"{nation.name} proposes a trade route with you.", fg=theme.INK)
         self._show_trade_complementarity(player_idx, target_idx, nation)
-        row = tk.Frame(self.actions, bg=theme.PANEL)
-        row.pack(fill="x", pady=(2, 2))
-        widgets.button(row, "Accept", lambda: self._do_respond_trade_proposal(
-                           target_idx, player_idx, accept=True), kind="success"
-                       ).pack(side="left", fill="x", expand=True, padx=(0, 3))
-        widgets.button(row, "Decline", lambda: self._do_respond_trade_proposal(
-                           target_idx, player_idx, accept=False), kind="danger"
-                       ).pack(side="left", fill="x", expand=True, padx=(3, 0))
+        self._panel_button("Accept", lambda: self._do_respond_trade_proposal(
+                               target_idx, player_idx, accept=True),
+                           kind="success")
+        self._panel_button("Decline", lambda: self._do_respond_trade_proposal(
+                               target_idx, player_idx, accept=False),
+                           kind="danger")
 
     def _do_respond_trade_proposal(self, from_idx, player_idx, accept):
         if accept:
@@ -3989,13 +3885,11 @@ class MapView(tk.Frame):
         # mechanical biome is still spelled out in the SUMMARY card below, so
         # nothing is hidden behind the flavour.
         flavour = region.flavour_name
-        self.info.config(fg=theme.INK,
-                          text=f"{region.name}\nRegion of {country.name}"
+        self._page_begin(None)
+        self._panel_text(f"{region.name}\nRegion of {country.name}"
                                + (f"\n{flavour}" if flavour else "")
-                               + ("\nForeign territory" if is_foreign else ""))
+                               + ("\nForeign territory" if is_foreign else ""), fg=theme.INK)
 
-        for w in self.actions.winfo_children():
-            w.destroy()
 
         body = self._card("SUMMARY")
         if body is not None:
@@ -4012,32 +3906,24 @@ class MapView(tk.Frame):
                 for st in sts:
                     self._kv(body, st.name, st.kind.capitalize())
             else:
-                tk.Label(body, text="No settlements.", bg=theme.PANEL,
-                         fg=theme.MUTED, font=theme.FONT_SMALL).pack(anchor="w")
+                self._panel_text("No settlements.", fg=theme.MUTED)
 
         if is_foreign:
-            tk.Label(self.actions, text="Foreign territory — consider hostile "
-                     "action below.", bg=theme.PANEL, fg=theme.MUTED,
-                     font=theme.FONT_SMALL, justify="left",
-                     wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 10))
+            self._panel_text("Foreign territory — consider hostile "
+                     "action below.", fg=theme.MUTED, font=theme.FONT_SMALL)
         else:
-            tk.Label(self.actions, text=f"{n_villages} villages — click again "
-                     "to zoom in.", bg=theme.PANEL, fg=theme.MUTED,
-                     font=theme.FONT_SMALL).pack(anchor="w", pady=(0, 10))
+            self._panel_text(f"{n_villages} villages — click again "
+                     "to zoom in.", fg=theme.MUTED, font=theme.FONT_SMALL)
 
         if is_foreign:
             player = self._player_faction()
             can_act = diplomacy.can_act_this_turn(self.world, player, country)
             for label, fn in (("Fabricate Claim on Region", diplomacy.fabricate_claim),
                               ("Terrorize Locals", diplomacy.terrorize_locals)):
-                widgets.button(self.actions, label,
-                                lambda f=fn: self._do_diplomacy(f, country, region),
-                                state="normal" if can_act else "disabled"
-                                ).pack(fill="x", pady=2)
+                self._panel_button(label,
+                                lambda f=fn: self._do_diplomacy(f, country, region))
             if not can_act:
-                tk.Label(self.actions, text="Already acted against them this turn.",
-                         bg=theme.PANEL, fg=theme.MUTED,
-                         font=theme.FONT_SMALL).pack(anchor="w")
+                self._panel_text("Already acted against them this turn.", fg=theme.MUTED, font=theme.FONT_SMALL)
         elif self._player_faction() is not None:
             # Claiming wildland only ever hands out villages (and, still
             # area-scaled, a Castle) now — a City or Town has to be built
@@ -4048,10 +3934,8 @@ class MapView(tk.Frame):
             for project in projects_here:
                 note = " (half speed — road not yet finished)" if project.half_speed else ""
                 elapsed = project.total_turns - project.turns_left
-                tk.Label(self.actions, text=f"{project.kind.capitalize()} under "
-                         f"construction: {elapsed}/{project.total_turns} turns{note}",
-                         bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
+                self._panel_text(f"{project.kind.capitalize()} under "
+                         f"construction: {elapsed}/{project.total_turns} turns{note}", fg=theme.MUTED)
             building_kinds = {p.kind for p in projects_here}
             for kind in ("city", "town", "castle"):
                 if kind in building_kinds:
@@ -4059,14 +3943,10 @@ class MapView(tk.Frame):
                 cost = construction.SETTLEMENT_BUILD_COST[kind]
                 turns = construction.SETTLEMENT_BUILD_TURNS[kind]
                 afford = construction.can_afford(player, cost, self.world)
-                tk.Label(self.actions,
-                         text=f"{kind.capitalize()} — Cost: {_format_resources(cost)}\n"
-                              f"Build time: {turns} turns",
-                         bg=theme.PANEL, fg=theme.INK if afford else theme.BAD, font=theme.FONT,
-                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(4, 2))
-                widgets.button(self.actions, f"Build {kind.capitalize()}...",
-                                lambda r=region, k=kind: self._begin_settlement_placement(r, k)
-                                ).pack(fill="x", pady=(0, 8))
+                self._panel_text(f"{kind.capitalize()} — Cost: {_format_resources(cost)}\n"
+                              f"Build time: {turns} turns", fg=theme.INK)
+                self._panel_button(f"Build {kind.capitalize()}...",
+                                lambda r=region, k=kind: self._begin_settlement_placement(r, k))
 
     def _show_wildland_region(self, region):
         """UNCLAIMED land: wildland garrison strength, claim cost/time/odds,
@@ -4094,40 +3974,31 @@ class MapView(tk.Frame):
             if sea_only:
                 lines.append("Across open water — no land border. An amphibious "
                              "claim is far costlier and better defended.")
-        self.info.config(fg=theme.INK, text="\n".join(lines))
+        self._page_begin(None)
+        self._panel_text("\n".join(lines), fg=theme.INK)
 
-        for w in self.actions.winfo_children():
-            w.destroy()
         if player is None:
             return
         faction_idx = wd.factions.index(player)
         if region not in expansion.claimable_frontier(wd, faction_idx):
-            tk.Label(self.actions, text="Not adjacent to your territory yet.",
-                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w")
+            self._panel_text("Not adjacent to your territory yet.", fg=theme.MUTED)
             return
         if wd.turn < region.claim_cooldown_until_turn:
-            tk.Label(self.actions, text="The locals are still wary after "
-                     "repelling your last attempt — try again later.",
-                     bg=theme.PANEL, fg=theme.BAD, font=theme.FONT,
-                     justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w")
+            self._panel_text("The locals are still wary after "
+                     "repelling your last attempt — try again later.", fg=theme.BAD)
             return
         project = next((p for p in wd.claim_projects if p.region_id == region.id), None)
         if project is not None:
             if project.complete:
-                tk.Label(self.actions, text="The expansion crew has arrived "
-                         "— fight the wildland garrison to claim this land.",
-                         bg=theme.PANEL, fg=theme.INK, font=theme.FONT,
-                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
-                widgets.button(self.actions, "Fight for the Territory",
+                self._panel_text("The expansion crew has arrived "
+                         "— fight the wildland garrison to claim this land.", fg=theme.INK)
+                self._panel_button("Fight for the Territory",
                                 lambda p=project: self._do_wildland_battle(p),
-                                kind="danger").pack(fill="x", pady=2)
+                                kind="danger")
             else:
                 elapsed = project.total_turns - project.turns_left
-                tk.Label(self.actions, text=f"Expansion under way: "
-                         f"{elapsed}/{project.total_turns} turns",
-                         bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                         justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
+                self._panel_text(f"Expansion under way: "
+                         f"{elapsed}/{project.total_turns} turns", fg=theme.MUTED)
             return
         # A claim is colonisation: settlers and the food to see them through
         # (see expansion.claim_cost). Both figures are shown against what the
@@ -4137,21 +4008,13 @@ class MapView(tk.Frame):
         have_settlers = expansion.faction_available_settlers(self.world, faction_idx)
         have_food = expansion._faction_food_stock(self.world, faction_idx)
         blocked = expansion.can_afford_claim(self.world, faction_idx, region, sea_only)
-        tk.Label(self.actions,
-                 text=f"Settlers: {settlers:,} (you can spare {have_settlers:,})\n"
+        self._panel_text(f"Settlers: {settlers:,} (you can spare {have_settlers:,})\n"
                       f"Provisions: {provisions:,} food (you hold {have_food:,})\n"
-                      f"Journey: {expansion.claim_turns(region)} turns",
-                 bg=theme.PANEL, fg=theme.INK if not blocked else theme.BAD,
-                 font=theme.FONT, justify="left",
-                 wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
+                      f"Journey: {expansion.claim_turns(region)} turns", fg=theme.INK)
         # Settlers are working-age people, and population is the workforce
         # (Phase 14) -- saying so stops this reading as a free number.
-        tk.Label(self.actions,
-                 text="Settlers are drawn from your nearest places and come "
-                      "off their workforce.",
-                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_SMALL,
-                 justify="left",
-                 wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
+        self._panel_text("Settlers are drawn from your nearest places and come "
+                      "off their workforce.", fg=theme.MUTED, font=theme.FONT_SMALL)
         # Winning pays real coin -- show that up front, or the cost reads as
         # pure expenditure and nobody expands early.
         spoils = expansion.claim_spoils(self.world, region)
@@ -4160,13 +4023,9 @@ class MapView(tk.Frame):
             line = f"Spoils if won: {spoils.get('Gold', 0):,} Gold"
             if goods:
                 line += f" + {goods:,} units of stores"
-            tk.Label(self.actions, text=line, bg=theme.PANEL, fg=theme.GOOD,
-                     font=theme.FONT, justify="left",
-                     wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 6))
-        widgets.button(self.actions, "Claim Territory",
-                        lambda cnty=region: self._do_claim(cnty),
-                        state="disabled" if blocked else "normal"
-                        ).pack(fill="x", pady=2)
+            self._panel_text(line, fg=theme.GOOD)
+        self._panel_button("Claim Territory",
+                        lambda cnty=region: self._do_claim(cnty))
 
     def _do_claim(self, region):
         player = self._player_faction()
@@ -4187,99 +4046,67 @@ class MapView(tk.Frame):
             self.on_wildland_claim(project)
 
     def _hide_prosperity_bar(self):
-        self.prosperity_frame.pack_forget()
+        """A no-op on a drawn page.
+
+        The meters used to be two permanently-built Canvases packed and
+        unpacked as the selection changed, which is why hiding one was a
+        method at all. A page has no such state: a meter exists on it because
+        this selection drew one. Kept as a name so the five _show_* methods
+        still read the way they did.
+        """
 
     def _show_prosperity_bar(self, value):
-        """Pack the meter in right under `info` (before rel_header, so it
-        lands there regardless of pack/forget history) and draw its current
-        fill — see resources._update_prosperity for how `value` (0..100)
-        actually moves over time."""
-        self.prosperity_frame.pack(anchor="w", padx=14, pady=(8, 0), fill="x",
-                                   before=self.rel_header)
-        self._draw_prosperity_bar(value)
-
-    def _draw_prosperity_bar(self, value):
-        # No update_idletasks() here. This canvas is built once in
-        # _build_panel and lives for the session, so after its first layout
-        # winfo_width() is already right -- forcing a geometry pass and a
-        # repaint mid-rebuild just painted a half-built panel, every turn.
-        # The <Configure> binding below covers a real resize.
-        c = self._prosperity_canvas
-        self._prosperity_value = value
-        w = c.winfo_width()
-        if w <= 1:
-            w = 270   # not yet laid out on the very first draw
-        h = 14
-        frac = max(0.0, min(1.0, value / 100.0))
-        if frac < 0.34:
-            color = theme.BAD
-        elif frac < 0.67:
-            color = theme.WARN
-        else:
-            color = theme.GOOD
-        c.delete("all")
-        c.create_rectangle(0, 0, w, h, fill=theme.METER_TRACK, outline="")
-        if frac > 0:
-            c.create_rectangle(0, 0, w * frac, h, fill=color, outline="")
-        self._prosperity_pct_lbl.config(text=f"{value:.0f} / 100")
+        """The prosperity meter, drawn where the caller is (see
+        resources._update_prosperity for how `value` moves over time)."""
+        self._page.bar("Prosperity", round(value), 100)
 
     def _hide_storage_bar(self):
-        self.storage_frame.pack_forget()
+        """See _hide_prosperity_bar."""
 
     def _show_storage_bar(self, stored, capacity):
-        """Pack right under the prosperity meter (before rel_header, same
-        convention) and draw the current fill. `stored` can exceed
-        `capacity` (overflowing storage spoils faster — see Storage &
-        Spoilage) — the bar itself is capped at full, but the color and
-        caption both flag the overflow rather than silently clipping it."""
-        self.storage_frame.pack(anchor="w", padx=14, pady=(4, 0), fill="x",
-                                before=self.rel_header)
-        self._draw_storage_bar(stored, capacity)
+        """The storage meter. `stored` can exceed `capacity` -- overflowing
+        storage spoils faster (see Storage & Spoilage) -- and page.bar colours
+        an over-full channel red rather than silently clipping it."""
+        self._page.bar("Storage", int(stored), int(capacity))
 
-    def _draw_storage_bar(self, stored, capacity):
-        # See _draw_prosperity_bar on why this no longer forces a repaint.
-        c = self._storage_canvas
-        self._storage_values = (stored, capacity)
-        w = c.winfo_width()
-        if w <= 1:
-            w = 270   # not yet laid out on the very first draw
-        h = 14
-        frac = stored / capacity if capacity > 0 else 0.0
-        display_frac = max(0.0, min(1.0, frac))
-        if frac > 1.0:
-            color = theme.BAD
-        elif frac > 0.85:
-            color = theme.WARN
-        else:
-            color = theme.GOOD
-        c.delete("all")
-        c.create_rectangle(0, 0, w, h, fill=theme.METER_TRACK, outline="")
-        if display_frac > 0:
-            c.create_rectangle(0, 0, w * display_frac, h, fill=color, outline="")
-        caption = f"{stored:,} / {capacity:,}"
-        if frac > 1.0:
-            caption += " — overflowing, spoiling faster"
-        self._storage_pct_lbl.config(text=caption)
-
-    _POOL_LABEL = {"household": "Granary (food, firewood)",
-                   "durable": "Warehouse (timber, ore, goods)",
-                   "other": "Vault (gold, luxuries)",
-                   "feed": "Barn (fodder)"}
-
-    # --- panel cards ---------------------------------------------------------
-    # The selection panel used to be one run-on Label: "Grows per year" alone
-    # wrapped to six lines of "·"-separated values, then "Currently stored" did
-    # the same, then Storage, then Herd -- about thirty lines of undifferentiated
-    # prose with inline "Storage:" text standing in for structure. These build
-    # real, foldable sections instead, so a village's detail is scannable and
-    # the parts you don't care about right now fold away.
     def _card(self, title, subtitle=None, key=None, default_open=True):
-        """A titled, foldable section in the selection panel. Returns the frame
-        to build the body into, or None when the card is folded shut."""
+        """A titled, foldable section on the drawn page. Returns the PAGE when
+        the card is open and None when it is folded -- the same
+        truthy-or-None contract the widget version had, so every `body =
+        self._card(...)` / `if body is not None:` call site is unchanged by
+        the move off widgets."""
         key = key or title
-        return widgets.card(self.actions, self._panel_cards_open, key, title,
-                             subtitle, default_open,
-                             on_toggle=lambda: self._toggle_panel_card(key))
+        if self._page.card(key, title, self._panel_cards_open, subtitle,
+                           on_toggle=lambda k=key: self._toggle_panel_card(k),
+                           default_open=default_open):
+            return self._page
+        return None
+
+    def _panel_text(self, text, fg=None, font=None):
+        """A run of prose on the page -- what a tk.Label packed into the old
+        actions frame used to be."""
+        self._page.text(text, fill=fg, font=font)
+
+    def _panel_button(self, text, command, kind="default"):
+        self._page.button(text, command, kind=kind)
+
+    def _panel_gap(self, amount=8):
+        self._page.gap(amount)
+
+    def _panel_divider(self):
+        self._page.divider()
+
+    def _page_begin(self, title, subtitle=None):
+        """Start the selection panel's page. Every _show_* opens with this and
+        closes with _page_end, which replaces the old destroy-the-widget-tree/
+        rebuild-it dance entirely -- a page is cleared by drawing it again."""
+        self._page.begin(max(320, self._panel_canvas.winfo_height() or 320))
+        if title:
+            self._page.title(title, subtitle)
+
+    def _page_end(self):
+        self._page.finish()
+        self._panel_canvas.yview_moveto(0.0)
 
     @contextlib.contextmanager
     def _quiet_rebuild(self, frame):
@@ -4315,7 +4142,11 @@ class MapView(tk.Frame):
         card's open/shut state and then redrew nothing at all. The arrow even
         changed on the next unrelated redraw, which made it look like the click
         had registered and the card had simply refused to move."""
-        with self._quiet_rebuild(self.actions):
+        # No unmap-and-restore dance any more (see _quiet_rebuild): the panel
+        # is a drawn page, so a rebuild is one delete-and-draw on a canvas
+        # rather than thirty widgets being destroyed and recreated while
+        # mapped. There is no half-built intermediate state for Tk to paint.
+        if True:
             if self.selected is not None:
                 self._show_faction(self.selected)
             if self.selected_region is not None:
@@ -4334,14 +4165,16 @@ class MapView(tk.Frame):
         self._rebuild_selection_panel()
 
     def _kv(self, parent, label, value, fg=None):
-        """One aligned label/value row -- the replacement for cramming figures
-        into a wrapped sentence."""
-        widgets.kv(parent, label, value, fg)
+        """One aligned label/value row. `parent` is ignored and kept only so
+        the thirty-odd existing call sites did not all have to change when
+        the panel stopped being a widget tree -- it was always the card body
+        they were already inside, which the page tracks itself."""
+        self._page.kv(label, value, fg)
 
     def _bar_row(self, parent, label, used, cap, warn_at=0.85):
-        """A compact labelled meter -- used/cap plus a fill bar, so four
-        storage pools read as four bars instead of four sentences."""
-        widgets.bar_row(parent, label, used, cap, warn_at)
+        """A labelled meter -- used/cap plus a fill in a carved channel, so
+        four storage pools read as four bars instead of four sentences."""
+        self._page.bar(label, used, cap, warn_at)
 
     def _storage_pool_lines(self, node):
         """One line per typed storage pool (see resources.STORAGE_POOLS) --
@@ -4412,23 +4245,16 @@ class MapView(tk.Frame):
     def _build_herd_policy_actions(self, village, parent=None):
         """Grow / Balanced / Cull buttons -- the player's direct dial on the
         Autumn cull (see resources.HERD_POLICY_MULTIPLIER)."""
-        parent = parent if parent is not None else self.actions
         if not getattr(village, "herds", None):
             return
         current = resources.herd_policy(village)
-        tk.Label(parent, text="Herd policy — how hard to cull in Autumn:",
-                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT,
-                 justify="left", wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(8, 2))
-        row = tk.Frame(parent, bg=theme.PANEL)
-        row.pack(fill="x", pady=2)
+        self._panel_text("Herd policy — how hard to cull in Autumn:",
+                         fg=theme.MUTED)
         for policy in resources.HERD_POLICIES:
-            active = policy == current
-            tk.Button(row, text=policy,
-                      command=lambda p=policy, v=village: self._do_set_herd_policy(v, p),
-                      bg=theme.ACCENT if active else theme.PANEL_ALT,
-                      fg="#06121f" if active else theme.INK,
-                      activebackground=theme.ACCENT, relief="flat",
-                      font=theme.FONT).pack(side="left", expand=True, fill="x", padx=1)
+            self._panel_button(
+                policy,
+                lambda p=policy, v=village: self._do_set_herd_policy(v, p),
+                kind="accent" if policy == current else "default")
 
     def _do_set_herd_policy(self, village, policy):
         resources.set_herd_policy(village, policy)
@@ -4459,24 +4285,15 @@ class MapView(tk.Frame):
                           key="stockpile", default_open=False)
         if body is None:
             return
-        tk.Label(body, text="How much to hold back before trading the rest away. "
-                 "Applies to this place only.",
-                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_SMALL,
-                 justify="left", wraplength=_RIGHT_PANEL_W - 60
-                 ).pack(anchor="w", pady=(2, 6))
+        self._panel_text("How much to hold back before trading the rest away. " "Applies to this place only.", fg=theme.MUTED)
         for res_name in sorted(stock, key=lambda r: -stock[r]):
             current = resources.stockpile_target(node, res_name)
             label = next((name for name, frac in resources.STOCKPILE_PRESETS
                           if frac == current), "Default")
-            row = tk.Frame(body, bg=theme.PANEL)
-            row.pack(fill="x", pady=1)
-            tk.Label(row, text=f"{res_name}  {stock[res_name]:,}", bg=theme.PANEL,
-                     fg=theme.MUTED, font=theme.FONT_SMALL,
-                     anchor="w").pack(side="left")
-            widgets.button(row, label,
-                           lambda n=node, r=res_name: self._cycle_stockpile_target(n, r),
-                           kind="active" if current is not None else "default",
-                           compact=True).pack(side="right")
+            self._kv(None, f"{res_name}  {stock[res_name]:,}", label,
+                     fg=theme.ACCENT if current is not None else None)
+            self._page.hit_last_row(
+                lambda n=node, r=res_name: self._cycle_stockpile_target(n, r))
 
     def _cycle_stockpile_target(self, node, resource):
         """Step this resource to the next preset -- a cycle rather than a
@@ -4517,10 +4334,9 @@ class MapView(tk.Frame):
         self.title_lbl.config(text=st.name)
         region = (wd.regions[st.region_id].name
                   if 0 <= st.region_id < len(wd.regions) else "?")
-        self.info.config(
-            fg=theme.MUTED,
-            text=f"{st.kind.capitalize()} in {region}\n"
-                 f"{wd.factions[st.faction_idx].name}")
+        self._page_begin(None)
+        self._panel_text(f"{st.kind.capitalize()} in {region}\n"
+                 f"{wd.factions[st.faction_idx].name}", fg=theme.MUTED)
 
         prosperity = getattr(st, "prosperity", None)
         if prosperity is not None:
@@ -4531,8 +4347,6 @@ class MapView(tk.Frame):
         # total is a number that means nothing. STORAGE shows the real pools.
         self._hide_storage_bar()
 
-        for w in self.actions.winfo_children():
-            w.destroy()
         player = self._player_faction()
         own = player is not None and st.faction_idx == wd.factions.index(player)
 
@@ -4566,11 +4380,7 @@ class MapView(tk.Frame):
                 for output, source, rate in making:
                     self._kv(body, f"{source} \u2192 {output}", f"{rate:,}/turn")
             else:
-                tk.Label(body, text="Nothing converting \u2014 this settlement is "
-                                    "waiting on inputs.",
-                         bg=theme.PANEL, fg=theme.MUTED, font=("Segoe UI", 8),
-                         justify="left", anchor="w",
-                         wraplength=_RIGHT_PANEL_W - 46).pack(fill="x")
+                self._panel_text("Nothing converting \u2014 this settlement is " "waiting on inputs.", fg=theme.MUTED)
 
         stock = {r: a for r, a in (getattr(st, "resources", {}) or {}).items() if a}
         body = self._card("STORAGE", f"{len(stock)} kinds held", key="storage")
@@ -4652,14 +4462,10 @@ class MapView(tk.Frame):
                      fg=theme.WARN)
         for option in (urgent or options)[:3]:
             if option.priority in ("urgent", "useful") and option.reason:
-                tk.Label(body, text=f"• {option.label}: {option.reason}",
-                         bg=theme.PANEL,
-                         fg=theme.BAD if option.priority == "urgent" else theme.WARN,
-                         font=theme.FONT_SMALL, anchor="w", justify="left",
-                         wraplength=_RIGHT_PANEL_W - 60).pack(fill="x", pady=(4, 0))
-        widgets.button(body, "Open Build Menu…",
-                       lambda n=node: self._open_build_menu(n),
-                       kind="accent" if urgent else "default").pack(fill="x", pady=(8, 2))
+                self._panel_text(f"• {option.label}: {option.reason}", fg=theme.BAD if option.priority == "urgent" else theme.WARN)
+        self._panel_button("Open Build Menu…",
+                           lambda n=node: self._open_build_menu(n),
+                           kind="accent" if urgent else "default")
 
     def _open_build_menu(self, node):
         player = self._player_faction()
@@ -4695,13 +4501,10 @@ class MapView(tk.Frame):
         self._kv(body, "Range", f"{reach} cells at {speed:g}/turn")
         blocked = resources.can_commission_survey(wd, st)
         if blocked:
-            tk.Label(body, text=blocked, bg=theme.PANEL, fg=theme.MUTED,
-                     font=theme.FONT_SMALL, anchor="w", justify="left",
-                     wraplength=_RIGHT_PANEL_W - 60).pack(fill="x", pady=(4, 0))
-        widgets.button(body, "Commission a Survey…",
-                       lambda n=st: self._do_start_survey(n),
-                       state="disabled" if blocked else "normal"
-                       ).pack(fill="x", pady=(8, 2))
+            self._panel_text(blocked, fg=theme.MUTED)
+        if not blocked:
+            self._panel_button("Commission a Survey…",
+                               lambda n=st: self._do_start_survey(n))
 
     def _do_start_survey(self, st):
         self.show_bottom_message(resources.start_survey(self.world, st))
@@ -4732,9 +4535,8 @@ class MapView(tk.Frame):
         self.selected_settlement = None   # a village and a settlement are never both selected
         self.title_lbl.config(text=v.name)
         region = wd.regions[v.region_id]
-        self.info.config(
-            fg=theme.MUTED,
-            text=f"Village in {region.name}\n{wd.factions[v.faction_idx].name}")
+        self._page_begin(None)
+        self._panel_text(f"Village in {region.name}\n{wd.factions[v.faction_idx].name}", fg=theme.MUTED)
 
         prosperity = getattr(v, "prosperity", None)
         if prosperity is not None:
@@ -4746,8 +4548,6 @@ class MapView(tk.Frame):
         # Storage card below shows the four real pools instead.
         self._hide_storage_bar()
 
-        for w in self.actions.winfo_children():
-            w.destroy()
         player = self._player_faction()
         own = player is not None and v.faction_idx == wd.factions.index(player)
 
@@ -4783,10 +4583,9 @@ class MapView(tk.Frame):
                          fg={"hands": theme.WARN,
                              "season": theme.MUTED}.get(row["limited_by"], theme.GOOD))
             if own:
-                widgets.button(body, "Set labour…",
-                               lambda n=v: self._open_build_menu(n),
-                               compact=True).pack(fill="x", pady=(6, 4))
-            tk.Frame(body, bg=theme.LINE, height=1).pack(fill="x", pady=(4, 6))
+                self._panel_button("Set labour…",
+                                   lambda n=v: self._open_build_menu(n))
+            self._panel_divider()
             for res_name, amount in sorted(yield_.items(), key=lambda kv: -kv[1]):
                 self._kv(body, res_name, f"{amount:,}/yr")
 
@@ -4827,9 +4626,7 @@ class MapView(tk.Frame):
                     self._kv(body, "Winter fodder", f"{have:,} / {need:,}",
                              fg=theme.BAD if short else theme.GOOD)
                     if short:
-                        tk.Label(body, text="herd will be culled", bg=theme.PANEL,
-                                 fg=theme.BAD, font=("Segoe UI", 8),
-                                 anchor="w").pack(fill="x")
+                        self._panel_text("herd will be culled", fg=theme.BAD)
                 if own:
                     self._build_herd_policy_actions(v, body)
 
@@ -4862,15 +4659,11 @@ class MapView(tk.Frame):
             lines.append(f"Moving — {remaining} cells left")
         else:
             lines.append("Idle")
-        self.info.config(fg=theme.INK, text="\n".join(lines))
+        self._page_begin(None)
+        self._panel_text("\n".join(lines), fg=theme.INK)
 
-        for w in self.actions.winfo_children():
-            w.destroy()
         if cmd.ship_turns_left is None:
-            tk.Button(self.actions, text="Move",
-                      command=lambda: self._begin_commander_move(cmd),
-                      bg=theme.PANEL_ALT, fg=theme.INK, activebackground=theme.ACCENT,
-                      relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+            self._panel_button("Move", lambda: self._begin_commander_move(cmd))
             if aboard is None and commander.can_build_ship(wd, cmd):
                 shipyard = commander.shipyard_at(wd, cmd.faction_idx, cmd.pos)
                 if shipyard is not None:
@@ -4884,35 +4677,18 @@ class MapView(tk.Frame):
                     if not afford:
                         missing = _resource_shortfall(nation, commander.SHIP_COST, wd)
                         cost_text += f"\nShort: {_format_resources(missing)}"
-                    tk.Label(self.actions, text=cost_text,
-                             bg=theme.PANEL, fg=theme.INK if afford else theme.BAD,
-                             font=theme.FONT, justify="left",
-                             wraplength=_RIGHT_PANEL_W - 60).pack(anchor="w", pady=(0, 4))
-                tk.Button(self.actions, text=label,
-                          command=lambda: self._do_build_ship(cmd),
-                          bg=theme.PANEL_ALT, fg=theme.INK, activebackground=theme.ACCENT,
-                          relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+                    self._panel_text(cost_text, fg=theme.INK)
+                self._panel_button(label, lambda: self._do_build_ship(cmd))
             if beached is not None:
-                tk.Button(self.actions, text="Board Ship",
-                          command=lambda: self._do_board_ship(cmd),
-                          bg=theme.PANEL_ALT, fg=theme.INK, activebackground=theme.ACCENT,
-                          relief="flat", font=theme.FONT).pack(fill="x", pady=2)
-                tk.Button(self.actions, text="Dismantle Ship",
-                          command=lambda: self._do_dismantle_ship(cmd),
-                          bg=theme.PANEL_ALT, fg=theme.BAD, activebackground=theme.ACCENT,
-                          relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+                self._panel_button("Board Ship", lambda: self._do_board_ship(cmd))
+                self._panel_button("Dismantle Ship", lambda: self._do_dismantle_ship(cmd), kind="danger")
 
     def _begin_commander_move(self, cmd):
         self.commander_move_mode = cmd
-        self.info.config(fg=theme.MUTED,
-                         text="Click a spot on the map to send the "
-                              "commander there.")
-        for w in self.actions.winfo_children():
-            w.destroy()
-        tk.Button(self.actions, text="Cancel",
-                  command=lambda: self._cancel_commander_move(cmd),
-                  bg=theme.PANEL_ALT, fg=theme.INK, activebackground=theme.ACCENT,
-                  relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+        self._page_begin(None)
+        self._panel_text("Click a spot on the map to send the "
+                              "commander there.", fg=theme.MUTED)
+        self._panel_button("Cancel", lambda: self._cancel_commander_move(cmd))
 
     def _cancel_commander_move(self, cmd):
         self.commander_move_mode = None
@@ -4964,11 +4740,7 @@ class MapView(tk.Frame):
     def _enter_ui(self, section_label, back_label, back_command):
         """Switch the panel into a zoomed mode: clear relationships/attack,
         show a Back button configured for the current level."""
-        self.rel_header.config(text=section_label)
-        for w in self.rel_frame.winfo_children():
-            w.destroy()
-        for w in self.actions.winfo_children():
-            w.destroy()
+        self._panel_section = section_label
         self.back_btn.config(text=back_label, command=back_command)
         self.back_btn.pack(side="bottom", fill="x", padx=14, pady=(0, 2))
 
@@ -4986,9 +4758,9 @@ class MapView(tk.Frame):
         self.selected_settlement = None
         self._base_key = None
         self.title_lbl.config(text="Regions")
-        self.info.config(fg=theme.MUTED,
-                         text=f"{faction.name}\nClick a region to inspect it. "
-                              "Zoom in close to see its villages.")
+        self._page_begin(None)
+        self._panel_text(f"{faction.name}\nClick a region to inspect it. "
+                              "Zoom in close to see its villages.", fg=theme.MUTED)
         self._enter_ui("REGION", "← Back to World", self._exit_region_view)
         self._start_zoom(self._padded_rect(faction.meta["bbox"]))
 
@@ -5024,9 +4796,9 @@ class MapView(tk.Frame):
                 naval = bool(frontier)
 
         if not frontier:
-            self.info.config(fg=theme.MUTED,
-                             text=f"{enemy.name}\nNo shared border or coastal "
-                                  "port to attack across right now.")
+            self._page_begin(None)
+            self._panel_text(f"{enemy.name}\nNo shared border or coastal "
+                                  "port to attack across right now.", fg=theme.MUTED)
             return
 
         # Only offer ground the army can actually reach. Showing targets
@@ -5036,11 +4808,10 @@ class MapView(tk.Frame):
                      if commander.commander_can_reach(self.world, player_idx, r)]
         if not reachable:
             where = "a coastal landing" if naval else "the frontier"
-            self.info.config(
-                fg=theme.WARN,
-                text=f"{enemy.name}\nYour army cannot reach them. March your "
+            self._page_begin(None)
+            self._panel_text(f"{enemy.name}\nYour army cannot reach them. March your "
                      f"commander to one of your own regions on {where} with "
-                     f"{enemy.name}, then attack.")
+                     f"{enemy.name}, then attack.", fg=theme.WARN)
             return
         frontier = reachable
 
@@ -5056,14 +4827,14 @@ class MapView(tk.Frame):
 
         self.title_lbl.config(text="Choose a Target")
         if naval:
-            self.info.config(fg=theme.MUTED,
-                             text=f"Launching a naval invasion of {enemy.name}.\n"
+            self._page_begin(None)
+            self._panel_text(f"Launching a naval invasion of {enemy.name}.\n"
                                   "Click a highlighted region along the coast "
-                                  "to attack it.")
+                                  "to attack it.", fg=theme.MUTED)
         else:
-            self.info.config(fg=theme.MUTED,
-                             text=f"Attacking {enemy.name}.\nClick a highlighted "
-                                  "region along the border to attack it.")
+            self._page_begin(None)
+            self._panel_text(f"Attacking {enemy.name}.\nClick a highlighted "
+                                  "region along the border to attack it.", fg=theme.MUTED)
         self._enter_ui("ATTACK", "← Cancel", self._cancel_attack_setup)
         self._start_zoom(self._padded_rect(bbox, min_pad_frac=0.3, min_size=10))
         self.render()
@@ -5124,16 +4895,12 @@ class MapView(tk.Frame):
         self._placement_hint_cells = self._score_placement_hint(region, kind)
         cost = construction.SETTLEMENT_BUILD_COST[kind]
         turns = construction.SETTLEMENT_BUILD_TURNS[kind]
-        self.info.config(fg=theme.MUTED,
-                         text=f"{region.name}\nClick a spot in this region to "
+        self._page_begin(None)
+        self._panel_text(f"{region.name}\nClick a spot in this region to "
                               f"begin building a {kind} there.\n\n"
                               f"Cost: {_format_resources(cost)}\n"
-                              f"Build time: {turns} turns")
-        for w in self.actions.winfo_children():
-            w.destroy()
-        tk.Button(self.actions, text="Cancel", command=self._cancel_settlement_placement,
-                  bg=theme.PANEL_ALT, fg=theme.INK, activebackground=theme.ACCENT,
-                  relief="flat", font=theme.FONT).pack(fill="x", pady=2)
+                              f"Build time: {turns} turns", fg=theme.MUTED)
+        self._panel_button("Cancel", self._cancel_settlement_placement)
         self.render()
 
     def _score_placement_hint(self, region, kind):

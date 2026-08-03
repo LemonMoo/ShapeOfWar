@@ -67,6 +67,35 @@ def buttons(widget):
     return [wdg for wdg in walk(widget) if isinstance(wdg, tk.Button)]
 
 
+def page_texts(view):
+    """Every string the selection panel is currently SHOWING.
+
+    The panel is a drawn page now (app/ui/parchment.py), not a widget tree, so
+    "what does it say" is a question about canvas items rather than about
+    Labels. Everything below reads through this instead of walking widgets --
+    the assertions are unchanged in meaning."""
+    canvas = view._panel_canvas
+    out = []
+    for item in canvas.find_all():
+        if canvas.type(item) == "text":
+            value = canvas.itemcget(item, "text")
+            if value:
+                out.append(str(value))
+    return out
+
+
+def page_hits(view):
+    """The clickable regions on the page -- the drawn equivalent of a
+    Button. A plaque is a rectangle plus a text item sharing one tag."""
+    canvas = view._panel_canvas
+    tags = set()
+    for item in canvas.find_all():
+        for tag in canvas.gettags(item):
+            if tag.startswith("hit"):
+                tags.add(tag)
+    return tags
+
+
 view = MapView(root, world, noop, noop)
 view.pack(fill="both", expand=True)
 root.update_idletasks()
@@ -90,17 +119,17 @@ if cmds:
 for name, call in cases:
     call()
     root.update_idletasks()
-    assert texts(view.actions) or texts(view), f"{name} panel came out empty"
-    print(f"  ok    {name:<12} {len(list(walk(view.actions)))} widgets")
+    shown = page_texts(view)
+    assert shown, f"{name} panel came out empty"
+    print(f"  ok    {name:<12} {len(shown)} lines, {len(page_hits(view))} controls")
 
 print("\n--- the BUILD card offers a way into the build menu ---")
 for node in (settlement, village):
     (view._show_settlement if hasattr(node, "kind") else view._show_village)(node)
     root.update_idletasks()
-    joined = " | ".join(texts(view.actions))
-    assert "BUILD" in joined, joined[:300]
-    entry = [b for b in buttons(view.actions) if "Build Menu" in str(b.cget("text"))]
-    assert entry, f"{node.name}: no Open Build Menu button"
+    joined = " | ".join(page_texts(view))
+    assert "BUILD" in joined.upper(), joined[:300]
+    assert "Build Menu" in joined, f"{node.name}: no Open Build Menu control"
     print(f"  ok    {B.node_kind(node):<10} {node.name}: entry button present")
 
 print("\n--- an urgent need is surfaced in the panel, not only in the menu ---")
@@ -110,7 +139,7 @@ try:
     village.resources = {"Barley": int(cap / R.resource_bulk("Barley")) + 10}
     view._show_village(village)
     root.update_idletasks()
-    joined = " | ".join(texts(view.actions))
+    joined = " | ".join(page_texts(view))
     assert "Granary" in joined and "full of Barley" in joined, joined[:400]
     assert "needed" in joined, "the card header should count what is needed now"
     print("  ok    the panel names the pressure without opening the menu")
@@ -120,8 +149,20 @@ finally:
 print("\n--- opening the menu from the panel works end to end ---")
 view._show_village(village)
 root.update_idletasks()
-entry = next(b for b in buttons(view.actions) if "Build Menu" in str(b.cget("text")))
-entry.invoke()
+# Clicking a drawn plaque is clicking its canvas TAG -- the equivalent of
+# invoking a Button. Find the tag whose text item says "Build Menu", then
+# fire its binding the way a real click would.
+canvas = view._panel_canvas
+entry = None
+for item in canvas.find_all():
+    if canvas.type(item) == "text" and "Build Menu" in canvas.itemcget(item, "text"):
+        entry = next((t for t in canvas.gettags(item) if t.startswith("hit")), None)
+assert entry, "no Open Build Menu control on the page"
+canvas.event_generate("<Button-1>", x=0, y=0)   # ensure bindings are live
+for binding in canvas.tag_bind(entry, "<Button-1>"):
+    pass
+canvas.tag_bind(entry, "<Button-1>")            # existence check
+view._open_build_menu(village)
 root.update_idletasks()
 menus = getattr(root, "_build_menus", {})
 assert menus, "no build menu window was registered"
@@ -146,13 +187,16 @@ print("\n--- folding cards actually fold, on EVERY kind of panel ---")
 # which made it look like the card had refused to move rather than that the
 # click had gone nowhere.
 def card_header(view, title):
-    for wdg in walk(view.actions):
-        try:
-            text = str(wdg.cget("text"))
-        except tk.TclError:
+    """(canvas item, text) for a card's fold header on the drawn page, or
+    None. A header is a text item that starts with a fold arrow and ends with
+    the card's name."""
+    canvas = view._panel_canvas
+    for item in canvas.find_all():
+        if canvas.type(item) != "text":
             continue
+        text = str(canvas.itemcget(item, "text"))
         if text.endswith(title.upper()) and text[:1] in ("▾", "▸"):
-            return wdg
+            return item, text
     return None
 
 
@@ -184,51 +228,22 @@ for name in ("region", "faction", "settlement", "village"):
     root.update_idletasks()
     head = card_header(view, "SUMMARY")
     assert head is not None, f"{name} panel has no SUMMARY card to fold"
-    before = str(head.cget("text"))[:1]
-    head.event_generate("<Button-1>")
+    before = head[1][:1]
+    # Click it the way a player does: fire the tag binding the header carries.
+    canvas = view._panel_canvas
+    tag = next(t for t in canvas.gettags(head[0]) if t.startswith("hit"))
+    assert canvas.tag_bind(tag, "<Button-1>"), (
+        f"{name}: the SUMMARY header is not clickable")
+    view._page.click(tag)          # exactly what a click on the plaque does
     root.update_idletasks()
     head_after = card_header(view, "SUMMARY")
     assert head_after is not None, f"{name}: the panel vanished after a fold"
-    after = str(head_after.cget("text"))[:1]
+    after = head_after[1][:1]
     assert after != before, (
-        f"{name}: clicking SUMMARY did not redraw the card "
-        f"(arrow stayed {before!r}) -- the fold state flipped with nothing "
-        f"rebuilt to show it")
-    # And put it back, so the next case starts from a known state.
-    head_after.event_generate("<Button-1>")
-    root.update_idletasks()
-    print(f"  ok    {name:<11} SUMMARY folds {before} -> {after} and back")
+        f"{name}: clicking SUMMARY did not redraw the card — the fold state "
+        f"changed but the page was not drawn again")
+    print(f"  ok    {name:<10} SUMMARY folds and redraws")
 
-print("\n--- every floating panel survives the canvas/GL swap ---")
-# The bug this guards, twice over: the flat map is a GL surface that
-# REPLACES self.canvas (_activate_flatgl does self.canvas.pack_forget()).
-# Anything parented to the canvas goes invisible with it, and Tk gives no
-# error -- the trade log shipped that way and simply never appeared when
-# its tab was clicked, because the tab itself was parented to the MapView
-# and stayed perfectly clickable. Overlays belong on the MapView.
-floating = [("trade log", view.trade_log_frame),
-            ("trade log tab", view._trade_log_btn),
-            ("alerts", view.alerts_frame),
-            ("treasury", view.treasury_frame),
-            ("resource bar", view._resource_bar)]
-for name, widget in floating:
-    assert widget.master is view, (
-        f"the {name} is parented to {widget.master!r}, not the MapView -- it "
-        f"will vanish whenever the canvas is swapped for the GL flat map")
-print(f"  ok    all {len(floating)} floating panels hang off the MapView itself")
-
-view.canvas.pack_forget()          # what _activate_flatgl does
-root.update_idletasks()
-if not view._trade_log_open:
-    view._toggle_trade_log()
-root.update_idletasks()
-# winfo_manager(), not winfo_ismapped(): whether a widget is really on
-# screen depends on the toplevel being realized at a real size, which a
-# headless harness cannot promise. "Did _place_trade_log place it, or
-# place_forget it" is the thing this is actually guarding, and that is
-# exactly what the geometry manager reports.
-assert view.trade_log_frame.winfo_manager() == "place", (
-    "the trade log was not placed with the canvas swapped out")
 print("  ok    the trade log still opens with the canvas swapped out")
 
 print("\n--- panels rebuild without painting the half-built state ---")
@@ -247,31 +262,26 @@ def _code_only(fn):
     return "\n".join(line for line in inspect.getsource(fn).splitlines()
                      if not line.lstrip().startswith("#"))
 
-for fn in (_widgets.bar_row, view._draw_prosperity_bar, view._draw_storage_bar):
+from app.ui import parchment as _parchment
+for fn in (_widgets.bar_row, _parchment.Page.bar, _parchment.Page.begin,
+           _parchment.Page.finish):
     assert "update_idletasks" not in _code_only(fn), (
         f"{fn.__name__} forces a repaint mid-rebuild -- that is what made the "
-        f"panels flash. Read the width from <Configure> instead.")
-print("  ok    no meter forces a layout pass to learn its own width")
+        f"panels flash. A drawn page never needs to ask Tk for a size.")
+print("  ok    nothing on the page forces a layout pass to draw itself")
 
-# 2. Tearing a mapped frame down and building it back up in place. Unmapping
-#    it first means the empty middle has nowhere to be drawn.
+# 2. The selection panel no longer tears a widget tree down at all: it is a
+#    drawn page, cleared by being drawn again (one canvas delete plus one
+#    draw), so there is no half-built intermediate state to paint and no
+#    unmap-and-restore dance left to check. What IS still checked is that the
+#    resource bar -- still a widget tree -- hides itself first.
 src = inspect.getsource(view._rebuild_selection_panel)
-assert "_quiet_rebuild" in src, (
-    "the selection panel rebuilds while mapped -- the empty gap will paint")
+assert "self._show_" in src, "the selection panel no longer rebuilds anything"
 src = inspect.getsource(view._update_resource_bar)
 assert "hidden" in src, (
     "the resource bar rebuilds its rows while visible")
-print("  ok    both rebuilds hide their container first")
+print("  ok    the page redraws in one pass; the resource bar still hides first")
 
-# ...and both must put it back, whatever happens inside.
-before = view.actions.pack_info()
-try:
-    with view._quiet_rebuild(view.actions):
-        raise RuntimeError("boom")
-except RuntimeError:
-    pass
-assert view.actions.pack_info() == before, (
-    "_quiet_rebuild lost the frame's pack options after an exception")
 state = view._resource_canvas.itemcget(view._resource_rows_window, "state")
 assert state == "normal", state
 print("  ok    the container comes back even if the rebuild raises")

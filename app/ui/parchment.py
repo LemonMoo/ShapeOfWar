@@ -246,21 +246,31 @@ class Page:
     surface with its own flat rectangle.
     """
 
-    def __init__(self, parent, width, seed=0, palette_name=None, **canvas_kwargs):
+    def __init__(self, parent, width, seed=0, palette_name=None, canvas=None,
+                 **canvas_kwargs):
         self.pal = palette(palette_name)
         self.palette_name = palette_name or DEFAULT_PALETTE
-        self.canvas = tk.Canvas(parent, width=width, highlightthickness=0,
-                                bd=0, bg=theme.PANEL, **canvas_kwargs)
+        # `canvas`, when given, is an EXISTING canvas to draw the page onto
+        # rather than one of its own. That is how a page gets scrolling for
+        # free: the right-hand panel already owns a scrollable canvas, and a
+        # page drawn straight onto it scrolls with it -- no second canvas, no
+        # nested widget, and no inner frame to cover the sheet up.
+        self.canvas = canvas if canvas is not None else tk.Canvas(
+            parent, width=width, highlightthickness=0, bd=0, bg=theme.PANEL,
+            **canvas_kwargs)
+        self.scrolls = canvas is not None
         self.width = width
         self.seed = seed
         self.y = 0
         self._height = 400
         self._next_tag = 0
+        self._handlers = {}
 
     # -- surface -----------------------------------------------------------
     def begin(self, height=None):
         """Clear the page and lay a fresh sheet on it."""
         self.canvas.delete("all")
+        self._handlers.clear()
         self.y = 12
         self._height = height or self._height
         self._sheet()
@@ -274,14 +284,21 @@ class Page:
               tags="sheet_frame", pal=self.pal)
 
     def finish(self):
-        """Size the canvas to what was actually drawn, and re-lay the sheet at
-        that height -- the first one was drawn against a guess."""
+        """Re-lay the sheet at the height actually used -- the first one was
+        drawn against a guess -- and tell the scroller how tall the page is.
+
+        A page on its OWN canvas resizes that canvas to fit. A page on a
+        borrowed scrolling canvas must not: its height is the viewport's, and
+        what changes is the scrollregion."""
         used = int(self.y + 14)
-        self.canvas.config(height=used)
         self.canvas.delete("sheet")
         self.canvas.delete("sheet_frame")
         self._height = used
         self._sheet()
+        if self.scrolls:
+            self.canvas.configure(scrollregion=(0, 0, self.width, used))
+        else:
+            self.canvas.config(height=used)
         return used
 
     # -- content -----------------------------------------------------------
@@ -467,6 +484,20 @@ class Page:
         self._bind(tag, lambda _e=None: command())
         self.y += 16
 
+    def hit_last_row(self, command):
+        """Make the row just drawn clickable.
+
+        For the handful of places where the CONTROL is the row itself -- a
+        stockpile line whose value cycles when you click it -- rather than a
+        plaque underneath it. Keeps those rows reading as data instead of
+        turning a list of twelve goods into a list of twelve buttons."""
+        tag = self._tag()
+        rect = self.canvas.create_rectangle(0, self.y - ROW_H - 4, self.width,
+                                            self.y - 2, fill="", outline="",
+                                            tags=(tag,))
+        self.canvas.tag_lower(rect)
+        self._bind(tag, lambda _e=None: command())
+
     def gap(self, amount=8):
         self.y += amount
 
@@ -479,7 +510,19 @@ class Page:
         self._next_tag += 1
         return "hit%d" % self._next_tag
 
+    def click(self, tag):
+        """Fire the control carrying `tag`, as a real click would.
+
+        A drawn plaque has no .invoke() the way a Button does, and a canvas
+        tag binding cannot be called back out of Tk -- so the handlers are
+        kept here as well as bound. Used by dev/test_panels.py, and by
+        anything that ever needs to drive the panel without a mouse."""
+        handler = self._handlers.get(tag)
+        if handler is not None:
+            handler()
+
     def _bind(self, tag, handler):
+        self._handlers[tag] = lambda: handler(None)
         self.canvas.tag_bind(tag, "<Button-1>", handler)
         self.canvas.tag_bind(tag, "<Enter>",
                              lambda _e: self.canvas.config(cursor="hand2"))

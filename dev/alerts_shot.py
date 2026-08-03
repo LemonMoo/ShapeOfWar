@@ -50,13 +50,38 @@ for i, node in enumerate(mine[:9]):
 view._refresh_alerts()
 view._alerts_expanded = {a["kind"] for a in view._current_alerts[:1]}
 view._render_alerts()
+
+# ...and the selection panel beside it, which is the rest of the conversion.
+# A settlement selection zooms the camera; the panel is what is being looked
+# at here, so the view is put back afterwards.
+target = next((s for s in world.settlements if s.faction_idx == 0), None)
+if target is not None:
+    view.selected_settlement = target
+    view._show_settlement(target)
+view.view = [0.0, 0.0, world.w, world.h]
+view._apply_panel_layout()
+# On top, or the grab catches whatever window happens to be over it -- which
+# is exactly what happened the first time this ran.
+root.attributes("-topmost", True)
+root.lift()
+root.update()
+root.after(120, lambda: None)
 root.update()
 
 try:
     from PIL import ImageGrab
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    x, y = root.winfo_rootx(), root.winfo_rooty()
-    grab = ImageGrab.grab((x, y, x + root.winfo_width(), y + root.winfo_height()))
+    # Grab the PANELS, not the window. The map canvas asks for a size of its
+    # own, so on a small test window the right-hand panel is placed past the
+    # window's own right edge and a whole-window grab simply misses it.
+    panel = view._panel
+    x0 = min(view.alerts_frame.winfo_rootx(), panel.winfo_rootx())
+    y0 = min(view.alerts_frame.winfo_rooty(), panel.winfo_rooty())
+    x1 = max(view.alerts_frame.winfo_rootx() + view.alerts_frame.winfo_width(),
+             panel.winfo_rootx() + panel.winfo_width())
+    y1 = max(view.alerts_frame.winfo_rooty() + view.alerts_frame.winfo_height(),
+             panel.winfo_rooty() + panel.winfo_height())
+    grab = ImageGrab.grab((x0, y0, x1, y1))
     grab.save(OUT)
     print(f"wrote {OUT} ({grab.width}x{grab.height}), "
           f"{len(view._current_alerts)} alerts")
