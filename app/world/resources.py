@@ -967,11 +967,18 @@ def advance_weather(world):
         # afterward, the same reasoning worldgen's own per-purpose RNGs
         # (region names, moisture, capital placement...) all get their own.
         world._weather_rng = random.Random((world.seed or 0) + 774_001)
+    # Underground regions have no sky and therefore no weather -- there is no
+    # drought in a gallery, and a blizzard does not reach one. They are skipped
+    # outright rather than given a "subterranean" entry in the weather tables,
+    # because every one of those tables answers a question (how much rain, how
+    # far can a bowman see, how bad is the going) that only means anything
+    # under an open sky.
+    from app.world.layers import is_under
     climates = {r.id: r.dominant_climate for r in world.regions
-               if r.faction_idx >= 0}
+               if r.faction_idx >= 0 and not is_under(r)}
     weather.advance_all(climates, world.region_weather, world._weather_rng)
     for region in world.regions:
-        if region.faction_idx < 0:
+        if region.faction_idx < 0 or is_under(region):
             continue
         event = world.region_weather.get(region.id)
         _advance_region_crop_weather(region, event, world.season)

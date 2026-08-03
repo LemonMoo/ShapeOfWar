@@ -537,6 +537,46 @@ _SETTLE_NAMES = {
 }
 
 
+# Underground regions get their own vocabulary. The surface pool is full of
+# vales, downs, moors and shores, every one of which needs a sky -- a gallery
+# called "Sunlit Meadow" would be the single most obvious tell that the
+# underworld was bolted onto a map generator. These are what people actually
+# called the parts of a working: a delve is what you dig, a drift follows the
+# seam, a stope is the space left where ore was taken out, a sump is where the
+# water collects.
+_UNDER_ADJ = ("Deep", "Lower", "Under", "Black", "Silent", "Old", "Broken",
+              "Iron", "Cold", "Hollow", "Long", "Nether", "Sunken", "Grim",
+              "Quiet", "Far", "Drowned", "Ember", "Stone", "Rich")
+_UNDER_FEATURE = ("Delve", "Drift", "Gallery", "Hall", "Deep", "Vault",
+                  "Stope", "Sump", "Warren", "Undercroft", "Cavern", "Reach",
+                  "Shaft", "Hollow", "Descent", "Workings", "Chamber", "Cut")
+
+
+def make_under_region_namer(rng):
+    """Region names for the underworld -- same contract as
+    make_region_namer, drawn from a vocabulary that does not assume a sky."""
+    used = set()
+
+    def namer():
+        for _ in range(300):
+            name = f"{rng.choice(_UNDER_ADJ)} {rng.choice(_UNDER_FEATURE)}"
+            if name not in used:
+                used.add(name)
+                return name
+        for _ in range(300):
+            name = (f"{rng.choice(_UNDER_ADJ)} {rng.choice(_UNDER_FEATURE)}, "
+                    f"{rng.choice(_REGION_QUALIFIERS)}")
+            if name not in used:
+                used.add(name)
+                return name
+        name = (f"{rng.choice(_UNDER_ADJ)} {rng.choice(_UNDER_FEATURE)}, "
+                f"{rng.choice(_REGION_QUALIFIERS)} and {rng.choice(_REGION_QUALIFIERS)}")
+        used.add(name)
+        return name
+
+    return namer
+
+
 def make_region_namer(rng):
     """Return a function () -> unique '<Adj> <Feature>' region name. No
     species argument — regions are named map-wide before any faction has

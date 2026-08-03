@@ -2513,6 +2513,14 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     #    expansion in app/world/expansion.py) — before any faction exists.
     _generate_all_regions(world, rng, base_cost, land_cells)
 
+    # 6b. carve the underworld beneath the mountain ranges, and cut it into
+    #     regions of its own (app/world/underworld.py). After the surface
+    #     regions, because underground regions are appended to the SAME list
+    #     and their ids continue the same sequence -- and after biomes, which
+    #     are what decide where a mountain is.
+    from app.world.underworld import carve_underworld
+    carve_underworld(world, rng)
+
     # 7. rate every region's neutral-garrison strength (defends UNCLAIMED land
     #    against being claimed until a faction's military can overcome it).
     _seed_wildland_strength(world, rng, capitals)
