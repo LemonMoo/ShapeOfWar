@@ -1184,11 +1184,20 @@ class MapView(tk.Frame):
         close.bind("<Button-1>", lambda e: self._toggle_trade_log())
         tk.Label(header, text="TRADE LOG", bg=theme.PANEL, fg=theme.ACCENT,
                  font=theme.FONT_HEADER).pack(side="left", padx=(0, 8), pady=4)
-        # The tab that reopens it once closed.
-        self._trade_log_btn = tk.Label(self, text="TRADE LOG", bg=theme.PANEL_ALT,
-                                       fg=theme.MUTED, font=theme.FONT_SMALL,
-                                       padx=8, pady=4, cursor="hand2")
-        self._trade_log_btn.bind("<Button-1>", lambda e: self._toggle_trade_log())
+        # The tab that reopens it once closed -- a drawn plaque rather than a
+        # grey Label (app/ui/parchment.py). Its canvas IS _trade_log_btn, so
+        # every place()/place_forget()/lift() call around it is unchanged; what
+        # used to be .config(text=...) is a redraw, since a drawn control has
+        # no label to change in place.
+        # Wrapped in a Frame, and the wrapper is what gets placed and raised.
+        # On a Canvas, BOTH lift() and tkraise() are aliases for tag_raise --
+        # they raise a canvas ITEM -- so placing a bare canvas as a floating
+        # panel means every raise is a TclError. A one-line frame around it
+        # keeps the placement code ordinary.
+        self._trade_log_btn = tk.Frame(self, bg=theme.PANEL)
+        self._trade_log_btn_page = parchment.Page(self._trade_log_btn, 154, seed=17)
+        self._trade_log_btn_page.canvas.pack()
+        self._render_trade_log_btn()
         tabs = tk.Frame(header, bg=theme.PANEL)
         tabs.pack(side="right", padx=6)
         self._trade_log_tab_btns = {}
@@ -1242,11 +1251,21 @@ class MapView(tk.Frame):
             self._trade_log_btn.place_forget()
         else:
             self.trade_log_frame.place_forget()
-            entries = len(getattr(self, "_trade_log_entries", []) or [])
-            self._trade_log_btn.config(
-                text=f"TRADE LOG ({entries})" if entries else "TRADE LOG")
+            self._render_trade_log_btn()
             self._trade_log_btn.place(relx=0.0, rely=1.0, anchor="sw", x=x + 8, y=-8)
             self._trade_log_btn.lift()
+
+    def _render_trade_log_btn(self):
+        """Draw the reopen plaque, carrying however many entries are waiting."""
+        page = getattr(self, "_trade_log_btn_page", None)
+        if page is None:
+            return
+        entries = len(getattr(self, "_trade_log_entries", []) or [])
+        page.begin(44)
+        page.button(f"Trade Log ({entries})" if entries else "Trade Log",
+                    self._toggle_trade_log,
+                    kind="accent" if entries else "default")
+        page.finish()
 
     def _toggle_trade_log(self):
         self._trade_log_open = not getattr(self, "_trade_log_open", False)
@@ -1991,15 +2010,17 @@ class MapView(tk.Frame):
         its place while you pan and zoom, and refreshes in step with the turn
         (see _refresh_treasury / refresh)."""
         self._treasury_open = False
-        f = tk.Frame(self, bg=theme.PANEL, highlightbackground=theme.ACCENT,
-                     highlightthickness=1, width=_TREASURY_W)
+        f = tk.Frame(self, bg=theme.PANEL, width=_TREASURY_W)
         self.treasury_frame = f
 
+        # The header stays a widget: it is the DRAG HANDLE, and a drag needs a
+        # cursor and press/motion bindings on a real window rather than on a
+        # canvas item. Everything below it is a drawn page.
         head = tk.Frame(f, bg=theme.PANEL_ALT, cursor="fleur")
         head.pack(fill="x")
         tk.Label(head, text="TREASURY", bg=theme.PANEL_ALT, fg=theme.ACCENT,
                  font=theme.FONT_HEADER).pack(side="left", padx=8, pady=4)
-        close = tk.Label(head, text="\u2715", bg=theme.PANEL_ALT, fg=theme.MUTED,
+        close = tk.Label(head, text="✕", bg=theme.PANEL_ALT, fg=theme.MUTED,
                          font=theme.FONT_SMALL, cursor="hand2")
         close.pack(side="right", padx=8)
         close.bind("<Button-1>", lambda e: self.close_treasury())
@@ -2009,8 +2030,8 @@ class MapView(tk.Frame):
                 continue
             wdg.bind("<ButtonPress-1>", self._treasury_drag_start)
             wdg.bind("<B1-Motion>", self._treasury_drag)
-        self._treasury_body = tk.Frame(f, bg=theme.PANEL)
-        self._treasury_body.pack(fill="both", expand=True)
+        self._treasury_page = parchment.Page(f, _TREASURY_W - 2, seed=13)
+        self._treasury_page.canvas.pack(fill="both", expand=True)
         self._treasury_pos = None      # (x, y); None means "dock me by default"
 
     def _treasury_drag_start(self, event):
@@ -2073,17 +2094,23 @@ class MapView(tk.Frame):
             return
         wd = self.world
         fac_idx = wd.factions.index(player)
-        body = self._treasury_body
-        for w in body.winfo_children():
-            w.destroy()
+        page = self._treasury_page
+        page.begin(360)
+        # No page title: the drag-handle header above it already says
+        # TREASURY, and an illuminated capital repeating the word directly
+        # underneath reads as a mistake rather than as ornament.
+        page.gap(2)
 
         def section(title, key, default_open=True):
-            return widgets.card(body, self._treasury_cards_open, key, title,
-                                 default_open=default_open,
-                                 on_toggle=self._refresh_treasury)
+            """A folding section, and the page itself when it is open -- the
+            same truthy-or-None contract _card uses on the selection panel."""
+            return page if page.card(key, title, self._treasury_cards_open,
+                                     on_toggle=self._refresh_treasury,
+                                     default_open=default_open) else None
 
         def line(parent, text, fg=None, bold=False):
-            self._panel_text(text, fg=fg or theme.INK)
+            page.text(text, fill=fg or (theme.ACCENT if bold else theme.INK),
+                      font=theme.FONT_SMALL_BOLD if bold else None)
 
         total = resources.faction_gold(wd, fac_idx)
         transit = resources.gold_in_transit(wd, fac_idx)
@@ -2137,6 +2164,8 @@ class MapView(tk.Frame):
                                        if k not in ("turn", "net"))
                     line(sec, f"  turn {entry['turn']}: {entry['net']:+,}   {causes}",
                          theme.MUTED)
+
+        page.finish()
 
         # Default dock: just left of the side panel, near the top -- out of the
         # way of both the alerts overlay and the trade log.

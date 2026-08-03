@@ -60,6 +60,8 @@ if target is not None:
     view._show_settlement(target)
 view.view = [0.0, 0.0, world.w, world.h]
 view._resource_groups_open = {"Food"}
+view._trade_log_entries = [1, 2, 3]
+view._place_trade_log()
 view._update_resource_bar()
 view._apply_panel_layout()
 # On top, or the grab catches whatever window happens to be over it -- which
@@ -70,13 +72,21 @@ root.update()
 root.after(120, lambda: None)
 root.update()
 
+# The treasury docks itself relative to the window's real size, so it is
+# opened only once the window HAS one -- opened earlier it clamps to (0, 0)
+# and hides behind the resource bar.
+view.open_treasury()
+view._place_trade_log()
+root.update()
+
 try:
     from PIL import ImageGrab
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     # Grab the PANELS, not the window. The map canvas asks for a size of its
     # own, so on a small test window the right-hand panel is placed past the
     # window's own right edge and a whole-window grab simply misses it.
-    parts = [view._resource_bar, view.alerts_frame, view._panel]
+    parts = [view._resource_bar, view.alerts_frame, view._panel,
+             view.treasury_frame, view._trade_log_btn]
     x0 = min(w.winfo_rootx() for w in parts)
     y0 = min(w.winfo_rooty() for w in parts)
     x1 = max(w.winfo_rootx() + w.winfo_width() for w in parts)
