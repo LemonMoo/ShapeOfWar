@@ -64,31 +64,60 @@ def texts(widget):
 
 
 def buttons(widget):
+    """Real Tk buttons. Kept meaning exactly what it always did -- the labour
+    and scope controls are still widgets."""
     return [wdg for wdg in walk(widget) if isinstance(wdg, tk.Button)]
 
 
-def card_for(win, label):
-    """The card frame whose own header names `label`. Every build button reads
-    "Build — tier N", so finding one by its own text alone would pick whichever
-    building happened to be laid out first.
+def plaques(widget):
+    """Drawn controls: (canvas, tag) for every clickable region on any page in
+    this window. A card is a page now (app/ui/parchment.py), so its Build
+    control is a canvas item carrying a "hit" tag rather than a Button."""
+    out = []
+    for canvas in walk(widget):
+        if not isinstance(canvas, tk.Canvas):
+            continue
+        tags = set()
+        for item in canvas.find_all():
+            tags.update(t for t in canvas.gettags(item) if t.startswith("hit"))
+        out.extend((canvas, tag) for tag in sorted(tags))
+    return out
 
-    Matched on the header's DIRECT children only. Searching the header
-    subtree matches the grid container too (its first child is the first card,
-    whose header is one level further down), and the grid holds every button
-    in the window."""
-    for frame in walk(win):
-        if not isinstance(frame, tk.Frame):
+
+def canvas_texts(widget):
+    """Every string drawn on any page inside this window."""
+    out = []
+    for canvas in walk(widget):
+        if not isinstance(canvas, tk.Canvas):
             continue
-        children = frame.winfo_children()
-        if not children or not isinstance(children[0], tk.Frame):
+        for item in canvas.find_all():
+            if canvas.type(item) == "text":
+                value = canvas.itemcget(item, "text")
+                if value:
+                    out.append(str(value))
+    return out
+
+
+def card_for(win, label):
+    """The CANVAS of the card whose own heading names `label`.
+
+    One card is one page on one canvas now, so "which card is this" is
+    answered by looking for the canvas that draws that heading -- much more
+    directly than the old walk over frame headers, which had to be careful not
+    to match the grid container holding every card at once."""
+    for canvas in walk(win):
+        if not isinstance(canvas, tk.Canvas):
             continue
-        for wdg in children[0].winfo_children():
-            try:
-                if str(wdg.cget("text")) == label:
-                    return frame
-            except tk.TclError:
-                continue
+        for item in canvas.find_all():
+            if (canvas.type(item) == "text"
+                    and str(canvas.itemcget(item, "text")) == label.upper()):
+                return canvas
     return None
+
+
+def card_texts(canvas):
+    return [str(canvas.itemcget(i, "text")) for i in canvas.find_all()
+            if canvas.type(i) == "text" and canvas.itemcget(i, "text")]
 
 
 print("\n--- the window builds for both node kinds ---")
@@ -97,15 +126,20 @@ for node in (village, settlement):
     win = build_menu.BuildMenuWindow(_root, w, node, nation)
     win.update_idletasks()
     windows.append(win)
-    all_text = " | ".join(texts(win))
+    all_text = " | ".join(texts(win) + canvas_texts(win))
     assert node.name in all_text, "the window doesn't name the place it is for"
     assert "PRODUCTION" in all_text and "BUILDINGS" in all_text, all_text[:400]
     options = B.build_options(w, node, nation)
+    # Case-insensitive: a card's heading is drawn in small caps (see
+    # parchment.Page.title), so the assertion is that the card is THERE and
+    # named, not that its name is stored in the case it was written in.
+    haystack = all_text.upper()
     for option in options:
-        assert option.label in all_text, f"{option.label} has no card"
-    assert len(buttons(win)) >= 2, "expected at least Close plus one build button"
+        assert option.label.upper() in haystack, f"{option.label} has no card"
+    controls = len(buttons(win)) + len(plaques(win))
+    assert controls >= 2, "expected at least Close plus one build control"
     print(f"  ok    {B.node_kind(node):<10} {node.name:<16} "
-          f"{len(options)} cards, {len(buttons(win))} buttons")
+          f"{len(options)} cards, {controls} controls")
 
 print("\n--- an unaffordable card is disabled, not missing ---")
 win = windows[0]
@@ -113,14 +147,23 @@ opts = {o.building: o for o in B.build_options(w, village, nation)}
 unaffordable = [o for o in opts.values()
                 if o.to_tier is not None and not o.affordable and not o.blocked]
 if unaffordable:
-    labels = [b.cget("text") for b in buttons(win)]
     target = unaffordable[0]
-    match = [b for b in buttons(win)
-             if f"tier {target.to_tier}" in str(b.cget("text"))]
-    assert match, (target.label, labels)
-    assert any(str(b.cget("state")) == "disabled" for b in match), (
-        f"{target.label} is unaffordable but its button is enabled")
-    print(f"  ok    {target.label} unaffordable -> button disabled")
+    card = card_for(win, target.label)
+    assert card is not None, f"{target.label} has no card at all"
+    texts_on_card = " | ".join(card_texts(card))
+    assert f"tier {target.to_tier}" in texts_on_card, texts_on_card
+    # Present but inert: the plaque is drawn and carries no click binding, so
+    # it reads as "this exists and you cannot have it yet" rather than
+    # vanishing (which would read as "this building does not exist").
+    plaque = None
+    for item in card.find_all():
+        if (card.type(item) == "text"
+                and f"tier {target.to_tier}" in str(card.itemcget(item, "text"))):
+            plaque = next((t for t in card.gettags(item)
+                           if t.startswith("hit")), None)
+    assert plaque is None or not card.tag_bind(plaque, "<Button-1>"), (
+        f"{target.label} is unaffordable but its plaque is still clickable")
+    print(f"  ok    {target.label} unaffordable -> plaque drawn, not clickable")
 else:
     print("  --    the player can afford everything here; skipped")
 
@@ -132,7 +175,7 @@ try:
     win = build_menu.BuildMenuWindow(_root, w, village, nation)
     win.update_idletasks()
     windows.append(win)
-    joined = " | ".join(texts(win))
+    joined = " | ".join(texts(win) + canvas_texts(win))
     assert "NEEDED NOW" in joined, "an over-full pool didn't raise an urgent card"
     assert "full of Barley" in joined, "the card doesn't say what is filling it"
     first = B.build_options(w, village, nation)[0]
@@ -154,9 +197,16 @@ try:
     windows.append(win)
     card = card_for(win, "Granary")
     assert card is not None, "no Granary card in the window"
-    granary_btn = next(b for b in buttons(card)
-                       if str(b.cget("state")) != "disabled")
-    granary_btn.invoke()
+    # Click the card's Build plaque the way a player does: fire the binding
+    # its tag carries. (A drawn control has no .invoke(); see
+    # parchment.Page.click, which is what the panel test drives.)
+    plaque = None
+    for item in card.find_all():
+        if card.type(item) == "text" and "tier" in str(card.itemcget(item, "text")):
+            plaque = next((t for t in card.gettags(item)
+                           if t.startswith("hit")), None)
+    assert plaque, "the Granary card has no clickable Build plaque"
+    win._click_card(card, plaque)
     win.update_idletasks()
     after = len(construction._storage_projects(w))
     assert after == before + 1, (before, after)
@@ -167,8 +217,8 @@ try:
     # And the card must now read as under construction rather than offering
     # the same tier a second time.
     card = card_for(win, "Granary")
-    assert "Under construction" in " | ".join(texts(card)), texts(card)
-    assert not [b for b in buttons(card) if "tier" in str(b.cget("text"))], (
+    assert "Under construction" in " | ".join(card_texts(card)), card_texts(card)
+    assert not [t for t in card_texts(card) if "tier" in t], (
         "a building under construction is still offering a Build button")
     opt = next(o for o in B.build_options(w, village, nation)
                if o.building == "granary")
@@ -183,7 +233,7 @@ print("\n--- labour orders ---")
 win = build_menu.BuildMenuWindow(_root, w, village, nation)
 win.update_idletasks()
 windows.append(win)
-joined = " | ".join(texts(win))
+joined = " | ".join(texts(win) + canvas_texts(win))
 assert "Put the hands on:" in joined, joined[:400]
 assert "Apply to:" in joined, joined[:400]
 policy_btns = {str(b.cget("text")): b for b in buttons(win)
@@ -214,7 +264,7 @@ try:
     fresh = R.village_labor_factors(
         w, village, *R._village_terrain_potential(w, village, w.season)[1:])
     assert cached == fresh, (cached, fresh)
-    assert "reassigned" in " | ".join(texts(win)), texts(win)[:8]
+    assert "reassigned" in " | ".join(texts(win) + canvas_texts(win)), texts(win)[:8]
     print(f"  ok    clicking {target} set the policy; the cached split agrees "
           f"with it")
 
@@ -272,7 +322,7 @@ print("\n--- a settlement is offered no labour orders ---")
 win = build_menu.BuildMenuWindow(_root, w, settlement, nation)
 win.update_idletasks()
 windows.append(win)
-assert "Put the hands on:" not in " | ".join(texts(win)), (
+assert "Put the hands on:" not in " | ".join(texts(win) + canvas_texts(win)), (
     "a settlement has no workforce model and must not be offered labour orders")
 print("  ok    settlement window has no labour row")
 
@@ -395,7 +445,7 @@ else:
     construction.start_storage_building(w, nation, village, target.building)
     build_menu.refresh_open(_root)
     reopened.update_idletasks()
-    joined = " | ".join(texts(reopened))
+    joined = " | ".join(texts(reopened) + canvas_texts(reopened))
     assert "Under construction" in joined, joined[:300]
     assert "days left" in joined or "finishes today" in joined, (
         "the countdown should say how much longer, in the days the world "
@@ -405,7 +455,7 @@ else:
         R.advance_turn(w)
         build_menu.refresh_open(_root)
         reopened.update_idletasks()
-    assert " | ".join(texts(reopened)) != first_read, (
+    assert " | ".join(texts(reopened) + canvas_texts(reopened)) != first_read, (
         "two turns passed and the open menu said exactly the same thing")
     print(f"  ok    {target.label} shows a countdown that moves with the turn")
 

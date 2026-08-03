@@ -23,6 +23,7 @@ Tk notes worth keeping, both hit while building this:
 import tkinter as tk
 
 from app.core import audio
+from app.ui import parchment
 from app.ui import theme
 from app.ui import widgets
 from app.world import buildings as B
@@ -267,13 +268,16 @@ class BuildMenuWindow(tk.Toplevel):
                      for o in options)
 
     def _refresh_countdowns(self):
-        """Update just the numbers that tick, without touching the widgets
-        around them. Registered by whatever draws a countdown."""
-        for label, source in list(getattr(self, "_countdowns", ())):
+        """Update just the numbers that tick, without touching anything
+        around them. Registered by whatever draws a countdown -- a
+        (canvas, item) pair now that a card is a drawn page, so the text is
+        set through the canvas rather than on a Label."""
+        for target, source in list(getattr(self, "_countdowns", ())):
             try:
-                if not label.winfo_exists():
+                canvas, item = target
+                if not canvas.winfo_exists():
                     continue
-                label.config(text=source())
+                canvas.itemconfigure(item, text=source())
             except tk.TclError:
                 pass
 
@@ -286,6 +290,7 @@ class BuildMenuWindow(tk.Toplevel):
             return
         self._content_sig = signature
         self._countdowns = []
+        self._card_pages = {}
         self._render_inner()
 
     def _render_inner(self):
@@ -487,41 +492,47 @@ class BuildMenuWindow(tk.Toplevel):
 
     # --- one card --------------------------------------------------------
     def _card(self, parent, option):
+        """One building, as a page of its own.
+
+        A card IS a page -- a small sheet with a heading, a few lines and a
+        plaque at the foot -- so each one gets its own parchment.Page rather
+        than the whole menu being a single column. That keeps the responsive
+        multi-column grid this window has always had, which a single tall page
+        could not do.
+
+        Wrapped in a Frame because the grid manager and .lift() both want an
+        ordinary widget: on a Canvas, lift() is an alias for tag_raise (see
+        map_view's trade log plaque, which found that the hard way)."""
         colour, badge = _PRIORITY.get(option.priority, _PRIORITY["idle"])
-        frame = tk.Frame(parent, bg=theme.PANEL, relief=theme.BORDER_RELIEF,
-                         borderwidth=theme.BORDER_WIDTH,
-                         highlightbackground=colour,
-                         highlightthickness=2 if option.priority == "urgent" else 0)
+        frame = tk.Frame(parent, bg=theme.BG)
+        page = parchment.Page(frame, _CARD_W - 10,
+                              seed=hash(option.building) & 0xFF)
+        page.canvas.pack(fill="both", expand=True)
 
-        head = tk.Frame(frame, bg=theme.PANEL_ALT)
-        head.pack(fill="x")
-        tk.Label(head, text=option.label, bg=theme.PANEL_ALT, fg=theme.ACCENT,
-                 font=theme.FONT_HEADER, anchor="w", padx=8,
-                 pady=4).pack(side="left")
-        tk.Label(head, text=self._tier_pips(option), bg=theme.PANEL_ALT,
-                 fg=theme.INK, font=theme.FONT_SMALL, padx=8).pack(side="right")
-
-        tk.Label(frame, text=badge, bg=theme.PANEL, fg=colour,
-                 font=theme.FONT_SMALL_BOLD, anchor="w"
-                 ).pack(fill="x", padx=8, pady=(4, 0))
+        # Remembered so a caller (and dev/test_build_menu.py) can drive a
+        # card's plaque without a mouse: the canvas is what you find a card
+        # by, and the page is what owns its click handlers.
+        self._card_pages[page.canvas] = page
+        page.begin(300)
+        page.title(option.label, self._tier_pips(option) or None)
+        page.text(badge, fill=colour, font=theme.FONT_SMALL_BOLD)
         if option.reason:
-            tk.Label(frame, text=option.reason, bg=theme.PANEL, fg=theme.INK,
-                     font=theme.FONT_SMALL, anchor="w", justify="left",
-                     wraplength=_CARD_W - 30
-                     ).pack(fill="x", padx=10, pady=(2, 4))
-        tk.Label(frame, text=B.BUILDING_BLURB.get(option.building, ""),
-                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_SMALL,
-                 anchor="w", justify="left", wraplength=_CARD_W - 30
-                 ).pack(fill="x", padx=10, pady=(0, 6))
-
+            page.text(option.reason)
+        blurb = B.BUILDING_BLURB.get(option.building, "")
+        if blurb:
+            page.text(blurb, fill=theme.MUTED)
         for line in option.effects:
-            tk.Label(frame, text="• " + line, bg=theme.PANEL, fg=theme.INK,
-                     font=theme.FONT_SMALL, anchor="w", justify="left",
-                     wraplength=_CARD_W - 34).pack(fill="x", padx=12)
-
-        tk.Frame(frame, bg=theme.LINE, height=1).pack(fill="x", padx=8, pady=(6, 4))
-        self._card_footer(frame, option)
+            page.text("• " + line, indent=4)
+        page.divider()
+        self._card_footer(page, option)
+        page.finish()
         return frame
+
+    def _click_card(self, canvas, tag):
+        """Fire a card's drawn control by tag -- what a click on it does."""
+        page = getattr(self, "_card_pages", {}).get(canvas)
+        if page is not None:
+            page.click(tag)
 
     def _tier_pips(self, option):
         """Tier as filled/empty pips -- a build menu wants to show progress
@@ -550,41 +561,43 @@ class BuildMenuWindow(tk.Toplevel):
                 return self._countdown_text(option)
         return ""
 
-    def _card_footer(self, frame, option):
+    def _card_footer(self, page, option):
         if option.in_progress:
             # Counting DOWN, not up. "3 of 8 turns" makes you do the
             # subtraction yourself every turn; what you actually want to know
             # is how much longer you are waiting.
-            label = tk.Label(frame, text=self._countdown_text(option),
-                             bg=theme.PANEL, fg=theme.WARN,
-                             font=theme.FONT_SMALL_BOLD, anchor="w")
-            label.pack(fill="x", padx=8, pady=(0, 8))
+            item = page.canvas.create_text(
+                parchment.PAD_X + 4, page.y, anchor="nw",
+                text=self._countdown_text(option), fill=theme.WARN,
+                font=theme.FONT_SMALL_BOLD,
+                width=page.width - 2 * parchment.PAD_X)
+            box = page.canvas.bbox(item)
+            page.y += (box[3] - box[1]) + 6
             # Registered so the number can be re-read WITHOUT rebuilding the
             # card around it. This is the half of the signature that ticks --
             # see _content_signature for why it is deliberately not in there.
+            # A canvas item rather than a Label, so the updater sets its text
+            # through the canvas (see _refresh_countdowns).
             building = option.building
-            self._countdowns.append((label, lambda b=building: self._countdown_for(b)))
+            self._countdowns.append(((page.canvas, item),
+                                     lambda b=building: self._countdown_for(b)))
             return
         if option.blocked:
-            tk.Label(frame, text=option.blocked, bg=theme.PANEL, fg=theme.MUTED,
-                     font=theme.FONT_SMALL, anchor="w", justify="left",
-                     wraplength=_CARD_W - 30).pack(fill="x", padx=10, pady=(0, 10))
+            page.text(option.blocked, fill=theme.MUTED)
             return
 
-        tk.Label(frame, text=_format_cost(option.cost), bg=theme.PANEL,
-                 fg=theme.INK if option.affordable else theme.BAD,
-                 font=theme.FONT_SMALL, anchor="w", justify="left",
-                 wraplength=_CARD_W - 30).pack(fill="x", padx=10)
-        tk.Label(frame, text=f"{option.turns} days to build", bg=theme.PANEL,
-                 fg=theme.MUTED, font=theme.FONT_SMALL, anchor="w"
-                 ).pack(fill="x", padx=10, pady=(0, 4))
+        page.text(_format_cost(option.cost),
+                  fill=theme.INK if option.affordable else theme.BAD)
+        page.text(f"{option.turns} days to build", fill=theme.MUTED)
         verb = "Upgrade" if option.current_tier > 0 else "Build"
-        widgets.button(
-            frame, f"{verb} — tier {option.to_tier}",
-            lambda o=option: self._start(o),
-            kind="accent" if option.priority == "urgent" else "default",
-            state="normal" if option.affordable else "disabled",
-        ).pack(fill="x", padx=10, pady=(0, 10))
+        # Drawn either way. An unaffordable building is DISABLED, not missing:
+        # a card with no control on it reads as a building that does not
+        # exist, and knowing what you cannot yet afford is most of what a
+        # build menu is for. dev/test_build_menu.py asserts exactly this.
+        page.button(f"{verb} — tier {option.to_tier}",
+                    lambda o=option: self._start(o),
+                    kind="accent" if option.priority == "urgent" else "default",
+                    enabled=option.affordable)
 
     # --- actions ---------------------------------------------------------
     def _notice(self, message):

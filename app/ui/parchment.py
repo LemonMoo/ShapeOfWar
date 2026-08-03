@@ -443,7 +443,7 @@ class Page:
         seal(self.canvas, PAD_X + 14, self.y + 10, 11, colour)
         self.y += max(28, (box[3] - box[1]) + 10)
 
-    def button(self, text, command, kind="default", width=None):
+    def button(self, text, command, kind="default", width=None, enabled=True):
         """A carved plaque, not a Tk button: a bevelled block on the sheet with
         the word cut into it. Drawn, because a real widget here would put a
         flat grey rectangle in the middle of a page."""
@@ -453,6 +453,13 @@ class Page:
         face = faces.get(kind, faces["default"])
         ink = ("#241a0a" if kind == "accent"
                else theme.INK if kind in ("danger", "success") else pal["ink"])
+        if not enabled:
+            # A plaque that cannot be pressed: the same shape, cut shallower.
+            # PRESENT rather than absent, because "you cannot afford this yet"
+            # is information and a card with no control at all reads as a
+            # building that does not exist. It carries no binding, so there is
+            # nothing to click and no hand cursor to promise otherwise.
+            face, ink = pal["track"], pal["muted"]
         x0 = PAD_X + 4
         x1 = (x0 + width) if width else (self.width - PAD_X - 4)
         y0, y1 = self.y, self.y + 26
@@ -469,7 +476,8 @@ class Page:
                 (tag,), pal)
         fleuron(self.canvas, x1 - 10, (y0 + y1) / 2, 3, pal["gold_dim"],
                 (tag,), pal)
-        self._bind(tag, lambda _e=None: command())
+        if enabled:
+            self._bind(tag, lambda _e=None: command())
         self.y += 32
         return tag
 
