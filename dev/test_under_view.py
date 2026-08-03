@@ -28,7 +28,8 @@ except tk.TclError as exc:
     sys.exit(0)
 root.withdraw()
 
-from app.ui.map_view import MapView, _UNDER_GATE_RGB, _UNDER_KIND_RGB
+from app.ui.map_view import (MapView, _UNDER_GATE_RGB, _UNDER_KIND_RGB,
+                             _UNDER_ROCK, _UNDER_ABOVE_LAND)
 
 
 def noop(*a, **k):
@@ -62,6 +63,22 @@ try:
     assert list(under_img.getdata()) != list(surface_img.getdata()), (
         "the underworld draws exactly the same pixels as the surface")
     print(f"  ok    base key {view._base_key!r}")
+
+    print("\n--- unexplored ground is not drawn at all ---")
+    # Phase 3 put darkness on this raster (app/world/vision.py): a gallery
+    # nobody has carried a lantern down is indistinguishable from the rock
+    # around it, which is why the assertions below have to light the map
+    # first. Rock and unexplored are the SAME pixel here on purpose -- a
+    # greyed-out shape would still tell you a hall was there.
+    dark_img = view._base_img
+    lit_cell = next(iter(world.under_kind))
+    assert dark_img.getpixel(lit_cell) in (_UNDER_ROCK, _UNDER_ABOVE_LAND), (
+        "an unexplored gallery is drawn on the map")
+    world.under_fog = set(world.under_cells)
+    view._base_key = None
+    view._ensure_base()
+    under_img = view._base_img
+    print("  ok    dark until walked, and the whole network once it is")
 
     print("\n--- the raster says what is actually down there ---")
     for (x, y), kind in list(world.under_kind.items())[:400]:

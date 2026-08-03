@@ -146,8 +146,16 @@ try:
     # does.
     view.clock.resume()
     view._set_speed(1.0)
-    view._advance_world(C.SECONDS_PER_DAY)
-    view.runner.step(budget_ms=0.1)
+    # Started explicitly, not by driving the clock for a day's worth of
+    # seconds and hoping the slice budget leaves it part-done: on a fast run
+    # _advance_world finished the whole day and the probe found nothing in
+    # progress. Measured 3 failures in 8 runs BEFORE the underworld work that
+    # turned it up, so this is the same lesson §34 records twice already --
+    # a wall-clock budget is not a thing to hang an assert on. A zero budget
+    # is checked between phases, so exactly one phase runs and the day is
+    # certainly still open.
+    view._begin_day()          # the same entry _advance_world uses, and it is
+    view.runner.step(budget_ms=0.0)   # what leaves _turn_pending for the close
     assert view.runner.busy, "the probe needs a day actually in progress"
     view.runner.stepping = True
     try:

@@ -33,6 +33,7 @@ from app.world.worldgen import (OCEAN, _path_dijkstra, _elev_cost, road_cells,
                                 homeland_affinity)
 from app.world import weather
 from app.world import wrap
+from app.world import layers
 
 # --- the resource registry --------------------------------------------------
 # category + tier (1 raw agricultural/pastoral .. 4 manufactured), per the
@@ -97,6 +98,29 @@ RESOURCES = {
     # so it needs to stay out of any code that assumes "every raw resource
     # has a RESOURCE_SPAWN entry."
     "Fish":     {"category": "Fishing", "tier": 1},
+
+    # Subterranean (SUBTERRANEAN_PLAN phase 4) -- its own category for the
+    # same reason Fishing has one: none of it spawns from a region's biome
+    # shares, so it has to stay out of every code path that assumes a raw
+    # resource has a RESOURCE_SPAWN entry. It is also, genuinely, a different
+    # economy -- a CONVERTER and a LARDER rather than a farm:
+    #
+    #   Guano   the free trickle. Real cave ecosystems run on energy carried
+    #           in from outside, and guano was mined industrially as
+    #           fertiliser. Small, reliable, and what stops a hold deadlocking
+    #           at zero before it has a herd to compost.
+    #   Manure  what the stalls produce, and the substrate the beds actually
+    #           want. The Paris champignonnieres grew on beds of horse manure
+    #           carted down into disused quarries.
+    #   Mushrooms  the food. Fungiculture CONVERTS waste into food; it cannot
+    #           create it, which is why this has no yield of its own anywhere
+    #           in the terrain tables and only ever comes out of a recipe.
+    #   Cave Fish  the floor. Blind cavefish are real and the biomass is
+    #           negligible: poor, reliable, and never enough on its own.
+    "Mushrooms": {"category": "Subterranean", "tier": 1},
+    "Cave Fish": {"category": "Subterranean", "tier": 1},
+    "Guano":     {"category": "Subterranean", "tier": 1},
+    "Manure":    {"category": "Subterranean", "tier": 1},
 
     # Food Products
     "Flour":       {"category": "Food Products", "tier": 3},
@@ -203,6 +227,13 @@ _CATEGORY_PROPERTY_DEFAULTS = {
                            "living": False, "stackable": True,  "luxury": False, "tradable": True},
     "Food Products":       {"edible": True,  "refined": True,  "renewable": True,
                            "living": False, "stackable": True,  "luxury": False, "tradable": True},
+    # Subterranean -- renewable (a bed re-flushes, a colony keeps roosting),
+    # unrefined (Mushrooms are grown, not manufactured -- the substrate is
+    # what is converted, and the recipe that does it is the growing). Not
+    # edible by default, because half the category is muck: Mushrooms and
+    # Cave Fish override it below.
+    "Subterranean":        {"edible": False, "refined": False, "renewable": True,
+                           "living": False, "stackable": True,  "luxury": False, "tradable": True},
     "Manufactured Goods":  {"edible": False, "refined": True,  "renewable": True,
                            "living": False, "stackable": True,  "luxury": False, "tradable": True},
     # Phase 13 -- the first category to ever actually set luxury: True (see
@@ -234,6 +265,8 @@ _PROPERTY_OVERRIDES = {
     # (and to build the Preserving House that does it well) is unchanged --
     # fresh fish simply feeds the village that caught it first.
     "Fish":    {"edible": True},
+    "Mushrooms": {"edible": True},
+    "Cave Fish": {"edible": True},   # landed and eaten, same as Fish above
     "Cotton":  {"edible": False},    # a fiber, not a food
     "Fodder":  {"edible": False},    # animal feed, not human food
     "Bricks":  {"renewable": False},  # fired from Clay -- a Mining (non-renewable) input
@@ -272,6 +305,11 @@ _SPOIL_RATE = {
     # Fishing -- a fresh catch spoils fast (worse than Meat, it's not even
     # butchered/salted yet); Smoked Fish is cured, like Cheese.
     "Fish": 0.35, "Smoked Fish": 0.05,
+    # Subterranean. A fresh mushroom is perishable, though nothing like a
+    # fresh fish; cave fish is a fish. Guano and manure are already the
+    # end of their own decay and keep indefinitely -- which is a large part
+    # of why a substrate economy works at all.
+    "Mushrooms": 0.18, "Cave Fish": 0.35, "Guano": 0.0, "Manure": 0.01,
     # Food Products -- the most perishable tier by far. Milk worst, then
     # Bread ("spoils quickly"), then Meat/Eggs; Cheese is cured/durable;
     # Honey essentially never spoils.
@@ -316,7 +354,7 @@ _SPOIL_RATE = {
 _CATEGORY_BULK = {
     "Crops": 1.0, "Livestock": 1.0, "Forestry": 2.5, "Mining": 1.6,
     "Fishing": 1.0, "Food Products": 1.0, "Manufactured Goods": 1.2,
-    "Luxury Goods": 0.5,
+    "Luxury Goods": 0.5, "Subterranean": 1.0,
 }
 _BULK_OVERRIDES = {
     # Forestry -- raw timber is the bulkiest thing in the game; Resin is sap
@@ -337,6 +375,8 @@ _BULK_OVERRIDES = {
     "Eggs": 1.2, "Honey": 0.6, "Fish": 1.0, "Smoked Fish": 0.8,
     "Salted Meat": 0.9,
     "Cotton": 1.8, "Grapes": 1.2,     # raw fiber and fresh fruit are bulky
+    # Muck is bulky and wet; a basket of mushrooms is not.
+    "Manure": 2.2, "Guano": 1.4, "Mushrooms": 0.9, "Cave Fish": 1.0,
     "Fodder": 2.2,   # baled hay is mostly air -- the bulkiest thing a granary holds
     # Luxury -- small and precious, except Furniture, which is neither.
     "Jewelry": 0.1, "Furniture": 3.0, "Fine Clothes": 0.8, "Books": 0.5,
@@ -1305,7 +1345,12 @@ def compute_industry_yield(region, season):
 PRODUCTION_SECTORS = ("farming", "forestry", "mining", "fishing")
 
 _SECTOR_BY_CATEGORY = {"Crops": "farming", "Forestry": "forestry",
-                       "Mining": "mining", "Fishing": "fishing"}
+                       "Mining": "mining", "Fishing": "fishing",
+                       # Tending the beds, the traps and the guano floor is
+                       # the same work by the same hands that would otherwise
+                       # be in the fields -- and below ground there are no
+                       # fields, so this is what farming MEANS down there.
+                       "Subterranean": "farming"}
 
 # Units of output one worker brings in per turn, by sector -- the calibration
 # knob for the whole system, and the one number to move if total production
@@ -1788,9 +1833,21 @@ def _village_terrain_potential(world, village, season):
     # offer BEFORE the Phase 14 labour limit, so a camp competes with the
     # harvest for hands rather than being free output.
     reach = village_outstation_cells(world, village)
-    crop_counts = biome_counts
+    # NO SUN, NO CROPS (SUBTERRANEAN_PLAN phase 4). Not a modifier: the ground
+    # a hold stands on grows nothing at all, so its own catchment contributes
+    # nothing whatever to the harvest. What a hold CAN farm is the mountainside
+    # above its gates, and that arrives through the outstation reach below like
+    # any other ground worked from somewhere else.
+    #
+    # The INDUSTRY sample is deliberately left reading the surface sample:
+    # those coordinates are the mountain overhead, the existing tables already
+    # gate Iron, Coal, Gold Ore and Gems on mountain and highland, and a
+    # gallery under a range is exactly where that ore is. The underground
+    # inherits a working mining economy rather than needing a new one.
+    under = layers.is_under(region)
+    crop_counts = {} if under else biome_counts
     if reach[OUTSTATION_CROP]:
-        crop_counts = dict(biome_counts)
+        crop_counts = dict(crop_counts)
         for b, cells in reach[OUTSTATION_CROP].items():
             crop_counts[b] = crop_counts.get(b, 0) + cells
     raw = _crop_yield_core(crop_counts, climate, fertility_frac, season)
@@ -1828,6 +1885,23 @@ def _village_terrain_potential(world, village, season):
         industry["Gold Ore"] = round(ore * gold_mine_multiplier(village))
     for resource, amount in industry.items():
         raw[resource] = raw.get(resource, 0) + amount
+
+    # The high pasture above the doors (see GATE_HOLDING_FODDER_PER_CELL).
+    # Added to the crop sample's own sector, so it competes for the same hands
+    # as everything else the terraces grow.
+    if under:
+        terraces = gate_holding_cells(world, village)
+        if terraces > 0:
+            raw["Fodder"] = raw.get("Fodder", 0) + terraces * GATE_HOLDING_FODDER_PER_CELL
+
+    # The sunless floor: guano off the roosts and fish out of the still water.
+    # Poor, reliable, and never enough on its own -- which is the whole point.
+    # It is what stops a hold deadlocking at zero before it has a herd to
+    # compost, and it is the entire diet of a warren that will not terrace a
+    # mountainside (phase 5).
+    if under:
+        for resource, amount in under_floor_yield(world, village, region).items():
+            raw[resource] = raw.get(resource, 0) + amount
 
     # How well these people know this kind of country (phase C). Applied to
     # everything the LAND offers -- crops and industry alike, since knowing
@@ -2361,6 +2435,20 @@ def _region_villages(world, region):
             if 0 <= vid < len(world.villages)]
 
 
+def _under_herd_capacity(world, village, animal):
+    """Head of `animal` a hold can keep, from its terraces alone.
+
+    The same per-cell rate and the same rarity-weighted biome shares every
+    surface village uses -- it is the identical formula with the terrace cells
+    standing in for the region's own land, so a hold's herd is neither a new
+    mechanic nor a better one, just a much smaller field."""
+    cells = gate_holding_cells(world, village)
+    if cells <= 0:
+        return 0.0
+    share = _LIVESTOCK_SHARES_BY_BIOME.get(GATE_HOLDING_BIOME, {}).get(animal, 0.0)
+    return BASE_LIVESTOCK_CAPACITY_PER_CELL * cells * share
+
+
 def village_herd_capacity(world, village, animal):
     """Head of `animal` this village can sustain: its share of the region's
     land-derived carrying capacity (_livestock_capacity, split across the
@@ -2368,7 +2456,24 @@ def village_herd_capacity(world, village, animal):
     whatever Pasture/Stable it has built."""
     region = world.regions[village.region_id]
     villages = getattr(region, "villages", []) or []
-    share = _livestock_capacity(region, animal) / max(1, len(villages))
+    if layers.is_under(region):
+        # A hold's beasts are kept in the stalls and fed off the terraces
+        # above its doors -- there is no pasture underground, so its herd is
+        # bounded by the ONE piece of ground it actually has (phase 4's gate
+        # holding) rather than by the region's biome counts, which for an
+        # underground region are empty. Without this a hold could keep no
+        # animals at all, which breaks the substrate chain at its first link
+        # and leaves the fungus beds running on guano alone: measured over
+        # 200 days, a hold produced 14 Mushrooms in total and lived entirely
+        # off the larder it was born with.
+        #
+        # The terraces count as highland for this, the same reading phase 4
+        # already takes of them (GATE_HOLDING_BIOME): what is up there is a
+        # bench cut into a slope, and highland is what a mountain community
+        # grazed.
+        share = _under_herd_capacity(world, village, animal)
+    else:
+        share = _livestock_capacity(region, animal) / max(1, len(villages))
     share *= herd_building_multiplier(village, "pasture", "capacity")
     if animal == "Horses":
         share *= herd_building_multiplier(village, "stable", "capacity")
@@ -2509,6 +2614,18 @@ def advance_herds(world):
             head -= round(head * _seasonal(spec["death_rate"]) * death_mult)
             capacity = village_herd_capacity(world, village, animal)
             herds[animal] = max(0, min(head, capacity) if capacity else head)
+
+        # Stalls (SUBTERRANEAN_PLAN phase 4): the muck, off the herd as it
+        # stands, exactly like the milk and the wool above -- it is the same
+        # animals. This is the link that makes a hold's beasts worth keeping
+        # for something other than meat, and it is why fungus yield scales
+        # with HERDS rather than with land.
+        stalls = min(storage_tier(village, STALLS), len(STALLS_MANURE_PER_HEAD) - 1)
+        if stalls > 0:
+            head = sum(herds.values())
+            muck = round(head * STALLS_MANURE_PER_HEAD[stalls])
+            if muck:
+                products["Manure"] += muck
 
         if season == "Autumn":
             _autumn_cull(world, village, herds, products)
@@ -2939,7 +3056,13 @@ _RAW_FOOD_FISH = [name for name, spec in RESOURCES.items()
 # draws "Food" from -- Food Products first in priority (see
 # _LOCAL_SHIPMENT_PRIORITY) since that's still the intended normal path,
 # raw Crops and raw Fish as a real fallback, not a last-resort hack.
-_FOOD_SOURCES = _FOOD_PRODUCTS + _RAW_FOOD_CROPS + _RAW_FOOD_FISH
+# What a hold eats (SUBTERRANEAN_PLAN phase 4). Joining this list is the whole
+# integration: the existing pooled consumption then feeds an underground
+# population with no new consumption code at all, which is exactly why the plan
+# put "resources and the loop" first in its build order.
+_RAW_FOOD_UNDER = [name for name, spec in RESOURCES.items()
+                   if spec["category"] == "Subterranean" and spec["edible"]]
+_FOOD_SOURCES = _FOOD_PRODUCTS + _RAW_FOOD_CROPS + _RAW_FOOD_FISH + _RAW_FOOD_UNDER
 # Every Luxury Good is fully interchangeable for satisfying "luxury
 # demand" -- a settlement with Wine but no Jewelry is just as well
 # provided for as one with the reverse -- same pooled-consumption
@@ -3226,6 +3349,9 @@ def _consume_node_needs(node, season, world):
 # _consume_node_needs above -- there's no war-casualty/disease drain), so
 # "starving"/"freezing" already cover every population-decline case, not
 # just a Food/Firewood-specific subset of a broader mechanic.
+RAID_ALERT_DAYS = 6      # how long a raid stays on the alerts panel
+
+
 def node_alerts(node, world):
     """{"kind", "severity" ("warning"/"critical"), "message"} for every
     problem currently active at this settlement/village -- "warning"
@@ -3241,6 +3367,19 @@ def node_alerts(node, world):
         alerts.append({"kind": "food_shortage", "severity": "warning",
                        "message": f"{node.name} has gone without food for {twf} turn"
                                   f"{'s' if twf != 1 else ''}"})
+
+    # Raided out of the mountain (SUBTERRANEAN_PLAN phase 5, app/world/
+    # holds.py). Surfaced through the same pipe as every other node problem
+    # rather than as a new kind of message: a raid IS a problem at this node,
+    # it just came from a door in the hillside rather than from the weather.
+    # It stays up for a few days because a running world scrolls past a
+    # one-day notice -- the same reasoning §34 records for auto-pause.
+    raided = getattr(node, "raided_turn", None)
+    if raided is not None and 0 <= getattr(world, "turn", 0) - raided <= RAID_ALERT_DAYS:
+        took = getattr(node, "raided_amount", 0)
+        alerts.append({"kind": "raided", "severity": "warning",
+                       "message": f"{node.name} was raided from below — "
+                                  f"{took:,} of its stores carried off"})
 
     twfw = getattr(node, "turns_without_firewood", 0)
     if twfw > FREEZE_GRACE_TURNS:
@@ -3441,7 +3580,7 @@ def advance_settlement_consumption(world):
 _SETTLEMENT_STORAGE_RESOURCES = ({name for name, spec in RESOURCES.items()
                                  if spec["category"] in
                                  ("Crops", "Food Products", "Forestry", "Mining",
-                                  "Fishing", "Luxury Goods")}
+                                  "Fishing", "Luxury Goods", "Subterranean")}
                                  | {"Wool", "Cloth", "Clothes", "Leather",
                                     "Planks", "Bricks", "Glass",
                                     "Tools", "Weapons", "Shields", "Paper", "Gold"})
@@ -3578,6 +3717,20 @@ def storage_max_tier(node, building):
         # Herd buildings are village-only: animals live where the fields are,
         # and a walled city is not a pasture.
         return VILLAGE_HERD_MAX_TIER if village else 0
+    if building in (GATE_HOLDING, FUNGUS_GALLERY, STALLS):
+        # The underground three. Village-only for the same reason the
+        # outstations are -- this is work done out at the ground rather than in
+        # a workshop -- except the Fungus Gallery, which a hold's great
+        # settlement runs at a larger scale than any mining village can. The
+        # is-this-node-actually-underground gate needs the world and lives in
+        # buildings.py, the same split the Gold Mine's seam check uses.
+        village = not hasattr(node, "kind")
+        if building == FUNGUS_GALLERY:
+            table = VILLAGE_FUNGUS_CAP if village else FUNGUS_CAP
+            return len(table) - 1
+        if building == GATE_HOLDING:
+            return (len(GATE_HOLDING_CELLS) - 1) if village else 0
+        return (len(STALLS_MANURE_PER_HEAD) - 1) if village else 0
     if building in OUTSTATIONS:
         # Village-only, every member of the family: an outstation is people
         # walking out to ground nobody lives on and carrying the work home,
@@ -3728,6 +3881,10 @@ STORAGE_THROTTLE_FLOOR = 0.15   # multiplier once at/over capacity
 _STORAGE_CLASS_BY_CATEGORY = {
     "Crops": "household", "Food Products": "household", "Fishing": "household",
     "Mining": "durable", "Forestry": "durable", "Manufactured Goods": "durable",
+    # The edible half of it. Manure and Guano are overridden out again below:
+    # a survival good never shares a pool with a bulk good, which is a rule
+    # this file has now had to learn four times (Firewood, Cotton, Fodder).
+    "Subterranean": "household",
 }
 _DURABLE_EXTRA = {"Planks", "Bricks", "Glass", "Tools", "Weapons", "Shields",
                   "Paper", "Cloth", "Clothes", "Leather", "Wool"}
@@ -3743,6 +3900,12 @@ _STORAGE_CLASS_OVERRIDE = {
     # went from 140 to 225. Same rule as before, stated once more: a
     # survival good never shares a pool with a bulk good.
     "Fodder": "feed",
+    # ...and the substrate goes with the hay, for exactly that reason. Manure
+    # is the bulkiest thing in the registry after baled hay, it is the stalls'
+    # output and the beds' input, and it belongs on the same shelf as the
+    # fodder that made it rather than in the pantry.
+    "Manure": "feed",
+    "Guano": "feed",
     "Gold": "other",
     "Firewood": "household",
     # Cotton is registered as a Crop because it's grown, but it is a
@@ -3905,12 +4068,24 @@ def village_local_sample(world, village, region, radius=None):
     biome_counts = defaultdict(int)
     climate_counts = defaultdict(int)
     fert_sum, n = 0.0, 0
+    # Which cells are this node's own (SUBTERRANEAN_PLAN phase 4). The surface
+    # region grid never contains an underground region's id -- the two layers
+    # are stored separately by design (see app/world/layers.py) -- so a hold
+    # sampled through it found no ground at all and offered nothing, ore
+    # included. Underneath, membership is asked of the underground grid, while
+    # the BIOME, CLIMATE and FERTILITY read at those coordinates stay the
+    # surface's: that is the rock overhead, and it is exactly what decides
+    # whether the galleries are cut through an iron range or a chalk one.
+    under = layers.is_under(region)
     for dy in range(-r, r + 1):
         for dx in range(-r, r + 1):
             nx, ny = x + dx, y + dy
             if not (0 <= nx < world.w and 0 <= ny < world.h):
                 continue
-            if world.region_grid[ny][nx] != region.id:
+            if under:
+                if layers.region_at(world, nx, ny, layers.UNDER) != region.id:
+                    continue
+            elif world.region_grid[ny][nx] != region.id:
                 continue
             biome = world.biome_grid[ny][nx]
             if biome:
@@ -4390,7 +4565,264 @@ def village_outstation_cells(world, village):
             if have:
                 share = cells * (have / total)
                 out[sample][b] = out[sample].get(b, 0) + share
+    # The gate holding is the one member of this family that reaches from one
+    # layer to the other, so it cannot be described by a biome list the way
+    # the four surface families are -- its ground is found by walking out from
+    # the doors, not by counting the region's own cells. Same shape otherwise:
+    # cells into the CROP sample, before the labour limit, shared between the
+    # holdings that work them.
+    terraces = gate_holding_cells(world, village)
+    if terraces > 0:
+        out[OUTSTATION_CROP][GATE_HOLDING_BIOME] = (
+            out[OUTSTATION_CROP].get(GATE_HOLDING_BIOME, 0) + terraces)
     return out
+
+
+# --- Phase 4: an economy with no sun ----------------------------------------
+# The underground is a CONVERTER and a LARDER, not a farm. Everything below
+# follows from that one sentence, and every piece of it is something people
+# underground actually did:
+#
+#   * a hold farms the mountainside above its own doors, worked from below --
+#     Derinkuyu kept its stores and its stables underground and farmed on top,
+#     and mountain communities everywhere ran on terraces and high pasture;
+#   * mushrooms CONVERT waste into food and cannot create it -- the Paris
+#     champignonnieres, in disused quarries, grew on beds of horse manure;
+#   * so fungus yield scales with HERDS AND TIMBER, never with land, and the
+#     stalls that feed the beds are the same stalls Cappadocia dug;
+#   * and a cave is the best larder anybody had before refrigeration, which is
+#     what turns the food problem that defines a hold's early game into the
+#     export that defines its late one.
+#
+# What is deliberately NOT here: warrens and hunger-driven raiding, which are
+# the last item in the plan's own build order and need somebody to live in the
+# warrens first (phase 5).
+
+# Ground on the mountainside above a hold's doors: terraces and high pasture,
+# worked from below. Its own cell table rather than the shared OUTSTATION_CELLS
+# one -- and that does NOT break the family's fairness guarantee, because no
+# underground node can build any of the other four (their gate reads
+# region.biome_counts, and an underground region has none) and no surface node
+# can build this one. There is no homeland this makes cheaper to work than
+# another; there is only one kind of node that can have it at all.
+#
+# Smaller than a surface outstation because a terraced mountainside is not a
+# field. It is enough to matter and never enough to be comfortable, which is
+# the whole strategic point: to starve a hold you take its terraces, and that
+# is a surface fight at a gate rather than an abstract siege timer.
+GATE_HOLDING = "gate_holding"
+GATE_HOLDING_CELLS = [0, 16, 30, 48]
+GATE_HOLDING_RADIUS = 4      # cells around a door the holding can work
+# Terraces are cut into the hillside a door opens onto, so they are counted as
+# highland however the surface cell is classed -- what is actually being farmed
+# is a bench cut into a slope, not the mountain's own summit rock.
+GATE_HOLDING_BIOME = "highland"
+# "Terraces AND HIGH PASTURE", and the pasture half has to be explicit: the
+# highland crop shares grow grain, not hay, so a hold's beasts starved every
+# single winter for want of fodder and the substrate chain never got past its
+# first link. Measured over 200 days before this existed -- 20 head at day 50,
+# none at all by day 100, and 14 Mushrooms produced in total.
+#
+# Grounded rather than a patch: transhumance is exactly this. Herds to the high
+# pasture in summer, hay cut and carried down for the winter, and the beasts
+# are what a mountain community actually lived on.
+GATE_HOLDING_FODDER_PER_CELL = 0.55
+
+# The sunless floor. Poor, reliable, never enough: a region's whole guano
+# harvest at these rates feeds a few hundred people, which is below what a real
+# hold needs and exactly what a floor should be. THESE TWO NUMBERS ARE THE KNOB
+# if a hold starves or coasts -- they are a first pass, measured once (see
+# dev/test_under_food.py) and not tuned in play.
+GUANO_PER_CAVERN_CELL = 0.020
+CAVE_FISH_PER_WATER_CELL = 0.055
+# What a warren scrapes off ordinary cavern floor, on top of the above and on
+# top of its own scavenging multiplier. Sized against a real warren rather
+# than picked: at this rate a freshly generated one feeds roughly two thirds
+# of its own people, so it shrinks a little, stays hungry, and raids. THIS IS
+# THE KNOB for how aggressive warrens are, together with holds.RAID_* -- and
+# the failure to watch for is this number landing just below subsistence,
+# which turns a nuisance into a permanent siege.
+WARREN_FORAGE_PER_CAVERN_CELL = 0.002
+
+# The beds. Substrate in, food out, and the ratios are the argument: manure is
+# what a champignonniere actually ran on, guano is richer per unit but there is
+# very little of it, and spent pit timber and sawdust are the worst bed of the
+# three and the one a mining hold has most of.
+FUNGUS_GALLERY = "fungus_gallery"
+FUNGUS_SUBSTRATE = {"Manure": 1.0, "Guano": 0.8, "Logs": 0.35}
+# Units of substrate a gallery can turn over per day, by tier.
+FUNGUS_CAP = [0, 8, 18, 32]
+VILLAGE_FUNGUS_CAP = [0, 5, 11]
+
+# The stalls, which close the loop: beasts kept underground eat fodder off the
+# terraces and produce the substrate the beds want. Manure comes off the herd
+# as it stands, once a season, exactly like milk and wool (see advance_herds) --
+# it is the same animals doing it.
+STALLS = "stalls"
+STALLS_MANURE_PER_HEAD = [0.0, 0.55, 1.10]
+
+# The larder, and the one thing about the underground that is an ADVANTAGE.
+# Stable cool temperature and steady humidity: Roquefort, cave-aged cheese,
+# cave breweries, ice houses. A hold survives a season that breaks a surface
+# realm, can afford to HOLD stock rather than move it -- which is right for a
+# realm at the end of a long haul road -- and eventually exports what it is
+# best at.
+UNDER_SPOIL_MULT = 0.35
+
+
+def _region_under_counts(world, region):
+    """{under kind: cells} for an underground region, cached on it.
+
+    Static after worldgen, and read every turn by every node in the region, so
+    it is cached the same way region adjacency is (see HANDOFF S3 -- that cache
+    is most of where the end-turn speedup came from)."""
+    counts = getattr(region, "_under_counts", None)
+    if counts is not None:
+        return counts
+    counts = {}
+    for x, y in getattr(region, "cells", ()):
+        kind = world.under_kind.get((x, y))
+        if kind:
+            counts[kind] = counts.get(kind, 0) + 1
+    region._under_counts = counts
+    return counts
+
+
+def under_floor_yield(world, village, region):
+    """What the galleries themselves give up, before anybody builds anything.
+
+    Guano off the roosts and blind fish out of the still water -- the two
+    things a real cave ecosystem runs on, both of them fed by energy carried in
+    from outside rather than grown down here. Shared between the nodes of the
+    region for the same reason an outstation's ground is: a colony does not get
+    bigger because two villages both sent people to collect from it."""
+    counts = _region_under_counts(world, region)
+    caverns = counts.get(layers.CAVERN, 0)
+    water = counts.get(layers.WATER, 0)
+    if not caverns and not water:
+        return {}
+    nodes = max(1, len(getattr(region, "villages", ())) +
+                len(getattr(region, "settlements", ())))
+    # A warren scavenges better than anybody -- cave fish, grubs, guano,
+    # carrion. Being good at living on nothing is what "cunning scavengers"
+    # ought to mean, and it is a multiplier on this floor rather than a
+    # mechanic of its own. See app/world/holds.py.
+    from app.world.holds import scavenge_mult, node_is_warren
+    mult = scavenge_mult(world, village)
+    out = {}
+    guano = caverns * GUANO_PER_CAVERN_CELL * mult / nodes
+    fish = water * CAVE_FISH_PER_WATER_CELL * mult / nodes
+    # Grubs, cave crickets, carrion and blind fish out of every damp crack --
+    # not just an open sunless lake. Warrens only, and it is the difference
+    # between a warren being poor and a warren being impossible: guano is
+    # fertiliser, not food, so a network with no standing water fed its
+    # goblins NOTHING AT ALL. Measured before this term existed: a warren went
+    # from 172 people to 48 in fifty days and sat there, on a floor of
+    # literally zero calories.
+    #
+    # Deliberately under subsistence even so (see WARREN_FORAGE_PER_CAVERN_
+    # CELL): poor, reliable, and never enough for the numbers a warren runs,
+    # which is what makes hunger -- and therefore raiding -- the normal state
+    # rather than an event.
+    if node_is_warren(world, village):
+        fish += caverns * WARREN_FORAGE_PER_CAVERN_CELL * mult / nodes
+    if guano > 0:
+        out["Guano"] = guano
+    if fish > 0:
+        out["Cave Fish"] = fish
+    return out
+
+
+def _region_gate_terrace_cells(world, region):
+    """How many surface cells lie within reach of this underground region's own
+    doors -- the ground a gate holding can work. Cached on the region: it is a
+    disc-scan per gate and it cannot change after worldgen."""
+    cached = getattr(region, "_gate_terrace_cells", None)
+    if cached is not None:
+        return cached
+    mouths = {tuple(g["under"]) for g in getattr(world, "gates", ())}
+    own = set(getattr(region, "cells", ())) & mouths
+    total = set()
+    r = GATE_HOLDING_RADIUS
+    for gx, gy in own:
+        for dy in range(-r, r + 1):
+            ny = gy + dy
+            if not (0 <= ny < world.h):
+                continue
+            for dx in range(-r, r + 1):
+                nx = wrap.wrap_x(gx + dx, world.w)
+                # Real, dry, workable ground on the SURFACE above -- a terrace
+                # cut into open water is not a terrace.
+                if world.owner[ny][nx] == OCEAN or (nx, ny) in world.lake_cells:
+                    continue
+                total.add((nx, ny))
+    region._gate_terrace_cells = len(total)
+    return region._gate_terrace_cells
+
+
+def gate_holding_cells(world, village):
+    """How much of the mountainside above its doors this node actually works.
+
+    Same three limits every outstation has -- its own tier, the real ground
+    that exists, and a share of it split between the holdings working it --
+    so a second holding in one hold splits the terraces rather than doubling
+    them."""
+    region = world.regions[village.region_id]
+    if not layers.is_under(region):
+        return 0        # there is nothing to reach DOWN to from the surface
+    tier = min(storage_tier(village, GATE_HOLDING), len(GATE_HOLDING_CELLS) - 1)
+    if tier <= 0:
+        return 0
+    total = _region_gate_terrace_cells(world, region)
+    if total <= 0:
+        return 0        # a sealed hold with no door has no terraces either
+    holdings = sum(1 for vid in getattr(region, "villages", [])
+                   if 0 <= vid < len(world.villages)
+                   and storage_tier(world.villages[vid], GATE_HOLDING) > 0)
+    share = total / max(1, holdings)
+    return int(min(GATE_HOLDING_CELLS[tier], share))
+
+
+def fungus_cap(node):
+    """Units of substrate this node's beds turn over per day, 0 without any."""
+    village = not hasattr(node, "kind")
+    table = VILLAGE_FUNGUS_CAP if village else FUNGUS_CAP
+    return table[min(storage_tier(node, FUNGUS_GALLERY), len(table) - 1)]
+
+
+def advance_fungus_galleries(world):
+    """Substrate into food, once a day, wherever there are beds to do it in.
+
+    BOUNDED BY SUBSTRATE, which is the one property that has to hold: a bed
+    with nothing to compost produces nothing at all, however large it is.
+    Fungiculture converts waste into food and cannot create it, and a fungus
+    farm producing from nothing would be the one thing in this design that was
+    plainly wrong.
+
+    Substrates are taken best-first, so a hold with manure uses manure and
+    falls back to its own spent pit timber when the stalls run dry."""
+    for node in list(world.settlements) + list(world.villages):
+        cap = fungus_cap(node)
+        if cap <= 0:
+            continue
+        res = getattr(node, "resources", None)
+        if not res:
+            continue
+        budget = cap
+        grown = 0.0
+        for substrate, ratio in sorted(FUNGUS_SUBSTRATE.items(),
+                                       key=lambda kv: -kv[1]):
+            if budget <= 0:
+                break
+            have = res.get(substrate, 0)
+            used = int(min(have, budget))
+            if used <= 0:
+                continue
+            res[substrate] = have - used
+            budget -= used
+            grown += used * ratio
+        if grown >= 1:
+            res["Mushrooms"] = res.get("Mushrooms", 0) + int(grown)
 
 
 def gold_mine_multiplier(node):
@@ -4843,18 +5275,24 @@ def advance_preservation(world):
         _preserve_at_node(node)
 
 
-def _apply_settlement_spoilage_and_overflow(node):
+def _apply_settlement_spoilage_and_overflow(node, spoil_mult=1.0):
     """Spoil this settlement's or village's own storage at each resource's
     real registry spoil_rate, then -- if total stock is over capacity --
     decay the overage further on top of that (see the Phase 9 section
     docstring for the full reasoning), tapering off as the overflow
-    shrinks back toward the limit instead of an instant cutoff."""
+    shrinks back toward the limit instead of an instant cutoff.
+
+    `spoil_mult` is the larder (SUBTERRANEAN_PLAN phase 4): stock held below
+    ground keeps far better, because a cave is the best larder anybody had
+    before refrigeration. It scales the registry rate only -- the overflow
+    decay below is a separate mechanic about a store packed past its limit,
+    and a cool cellar does not make an overfull one any roomier."""
     res = getattr(node, "resources", None)
     if not res:
         return
 
     for resource in list(res.keys()):
-        rate = RESOURCES.get(resource, {}).get("spoil_rate", 0.0)
+        rate = RESOURCES.get(resource, {}).get("spoil_rate", 0.0) * spoil_mult
         if rate:
             res[resource] = int(res[resource] * (1 - rate))
 
@@ -4898,10 +5336,19 @@ def advance_settlement_storage(world):
     settlement's *and* village's own storage -- Villages have real storage
     of their own as of Phase 10 (see the Village class), no longer exempt
     the way they used to be."""
-    for settlement in world.settlements:
-        _apply_settlement_spoilage_and_overflow(settlement)
-    for village in world.villages:
-        _apply_settlement_spoilage_and_overflow(village)
+    for node in list(world.settlements) + list(world.villages):
+        _apply_settlement_spoilage_and_overflow(node, node_spoil_mult(world, node))
+
+
+def node_spoil_mult(world, node):
+    """The larder: how fast this node's stock spoils, relative to the same
+    stock on the surface. 1.0 everywhere above ground, UNDER_SPOIL_MULT in a
+    hold -- and this is the mechanic that turns the underground's food problem
+    into its late-game export."""
+    rid = getattr(node, "region_id", None)
+    if rid is None or not (0 <= rid < len(world.regions)):
+        return 1.0
+    return UNDER_SPOIL_MULT if layers.is_under(world.regions[rid]) else 1.0
 
 
 # --- Phase 10: local logistics -----------------------------------------------
@@ -6423,6 +6870,7 @@ def day_steps(world):
 
     advance_production_chains(world)
     advance_settlement_production_chains(world)
+    advance_fungus_galleries(world)         # substrate into food, in the beds
     _record_gold(world, "minted", _gold_mark)   # Gold struck from Gold Ore
     _gold_mark = _gold_snapshot(world)
     yield "workshops"
@@ -6435,6 +6883,14 @@ def day_steps(world):
     _update_prosperity(world, production_value, consumption_value)
     _grow_city_villages(world)
     yield "prosperity"
+
+    # Hungry warrens come up through the doors (app/world/holds.py). After
+    # consumption, because hunger is what triggers it and consumption is what
+    # decides whether they are hungry -- a raid is this day's answer to this
+    # day's empty store, not yesterday's.
+    from app.world.holds import advance_raids
+    advance_raids(world)      # marks its victims; see node_alerts
+    yield "raids"
 
     # Autonomous trade (app/world/trade.py): move existing caravans first —
     # freeing a faction's trade "slot" on delivery — then let factions

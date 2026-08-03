@@ -25,6 +25,7 @@ Two things it deliberately does NOT do:
     without a second registry to keep in step.
 """
 from app.world import construction
+from app.world import layers
 from app.world import resources
 
 
@@ -92,6 +93,9 @@ BUILDING_CATEGORY = {
     resources.WOODCUTTERS_CAMP: "Industry",
     resources.GRANGE: "Industry",
     resources.WORKINGS: "Industry",
+    resources.GATE_HOLDING: "Food",
+    resources.FUNGUS_GALLERY: "Food",
+    resources.STALLS: "Livestock",
 }
 
 BUILDING_BLURB = {
@@ -127,6 +131,16 @@ BUILDING_BLURB = {
     resources.WORKINGS:
         "A camp out at whatever this region has worth taking out of the "
         "ground -- stone, sand, salt, clay, peat.",
+    resources.GATE_HOLDING:
+        "Terraces and high pasture on the mountainside above this hold's "
+        "doors, worked from below. The only ground a hold can farm — and the "
+        "ground an enemy takes to starve it.",
+    resources.FUNGUS_GALLERY:
+        "Beds of manure, guano and spent pit timber, turned into food. "
+        "It converts waste; it cannot make something from nothing.",
+    resources.STALLS:
+        "Beasts kept below, out of the weather. Their muck is what the "
+        "mushroom beds run on.",
 }
 
 # Ore on hand at a settlement above which a Mint is plainly the bottleneck,
@@ -420,10 +434,69 @@ def _outstation_verdict(world, node, building):
             f"{'s' if camps != 1 else ''}.", score)
 
 
+_UNDERGROUND_BUILDINGS = (resources.GATE_HOLDING, resources.FUNGUS_GALLERY,
+                          resources.STALLS)
+
+
+def _node_is_under(world, node):
+    rid = getattr(node, "region_id", None)
+    if rid is None or not (0 <= rid < len(world.regions)):
+        return False
+    return layers.is_under(world.regions[rid])
+
+
+def _gate_holding_verdict(world, node):
+    """The terraces above the doors -- and the first thing a hold should build,
+    because nothing else it can build feeds anybody."""
+    cells = resources._region_gate_terrace_cells(world, world.regions[node.region_id])
+    if cells <= 0:
+        return "idle", "This hold has no door to farm above.", 0.0
+    if not resources.storage_tier(node, resources.GATE_HOLDING):
+        return ("urgent",
+                f"{cells:,} cells of mountainside above this hold's doors, "
+                f"and nothing growing on them.", 1.0)
+    worked = resources.gate_holding_cells(world, node)
+    if worked >= cells:
+        return "idle", "Every terrace above the doors is already worked.", 0.0
+    return "useful", f"{cells:,} cells of terrace above the doors.", 0.6
+
+
+def _fungus_verdict(world, node):
+    """Beds are worth what there is to compost -- which is the entire claim
+    the fungus loop makes, so it is also how the AI should judge them."""
+    res = getattr(node, "resources", None) or {}
+    substrate = sum(res.get(s, 0) for s in resources.FUNGUS_SUBSTRATE)
+    if resources.fungus_cap(node) <= 0:
+        if substrate <= 0:
+            return ("useful",
+                    "Nothing to compost yet, but the beds are how a hold eats.",
+                    0.4)
+        return ("urgent", f"{substrate:,} units of substrate and no beds to "
+                          f"put it in.", 1.0)
+    if substrate <= resources.fungus_cap(node):
+        return "idle", "The beds already turn over more than there is to feed them.", 0.0
+    return "useful", f"{substrate:,} units of substrate waiting on bed space.", 0.5
+
+
+def _stalls_verdict(world, node):
+    head = sum((getattr(node, "herds", None) or {}).values())
+    if head <= 0:
+        return "idle", "No beasts down here to stall.", 0.0
+    return ("useful" if resources.storage_tier(node, resources.STALLS) else "urgent",
+            f"{head:,} head kept below, and their muck is what the beds want.",
+            min(1.0, head / 40))
+
+
 def _verdict(world, node, building):
     """(priority, reason, score) -- does THIS node want THIS building?"""
     if building in resources.OUTSTATIONS:
         return _outstation_verdict(world, node, building)
+    if building == resources.GATE_HOLDING:
+        return _gate_holding_verdict(world, node)
+    if building == resources.FUNGUS_GALLERY:
+        return _fungus_verdict(world, node)
+    if building == resources.STALLS:
+        return _stalls_verdict(world, node)
     if building == resources.CARTOGRAPHER:
         return _cartographer_verdict(world, node)
     if building == resources.MINT:
@@ -470,6 +543,27 @@ def _storage_effect_lines(node, building, to_tier):
             lines.append("Iron · Coal · Copper · Tin · Stone · Gems · Gold Ore")
             lines.append("Dug by this village's own hands — it competes with "
                          "the harvest")
+    if building == resources.GATE_HOLDING and to_tier is not None:
+        table = resources.GATE_HOLDING_CELLS
+        if to_tier < len(table):
+            now = table[min(resources.storage_tier(node, building), len(table) - 1)]
+            lines.append(f"Farms {table[to_tier]} cells of mountainside above "
+                         f"this hold's doors  (now {now})")
+            lines.append("The only crops and fodder a hold has — and they can "
+                         "be taken from above")
+    if building == resources.FUNGUS_GALLERY and to_tier is not None:
+        table = (resources.VILLAGE_FUNGUS_CAP if node_kind(node) == "village"
+                 else resources.FUNGUS_CAP)
+        if to_tier < len(table):
+            now = table[min(resources.storage_tier(node, building), len(table) - 1)]
+            lines.append(f"Composts up to {table[to_tier]} units of substrate "
+                         f"a day  (now {now})")
+            lines.append("Manure · Guano · Logs — and nothing at all without them")
+    if building == resources.STALLS and to_tier is not None:
+        table = resources.STALLS_MANURE_PER_HEAD
+        if to_tier < len(table):
+            lines.append(f"{table[to_tier]:g} Manure a season from every head "
+                         f"kept here")
     if building == resources.GOLD_MINE and to_tier is not None:
         table = resources.GOLD_MINE_YIELD_MULT
         if to_tier < len(table):
@@ -539,6 +633,7 @@ def _all_buildings(node):
             order.append(herd_building)
     order += [resources.MINING_CAMP, resources.WOODCUTTERS_CAMP,
               resources.GRANGE, resources.WORKINGS,
+              resources.GATE_HOLDING, resources.FUNGUS_GALLERY, resources.STALLS,
               resources.GOLD_MINE, resources.MINT, resources.CARTOGRAPHER]
     if node_kind(node) == "settlement":
         order.append("shipyard")
@@ -608,6 +703,14 @@ def build_options(world, node, nation):
         if (building in resources.OUTSTATIONS
                 and not resources.storage_tier(node, building)
                 and not resources.has_region_outstation_land(world, node, building)):
+            continue
+        # The underground three only exist below ground, and a card offering a
+        # fungus gallery to a farming village on the plains is worse than
+        # noise -- it is a mechanic advertised where it cannot be used. Same
+        # drop-it-entirely treatment as the Gold Mine's seam.
+        if (building in _UNDERGROUND_BUILDINGS
+                and not resources.storage_tier(node, building)
+                and not _node_is_under(world, node)):
             continue
         current = resources.storage_tier(node, building)
         max_tier = resources.storage_max_tier(node, building)

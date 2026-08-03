@@ -16,6 +16,7 @@ import math
 from collections import deque
 
 from app.world import wrap
+from app.world import layers as L
 
 VISION_MIN = 6      # reveal radius (world cells) at owned_frac == 0
 VISION_MAX = 40     # reveal radius at owned_frac == FULL_VISION_THRESHOLD
@@ -26,6 +27,26 @@ CARAVAN_VISION_RADIUS = 7   # much smaller than a scouting Commander's (see
                             # isn't scouting, it's just passing through, but
                             # its crew still sees more than the single cell
                             # it's standing on right now
+
+# --- darkness (SUBTERRANEAN_PLAN phase 3) ------------------------------------
+# Underground fog is a SET of revealed cells, not a second bytearray: the
+# underworld is a fraction of a per cent of the map (see app/world/layers.py on
+# why every underground store is sparse), and a full-map buffer for it would be
+# 726,000 bytes to hold a few thousand answers.
+#
+# It is also a genuinely different mechanic from the surface's, not the same
+# one with a smaller number. Above ground you see as far as the light reaches;
+# below it there is no light at all, and what you can see is how far down the
+# passage you have actually carried one. So this is a WALK through open
+# passage, never a radius: two galleries a single cell of rock apart are not in
+# sight of each other, which is exactly the property that makes exploring down
+# there an undertaking rather than a formality.
+UNDER_VISION_RADIUS = 3    # steps of open passage a column lights around itself
+UNDER_HOLD_RADIUS = 2      # ...and around ground it already holds: a realm
+                           # knows its own halls and the mouth of the next one
+UNDER_GATE_PEEK = 2        # how far in you can see through a door you are
+                           # standing at. Enough to know whether the way is a
+                           # hall or a hole, and no more.
 
 ROUTE_REVEAL_RADIUS = 3    # corridor width (flat square, not a BFS -- a road/
                            # trade route can run hundreds of cells long, so a
@@ -86,12 +107,116 @@ def init_fog(world):
     world.fog_version = 0
     world.fog_fully_revealed = False
     world.discovered_factions = set()
+    ensure_under_fog(world)  # darkness, see recompute_under
     world.fog_bbox = None    # (x0, y0, x1, y1) of everything ever revealed —
                               # see recompute(); lets the world-view camera
                               # zoom out to "as far as discovered" instead of
                               # the whole (mostly-unrevealed) map.
     if world.player_faction_idx is not None:
         recompute(world)
+
+
+def ensure_under_fog(world):
+    """Give `world` its underground fog set if it has none. Same shape as
+    layers.ensure_layers: a world saved before darkness existed comes back as
+    one nobody has been below in, which is what it was."""
+    if not hasattr(world, "under_fog"):
+        world.under_fog = set()
+    return world.under_fog
+
+
+def under_revealed(world, x, y):
+    """Whether the player has been shown this underground cell.
+
+    True unconditionally in a sandbox world with no player faction, matching
+    _cell_revealed's own answer above ground -- fog is the player's alone, and
+    where there is no player there is nothing to hide it from."""
+    if world.player_faction_idx is None:
+        return True
+    fog = getattr(world, "under_fog", None)
+    if fog is None:
+        return False
+    return (x, y) in fog
+
+
+def _light_from(world, seeds, radius, reveal):
+    """Reveal every underground cell within `radius` steps of open passage of
+    any of `seeds`. A shared depth-capped BFS over layers.open_neighbours, so
+    light never crosses rock and never crosses a gate -- see that function."""
+    dist = {}
+    frontier = deque()
+    for p in seeds:
+        if p not in dist:
+            dist[p] = 0
+            frontier.append(p)
+            reveal(p)
+    while frontier:
+        x, y = frontier.popleft()
+        d = dist[(x, y)]
+        if d >= radius:
+            continue
+        for nx, ny, _lay in L.open_neighbours(world, x, y, L.UNDER):
+            if (nx, ny) not in dist:
+                dist[(nx, ny)] = d + 1
+                frontier.append((nx, ny))
+                reveal((nx, ny))
+
+
+def recompute_under(world):
+    """What the player can see below ground, this day.
+
+    Monotonic like the surface's fog, and cheap for the same reason it is
+    sparse: the seeds are the player's own underground regions, his commanders
+    who have actually gone down, and any door he is standing at. A realm with
+    nothing underground and nobody near a gate does no work here at all.
+
+    Returns True if anything new was revealed."""
+    if world.player_faction_idx is None:
+        return False
+    # A world saved before the underworld existed has no gates and no cells to
+    # light; give it the empty ones rather than making every reader guard.
+    L.ensure_layers(world)
+    fog = ensure_under_fog(world)
+    before = len(fog)
+    player_idx = world.player_faction_idx
+
+    def reveal(p):
+        fog.add(p)
+
+    # Ground the realm holds, and the passage immediately off it.
+    held = []
+    for cid in world.factions[player_idx].meta.get("regions", []):
+        region = world.regions[cid]
+        if L.is_under(region):
+            held.extend(region.cells)
+    if held:
+        _light_from(world, held, UNDER_HOLD_RADIUS, reveal)
+
+    # A column that has gone down, lighting its own way.
+    below = [tuple(cmd.pos) for cmd in world.commanders
+             if cmd.faction_idx == player_idx
+             and getattr(cmd, "layer", 0) == L.UNDER]
+    if below:
+        _light_from(world, below, UNDER_VISION_RADIUS, reveal)
+
+    # ...and a look through a door he is standing at from the other side. A
+    # gate is visible on the surface map whether or not anyone has been in it
+    # (see map_view's gate markers -- a door you cannot find is a door that
+    # does not exist); what is behind it is not.
+    at_gates = []
+    for cmd in world.commanders:
+        if cmd.faction_idx != player_idx or getattr(cmd, "layer", 0) != L.SURFACE:
+            continue
+        gate = L.gate_at(world, cmd.pos[0], cmd.pos[1], L.SURFACE)
+        if gate is not None:
+            at_gates.append(tuple(gate["under"]))
+    if at_gates:
+        _light_from(world, at_gates, UNDER_GATE_PEEK, reveal)
+
+    if len(fog) == before:
+        return False
+    world.fog_version = getattr(world, "fog_version", 0) + 1
+    return True
 
 
 def fog_mask_bytes(world):
@@ -117,7 +242,16 @@ def recompute(world):
     one-time full-map reveal once owned_frac clears FULL_VISION_THRESHOLD,
     which happens at most once since fog is monotonic (guarded by
     fog_fully_revealed so it doesn't re-scan every turn after that)."""
-    if world.player_faction_idx is None or world.fog_fully_revealed:
+    if world.player_faction_idx is None:
+        return
+    # Darkness is its own fog and is deliberately NOT covered by the
+    # full-map reveal below: holding three quarters of the surface tells you
+    # nothing whatever about the inside of a mountain, and the whole point of
+    # phase 3 is that the underworld has to be walked to be known. If that
+    # ever reads as tedious in a late-game world the lever is here, and it is
+    # one line.
+    recompute_under(world)
+    if world.fog_fully_revealed:
         return
     w, h = world.w, world.h
     fog = world.fog

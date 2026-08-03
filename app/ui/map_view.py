@@ -22,6 +22,7 @@ from PIL import Image, ImageTk
 
 from app.core import audio
 from app.core import clock
+from app.ui import parchment
 from app.ui import theme
 from app.ui import widgets
 from app.world.world_map import Stance
@@ -531,6 +532,10 @@ _RESOURCE_GROUP = {
     "Crops": "Food", "Food Products": "Food", "Fishing": "Food",
     "Forestry": "Industry", "Mining": "Industry", "Manufactured Goods": "Industry",
     "Luxury Goods": "Luxury", "Livestock": "Livestock",
+    # Mushrooms and cave fish are food; the muck they grow on is not, but it
+    # belongs beside them rather than in a group of its own -- the whole
+    # category exists to feed a hold.
+    "Subterranean": "Food",
 }
 _RESOURCE_GROUP_ORDER = ("Food", "Industry", "Luxury", "Livestock", "Other")
 # Goods a realm dies without. Low stock of these is promoted above the groups,
@@ -1617,21 +1622,14 @@ class MapView(tk.Frame):
         entirely (via place_forget) when there's nothing wrong."""
         self._alerts_open = True
         self._alerts_expanded = set()
-        self.alerts_frame = tk.Frame(self, bg=theme.ALERT_BG,
-                                     highlightbackground=theme.BAD,
-                                     highlightthickness=1, width=_ALERTS_PANEL_W)
-        header = tk.Frame(self.alerts_frame, bg=theme.PANEL)
-        header.pack(fill="x")
-        self._alerts_header_lbl = tk.Label(
-            header, text="ALERTS", bg=theme.PANEL, fg=theme.BAD,
-            font=theme.FONT_HEADER)
-        self._alerts_header_lbl.pack(side="left", padx=8, pady=4)
-        close = tk.Label(header, text="✕", bg=theme.PANEL, fg=theme.MUTED,
-                         font=theme.FONT_SMALL, cursor="hand2")
-        close.pack(side="right", padx=8)
-        close.bind("<Button-1>", lambda e: self._toggle_alerts())
-        self._alerts_rows_frame = tk.Frame(self.alerts_frame, bg=theme.ALERT_BG)
-        self._alerts_rows_frame.pack(fill="both", expand=True, padx=4, pady=(2, 6))
+        # A DRAWN page rather than a stack of Labels (app/ui/parchment.py).
+        # This panel is the one the player reads under pressure -- something is
+        # already going wrong when it is on screen -- so it is the one that
+        # most wants a wax seal beside each line instead of a coloured word.
+        self.alerts_frame = tk.Frame(self, bg=theme.PANEL, width=_ALERTS_PANEL_W)
+        self._alerts_page = parchment.Page(self.alerts_frame, _ALERTS_PANEL_W,
+                                           seed=5)
+        self._alerts_page.canvas.pack(fill="both", expand=True)
 
         # Badge that takes the panel's place once it's dismissed, so alerts can
         # always be brought back and their count stays visible meanwhile.
@@ -1688,8 +1686,7 @@ class MapView(tk.Frame):
         player across 4 distinct kinds, and 1,088 map-wide. Grouping turns
         that into four lines that name every problem, and the detail is one
         click away."""
-        for w in self._alerts_rows_frame.winfo_children():
-            w.destroy()
+        page = self._alerts_page
         alerts = self._current_alerts
         if not alerts or not getattr(self, "_alerts_open", True):
             self.alerts_frame.place_forget()
@@ -1703,36 +1700,26 @@ class MapView(tk.Frame):
                          key=lambda kv: (0 if any(x["severity"] == "critical"
                                                   for x in kv[1]) else 1,
                                          -len(kv[1])))
-        self._alerts_header_lbl.config(text=f"ALERTS ({len(alerts)})")
+        page.begin(400)
+        page.title("Alerts", f"{len(alerts)} standing against your realm")
         for kind, items in ordered:
             critical = any(x["severity"] == "critical" for x in items)
-            colour = theme.BAD if critical else self._ALERT_WARN_COLOR
             expanded = kind in self._alerts_expanded
             label = self._ALERT_GROUP_LABEL.get(kind, kind.replace("_", " "))
-            arrow = "▾" if expanded else "▸"
-            head = tk.Label(self._alerts_rows_frame,
-                            text=f"{arrow} {len(items)}   {label}",
-                            bg=theme.ALERT_BG, fg=colour, anchor="w", justify="left",
-                            font=theme.FONT_SMALL_BOLD, cursor="hand2",
-                            wraplength=_ALERTS_PANEL_W - 24)
-            head.pack(fill="x", pady=1)
-            head.bind("<Button-1>", lambda e, k=kind: self._toggle_alert_group(k))
+            page.alert_group(f"{len(items)}   {label}", expanded,
+                             "critical" if critical else "warning",
+                             lambda k=kind: self._toggle_alert_group(k))
             if not expanded:
                 continue
             for a in items[:self._ALERTS_MAX_VISIBLE]:
-                row = tk.Button(self._alerts_rows_frame,
-                                text="    " + a["node"].name,
-                                command=lambda n=a["node"]: self._jump_to_alert_node(n),
-                                bg=theme.ALERT_BG, fg=theme.MUTED, activebackground=theme.ALERT_BG_HOVER,
-                                activeforeground=colour, relief="flat", anchor="w",
-                                justify="left", font=theme.FONT_SMALL,
-                                cursor="hand2", bd=0, highlightthickness=0)
-                row.pack(fill="x")
+                page.entry(a["node"].name,
+                           lambda n=a["node"]: self._jump_to_alert_node(n))
             extra = len(items) - self._ALERTS_MAX_VISIBLE
             if extra > 0:
-                tk.Label(self._alerts_rows_frame, text=f"    + {extra} more",
-                         bg=theme.ALERT_BG, fg=theme.MUTED, font=theme.FONT_SMALL,
-                         anchor="w").pack(fill="x")
+                page.kv("", f"+ {extra} more", indent=18)
+        page.gap(2)
+        page.button("Dismiss", self._toggle_alerts)
+        page.finish()
         self.alerts_frame.place(relx=0.0, rely=0.0, anchor="nw",
                                 x=_LEFT_PANEL_W if not getattr(self, "_left_collapsed", False)
                                 else _EDGE_TAB_W, y=0)
@@ -2707,10 +2694,9 @@ class MapView(tk.Frame):
         # unclipped line would give away where he is going through country you
         # cannot see).
         for cmd in wd.commanders:
-            path = getattr(cmd, "path", None)
-            if not path:
+            if not getattr(cmd, "path", None):
                 continue
-            remaining = path[cmd.path_index:]
+            remaining = self._visible_route(cmd)
             if len(remaining) < 2:
                 continue
             mine = player_idx is not None and cmd.faction_idx == player_idx
@@ -2718,7 +2704,7 @@ class MapView(tk.Frame):
                 colour = _GL_RGB[_COMMANDER_STYLE["fill"]]
                 width = lw(2.0, 0.19)
             else:
-                if not self._cell_revealed(*self._display_cell(cmd)):
+                if not self._on_layer(cmd) or not self._revealed_here(*self._display_cell(cmd)):
                     continue
                 colour = _GL_RGB[wd.factions[cmd.faction_idx].color]
                 width = lw(1.5, 0.14)
@@ -2847,14 +2833,14 @@ class MapView(tk.Frame):
                     12.0, _GL_LABEL_COLOR, -10.0)
         else:
             add([(st.name, st.pos) for st in wd.settlements
-                 if self._cell_revealed(*st.pos)],
+                 if self._node_visible(st)],
                 12.0, _GL_LABEL_COLOR, 14.0)
             # Village names only once there are few enough to read. The whole
             # facing hemisphere of a developed realm is hundreds of them, which
             # is label soup rather than information -- the same reason the flat
             # map gates them on _VILLAGE_LABEL_LIMIT.
             villages = [(v.name, v.pos) for v in wd.villages
-                        if self._cell_revealed(*v.pos)]
+                        if self._node_visible(v)]
             if villages:
                 count = (int(cull([pos for _, pos in villages]).sum())
                          if cull is not None else len(villages))
@@ -2943,10 +2929,10 @@ class MapView(tk.Frame):
         # matching _draw_settlements' own shape-per-kind exactly.
         if self.zoom_faction is not None:
             sids = [sid for sid in self.zoom_faction.meta.get("settlements", [])
-                    if self._cell_revealed(*wd.settlements[sid].pos)]
+                    if self._node_visible(wd.settlements[sid])]
         else:
             sids = [s.id for s in wd.settlements if s.kind == "city"
-                    and self._cell_revealed(*s.pos)]
+                    and self._node_visible(s)]
         for sid in sids:
             st = wd.settlements[sid]
             style = _SETTLE_STYLE[st.kind]
@@ -2960,7 +2946,7 @@ class MapView(tk.Frame):
             zf = wd.factions.index(self.zoom_faction)
             r = self._marker_radius(_VILLAGE_STYLE["base"])
             for v in wd.villages:
-                if v.faction_idx != zf:
+                if v.faction_idx != zf or not self._node_visible(v):
                     continue
                 if v is self.selected_village:
                     ring(v.pos[0] + 0.5, v.pos[1] + 0.5, r)
@@ -2970,11 +2956,13 @@ class MapView(tk.Frame):
         # Commanders: diamond, player's own kept orchid.
         cr = _COMMANDER_STYLE["r"]
         for cmd in wd.commanders:
+            if not self._on_layer(cmd):
+                continue        # gone below, or still up there
             mine = cmd.faction_idx == wd.player_faction_idx
             if mine:
                 color = _GL_RGB[_COMMANDER_STYLE["fill"]]
             else:
-                if not self._cell_revealed(*self._display_cell(cmd)):
+                if not self._revealed_here(*self._display_cell(cmd)):
                     continue
                 color = _GL_RGB[wd.factions[cmd.faction_idx].color]
             cx, cy = self._display_pos(cmd)
@@ -3573,6 +3561,54 @@ class MapView(tk.Frame):
         e.g. mid-click."""
         wd = self.world
         return wd.player_faction_idx is not None and hasattr(wd, "fog")
+
+    def _on_layer(self, obj):
+        """Whether this thing is on the layer currently being looked at.
+
+        Two ways to answer it, and both are needed. A mover carries its own
+        layer, because a commander walks between them (phase 3). A settlement
+        or village never moves, so its layer is its region's -- and as of
+        phase 5 there are real holds and warrens down there, so this is no
+        longer a question only movers ask."""
+        own = getattr(obj, "layer", None)
+        if own is not None:
+            return own == self.layer
+        rid = getattr(obj, "region_id", None)
+        if rid is not None and 0 <= rid < len(self.world.regions):
+            return layers.region_layer(self.world.regions[rid]) == self.layer
+        return self.layer == layers.SURFACE
+
+    def _node_visible(self, node):
+        """On this layer, and somewhere the player has actually seen. One call,
+        because every marker path needs both and the fog question is different
+        on each layer (see _revealed_here)."""
+        return self._on_layer(node) and self._revealed_here(*node.pos)
+
+    def _revealed_here(self, x, y):
+        """Fog on whichever layer is being looked at. Above ground that is the
+        ordinary fog of war; below it, darkness (vision.under_revealed) --
+        two different mechanics, and the surface's answer is meaningless for a
+        cell under a mountain."""
+        if self.layer == layers.UNDER:
+            from app.world.vision import under_revealed
+            return under_revealed(self.world, x, y)
+        return self._cell_revealed(x, y)
+
+    def _visible_route(self, cmd):
+        """The stretch of a commander's remaining march that is on the layer
+        being looked at -- the first contiguous run of it, so a march that
+        goes down through a gate is drawn up to the door on the surface and
+        onward from the door below, rather than as one line that teleports."""
+        from app.world.commander import path_layer_at
+        path = cmd.path or ()
+        out = []
+        for i in range(cmd.path_index, len(path)):
+            if path_layer_at(cmd, i) != self.layer:
+                if out:
+                    break
+                continue
+            out.append(path[i])
+        return out
 
     def _cell_revealed(self, x, y):
         """True if fog isn't currently gating the view, or this specific
@@ -5396,7 +5432,7 @@ class MapView(tk.Frame):
             # --- COMMANDER MOVE: next click of any kind is the destination -
             cmd = self.commander_move_mode
             self.commander_move_mode = None
-            msg = commander.set_move_order(wd, cmd, (gx, gy))
+            msg = commander.set_move_order(wd, cmd, (gx, gy), self.layer)
             self.show_bottom_message(msg)
             if self.selected_commander is cmd:
                 self._show_commander(cmd)
@@ -5421,7 +5457,7 @@ class MapView(tk.Frame):
         if player is not None:
             player_idx = wd.factions.index(player)
             for cmd in wd.commanders:
-                if cmd.faction_idx != player_idx:
+                if cmd.faction_idx != player_idx or not self._on_layer(cmd):
                     continue
                 csx, csy = self.world_to_screen(cmd.pos[0] + 0.5, cmd.pos[1] + 0.5)
                 if (csx - event.x) ** 2 + (csy - event.y) ** 2 <= 10 ** 2:
@@ -5461,8 +5497,8 @@ class MapView(tk.Frame):
             zf = wd.factions.index(self.zoom_faction)
             if self._villages_visible():
                 for v in wd.villages:
-                    if v.faction_idx != zf:
-                        continue
+                    if v.faction_idx != zf or not self._on_layer(v):
+                        continue        # a hall is not clickable from above
                     sx, sy = self.world_to_screen(v.pos[0] + 0.5, v.pos[1] + 0.5)
                     hit_r = self._marker_radius(_VILLAGE_STYLE["base"]) + 4
                     if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= hit_r ** 2:
@@ -5473,6 +5509,8 @@ class MapView(tk.Frame):
             # settlement markers take priority over region selection
             for sid in self.zoom_faction.meta.get("settlements", []):
                 st = wd.settlements[sid]
+                if not self._on_layer(st):
+                    continue
                 sx, sy = self.world_to_screen(st.pos[0] + 0.5, st.pos[1] + 0.5)
                 hit_r = self._marker_radius(_SETTLE_STYLE[st.kind]["base"]) + 4
                 if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= hit_r ** 2:
@@ -5517,7 +5555,11 @@ class MapView(tk.Frame):
             return
         cmd = self.selected_commander
         self.commander_move_mode = None   # in case Move was separately armed
-        msg = commander.set_move_order(wd, cmd, (gx, gy))
+        # The layer you are LOOKING at is the layer you are pointing at: a
+        # right-click on the underworld view is an order into the galleries,
+        # and set_move_order will route it through a gate (or refuse, if there
+        # is no way in from where he stands).
+        msg = commander.set_move_order(wd, cmd, (gx, gy), self.layer)
         self.show_bottom_message(msg)
         self._show_commander(cmd)
         self.render()
@@ -5537,7 +5579,8 @@ class MapView(tk.Frame):
         # (fertility, climate, biome) mean anything in a gallery.
         if self.layer == layers.UNDER:
             sc = self.selected_region.id if self.selected_region else -1
-            key = ("under", len(wd.under_cells), wd.turn // 8, sc)
+            key = ("under", len(wd.under_cells), wd.turn // 8, sc,
+                   len(getattr(wd, "under_fog", ()) or ()))
             if key == self._base_key and self._base_img is not None:
                 return
             img = Image.new("RGB", (wd.w, wd.h))
@@ -5612,7 +5655,17 @@ class MapView(tk.Frame):
                 if row[x] != OCEAN:
                     data[base + x] = above
         fcolors, _ = self._color_context()
+        # Darkness (app/world/vision.py). Not the surface's grey fog overlay:
+        # down here unexplored ground is simply not drawn at all, so rock and
+        # a gallery nobody has carried a lantern down look exactly alike --
+        # which is the honest picture, and the reason the surface's fog mask
+        # is not applied to this raster (it would grey out the mountain
+        # overhead, which has nothing to do with what is under it).
+        dark = wd.player_faction_idx is not None and hasattr(wd, "under_fog")
+        under_fog = getattr(wd, "under_fog", None) or set()
         for (x, y), kind in wd.under_kind.items():
+            if dark and (x, y) not in under_fog:
+                continue
             colour = _UNDER_KIND_RGB.get(kind, (255, 0, 255))
             owner = layers.owner_at(wd, x, y, layers.UNDER)
             if owner is not None and 0 <= owner < len(wd.factions):
@@ -6031,25 +6084,27 @@ class MapView(tk.Frame):
         wd = self.world
         r = _COMMANDER_STYLE["r"]
         for cmd in wd.commanders:
+            if not self._on_layer(cmd):
+                continue        # gone below, or still up there
             mine = cmd.faction_idx == wd.player_faction_idx
             # Own commander: fixed orchid. Rival: his realm's colour, on a dark
             # outline so pale faction colours still read against the terrain.
             if mine:
                 fill, outline = _COMMANDER_STYLE["fill"], _COMMANDER_STYLE["outline"]
             else:
-                if not self._cell_revealed(*self._display_cell(cmd)):
+                if not self._revealed_here(*self._display_cell(cmd)):
                     continue
                 fill = wd.factions[cmd.faction_idx].color
                 outline = "#11151b"
 
             if cmd.path is not None:
-                remaining_path = cmd.path[cmd.path_index:]
+                remaining_path = self._visible_route(cmd)
                 if len(remaining_path) >= 2:
                     pts = []
                     for gx, gy in remaining_path:
                         # A foreign march is only traced across ground you have
                         # actually explored.
-                        if not mine and not self._cell_revealed(gx, gy):
+                        if not mine and not self._revealed_here(gx, gy):
                             break
                         pts.extend(screen(gx + 0.5, gy + 0.5))
                     if len(pts) >= 4 and self._visible_pts(pts):
@@ -6082,11 +6137,11 @@ class MapView(tk.Frame):
         wd = self.world
         if self.zoom_faction is not None:
             sids = [sid for sid in self.zoom_faction.meta.get("settlements", [])
-                    if self._cell_revealed(*wd.settlements[sid].pos)]
+                    if self._node_visible(wd.settlements[sid])]
             show_names = True
         else:
             sids = [s.id for s in wd.settlements if s.kind == "city"
-                    and self._cell_revealed(*s.pos)]
+                    and self._node_visible(s)]
             show_names = False
 
         for sid in sids:
@@ -6673,7 +6728,7 @@ class MapView(tk.Frame):
         zf = wd.factions.index(self.zoom_faction)
         visible = []
         for v in wd.villages:
-            if v.faction_idx != zf:
+            if v.faction_idx != zf or not self._node_visible(v):
                 continue
             x, y = screen(v.pos[0] + 0.5, v.pos[1] + 0.5)
             if not self._visible_point(x, y):

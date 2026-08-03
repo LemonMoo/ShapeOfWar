@@ -106,6 +106,13 @@ def frontier_id_sets(world, faction_idx):
     300-region world that was ~24% of the entire end-turn cost.
     """
     land = {r.id for r in territory.bordering_regions(world, faction_idx, UNCLAIMED)}
+    # ...and whatever lies through a door you hold (SUBTERRANEAN_PLAN phase 5).
+    # Counted as LAND-adjacent rather than as its own third kind of frontier:
+    # a gate is a way in that you walk through, so an underground claim is an
+    # ordinary claim made at a chokepoint, not an amphibious one. What makes
+    # it expensive is the ground itself -- see the marching cost of a gallery.
+    land |= {r.id for r in territory.gate_bordering_regions(world, faction_idx,
+                                                            UNCLAIMED)}
     naval = {r.id for r in territory.naval_reachable_regions(world, faction_idx,
                                                              UNCLAIMED)}
     return land, naval

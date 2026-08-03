@@ -224,9 +224,44 @@ def gate_exit(gate, layer):
 
 
 # --- movement -----------------------------------------------------------------
+# What a cell of underground costs a marching column, in the same units as
+# commander.TERRAIN_MOVE_COST -- one easy-going cell of open country.
+#
+# HAULAGE IS THE POINT. Distance underground was never priced in distance; it
+# was priced in what it took to move a load back to the shaft. A gallery is a
+# single-file working carried by hand-barrow and pony: slower than the swamp
+# that is the worst ground on the surface (2.2), because there is no going
+# around it and no widening it. A cavern is an open floor with room to form up
+# and turn a cart, so it is merely bad ground rather than a bottleneck.
+#
+# The consequence is the one the plan asked for: a hold's own halls are close
+# together and the next massif is a genuine expedition, without a single rule
+# anywhere saying "the underground is far".
+UNDER_MOVE_COST = {GALLERY: 2.2, CAVERN: 1.2}
+UNDER_DEFAULT_MOVE_COST = 2.2   # anything unrecognised is treated as a working
+
+# Passing a gate is an event, not a step. A mine was entered down staged
+# ladders or a windlass shaft and Cappadocia's doors were rolling stones a
+# party had to shift; either way a column does not walk through one in its
+# stride. Five is exactly COMMANDER_CELLS_PER_TURN, so descending costs a
+# marching day of its own -- large enough to be felt, small enough that a
+# raid through a gate is still a thing anybody would attempt.
+GATE_TRANSIT_COST = 5.0
+
 _NEIGH8 = ((-1, -1), (0, -1), (1, -1),
            (-1, 0), (1, 0),
            (-1, 1), (0, 1), (1, 1))
+
+
+def move_cost(world, x, y, layer):
+    """What one cell of this layer costs to cross. Surface returns None --
+    the surface's own answer needs roads and biomes, which live in
+    commander.cell_move_cost; this module owns the underground numbers only,
+    the same way it owns the underground grids."""
+    if layer == SURFACE:
+        return None
+    return UNDER_MOVE_COST.get(world.under_kind.get((x, y)),
+                               UNDER_DEFAULT_MOVE_COST)
 
 
 def neighbours(world, x, y, layer):
@@ -243,3 +278,17 @@ def neighbours(world, x, y, layer):
     gate = gate_at(world, x, y, layer)
     if gate is not None:
         yield gate_exit(gate, layer)
+
+
+def open_neighbours(world, x, y, layer):
+    """The eight around this cell on its OWN layer, and never the gate.
+
+    What light does, as against what a column does. A lantern carried up to a
+    gate mouth shows the mouth and not the hall behind it, so underground
+    vision (app/world/vision.py) spreads along open passage only -- which is
+    also why it needs a walk rather than a radius: a radius through solid rock
+    would reveal the next gallery over through the stone between them."""
+    for dx, dy in _NEIGH8:
+        nx, ny = x + dx, y + dy
+        if 0 <= nx < world.w and 0 <= ny < world.h and is_open(world, nx, ny, layer):
+            yield nx, ny, layer

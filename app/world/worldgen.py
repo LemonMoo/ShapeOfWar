@@ -2649,6 +2649,13 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     #     dirt roads; each village's farm output tracks local fertility
     _generate_villages(world, rng)
 
+    # 11b. put dwarf holds and goblin warrens under the mountains
+    #      (app/world/holds.py). After the surface is settled, deliberately:
+    #      a hold is born with a larder and terraces and needs somebody to
+    #      trade with, and a warren needs somebody to raid.
+    from app.world.holds import settle_underworld
+    settle_underworld(world, rng)
+
     # 12. trade routes start nonexistent — no nation is pre-connected to any
     #     other; land routes must be discovered (diplomacy) and physically
     #     built (app/world/trade.py) before caravans can use them, sea lanes
@@ -2659,6 +2666,12 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     #     their real military strength) — see app/world/resources.py
     from app.world.resources import seed_initial_stockpiles
     seed_initial_stockpiles(world)
+
+    # 13b. ...and a hold's larder AFTER it, because seeding empties every
+    #      node's storage first. A larder handed out before this ran was
+    #      thrown away silently (app/world/holds.py's stock_larders).
+    from app.world.holds import stock_larders
+    stock_larders(world)
 
     # 14. spawn the player's Commander at their capital — a mobile scout
     #     unit, independent of territory growth (see app/world/commander.py;

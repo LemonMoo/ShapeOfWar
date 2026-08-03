@@ -156,6 +156,30 @@ STORAGE_BUILD_COSTS = {
         {"Planks": 300, "Stone": 320, "Tools": 120, "Gold": 600},
         {"Planks": 620, "Bricks": 400, "Tools": 340, "Gold": 1500},
     ],
+    # The underground three (SUBTERRANEAN_PLAN phase 4). Priced in timber and
+    # coin at tier 1, with no Tools and no Stone: a hold's first problem is
+    # that it cannot eat, and gating the answer behind an industry it has not
+    # built yet is the exact trap the Preserving House hit with Stone
+    # (eligible 308 times over 30 turns, affordable zero) and the Mining Camp
+    # with Tools. Cheap, because the alternative to affording them is
+    # starving.
+    "gate_holding": [
+        None,
+        {"Logs": 160, "Gold": 120},
+        {"Planks": 280, "Stone": 240, "Tools": 90, "Gold": 520},
+        {"Planks": 560, "Bricks": 360, "Tools": 280, "Gold": 1300},
+    ],
+    "fungus_gallery": [
+        None,
+        {"Logs": 100, "Gold": 60},
+        {"Planks": 200, "Stone": 140, "Gold": 380},
+        {"Planks": 460, "Bricks": 300, "Tools": 200, "Gold": 1000},
+    ],
+    "stalls": [
+        None,
+        {"Logs": 120, "Gold": 80},
+        {"Planks": 220, "Stone": 160, "Gold": 420},
+    ],
     "mint": [
         None,
         {"Stone": 240, "Iron": 90, "Tools": 60, "Gold": 120},
@@ -185,6 +209,9 @@ STORAGE_BUILD_TURNS = {"granary": [0, 15, 22, 30],
                        "woodcutters_camp": [0, 16, 26, 36],
                        "grange": [0, 16, 26, 36],
                        "workings": [0, 16, 26, 36],
+                       "gate_holding": [0, 14, 24, 34],
+                       "fungus_gallery": [0, 10, 18, 28],
+                       "stalls": [0, 10, 18],
                        "cartographer": [0, 20, 30, 42]}
 
 # A village builds smaller and cheaper than a settlement -- but it can build,

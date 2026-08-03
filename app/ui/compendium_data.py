@@ -38,7 +38,8 @@ from app.world.worldgen import (POPULATION_RANGE, SETTLEMENT_TAX_INCOME,
 from app.world.lexicon import SPECIES, species_trait_summary
 
 RESOURCE_CATEGORIES = ["Crops", "Livestock", "Forestry", "Mining", "Fishing",
-                       "Food Products", "Manufactured Goods", "Luxury Goods"]
+                       "Food Products", "Manufactured Goods", "Luxury Goods",
+                       "Subterranean"]
 
 CATEGORY_BLURB = {
     "Crops": (
@@ -94,6 +95,15 @@ CATEGORY_BLURB = {
         "satisfy a settlement's Luxury need, giving prosperity a real "
         "boost when met and never a penalty when they're not. See the "
         "Luxury Economy article."
+    ),
+    "Subterranean": (
+        "What a hold under the mountains lives on. Nothing grows without "
+        "sun, so the underground CONVERTS rather than farms: guano off the "
+        "roosts and blind fish out of the still water are the floor, manure "
+        "from the stalls and spent pit timber are the beds, and Mushrooms "
+        "are what comes out of them. Mushrooms and Cave Fish feed a "
+        "population directly, like any other food. A hold's real farm is "
+        "the terraced mountainside above its own gates."
     ),
 }
 
@@ -1842,6 +1852,7 @@ NAV = [
     ("food_products", "Food Products", "resources"),
     ("manufactured_goods", "Manufactured Goods", "resources"),
     ("luxury_goods", "Luxury Goods", "resources"),
+    ("subterranean", "Subterranean", "resources"),
     ("settlements", "Settlements & Villages", "article"),
     ("storage", "Storage & Spoilage", "article"),
     ("livestock_herds", "Livestock & Herds", "article"),
@@ -1862,6 +1873,7 @@ _NAV_ID_TO_CATEGORY = {
     "crops": "Crops", "livestock": "Livestock", "forestry": "Forestry",
     "mining": "Mining", "fishing": "Fishing", "food_products": "Food Products",
     "manufactured_goods": "Manufactured Goods", "luxury_goods": "Luxury Goods",
+    "subterranean": "Subterranean",
 }
 
 

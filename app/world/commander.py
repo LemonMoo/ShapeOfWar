@@ -29,6 +29,7 @@ from app.world.worldgen import (OCEAN, _path_dijkstra, _elev_cost, _sea_cost,
 from app.world.construction import can_afford, _pay_cost
 from app.world import wrap
 from app.world import currents
+from app.world import layers as L
 
 COMMANDER_CELLS_PER_TURN = 5
 COMMANDER_VISION_RADIUS = 8
@@ -95,6 +96,15 @@ class Commander:
         # were marches is just one with no attack order.
         self.attack_order = None
         self.path_index = 0             # how far along `path` so far
+        # Which layer he is standing on, and the layer of each cell of `path`
+        # (parallel to it, or None for a route that never leaves the surface).
+        # `path` itself stays a plain list of (x, y) whatever happens, because
+        # eight places in the renderer walk it and a march below ground is not
+        # a reason to change the shape of a route. Read through
+        # commander_layer/path_layer_at so a commander pickled before the
+        # underworld is simply one who has never been down.
+        self.layer = L.SURFACE
+        self.path_layers = None
         self.aboard_ship_id = None      # id of the Ship carrying it, or None (on foot)
         self.ship_turns_left = None     # None unless currently building a (non-free) ship
 
@@ -503,7 +513,117 @@ def _ship_path(world, start, dest):
     return path
 
 
-def set_move_order(world, commander, dest):
+# --- moving between the layers ------------------------------------------------
+def commander_layer(commander):
+    """Which layer this commander stands on. Defaults to the surface, so a
+    commander pickled before the underworld existed reads correctly and there
+    is nothing to migrate."""
+    return getattr(commander, "layer", L.SURFACE)
+
+
+def path_layer_at(commander, index):
+    """The layer of one cell of a queued route. A route with no layers at all
+    is a surface route, which is what every route in every existing save is."""
+    seq = getattr(commander, "path_layers", None)
+    if not seq or index >= len(seq):
+        return L.SURFACE
+    return seq[index]
+
+
+def _two_layer_path(world, start, start_layer, dest, dest_layer):
+    """A route that may pass through a gate, as (cells, layers).
+
+    Costed in MARCHING time on both layers -- commander cell costs above
+    ground, L.UNDER_MOVE_COST below, L.GATE_TRANSIT_COST for the door itself
+    -- rather than in the surface's own `_elev_cost` route-shaping units. Two
+    reasons, and they are the same reason: elevation says nothing at all about
+    a gallery, and choosing WHICH door to use is a question about how long the
+    journey takes, which is the only currency the two layers share.
+
+    Single-layer surface movement is deliberately left on the existing
+    `_elev_cost` search (see set_move_order) -- routing above ground is
+    unchanged by any of this, and a marching order that never goes near a
+    gate behaves today exactly as it did before.
+
+    Never fails into a straight line: where there is no route at all it walks
+    as far as it can and stops, the same `_path_dijkstra_nearest` contract the
+    surface search uses, for the same fog reason.
+    """
+    import heapq
+    cellset = _bbox_cellset(world, start, dest, False)
+    # A door is very often not between the two endpoints -- it is off to one
+    # side of the range -- so the box a cross-layer route is searched in is
+    # wider than a surface march's.
+    if _UNDER_BBOX_EXTRA:
+        pad_a = (max(0, start[0] - _UNDER_BBOX_EXTRA), max(0, start[1] - _UNDER_BBOX_EXTRA))
+        pad_b = (min(world.w - 1, dest[0] + _UNDER_BBOX_EXTRA),
+                 min(world.h - 1, dest[1] + _UNDER_BBOX_EXTRA))
+        cellset |= _bbox_cellset(world, pad_a, pad_b, False)
+    roads = road_cells(world)
+
+    def open_here(x, y, layer):
+        if layer == L.UNDER:
+            return world.under_kind.get((x, y)) in L.PASSABLE_KINDS
+        return (x, y) in cellset
+
+    def step_cost(fx, fy, flayer, tx, ty, tlayer):
+        if flayer != tlayer:
+            return L.GATE_TRANSIT_COST
+        if tlayer == L.UNDER:
+            base = L.move_cost(world, tx, ty, L.UNDER)
+        else:
+            base = cell_move_cost(world, (tx, ty), roads)
+        return base * (_DIAG if fx != tx and fy != ty else 1.0)
+
+    src = (start[0], start[1], start_layer)
+    goal = (dest[0], dest[1], dest_layer)
+    if not open_here(*src):
+        return None, None
+    dist = {src: 0.0}
+    parent = {}
+    pq = [(0.0, src)]
+    best, best_d2 = src, wrap.dist2_wrap(start, dest, world.w)
+    if start_layer != dest_layer:
+        best_d2 += _WRONG_LAYER_PENALTY
+    while pq:
+        d, cur = heapq.heappop(pq)
+        if d > dist.get(cur, 1e18):
+            continue
+        cx, cy, clayer = cur
+        d2 = wrap.dist2_wrap((cx, cy), dest, world.w)
+        if clayer != dest_layer:
+            # Standing on the wrong layer is never "as close as it gets" while
+            # anything on the right one has been reached: without this a march
+            # ordered into a hall stops on the mountainside above it.
+            d2 += _WRONG_LAYER_PENALTY
+        if d2 < best_d2:
+            best_d2, best = d2, cur
+        if cur == goal:
+            break
+        for nx, ny, nlayer in L.neighbours(world, cx, cy, clayer):
+            if not open_here(nx, ny, nlayer):
+                continue
+            nb = (nx, ny, nlayer)
+            nd = d + step_cost(cx, cy, clayer, nx, ny, nlayer)
+            if nd < dist.get(nb, 1e18):
+                dist[nb] = nd
+                parent[nb] = cur
+                heapq.heappush(pq, (nd, nb))
+
+    node = best
+    nodes = [node]
+    while nodes[-1] != src:
+        nodes.append(parent[nodes[-1]])
+    nodes.reverse()
+    return [(x, y) for x, y, _lay in nodes], [lay for _x, _y, lay in nodes]
+
+
+_UNDER_BBOX_EXTRA = 25          # see _two_layer_path: a door is off to one side
+_WRONG_LAYER_PENALTY = 10 ** 9  # squared cells; simply "worse than any cell on
+                                # the layer actually asked for"
+
+
+def set_move_order(world, commander, dest, dest_layer=None):
     """Plan a route from the commander's current position to `dest` and
     queue it — advance_commanders() walks it a few cells per turn. Calling
     this again while already moving simply replans from the current
@@ -520,15 +640,42 @@ def set_move_order(world, commander, dest):
     the direct route isn't available, _path_dijkstra_nearest walks/sails as
     far toward `dest` as the terrain allows and simply stops at whatever's
     blocking it -- the same "follow the line, stop at the edge" behavior
-    either way. Returns a message describing what happened."""
+    either way. Returns a message describing what happened.
+
+    `dest_layer` is the layer the destination cell is on, defaulting to
+    whichever layer the commander is already standing on. Any order that
+    involves the underworld at all -- into it, out of it, or from one hall to
+    another -- goes through `_two_layer_path` and so through a gate; a
+    surface-to-surface order takes exactly the search it always did."""
     x, y = dest
     if not (0 <= x < world.w and 0 <= y < world.h):
         return "That's outside the map."
-    if dest == commander.pos:
+    here = commander_layer(commander)
+    if dest_layer is None:
+        dest_layer = here
+    if dest == commander.pos and dest_layer == here:
         return "Already there."
     if commander.ship_turns_left is not None:
         return "The commander is busy building a ship."
 
+    if L.UNDER in (here, dest_layer):
+        if commander.aboard_ship_id is not None:
+            return "The commander cannot take a ship underground."
+        path, path_layers = _two_layer_path(world, commander.pos, here,
+                                            dest, dest_layer)
+        if path is None or len(path) < 2:
+            return "There is no way through from here."
+        commander.path = path
+        commander.path_layers = path_layers
+        commander.path_index = 0
+        gates = sum(1 for a, b in zip(path_layers, path_layers[1:]) if a != b)
+        days = _march_days(world, commander, path, path_layers)
+        if gates:
+            door = "a gate" if gates == 1 else f"{gates} gates"
+            return f"The column sets out through {door} — about {_days(days)}."
+        return f"The column sets out — about {_days(days)}."
+
+    commander.path_layers = None
     if commander.aboard_ship_id is not None:
         path = _ship_path(world, commander.pos, dest)
     else:
@@ -554,11 +701,14 @@ def set_move_order(world, commander, dest):
                             * commander_speed_mult(world, commander)))
     turns = max(1, math.ceil((len(path) - 1) / per_turn))
     mounted = " (mounted)" if is_mounted(world, commander) else ""
-    return f"The commander sets out{mounted} — about {turns} days."
+    return f"The commander sets out{mounted} — about {_days(turns)}."
 
 
 def can_build_ship(world, commander):
     if commander.aboard_ship_id is not None or commander.ship_turns_left is not None:
+        return False
+    # The sea a gallery runs under is still the sea, and it is over his head.
+    if commander_layer(commander) == L.UNDER:
         return False
     if shipyard_at(world, commander.faction_idx, commander.pos) is not None:
         return True
@@ -598,6 +748,7 @@ def start_ship(world, commander):
     _pay_cost(nation, SHIP_COST, world)
 
     commander.path = None   # building locks the commander in place
+    commander.path_layers = None
     commander.path_index = 0
     commander.ship_turns_left = SHIP_BUILD_TURNS
     return f"Shipwrights set to work — about {SHIP_BUILD_TURNS} days."
@@ -606,6 +757,8 @@ def start_ship(world, commander):
 def board_ship(world, commander):
     if commander.aboard_ship_id is not None:
         return "Already aboard a ship."
+    if commander_layer(commander) == L.UNDER:
+        return "There is no water here to sail."
     if commander.ship_turns_left is not None:
         return "The commander is busy building a ship."
     ship = find_ship_near(world, commander.faction_idx, commander.pos)
@@ -678,22 +831,53 @@ def cell_move_cost(world, pos, roads=None):
     return TERRAIN_MOVE_COST.get(biome, DEFAULT_MOVE_COST)
 
 
-def _advance_along_path(world, path, start_index, budget, roads):
+def _step_cost(world, path, path_layers, index, roads):
+    """What the step from `index` to `index + 1` costs a marching column.
+
+    Three kinds of step, and the door is its own kind: a gate is not a cell
+    you cross, it is a descent you make (L.GATE_TRANSIT_COST)."""
+    if path_layers is not None and index + 1 < len(path_layers):
+        if path_layers[index] != path_layers[index + 1]:
+            return L.GATE_TRANSIT_COST
+        if path_layers[index + 1] == L.UNDER:
+            nx, ny = path[index + 1]
+            return L.move_cost(world, nx, ny, L.UNDER)
+    return cell_move_cost(world, path[index + 1], roads)
+
+
+def _advance_along_path(world, path, start_index, budget, roads, path_layers=None):
     """How far up `path` a column gets on `budget` cells' worth of marching.
 
     Always at least one cell: a commander ordered to cross a mountain has to
     be able to actually start, and a budget that rounds to nothing would
-    strand them forever rather than merely slow them down."""
+    strand them forever rather than merely slow them down. That also bounds
+    a gate at one day however slow the column is, which is the right answer --
+    the door is a day's work, not an indefinite one."""
     index = start_index
     spent = 0.0
     limit = len(path) - 1
     while index < limit:
-        cost = cell_move_cost(world, path[index + 1], roads)
+        cost = _step_cost(world, path, path_layers, index, roads)
         if spent + cost > budget and index > start_index:
             break
         index += 1
         spent += cost
     return index
+
+
+def _days(n):
+    return "1 day" if n == 1 else f"{n} days"
+
+
+def _march_days(world, commander, path, path_layers=None):
+    """Rough length of a march in days, for the order message. Uses the same
+    per-step costs advance_commanders will actually spend, so a route through
+    a gate and a gallery is not quoted at open-country speed."""
+    roads = road_cells(world)
+    total = sum(_step_cost(world, path, path_layers, i, roads)
+                for i in range(len(path) - 1))
+    budget = COMMANDER_CELLS_PER_TURN * commander_speed_mult(world, commander)
+    return max(1, math.ceil(total / max(0.01, budget)))
 
 
 ATTACK_ARRIVAL_CELLS = 2      # close enough to the target to fall on it
@@ -711,7 +895,7 @@ def order_attack(world, commander, region):
 
     Returns a message describing what was ordered."""
     dest = _region_target_cell(world, region, commander.pos)
-    message = set_move_order(world, commander, dest)
+    message = set_move_order(world, commander, dest, L.region_layer(region))
     commander.attack_order = region.id
     return message
 
@@ -737,9 +921,15 @@ def _attack_arrivals(world):
             cmd.attack_order = None      # somebody else took it first
             continue
         cx, cy = cmd.pos
-        near = any(abs(px - cx) <= ATTACK_ARRIVAL_CELLS
-                   and abs(py - cy) <= ATTACK_ARRIVAL_CELLS
-                   for px, py in region.cells)
+        # On the same layer as well as in the same place: an underground
+        # region's cells carry the coordinates of the mountainside above
+        # them, so a column standing on that hillside is directly over the
+        # hall and nowhere near it. Arriving means having come through the
+        # door.
+        near = (L.region_layer(region) == commander_layer(cmd)
+                and any(abs(px - cx) <= ATTACK_ARRIVAL_CELLS
+                        and abs(py - cy) <= ATTACK_ARRIVAL_CELLS
+                        for px, py in region.cells))
         if not near and cmd.path is not None:
             continue                     # still marching
         cmd.attack_order = None
@@ -776,7 +966,8 @@ def advance_commanders(world):
                 # faster than either. See TERRAIN_MOVE_COST.
                 budget = COMMANDER_CELLS_PER_TURN * commander_speed_mult(world, cmd)
                 new_index = _advance_along_path(world, cmd.path, old_index,
-                                                budget, road_cells(world))
+                                                budget, road_cells(world),
+                                                getattr(cmd, "path_layers", None))
 
             if ship is not None:
                 # Scan the whole segment crossed this turn (not just the
@@ -793,12 +984,17 @@ def advance_commanders(world):
                         ship.pos = last_water_pos
                         cmd.aboard_ship_id = None
                         break
-            else:
+            elif getattr(cmd, "path_layers", None) is None:
                 # On foot: never step onto an ocean cell. Freshly planned
                 # paths can't contain one (see set_move_order), but this
                 # guards a path that already existed before that guarantee
                 # -- e.g. an old save -- from stranding the commander
-                # mid-ocean instead of just stopping short.
+                # mid-ocean instead of just stopping short. Skipped entirely
+                # for a route that goes below: an underground cell's
+                # coordinates sit under whatever the surface has there, ocean
+                # included where a gallery runs out beneath the shore, and
+                # reading the surface grid for it would strand the column in
+                # a gallery it is perfectly able to walk down.
                 for i in range(old_index, new_index + 1):
                     px, py = cmd.path[i]
                     if world.owner[py][px] == OCEAN:
@@ -807,8 +1003,13 @@ def advance_commanders(world):
 
             cmd.path_index = new_index
             cmd.pos = cmd.path[cmd.path_index]
+            # The layer travels with him. This is the one place a commander
+            # ever changes layer, and it can only happen by walking a route
+            # that went through a gate -- see _two_layer_path.
+            cmd.layer = path_layer_at(cmd, cmd.path_index)
             if cmd.path_index >= len(cmd.path) - 1:
                 cmd.path = None
+                cmd.path_layers = None
                 cmd.path_index = 0
 
         if cmd.ship_turns_left is not None:

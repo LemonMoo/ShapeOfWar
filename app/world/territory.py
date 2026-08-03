@@ -46,6 +46,40 @@ def _recompute_settle_proximity(world, region):
     region.settle_proximity = math.exp(-best / 10.0)
 
 
+def gate_bordering_regions(world, attacker_idx, defender_idx):
+    """Regions owned by `defender_idx` that this faction reaches THROUGH A
+    DOOR (SUBTERRANEAN_PLAN phase 5).
+
+    The two layers share no cell edge -- that is the whole model (see
+    app/world/layers.py) -- so `bordering_regions` above, which walks the
+    surface owner grid, can never see across. Without this an underground
+    region is unclaimable and unattackable by anybody who is not already down
+    there, which reads as the underworld being decorative.
+
+    A gate joins two cells, so the rule is exactly as narrow as the geography:
+    you border a region on the other layer when you hold (or, for wildland,
+    stand beside) the cell at YOUR end of a door whose other end is in it.
+    Claiming underground is claiming through a chokepoint, which is what the
+    plan asks the AI to understand."""
+    out = {}
+    for gate in getattr(world, "gates", ()):
+        sx, sy = gate["pos"]
+        ux, uy = gate["under"]
+        for near, far, near_layer, far_layer in (
+                ((sx, sy), (ux, uy), 0, 1), ((ux, uy), (sx, sy), 1, 0)):
+            from app.world import layers as L
+            if L.owner_at(world, near[0], near[1], near_layer) != attacker_idx:
+                continue
+            far_owner = L.owner_at(world, far[0], far[1], far_layer)
+            far_owner = -1 if far_owner is None else far_owner
+            if far_owner != defender_idx:
+                continue
+            rid = L.region_at(world, far[0], far[1], far_layer)
+            if rid is not None and 0 <= rid < len(world.regions):
+                out[rid] = world.regions[rid]
+    return list(out.values())
+
+
 def bordering_regions(world, attacker_idx, defender_idx):
     """Regions owned by `defender_idx` that share at least one cell edge
     with land owned by `attacker_idx` — the frontline, and the only

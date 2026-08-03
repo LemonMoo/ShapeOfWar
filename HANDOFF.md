@@ -1,30 +1,51 @@
 # Shapes of War — Handoff
 
-Python/Tkinter desktop 4X strategy game. Single developer, turn-based, procedurally
-generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch `master`.
+Python/Tkinter desktop 4X strategy game. Single developer, **real-time**,
+procedurally generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch
+`master`.
 
-**Last release: v0.11.0, "The World Does Not Wait"** — the real-time
-overhaul (§34). The game is no longer turn-based. Before that, v0.10.0 was the
-battle movement rework (§32) and the fix for packaged audio (§33). Check
-`gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting this
-line — this repo ships fast, sometimes several releases in one day.
+## START HERE
 
-**Nothing is sitting unreleased.** Working tree is clean; the **42-script
-suite passes** (39 plus `test_formation`, `test_cavalry_cycle`,
-`test_firing_line`, `test_special_roles` — and note `test_special_roles` is
-one of the slower ones, it runs real battles). One caveat found while running
-it: `dev/test_mining_camp.py` fails on `dev560.pkl` specifically (`workers >
-0` assertion) and passes on `dev160.pkl` and with no world — a world-specific
-quirk of that late-game save, not a regression.
+**Last release: v0.12.0, "The Sound of Steel"** (§36). Check
+`gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting that —
+this repo ships fast, sometimes several releases in a day.
 
-**The thing most worth knowing from this session:** the roster spread went
-**75 points to 38** without a single stat being touched. §32 is why, and what
-it means for the balance work that was queued.
+**Underworld phases 3, 4 and 5 are built and UNRELEASED on `master`** — see
+§37. The suite is **50 scripts** and passes, with one standing caveat:
+`dev/test_mining_camp.py` fails on `dev560.pkl` specifically (`workers > 0`)
+and passes on `dev160.pkl` and with no world — a quirk of that late-game save,
+not a regression.
 
-**Two long threads finished since the last handoff.** The **biome overhaul**
-is complete — all six phases, §§19-24. The **weather system** is complete —
-all five phases, §10 plus §§27-29. Neither is a live thread any more; §31 is
-where to look for what actually is.
+**THE LIVE THREAD is the underworld** (`SUBTERRANEAN_PLAN.md`, §37).
+Phases 0-5 are built; **phase 6 is next** — fighting underground, a battle
+terrain profile for gallery and cavern. The plan file is the spec and it is
+current; read it before writing anything.
+
+**The four things a new agent most needs to know:**
+
+1. **The game is real-time now** (§34). A DAY is exactly what a turn was —
+   `world.turn` is still the day counter, every per-turn rate keeps its
+   meaning, and `resources.advance_turn` still runs a whole day, which is why
+   every dev harness and the tournament were untouched by the change. What is
+   different is that a day is sliced across frames
+   (`app/world/turn_runner.py`) and driven by a clock (`app/core/clock.py`).
+2. **`dev/test_turn_slice.py` is the gate on anything touching the day.**
+   Sliced and unsliced days must fingerprint identically.
+3. **Battle behaviour was reworked in v0.10.0** (§32) and moved the species
+   spread from 75 points to 38 **without touching a stat**. Any balance work
+   queued in §4 must re-baseline: those multipliers were fitted to an army
+   that fought as a swarm.
+4. **Render worldgen before trusting it — and then try to USE it.** Rendering
+   has caught five real bugs (plate artifacts, flooded-continent lakes,
+   diamond chambers, networks that never reached daylight, galleries under the
+   sea). `dev/under_shot.py`, `dev/plate_shot.py`, `dev/coastline_metrics.py`.
+   The sixth needed more than a picture: gates opening onto solid rock looked
+   perfectly fine in every render and every summary, and only turned up when
+   something first tried to walk through one (§37, phase 3).
+
+**Closed threads — do not re-open expecting work:** the biome overhaul
+(§§19-24), weather (§10, §§27-29), the battle movement rework (§32), and the
+real-time overhaul (§34).
 
 ## HOW THIS PROJECT WANTS TO BE WORKED ON
 
@@ -98,11 +119,23 @@ newest subsystem). §12's two methodology lessons matter before touching
 anything GL-related. §§19-24 and §§10/27-29 are now closed records rather than
 plans. Everything else is stable background.
 
-**The suite is 39 scripts and all of them pass.** Run it after every change:
+**The suite is 50 scripts and all of them pass.** It takes well over ten
+minutes end to end, so run it in batches rather than one command that will
+time out under you. **Run it with `SHAPES_SILENT=1`** — a dozen scripts build
+a real MapView or run a real battle, every one of them brings the mixer up,
+and the result is the whole sound library firing at once at full volume on the
+developer's own machine. That variable makes `audio.init()` report no device,
+which is a state the module is built to survive everywhere. Run it after every
+change:
 
 ```bash
-for f in dev/test_*.py; do out=$(python "$f" 2>&1); [ $? -ne 0 ] && echo "FAIL $f" && echo "$out" | tail -6; done; echo done
+export SHAPES_SILENT=1; for f in dev/test_*.py; do out=$(python "$f" 2>&1); [ $? -ne 0 ] && echo "FAIL $f" && echo "$out" | tail -6; done; echo done
 ```
+
+`dev/test_audio.py` is the one script that WANTS a real mixer (it plays every
+packaged sound through one to prove they all load). Run that one on its own,
+without the variable, when audio itself is what changed — it plays them at
+volume zero now, for the same reason.
 
 Five of them (`test_battle_death`, `test_commander_gate`, `test_elim`,
 `test_gate2`, `test_succession`) require a world path and fail with
@@ -2976,3 +3009,376 @@ the same argument made for it.
   a part-run day if that path is ever reached another way.
 - **Alerts are still a per-day dump** into the log rather than a running feed.
   In a world that runs, several days' worth can scroll past between glances.
+
+---
+
+## 35. Marching orders (v0.11.1)
+
+The real-time overhaul's own loose end, and small enough to describe in a
+sentence: **an attack is a march now.** Ordering one used to fight it on the
+spot, wherever the commander happened to be standing, because when a turn is
+the only thing that makes "later" real, an order is an event. With a clock
+running, `commander.order_attack` sets a move order and remembers the target;
+`_attack_arrivals` stages the battle when the column actually gets there
+(`ATTACK_ARRIVAL_CELLS`, and it is emitted on the bus rather than resolved in
+place -- staging a battle switches the whole screen, and this runs inside a
+day). Measured on a real save: an enemy province 130 cells away took 22 days.
+
+The consequence worth knowing is not the timing, it is that **an attack can
+now be seen coming, and met.** The same release taught the UI to speak in days
+rather than turns.
+
+## 36. The sound of steel, and a credits screen (v0.12.0)
+
+Two halves, and the credits screen is the load-bearing one. CC0 asks for
+nothing; CC-BY asks for a visible credit, and until there was somewhere to put
+one the game could only ever use the first kind -- which ruled out most of
+what exists, because the CC-BY libraries are far larger and far better. There
+is a Credits button on the main menu now, `app/ui/credits.py`'s `CREDITS` is
+the single source of truth for it, and `dev/test_audio.py` asserts it agrees
+with `assets/audio/LICENSES.md`. **A credit that lives only in a markdown file
+nobody ships is not a credit.** This also closes the loose end §0 carried for
+several sessions.
+
+The other half needed no new assets at all: the game already owned eighty
+sounds and played about a dozen. A battle was one sword-draw and then silence
+while blades, shields, stone, fire and death sat unused in the folder. Melee
+rings, shields turn blows, bows loose, bombs go off, a charge lands like a
+charge, and a commander falling is audible.
+
+**Check the packaged build, not the source run** -- §33 is the record of the
+sound never being in the exe at all.
+
+## 37. THE UNDERWORLD -- the live thread
+
+`SUBTERRANEAN_PLAN.md` is the spec and it is current. **Phases 0-3 are built;
+phase 4 (an economy with no sun) is next**, and the plan's "Food below ground"
+half is already written in full -- it is a design, not a sketch, and it was
+grounded in what people underground actually ate before a line of it was
+planned. Read it before writing anything.
+
+### The four decisions that shape everything
+
+A sparse layer under the mountains only (not a mirrored world), dwarf holds
+and goblin warrens as generated inhabitants, a few gates per massif as the
+**only** way between layers, and one level. Every phase since has been
+downstream of those.
+
+### Phase 0 -- the model (`app/world/layers.py`)
+
+Sparse by cell: a 4,000-cell network pickles to 82 KB against the 726,000
+cells a dense mirror of the grids would need. Absent means rock, and `fill()`
+forgets everything about a cell so rock can never remember who owned it.
+`Region.layer` is read through a `getattr` default, so **every world ever
+pickled is already a valid surface-only world** -- there is no migration over
+region data at all. An underground region is an ordinary `Region`, which is
+what lets territory, claims, prosperity, trade and battles work on it
+unchanged.
+
+**A gate is the only join between the layers, and `neighbours()` is the single
+place that is true.** Indexed, not scanned -- a path search walks `neighbours`,
+and a linear scan per cell is the same quiet quadratic this project already
+dug out of `choose_target`. The index is derived and stays out of the save.
+
+### Phase 1 -- carving (`app/world/underworld.py`)
+
+Chambers in the deepest rock, a spanning network between them rather than a
+maze (a mine is a tree from its shafts), adits driven out to the hillside,
+sunless water and chasms for shape, gates on the flanks, regions cut per
+NETWORK at the end. About 0.5% of the land, ~18 districts on a Standard world,
+~1s on top of a 35s generation.
+
+Four things the renderer or a measurement forced, none of which a metric alone
+would have found: a connected range is not a hold (mountain+highland glue into
+35,000-cell cordilleras, so ranges are cut into ~4,000-cell districts);
+chambers drawn from the top 70 cells by height are all one summit; a radius-2
+Euclidean blob is a four-pointed diamond, and a network of them reads as
+sparkles; and nothing drove a passage OUT, so every gate landed inside the
+rock until adits existed.
+
+The load-bearing invariant is that **no network is sealed**, enforced globally
+after every district is cut -- district skirts overlap, so carving a later
+district can strand a fragment of an earlier one after its gates were placed.
+
+### Phase 2 -- seeing it
+
+One piece of state, `MapView.layer`, read by the raster, its cache key, the
+click handler and the markers. That was the phase's named risk: two answers to
+"where am I" and the single-map assumption gets patched into twenty places.
+Gates are marked on BOTH sides, because a door you cannot find is a door that
+does not exist. One real bug fell out: `layers._is_land` tested `height > 0`,
+and height is RAW elevation -- the seabed is above zero, so the whole ocean
+rendered as ground, which had been hiding galleries carved under the sea.
+
+### Phase 3 -- moving, and not seeing in the dark (THIS SESSION)
+
+Three mechanics, and each is grounded rather than invented:
+
+1. **Haulage is what makes distance underground expensive.**
+   `layers.UNDER_MOVE_COST`: a gallery is 2.2 -- worse than swamp, the worst
+   ground on the surface -- because a working is single-file and there is no
+   going around it; a cavern is 1.2, an open floor with room to form up. The
+   consequence is that a hold's own halls are close together and the next
+   massif is a genuine expedition, with no rule anywhere saying so.
+2. **A gate costs a day.** `layers.GATE_TRANSIT_COST = 5.0` is exactly
+   `COMMANDER_CELLS_PER_TURN`, spent out of the march budget, and
+   `_advance_along_path`'s always-one-step rule bounds it at one day however
+   slow the column -- the door is a day's work, not an indefinite one.
+3. **Darkness is not a smaller fog radius, it is a walk.**
+   `vision.recompute_under` spreads light along OPEN PASSAGE
+   (`layers.open_neighbours`), so two galleries a single cell of rock apart
+   are not in sight of each other. Sources: ground the realm holds
+   (`UNDER_HOLD_RADIUS`), a column that has actually gone down
+   (`UNDER_VISION_RADIUS`), and a look through a door you are standing in
+   (`UNDER_GATE_PEEK`). A set, not a bytearray, for the same sparseness
+   reason as everything else down here. **Deliberately not lifted by the
+   surface's full-map reveal** -- owning three quarters of the world tells you
+   nothing about the inside of a mountain. If that reads as tedious late, the
+   lever is one line in `vision.recompute`.
+
+`Commander.layer` and `Commander.path_layers` are both read through
+`commander_layer`/`path_layer_at`, so a commander pickled before this is one
+who has never been down. **`path` itself is still a plain list of `(x, y)`** --
+eight places in the renderer walk it, and a march below ground was not a
+reason to change the shape of a route. A cross-layer order goes through
+`_two_layer_path`, costed in MARCHING TIME on both layers rather than the
+surface's `_elev_cost` route-shaping units, because choosing *which door* is a
+question about how long the journey takes and that is the only currency the
+two layers share. **A surface-to-surface order takes exactly the search it
+always did** -- nothing about routing above ground changed.
+
+**A real phase-1 bug that only phase 3 could find:** `_repair_network` fills
+the orphan fragments of the district it is repairing, and district skirts
+overlap -- so it could fill a cell an EARLIER district had already put a gate
+on, leaving a door in the hillside with solid rock behind it. One gate in
+three on seed 7. Silent in every summary and invisible to every existing test,
+because nothing had ever tried to walk through a gate before.
+`underworld._prune_dead_gates` now drops them, and reports `dead_gates` in the
+summary rather than hiding the repair.
+
+**A pre-existing flaky test found while running the suite**, and it is the
+fourth time this project has been bitten by the same thing:
+`dev/test_realtime.py`'s mid-day probe drove the clock for a day's worth of
+seconds and *hoped* the slice budget would leave the day part-done. Measured 3
+failures in 8 runs on unmodified code. It now begins a day explicitly and
+steps it with a zero budget, which is checked between phases and so is
+certain. **A wall-clock budget is not a thing to hang an assert on.**
+
+`dev/test_under_move.py` is the phase's gate: a column can only get down
+through a gate and pays for the door, a day underground covers less ground
+than a day above it, light stops at the rock, and an old commander reads as a
+surface commander.
+
+### Phase 4 -- an economy with no sun (THIS SESSION)
+
+The plan's "Food below ground" half, built. One sentence carries all of it:
+**the underground is a CONVERTER and a LARDER, not a farm.** Every piece is
+something people underground actually did, and the grounding did the work
+again -- guano, champignonnieres on horse manure, Derinkuyu's stables and
+storerooms, transhumance, and cave-ageing.
+
+**Four new resources, in a category of their own.** Mushrooms, Cave Fish,
+Guano and Manure, under a new `"Subterranean"` category for exactly the reason
+Fishing has one: none of it spawns from a region's biome shares, so it has to
+stay out of every path that assumes a raw resource has a `RESOURCE_SPAWN`
+entry. Mushrooms and Cave Fish join `_FOOD_SOURCES`, and that is the whole
+integration -- the existing pooled consumption then feeds an underground
+population with **no new consumption code at all**, which is why the plan put
+this first in its build order. Manure and Guano go in the FEED pool with the
+hay, not the pantry: a survival good never shares a pool with a bulk good, a
+rule this file has now had to learn four times.
+
+**The chain, and each link is a real constraint:**
+
+```
+terraces above the gates -> fodder -> beasts in the stalls -> manure --+
+spent pit timber (Logs) ----------------------------------------------+-> beds -> Mushrooms
+guano (a small free trickle) -----------------------------------------+
+```
+
+- **Nothing grows underground.** Not a modifier: an underground village's own
+  catchment contributes nothing whatever to the crop sample. Its INDUSTRY
+  sample is deliberately left reading the surface, because those coordinates
+  are the mountain overhead and the ore tables already gate Iron, Coal, Gems
+  and Gold Ore on it -- the underground **inherits** a working mining economy
+  rather than needing a new one. Measured on the first hold planted: Coal,
+  Copper, Gems, Gold Ore, Iron, Stone and Tin, and not one crop.
+- **The Gate Holding** is the bootstrap and the strategy at once: terraces and
+  high pasture on the mountainside above a hold's own doors, worked from
+  below. It is a fifth member of the outstation family and the first one that
+  reaches across the layer boundary, with its own cell table
+  (`GATE_HOLDING_CELLS`) -- which does NOT break the family's fairness
+  guarantee, because no underground node can build the other four (their gate
+  reads `region.biome_counts`, and an underground region has none) and no
+  surface node can build this one. **To starve a hold you take its terraces**,
+  and that is a surface fight at a gate rather than an abstract siege timer.
+- **The Fungus Gallery is bounded by substrate**, and that is the load-bearing
+  property: beds with nothing to compost produce nothing however large they
+  are. Fungiculture converts waste into food and cannot create it, and a
+  fungus farm producing from nothing is the one thing here that would be
+  plainly wrong.
+- **The Stalls** close the loop, producing Manure off the herd as it stands,
+  once a season, exactly like milk and wool -- it is the same animals.
+- **The larder is the advantage**, not the handicap: `UNDER_SPOIL_MULT` scales
+  the registry spoil rate for any node below ground. Measured over ten days on
+  identical stock, 1,000 Meat: **114 below against 12 above**. That is what
+  turns the food dependency that defines a hold's early game into the export
+  that defines its late one.
+
+**A real bug this turned up, and it would have hit phase 5 head-on:**
+`village_local_sample` filters a node's catchment through `world.region_grid`,
+which never contains an underground region's id -- the two layers are stored
+separately by design. A hold sampled through it found NO GROUND AT ALL and
+offered nothing, ore included. Membership is now asked of the underground grid
+when the region is below, while the biome, climate and fertility read at those
+coordinates stay the surface's, because that is the rock overhead.
+
+**The numbers to judge in play**, all first-pass and none of them tuned
+against a real hold (there are no holds yet):
+`GUANO_PER_CAVERN_CELL` 0.020 and `CAVE_FISH_PER_WATER_CELL` 0.055 (the floor
+-- measured at 1.66 Guano/day for a real region against a 0.60 food need, so
+deliberately below subsistence), `FUNGUS_SUBSTRATE`'s three ratios,
+`FUNGUS_CAP`/`VILLAGE_FUNGUS_CAP`, `STALLS_MANURE_PER_HEAD`,
+`GATE_HOLDING_CELLS`/`GATE_HOLDING_RADIUS`, and `UNDER_SPOIL_MULT` 0.35.
+
+`dev/test_under_food.py` is the phase's gate, structural only: nothing grows
+underground but the ore above is real, the floor exists and is not enough, the
+beds are bounded by substrate, the stalls fill them, the terraces are the only
+farm and cutting them off takes the food with them, the larder measurably
+keeps, the three buildings are offered below ground and only there, and a day
+still runs with a hold in the world.
+
+**Deliberately not built**, and it is the last item in the plan's own build
+order: **warrens, scavenging and hunger-driven raiding**. They need somebody
+to live in the warren, which is phase 5. The plan flags raiding as the piece
+most likely to measure oppressive, and names raid frequency and haul size as
+the knobs before a line of it is written.
+
+### Phase 5 -- who lives there (THIS SESSION)
+
+`app/world/holds.py` is new and owns all of it. Worldgen now puts **dwarf
+holds** and **goblin warrens** under the mountains, and they are not the same
+mechanic wearing two names:
+
+- A **hold** is one great settlement in the deepest hall -- furthest from any
+  door, which is what "defensible" actually means -- plus 2-4 mining villages.
+  It is BORN with terraces, stalls, beds and a full larder (`LARDER_DAYS`,
+  120 days of its own consumption), which is the Cappadocian picture exactly:
+  shelter, stores, and a door. It begins fat and has to solve the food problem
+  before the stores run out.
+- A **warren** is 4-7 small villages clustered AT the gates: no hall, no
+  terraces, no larder. It lives on scavenging and on what it can carry off.
+
+Which species live below is a four-line table (`UNDERGROUND_SPECIES`), because
+the plan's third decision was that everyone else stays a surface people who may
+take galleries by force. A dwarf realm too far from any range simply lives
+above ground -- a real outcome, not a failure.
+
+**Raiding is hunger and nothing else.** No timer, no aggression stat, no
+scripted event: a warren node that has actually gone without food
+(`turns_without_food`, the same counter starvation itself reads) rolls
+`RAID_CHANCE_PER_DAY` and carries off a share of the nearest foreign surface
+node's food. Reach is measured **from the gates**, not from the warren -- a
+party comes out of a door and goes over the ground, which is precisely why
+garrisoning the gate is the answer. Raids surface through the existing alerts
+panel by marking the victim (`node.raided_turn`), so the mechanic needed no
+new UI at all.
+
+**The AI understands a door now.** `territory.gate_bordering_regions` is the
+seam: the two layers share no cell edge, so `bordering_regions` -- which walks
+the surface owner grid -- could never see across, and an underground region was
+unclaimable by anyone not already down there. It is folded into
+`expansion.frontier_id_sets` as LAND adjacency, because a gate is a way in that
+you walk through; what makes an underground claim expensive is the ground
+itself, not a special rule.
+
+**THE 200-DAY CHECK THE PLAN ASKED FOR, RUN.** A hold, no trade partner, real
+days on a real world (seed 21):
+
+| | day 0 | day 50 | day 150 | day 300 |
+|---|---|---|---|---|
+| food | 4,308 | 3,323 | 3,037 | 2,755 |
+| population | 1,990 | 2,030 | 1,998 | 1,961 |
+
+It draws its larder down to a steady state and then holds there, seasonally
+oscillating between roughly 2,500 and 3,300 -- **zero node-days of hunger over
+the whole run**, which is the design working: born fat, solves it, stays. The
+underground total on that world went 4,686 -> 3,638 while the surface went
+22,981 -> 34,244; holds are stable rather than growing, and much of the
+difference is settlers drawn off for expansion.
+
+**Three real bugs, every one of them found by running those days rather than
+by reading:**
+
+1. **A hold could keep no animals at all.** `village_herd_capacity` reads
+   `region.biome_counts`, which is empty for an underground region, so capacity
+   was zero, so there were no beasts, so there was no manure, so the fungus
+   beds ran on guano alone. Measured: 20 head at day 50, none by day 100, and
+   **14 Mushrooms produced in 200 days**. A hold's herd is now bounded by its
+   terraces (`_under_herd_capacity`), which is the one piece of ground it
+   actually has -- the identical formula with the terrace cells standing in
+   for the region's land.
+2. **The terraces grew no fodder**, so the beasts starved every winter even
+   once they existed. The highland crop shares grow grain, not hay. Fixed with
+   an explicit `GATE_HOLDING_FODDER_PER_CELL`, and it is grounded rather than
+   patched: transhumance IS this -- herds to the high pasture in summer, hay
+   cut and carried down for the winter. The plan's own phrase was "terraces and
+   high pasture"; only the terrace half had been built.
+3. **A warren with no sunless water had literally nothing to eat.** Guano is
+   fertiliser, not food, so the floor fed them zero calories: measured, 172
+   people to 48 in fifty days. `WARREN_FORAGE_PER_CAVERN_CELL` is grubs,
+   crickets and blind fish out of every damp crack, not just an open lake.
+4. **A hold's larder was being thrown away silently.** `settle_underworld`
+   stocked it, and `seed_initial_stockpiles` -- which runs later and empties
+   every node's storage before seeding -- deleted it. Split out as
+   `holds.stock_larders`, called after seeding. This is the kind of ordering
+   bug that surfaces months later as "holds seem to starve early".
+
+**The knobs, all first-pass and none of them playtested:**
+`WARREN_FORAGE_PER_CAVERN_CELL` (sized so a fresh warren feeds about two
+thirds of its own people -- deliberately under subsistence, so hunger and
+therefore raiding is the normal state), `holds.RAID_CHANCE_PER_DAY` 0.06,
+`RAID_HAUL_FRACTION` 0.18, `RAID_HAUL_CAP` 260, `RAID_RANGE` 22,
+`WARREN_SCAVENGE_MULT` 2.2, `LARDER_DAYS` 120, `GATE_HOLDING_FODDER_PER_CELL`.
+Measured raid rate with a granary planted at the door: **155 raids per 400
+days while starving, 0 while fed**, hauling 260 a time. On the real generated
+world it was **0 raids in 200 days**, because the nearest foreign node to that
+warren's door was 83 cells away -- which is the design working ("a warren
+beside a poor valley is quiet, because there is nothing to take") and also why
+the harness has to plant a target to measure the mechanic at all.
+
+`dev/test_holds.py` is the phase's gate. `MapView._on_layer` now answers for
+nodes as well as movers (a settlement's layer is its region's), so holds draw
+below and not on the mountainside above them.
+
+### What is open, after phase 5
+
+- **Phase 6 is fighting underground** -- a battle terrain profile for gallery
+  and cavern: no room to manoeuvre, cavalry worth little, archers
+  short-sighted, and a real defender's advantage at a gate. Then phase 7 is
+  the release.
+- **The AI claims through a door but does not yet PLAN for one.** It sees an
+  underground region on its frontier and can claim it; nothing teaches it that
+  a hold is worth taking or that a gate is worth garrisoning against raids.
+  That is the plan's named risk and it is still open.
+- **A warren is a slow decline** on a world where nobody lives near its doors
+  (172 -> 71 over 200 days). Feeding them is a lever the player has; the AI
+  has no idea it exists.
+
+### What was open going into phase 5
+
+- **Nothing lives underground yet**, so the map still draws surface
+  settlements, roads and trade routes over the rock on the under view. Movers
+  are layer-gated through `MapView._on_layer`; that is the one place the rest
+  has to learn about when phase 5 puts somebody down there.
+- **Phase 4's whole economy is unexercised by a real hold.** Everything in it
+  is tested against a Village planted in an underground region by hand, which
+  is the honest way to build the machinery first -- but the plan's own check,
+  "a newly generated hold does not starve over 200 days with no trade partner
+  at all", cannot be run until worldgen builds one. Run it FIRST in phase 5,
+  before tuning anything.
+- **The AI is the hard part, not the terrain** (the plan says so up front). An
+  expansion AI that reasons about a second layer reachable only through
+  chokepoints is genuinely new work, and it is where this overruns if it does.
+- **No balance was touched**, by design. If holds measure oppressive the
+  levers are gate count and food yield, not the species table.

@@ -20,6 +20,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.core import audio
 
+# THE PLAYER'S OWN SETTINGS FILE IS NOT A TEST FIXTURE. Several blocks below
+# save volumes to disk -- the round-trip test does it deliberately, and the
+# settings panel's Back button does it as a side effect -- so the whole script
+# runs between a backup and a restore. Without this, running the suite reset
+# the developer's own music and effects volumes every single time, silently.
+_SETTINGS = audio._audio._settings_path()
+_SETTINGS_BACKUP = _SETTINGS.read_bytes() if _SETTINGS.exists() else None
+
+
+def _restore_settings():
+    if _SETTINGS_BACKUP is not None:
+        _SETTINGS.write_bytes(_SETTINGS_BACKUP)
+    elif _SETTINGS.exists():
+        _SETTINGS.unlink()
+
+
+import atexit
+atexit.register(_restore_settings)
+
 print("--- every event names files that actually exist ---")
 # The whole point of the event table is that call sites never name a file. If
 # a name in it is wrong, the sound silently never plays and nobody notices.
@@ -118,6 +137,17 @@ finally:
 
 print("\n--- the real mixer, if this machine has one ---")
 if audio.init():
+    # SILENTLY. This test plays every sound the game owns and then starts the
+    # music, and at the default volume that is eighty samples firing at once
+    # at full blast -- on the developer's own machine, every time the suite
+    # runs. Volume zero rather than set_muted(True): muting returns from
+    # play() before the file is ever loaded, so it would stop testing the one
+    # thing this block exists to test (that every packaged sound really opens
+    # and really plays through a real mixer). At zero the whole path runs and
+    # nobody is deafened.
+    real_sfx, real_music = audio.state()["sfx"], audio.state()["music"]
+    audio.set_sfx_volume(0.0)
+    audio.set_music_volume(0.0)
     for event in audio.SFX:
         audio.play(event)
     audio.play_music("map")
@@ -134,8 +164,10 @@ if audio.init():
     assert audio.state()["track"] is None
     audio.shutdown()
     assert audio.state()["available"] is False
-    print(f"  ok    played all {len(audio.SFX)} events, switched music, "
-          f"muted and shut down cleanly")
+    audio.set_sfx_volume(real_sfx)
+    audio.set_music_volume(real_music)
+    print(f"  ok    played all {len(audio.SFX)} events (at volume zero -- see "
+          f"above), switched music, muted and shut down cleanly")
 else:
     print("  skip  no audio device on this machine (which is itself fine)")
 
@@ -249,6 +281,14 @@ assert not offenders, f"call sites naming audio files directly: {offenders}"
 print("  ok    no call site names a sound file")
 
 print("\n--- settings survive a restart ---")
+# The FILE is what gets backed up, not the module's in-memory state. Restoring
+# state() and saving it wrote the module's DEFAULTS over whatever the player
+# had actually chosen -- so running the suite quietly reset their volumes,
+# while the restore in the `finally` below looked like it was preventing
+# exactly that. Same pattern the corrupt-file block below already used
+# correctly.
+_settings_path = audio._audio._settings_path()
+_settings_backup = _settings_path.read_bytes() if _settings_path.exists() else None
 before = (audio.state()["music"], audio.state()["sfx"], audio.state()["muted"])
 try:
     audio.set_music_volume(0.23)
@@ -267,7 +307,10 @@ finally:
     audio.set_music_volume(before[0])
     audio.set_sfx_volume(before[1])
     audio.set_muted(before[2])
-    audio.save_settings()
+    if _settings_backup is not None:
+        _settings_path.write_bytes(_settings_backup)
+    elif _settings_path.exists():
+        _settings_path.unlink()
 
 print("\n--- ...and a corrupt settings file is not fatal ---")
 path = audio._audio._settings_path()

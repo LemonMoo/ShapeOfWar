@@ -170,6 +170,15 @@ class _Audio:
         (a CI box, a remote session, a VM)."""
         if self.available or not _HAVE_PYGAME:
             return self.available
+        if os.environ.get("SHAPES_SILENT"):
+            # A machine that has a device and does not want to use it. The dev
+            # suite is exactly that: a dozen of its scripts build a real
+            # MapView or run a real battle, every one of them brings the mixer
+            # up, and the result is the whole sound library firing at once at
+            # full volume on the developer's own machine several times an
+            # hour. Treated as "no device", which is a state this module is
+            # already built to survive everywhere (see the docstring above).
+            return False
         try:
             # A small buffer keeps a UI click feeling like it belongs to the
             # click. The default is tuned for a game loop that submits audio

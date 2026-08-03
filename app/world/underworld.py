@@ -579,6 +579,32 @@ def carve_underworld(world, rng):
 MIN_ORPHAN_CELLS = 25
 
 
+def _prune_dead_gates(world, summary):
+    """Drop any door that no longer opens onto anything.
+
+    Districts share skirt space, and `_repair_network` fills the orphan
+    fragments of the district it is repairing -- including, where the skirts
+    overlap, cells an EARLIER district had already put a gate on. The result is
+    a door in the hillside with solid rock behind it: no crash, nothing in any
+    summary, and completely invisible until something actually tries to walk
+    through it. Phase 3 was that something, on the first world it was pointed
+    at (seed 7, one gate of three).
+
+    Checked over the whole map after every district is cut, for the same
+    reason the sealed-network check below is: this is a cross-district failure
+    and no per-district pass can see it."""
+    live = [g for g in world.gates
+            if L.kind_at(world, g["under"][0], g["under"][1], L.UNDER)
+            in L.PASSABLE_KINDS]
+    dead = len(world.gates) - len(live)
+    if dead:
+        world.gates = live
+        world._gate_index = None
+        summary["gates"] -= dead
+        summary["dead_gates"] = summary.get("dead_gates", 0) + dead
+    return dead
+
+
 def _enforce_no_sealed_networks(world, rng, summary):
     """The invariant, checked over the whole map once every district is cut.
 
@@ -592,6 +618,7 @@ def _enforce_no_sealed_networks(world, rng, summary):
     crashes, the map just contains a kingdom no army can ever reach -- and
     dev/test_underworld.py asserts against it precisely because nothing else
     would ever notice."""
+    _prune_dead_gates(world, summary)
     mouths = {tuple(g["under"]) for g in world.gates}
     for comp in _components(world, world.under_cells):
         if comp & mouths:
