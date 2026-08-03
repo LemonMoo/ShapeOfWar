@@ -20,6 +20,21 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 73,
+        "title": "The Deep Places",
+        "items": [
+            "NEW: dwarf holds and goblin warrens live under the mountains now. A hold is a great hall in the deepest rock with mining villages around it; a warren is a sprawl of hovels crowding the gates",
+            "NEW: march your commander through a gate and down into the galleries. A gallery is harder going than a swamp, and the door itself costs a day",
+            "NEW: darkness is its own fog. Light travels along open passage, so the hall on the other side of ten feet of rock is unknown until somebody walks there — and taking the whole surface tells you nothing about what is under it",
+            "NEW: an economy with no sun. Mushrooms grown on manure, guano and spent pit timber; blind fish out of the sunless water; terraces and high pasture on the mountainside above a hold's own doors, worked from below",
+            "NEW: a cave is the best larder in the world. Food keeps roughly three times as long below ground",
+            "NEW: hungry warrens raid the surface for food. Feed them or garrison the gate — a warren beside a poor valley is quiet, because there is nothing to take",
+            "NEW: a hold begins with a full larder and has to solve its food problem before the stores run out",
+            "CHANGED: the alerts panel is drawn on parchment now, with a wax seal on every warning",
+            "FIXED: gates that opened onto solid rock — one in three on some maps — are gone",
+        ],
+    },
+    {
         "version": 72,
         "title": "The Sound of Steel",
         "items": [
