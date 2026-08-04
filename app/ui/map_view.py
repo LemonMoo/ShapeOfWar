@@ -678,6 +678,10 @@ class MapView(tk.Frame):
         self.selected_village = None
         self.selected_commander = None
         self.commander_move_mode = None   # armed Commander awaiting a destination click
+        # Fingerprint of what the commander panel last drew, so refresh() can
+        # skip redrawing it (and the flicker that costs) when nothing on it
+        # changed -- an idle scout's panel is redrawn ~once a second otherwise.
+        self._panel_sig = None
         self.mode = "political"
         self.show_currents = False   # opt-in overlay -- see _draw_currents
         self._img = None
@@ -954,8 +958,19 @@ class MapView(tk.Frame):
         # Treasury is an in-game panel that can be left open across End Turn,
         # so it has to be rebuilt here to show the turn's new figures.
         self._refresh_treasury()
-        if self.selected_commander is not None:
-            self._show_commander(self.selected_commander)
+        # The commander panel used to be force-redrawn here every refresh
+        # (~once a second while time runs). On an idle scout nothing on it ever
+        # changes, so that redraw -- and the two-paint flicker Page.begin's
+        # deferred finish() gives it -- was pure noise: the "panel flashes every
+        # end-turn" the player reported. Redraw it only when what it shows
+        # actually changed, and never over the top of an in-progress Move prompt
+        # (the panel is showing that then, not this). A None fingerprint means
+        # "too live to skip" (a countdown, a ship's affordability) -- always
+        # redraw those, so they can never go stale.
+        if self.selected_commander is not None and self.commander_move_mode is None:
+            sig = self._commander_panel_sig(self.selected_commander)
+            if sig is None or sig != self._panel_sig:
+                self._show_commander(self.selected_commander)
         self._update_resource_bar()
         self._update_turn_label()
         self._refresh_alerts()
@@ -4807,6 +4822,30 @@ class MapView(tk.Frame):
             if beached is not None:
                 self._panel_button("Board Ship", lambda: self._do_board_ship(cmd))
                 self._panel_button("Dismantle Ship", lambda: self._do_dismantle_ship(cmd), kind="danger")
+        # Record what this draw showed, so refresh() knows when it can leave the
+        # panel alone (see _commander_panel_sig).
+        self._panel_sig = self._commander_panel_sig(cmd)
+
+    def _commander_panel_sig(self, cmd):
+        """A fingerprint of the commander panel's content, or None when it is
+        too live to safely skip a redraw of.
+
+        Only the plain idle-scout form -- on foot, idle, with no ship it could
+        board, dismantle or build -- gets a stable fingerprint; that is the
+        panel the player leaves up for minutes at a time, and the one whose
+        every-second redraw reads as flicker. Anything with a figure that moves
+        day to day (a build countdown, a move's cells-left, a ship's changing
+        affordability) returns None, i.e. 'always redraw', so it never goes
+        stale under the skip."""
+        wd = self.world
+        if (cmd.aboard_ship_id is not None or cmd.ship_turns_left is not None
+                or cmd.path is not None):
+            return None
+        if commander.find_ship_near(wd, cmd.faction_idx, cmd.pos) is not None:
+            return None
+        if commander.can_build_ship(wd, cmd):
+            return None
+        return (id(cmd), tuple(cmd.pos))
 
     def _begin_commander_move(self, cmd):
         self.commander_move_mode = cmd

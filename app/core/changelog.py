@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 81,
+        "title": "Steady Panel",
+        "items": [
+            "FIXED: the selected-commander panel no longer flickers every day while time runs.",
+        ],
+    },
+    {
         "version": 80,
         "title": "Smoother Roads",
         "items": [
