@@ -7,6 +7,8 @@ drawing a sphere. gl_flatmap.py was already importing exactly these pieces
 out of the globe module rather than duplicating them, which is what made
 deleting the globe a matter of moving them somewhere honest.
 """
+import math
+
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 

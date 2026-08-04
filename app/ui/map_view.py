@@ -1459,6 +1459,10 @@ class MapView(tk.Frame):
         self._trade_log_open = not getattr(self, "_trade_log_open", False)
         self._place_trade_log()
         self._refresh_trade_log_tab_styles()
+        if self._trade_log_open:
+            # Rows are only built while the log is open (see
+            # _log_trade_events) -- opening it must build what it will show.
+            self._refresh_trade_log_rows()
 
     def _resize_trade_log(self, width):
         width = max(self._TRADE_LOG_MIN_WIDTH, min(self._TRADE_LOG_MAX_WIDTH, width))
@@ -1694,7 +1698,12 @@ class MapView(tk.Frame):
         overflow = len(self._trade_log_entries) - self._TRADE_LOG_MAX_ENTRIES
         if overflow > 0:
             del self._trade_log_entries[:overflow]
-        self._refresh_trade_log_rows()
+        # Rebuilding every row is a Tk Label per entry; while the log is
+        # closed the rows are not visible, so a closed log just records the
+        # entries (the count on the reopen plaque reads them) and builds
+        # them when it opens (see _toggle_trade_log).
+        if getattr(self, "_trade_log_open", False):
+            self._refresh_trade_log_rows()
 
     def _refresh_trade_log_rows(self):
         """Rebuild the visible row widgets for the current tab from

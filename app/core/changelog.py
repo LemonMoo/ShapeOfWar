@@ -20,6 +20,14 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 86,
+        "title": "GPU Map Restored",
+        "items": [
+            "FIXED: the GPU map now actually runs -- a missing import made it fail silently on every machine, falling back to the slow Tk canvas renderer. Same map, ~40x cheaper frames.",
+            "PERFORMANCE: the trade log no longer rebuilds its rows every day while closed (built on open instead).",
+        ],
+    },
+    {
         "version": 85,
         "title": "Frame Rate Unlocked",
         "items": [
