@@ -791,6 +791,12 @@ class App(tk.Tk):
         # is how you lose the province you just won without seeing it happen.
         self.map_view.clock.forgive_backlog()
         self.map_view.reset_frame_clock()
+        # BattleView's own key bindings are torn down with unbind_all, which
+        # clears a sequence for the WHOLE app (Tk's "all" bindtag is shared),
+        # not just the battle screen's handler -- that silently erased this
+        # binding too. Restore it every time so Space keeps pausing/unpausing
+        # the world after the first battle, not just before it.
+        self.bind_all("<space>", self._on_time_key)
         self.show_screen("map")
         if outcome is None:
             return
