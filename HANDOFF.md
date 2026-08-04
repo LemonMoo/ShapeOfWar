@@ -6,20 +6,29 @@ procedurally generated fantasy world. Repo: `LemonMoo/ShapeOfWar`, branch
 
 ## START HERE
 
-**Last release: v0.12.0, "The Sound of Steel"** (§36). Check
-`gh release list --repo LemonMoo/ShapeOfWar --limit 5` before trusting that —
-this repo ships fast, sometimes several releases in a day.
+**Last release: v0.16.0, "Where You Make Your Stand"** (§40) — choosing your
+start. Check `gh release list --repo LemonMoo/ShapeOfWar --limit 6` before
+trusting that — this repo ships fast, sometimes several releases in a day.
 
-**Underworld phases 3, 4 and 5 are built and UNRELEASED on `master`** — see
-§37. The suite is **50 scripts** and passes, with one standing caveat:
-`dev/test_mining_camp.py` fails on `dev560.pkl` specifically (`workers > 0`)
-and passes on `dev160.pkl` and with no world — a quirk of that late-game save,
-not a regression.
+**Nothing is unreleased. The working tree is clean.** The suite is **55
+scripts** and passes, with one standing caveat: `dev/test_mining_camp.py`
+fails on `dev560.pkl` specifically (`workers > 0`) and passes on `dev160.pkl`
+and with no world — a quirk of that late-game save, not a regression.
 
-**THE LIVE THREAD is the underworld** (`SUBTERRANEAN_PLAN.md`, §37).
-Phases 0-5 are built; **phase 6 is next** — fighting underground, a battle
-terrain profile for gallery and cavern. The plan file is the spec and it is
-current; read it before writing anything.
+**There is NO live thread right now.** The last four multi-part efforts are all
+finished and shipped:
+- The **underworld** (`SUBTERRANEAN_PLAN.md`, §37) — phases 0-5, dwarf holds
+  and goblin warrens under the mountains, shipped v0.13.0. **Phase 6 (fighting
+  underground) was planned but not built** — it is the one open piece of that
+  plan, and the obvious next thing if you want to continue it.
+- The **parchment UI rework** (§38) — the whole HUD redrawn on a drawn-page
+  kit, v0.14.0/v0.14.1.
+- **Worldgen coherence** (`WORLDGEN_START_PLAN.md` Part A, §39) — 4-5 real
+  continents instead of a scatter of islands, v0.15.0.
+- **Choosing your start** (`WORLDGEN_START_PLAN.md` Part B, §40) — v0.16.0.
+
+Pick the next thing by value; §4's species balance and the queued economy ideas
+(supply-driven pricing, §31) are the largest unbuilt gameplay items.
 
 **The four things a new agent most needs to know:**
 
@@ -44,8 +53,10 @@ current; read it before writing anything.
    something first tried to walk through one (§37, phase 3).
 
 **Closed threads — do not re-open expecting work:** the biome overhaul
-(§§19-24), weather (§10, §§27-29), the battle movement rework (§32), and the
-real-time overhaul (§34).
+(§§19-24), weather (§10, §§27-29), the battle movement rework (§32), the
+real-time overhaul (§34), the underworld phases 0-5 (§37), the parchment UI
+(§38), and worldgen + start selection (§§39-40). The one loose end inside a
+closed thread is underworld **phase 6** (fighting in a corridor), never built.
 
 ## HOW THIS PROJECT WANTS TO BE WORKED ON
 
@@ -3382,3 +3393,107 @@ below and not on the mountainside above them.
   chokepoints is genuinely new work, and it is where this overruns if it does.
 - **No balance was touched**, by design. If holds measure oppressive the
   levers are gate count and food yield, not the species table.
+
+---
+
+## 38. The parchment UI (v0.14.0 / v0.14.1)
+
+The whole HUD was redrawn on a manuscript-page kit (`app/ui/parchment.py`):
+aged vellum, gold frames with corner flourishes, illuminated capitals at
+headings, a dotted ledger leader on every figure, wax-seal warnings, meters
+read as ink cut into a channel, buttons as carved plaques. Every screen wears
+it -- title, load, credits, pause, defeat, treasury, trade log, the build
+menu's cards, and the New Game screen (which lost the last of the old
+slate-blue pre-theme colours).
+
+Two things a new agent should know rather than rediscover:
+
+- **`app/ui/parchment.py` is the kit.** A `Page` object with `title`, `text`,
+  `divider`, `button`, `gap`, `begin`/`finish` -- pages are drawn onto a
+  `tk.Canvas`, not built from widgets. `CreditsView` is the clean worked
+  example (a scrolling colophon). New full-screen panels should use it.
+- **v0.13.1 "Let Us Out" was a real bug fix worth remembering as a shape:**
+  the game booted straight into the Credits screen and could not leave it,
+  from v0.12.0 onward. A screen-stack that can trap the player is the failure;
+  the guard is that every screen's Back/close has a tested path home.
+
+Not every screen is on the kit yet if a new one is added -- follow the
+`parchment.Page` pattern rather than hand-building tk widgets, or the HUD
+drifts back to looking like two different programs.
+
+## 39. Worldgen coherence -- Part A (v0.15.0)
+
+`WORLDGEN_START_PLAN.md` Part A. The plate model (§9) shipped as a first pass
+and was never tuned to convergence; this is that pass. User's asks: bigger,
+fewer continents; smaller interior lakes; fewer islands; "fantastical but still
+a world."
+
+Measured on seed sweeps, never by eye (the scratch harness pattern):
+
+- **Land bodies per world 46.6 -> ~8.** The eyesore was never continent COUNT
+  (`_target_n` already aimed at 4-7) -- it was islets that don't count as
+  substantial but fill the sea.
+- **~4.4 substantial continents** (target 4-5), land ~40%, gen time **~35s ->
+  15-25s** (fewer retries + less land downstream -- a free perf win).
+- **Lakes:** a would-be inland sea (one basin at 17% of land) is capped out;
+  now one great lake + ~6 mediums + small character lakes, worst 7% of land.
+
+Knobs, all in `plates.py`/`worldgen.py`: `FRACTION_CONTINENTAL` 0.40->0.45,
+base gap +-0.75->+-0.90, `AMP_CONVERGENT_OO` 0.40->0.22, `AMP_DIVERGENT_OTHER`
+0.15->0.06, `HOTSPOT_CHAIN_LINKS` 6->3 and half the hotspots,
+`DETAIL_AMPLITUDE` 0.6->0.30, sea-level percentile 0.60->0.58, `_LAKE_DEPTH`
+0.022->0.011, `_LAKE_MAX_SHARE` 0.005->0.006.
+
+**Two new mechanisms did the real work**, and both are the levers to reach for
+if this wants retuning:
+
+- `_cull_small_islands` (worldgen.py) -- sinks land components below
+  `_MIN_ISLAND_SHARE` (0.010 of land) back under the sea, protecting the
+  largest `keep_largest`. THE direct lever for "fewer islands." Runs after
+  carving, drops culled cells below sea level so every downstream height check
+  agrees, and is a mild perf win (less land downstream).
+- `_GREAT_LAKE_MAX_SHARE` (0.028) -- caps even the one exempt great lake, so a
+  smooth continent's single basin can no longer flood into an inland sea.
+
+Left deliberately (user said don't overspend): continent-count variance (still
+the occasional 2 or 9), and one fragmented outlier seed (a mountainous
+mid-ocean chain -- acceptable, still reads as a world). Levers if wanted:
+`_MIN_ISLAND_SHARE`, `FRACTION_CONTINENTAL`, `_target_n`.
+
+## 40. Choosing your start -- Part B (v0.16.0)
+
+`WORLDGEN_START_PLAN.md` Part B. The player picks where their realm begins and
+sees the ground before committing. Three phases:
+
+- **B1 -- `generate_world(..., player_start=(x,y))`.** The chosen cell is
+  pinned as capital[0] before rivals are placed (so they space away from it)
+  and through affinity ordering (so it is not handed to a rival); no farmland
+  gate on it (free placement is allowed, the UI warns). **Terrain is generated
+  before capitals and does not depend on them**, so a fixed seed grows
+  byte-identical ground with or without a chosen start -- the guarantee the
+  preview rests on. `dev/test_start_choice.py` is the gate.
+- **B2 -- `app/world/startsites.py`, a pure evaluator.** Given a cell: country,
+  goods (matched against **`RESOURCE_SPAWN`** -- NOT `RESOURCES`, which carries
+  no biome tables; that cost an hour), farmland %, coast/river, homeland fit,
+  elbow room, and a sustain verdict on WORKABLE land (rock/sand/ice barren;
+  forest/coast viable, because the generator places capitals there).
+  `candidate_sites()` offers spaced, viable, rival-free starts best-first by
+  affinity. `dev/test_startsites.py`.
+- **B3 -- the picker** (`app/ui/new_game.py`). Candidate dots + a chosen-start
+  ring on the preview, click to choose (snap to a dot, or free-place on the
+  nearest land), a card of what the site offers, and a warning on barren
+  ground that does not forbid it. Play regenerates with the player founded at
+  the chosen cell.
+
+**One pre-existing bug this surfaced, worth knowing:** `world.seed` alone does
+NOT reproduce a world that retried internally during generation -- the retry
+replaces the seed while `_target_n`/`_n_plates` came from the original. So
+`generate_world` now stashes `world._gen_params` (the fully-resolved seed +
+target + plate count of the successful attempt), and
+`startsites.regenerate_with_start` uses those to reproduce the previewed
+terrain cell-for-cell. Anything that needs to re-grow a shown world must use
+`_gen_params`, not `world.seed`.
+
+The sustain floors (`_SUSTAIN_WORKABLE_FLOOR` 0.15, `_THIN_FARMLAND_FLOOR`
+0.06) and candidate spacing are first-pass numbers in `startsites.py` -- the
+levers if the warning fires too often or too rarely in play.
