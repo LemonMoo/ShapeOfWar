@@ -249,6 +249,11 @@ class GLFlatMapFrame(OpenGLFrame):
         self._markers_wrap_bucket = None
         self._labels_src = None
         self._labels_wrap_bucket = None
+        # Set by set_lines/set_markers/set_labels whenever they actually
+        # re-pack a buffer (they skip on identity+wrap-bucket), consumed by
+        # redraw so unchanged content is not re-tobytes'd and re-uploaded
+        # every frame. Starts dirty so the first redraw uploads.
+        self._buffers_dirty = True
 
     # --- lifecycle --------------------------------------------------------
     @property
@@ -413,6 +418,7 @@ class GLFlatMapFrame(OpenGLFrame):
             return
         self._lines_src = paths
         self._lines_wrap_bucket = bucket
+        self._buffers_dirty = True
         segs = []
         for cells, color, width, dash in paths:
             if len(cells) < 2:
@@ -447,6 +453,7 @@ class GLFlatMapFrame(OpenGLFrame):
             return
         self._markers_src = marks
         self._markers_wrap_bucket = bucket
+        self._buffers_dirty = True
         n = len(marks)
         need = max(1, n) * _SHAPE_STRIDE
         if self._markers.size < need:
@@ -470,6 +477,7 @@ class GLFlatMapFrame(OpenGLFrame):
             return
         self._labels_src = labels
         self._labels_wrap_bucket = bucket
+        self._buffers_dirty = True
         atlas = self.atlas
         glyphs = []
         for cx, cy, text, color, px, dy in labels:
@@ -604,10 +612,11 @@ class GLFlatMapFrame(OpenGLFrame):
             lp["u_viewproj"].write(viewproj.T.tobytes())
             lp["u_rot"].write(rot)
             lp["u_px2ndc"].value = px2ndc
-            payload = self._lines[:self._line_count * _glg._LINE_STRIDE].tobytes()
-            if len(payload) > self.line_inst.size:
-                self.line_inst.orphan(len(payload))
-            self.line_inst.write(payload)
+            if self._buffers_dirty:
+                payload = self._lines[:self._line_count * _glg._LINE_STRIDE].tobytes()
+                if len(payload) > self.line_inst.size:
+                    self.line_inst.orphan(len(payload))
+                self.line_inst.write(payload)
             self.line_vao.render(moderngl.TRIANGLES, vertices=6,
                                  instances=self._line_count)
 
@@ -616,10 +625,11 @@ class GLFlatMapFrame(OpenGLFrame):
             mp["u_viewproj"].write(viewproj.T.tobytes())
             mp["u_right"].value = (1.0, 0.0, 0.0)
             mp["u_up"].value = (0.0, 1.0, 0.0)
-            payload = self._markers[:self._marker_count * _SHAPE_STRIDE].tobytes()
-            if len(payload) > self.mark_inst.size:
-                self.mark_inst.orphan(len(payload))
-            self.mark_inst.write(payload)
+            if self._buffers_dirty:
+                payload = self._markers[:self._marker_count * _SHAPE_STRIDE].tobytes()
+                if len(payload) > self.mark_inst.size:
+                    self.mark_inst.orphan(len(payload))
+                self.mark_inst.write(payload)
             self.mark_vao.render(moderngl.TRIANGLES, vertices=6,
                                  instances=self._marker_count)
 
@@ -630,9 +640,11 @@ class GLFlatMapFrame(OpenGLFrame):
             tp["u_viewproj"].write(viewproj.T.tobytes())
             tp["u_rot"].write(rot)
             tp["u_px2ndc"].value = px2ndc
-            payload = self._glyphs[:self._glyph_count * _glg._GLYPH_STRIDE].tobytes()
-            if len(payload) > self.text_inst.size:
-                self.text_inst.orphan(len(payload))
-            self.text_inst.write(payload)
+            if self._buffers_dirty:
+                payload = self._glyphs[:self._glyph_count * _glg._GLYPH_STRIDE].tobytes()
+                if len(payload) > self.text_inst.size:
+                    self.text_inst.orphan(len(payload))
+                self.text_inst.write(payload)
             self.text_vao.render(moderngl.TRIANGLES, vertices=6,
                                  instances=self._glyph_count)
+        self._buffers_dirty = False

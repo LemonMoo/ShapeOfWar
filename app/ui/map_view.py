@@ -414,6 +414,19 @@ def _terrain_noise(x, y, salt):
     return h / 0xffffffff
 
 
+def _terrain_noise_grid(xx, yy, salt):
+    """Vectorized _terrain_noise over broadcast index arrays. The same
+    integer hashing in int64 -- every intermediate is < 2^63, so the int64
+    wrap (and masking to 32 bits after it) reproduces Python's arbitrary-
+    precision result exactly, and the final division is the same IEEE double.
+    Bit-identical to the scalar version; any divergence would show up as a
+    changed pixel somewhere (see _texture_pixels and dev/verify_render_pixels.py)."""
+    h = (xx * 374761393 + yy * 668265263 + salt * 2246822519) & 0xffffffff
+    h = ((h ^ (h >> 13)) * 1274126177) & 0xffffffff
+    h = (h ^ (h >> 16)) & 0xffffffff
+    return h / 0xffffffff
+
+
 # Per-biome texture spec: (density, dark, light, scale)
 #   density - fraction of cells the texture touches (0..1)
 #   dark    - how far the touched tone moves toward black (negative)
@@ -442,37 +455,6 @@ _BIOME_TEXTURE = {
 # owns a place still reads as the primary signal. See _ensure_base.
 _TEXTURE_FULL = 1.0
 _TEXTURE_POL = 0.55
-
-
-def _texture_cell(rgb, biome, x, y, strength):
-    """One cell's colour after `biome`'s texture at `strength` (0..1) is
-    applied. Returns `rgb` untouched when the cell falls under the biome's
-    density threshold, so plains and sparse biomes stay mostly clean."""
-    if biome == "desert":
-        # Dune ripples: diagonal light bands ~7 cells apart, waved by noise.
-        band = (x + y + _terrain_noise(x, y, 7) * 2.5) % 7.0
-        if band < 1.6:
-            amt = (1.6 - band) / 1.6 * 0.13 * strength
-            return _rgb(*_lighten(rgb, amt))
-        return rgb
-    spec = _BIOME_TEXTURE.get(biome)
-    if spec is None:
-        return rgb
-    density, dark, light, scale = spec
-    # Coarse lattice decides WHERE a patch is (exactly `density` of cells,
-    # since patch ~ U(0,1)), and a little per-cell jitter softens the patch
-    # edges instead of leaving hard scale-cell squares. The jitter has mean
-    # zero, so it blurs the boundary without changing the touched fraction.
-    patch = _terrain_noise(int(x // scale), int(y // scale), 3)
-    grain = _terrain_noise(x, y, 5)
-    mix = patch + (grain - 0.5) * 0.4
-    if mix > density:
-        return rgb
-    t = 1.0 - mix / max(density, 1e-4)
-    amt = dark + (light - dark) * t
-    if amt >= 0:
-        return _rgb(*_lighten(rgb, amt * strength))
-    return _rgb(*(int(c * (1.0 + amt * strength)) for c in rgb))
 
 
 # Basic topographical texture on the political map itself, not just the
@@ -862,6 +844,8 @@ class MapView(tk.Frame):
         self._anim_id = None
         self._px_pol = None             # None until the first _precompute_colors -- see
                                          # _update_dirty_colors' fallback
+        self._tex_cache = None          # (world, cache) of the texture pass's
+                                         # geometry-only inputs -- see _texture_cache
 
         # Free camera (drag-pan / wheel-zoom): independent of the click-
         # driven drill-down zoom (_start_zoom/_animate below), but writes
@@ -950,6 +934,8 @@ class MapView(tk.Frame):
         self._flat_content_sig = None
         self._flat_lines_cache = []
         self._flat_markers_cache = []
+        self._flat_static_markers_cache = []   # non-mover half of _flat_markers --
+                                               # rebuilt only on structural changes
         self._flat_labels_cache = []
         # Movement animation state (see _start_move_animation /
         # _update_anim_positions). There is no separate animation timer any
@@ -960,6 +946,8 @@ class MapView(tk.Frame):
                                      # (the marker-rebuild signal; see _sync_flatgl)
         self._anim_day_base = 0.0    # _sim_days value the current slide started at
         self._last_slide_frac = None  # last frac drawn, so a settled slide stops redrawing
+        self._pending_tracks = None   # next day's tracks parked until the display clock
+                                      # crosses the day boundary -- see _start_move_animation
         self._move_seconds = _MOVE_ANIM_SECONDS   # hand-step (paused) window only
         self._move_t0 = 0.0                        # ...its wall-clock origin
 
@@ -1044,6 +1032,7 @@ class MapView(tk.Frame):
         self.view_target = list(self.view)
         self._base_img = self._base_key = None
         self._px_pol = None   # new world: force a full _precompute_colors rebuild, not a patch
+        self._tex_cache = None   # new geometry: the texture noise cache is stale too
         self._fog_overlay_img = None
         self._stop_move_animation()   # a slide from the previous world means
                                       # nothing in this one
@@ -1166,16 +1155,16 @@ class MapView(tk.Frame):
         full rebuild on every single territory change got expensive)."""
         wd = self.world
         n = wd.w * wd.h
-        self._px_pol = [None] * n
-        self._px_pol_hi = [None] * n
-        self._px_fert = [None] * n
-        self._px_elev = [None] * n
-        self._px_biome = [None] * n
-        self._px_climate = [None] * n
-        self._px_region = [None] * n
-        self._px_region_hi = [None] * n
-        self._owner_flat = [OCEAN] * n
-        self._region_flat = [-1] * n
+        self._px_pol = np.zeros((n, 3), dtype=np.uint8)
+        self._px_pol_hi = np.zeros((n, 3), dtype=np.uint8)
+        self._px_fert = np.zeros((n, 3), dtype=np.uint8)
+        self._px_elev = np.zeros((n, 3), dtype=np.uint8)
+        self._px_biome = np.zeros((n, 3), dtype=np.uint8)
+        self._px_climate = np.zeros((n, 3), dtype=np.uint8)
+        self._px_region = np.zeros((n, 3), dtype=np.uint8)
+        self._px_region_hi = np.zeros((n, 3), dtype=np.uint8)
+        self._owner_flat = np.full(n, OCEAN, dtype=np.int16)
+        self._region_flat = np.full(n, -1, dtype=np.int32)
         fcolors, cshade = self._color_context()
         cg = wd.region_grid
         for y in range(wd.h):
@@ -2665,7 +2654,7 @@ class MapView(tk.Frame):
         hint = self._placement_hint_cells
         return (
             wd.turn, getattr(wd, "territory_version", 0), level, round(scale, 3),
-            self.mode, self.selected_settlement, self.selected_village,
+            self.mode, self.layer, self.selected_settlement, self.selected_village,
             self.selected_commander, self.attack_mode, id(self._attack_frontier),
             self.building_mode, tuple(hint) if hint else None,
             # Marching orders. A move order is given to an ALREADY-selected
@@ -2730,14 +2719,21 @@ class MapView(tk.Frame):
         if structural or flashing:
             self._flat_content_sig = sig
             lines = self._map_lines(level, scale=scale)
-            markers = self._flat_markers(level)
+            static = self._flat_static_markers(level)
+            markers = static + self._flat_mover_markers()
             labels = self._map_labels(level, region_names=False) + self._flat_labels_extra()
             self._flat_lines_cache = lines
             self._flat_markers_cache = markers
+            self._flat_static_markers_cache = static
             self._flat_labels_cache = labels
         elif move_animating:
             lines = self._flat_lines_cache
-            markers = self._flat_markers(level)   # only the movers slid
+            # Only the movers slid -- settlements, villages, gates, hints and
+            # construction sites are static between day boundaries, so the
+            # animation frame rebuilds JUST the mover markers and reuses the
+            # cached static half, instead of re-walking every settlement and
+            # village (with per-node fog checks) at 30fps for the whole day.
+            markers = self._flat_static_markers_cache + self._flat_mover_markers()
             labels = self._flat_labels_cache
             self._flat_markers_cache = markers
         else:
@@ -3110,31 +3106,21 @@ class MapView(tk.Frame):
     _SETTLE_SHAPE = {"city": SHAPE_CIRCLE, "castle": SHAPE_TRIANGLE, "town": SHAPE_SQUARE}
 
     def _flat_markers(self, level):
-        """Everything the flat map draws as a point marker, as
-        (cell_x, cell_y, radius_world_units, (r,g,b), shape) for
-        gl_flatmap's set_markers -- the GPU equivalent of what the canvas
-        draws. Shape is carried by gl_flatmap's own marker shader
-        (SHAPE_CIRCLE/TRIANGLE/SQUARE/DIAMOND/HULL), which reproduces the
-        canvas's city/castle/town/commander/ship silhouettes directly, and
-        size comes from _marker_radius's screen-pixel-clamped rule, so a
-        marker is exactly as legible at any zoom as it is on the canvas.
+        """Everything the flat map draws as a point marker -- the static set
+        plus the movers (see _flat_static_markers / _flat_mover_markers).
+        Used for a structural rebuild; an animation-only frame rebuilds just
+        the mover half (see _sync_flatgl)."""
+        return self._flat_static_markers(level) + self._flat_mover_markers()
 
-        No camera-culling here: an orthographic viewport clips off-screen
-        instances on the GPU for free, and at flat-map scale (hundreds, not
-        tens of thousands, of markers) there is no reason to spend CPU time
-        pre-filtering them."""
+    def _flat_static_markers(self, level):
+        """The flat-map markers that do NOT move during a day's slide: gates,
+        settlements, villages, placement hints and construction sites. Their
+        positions never come from _display_pos, so they are cached across
+        animation frames and rebuilt only when the content signature changes
+        (which covers wd.turn, every selection, scale and level)."""
         wd = self.world
         scale = self._place[2]
         marks = []
-
-        # Gates, on BOTH layers. A door you cannot find is a door that does
-        # not exist -- and on the surface it is the only sign that there is
-        # anything under that mountain at all.
-        for gate in getattr(wd, "gates", ()):
-            gx, gy = gate["pos" if self.layer == layers.SURFACE else "under"]
-            marks.append((gx, gy, max(2.0, 6.0 / scale),
-                          tuple(c / 255.0 for c in _UNDER_GATE_RGB),
-                          SHAPE_DIAMOND))
 
         def px(screen_r):
             """Screen-pixel radius -> world-unit size for set_markers: the
@@ -3148,6 +3134,15 @@ class MapView(tk.Frame):
 
         def ring(cx, cy, screen_r):
             marks.append((cx, cy, px(screen_r + 3), (1.0, 1.0, 1.0), SHAPE_CIRCLE))
+
+        # Gates, on BOTH layers. A door you cannot find is a door that does
+        # not exist -- and on the surface it is the only sign that there is
+        # anything under that mountain at all.
+        for gate in getattr(wd, "gates", ()):
+            gx, gy = gate["pos" if self.layer == layers.SURFACE else "under"]
+            marks.append((gx, gy, max(2.0, 6.0 / scale),
+                          tuple(c / 255.0 for c in _UNDER_GATE_RGB),
+                          SHAPE_DIAMOND))
 
         # Settlements: city = circle, castle = triangle, town = square,
         # matching _draw_settlements' own shape-per-kind exactly.
@@ -3176,6 +3171,34 @@ class MapView(tk.Frame):
                     ring(v.pos[0] + 0.5, v.pos[1] + 0.5, r)
                 marks.append((v.pos[0] + 0.5, v.pos[1] + 0.5, px(r),
                              _GL_RGB[_VILLAGE_STYLE["fill"]], SHAPE_CIRCLE))
+
+        # Settlement placement hint (see _score_placement_hint) -- advisory
+        # gold dots over a region's best-scoring cells while a City/Town/
+        # Castle is armed to place.
+        if self.building_mode is not None and self._placement_hint_cells:
+            for x, y in self._placement_hint_cells:
+                marks.append((x + 0.5, y + 0.5, px(4.0), _GL_RGB["#ffec78"], SHAPE_CIRCLE))
+
+        # In-progress settlement construction sites (see _draw_construction).
+        for project in wd.settlement_projects:
+            marks.append((project.pos[0] + 0.5, project.pos[1] + 0.5, px(4.0),
+                         _GL_RGB["#f2e9c9"], SHAPE_CIRCLE))
+        return marks
+
+    def _flat_mover_markers(self):
+        """The flat-map markers whose drawn position changes during a day's
+        slide: commanders, ships and trade caravans. Their coordinates come
+        from _display_pos, i.e. the interpolated slide position, so this is
+        the ONLY part of the marker set rebuilt on an animation-only frame."""
+        wd = self.world
+        scale = self._place[2]
+        marks = []
+
+        def px(screen_r):
+            return screen_r / scale
+
+        def ring(cx, cy, screen_r):
+            marks.append((cx, cy, px(screen_r + 3), (1.0, 1.0, 1.0), SHAPE_CIRCLE))
 
         # Commanders: diamond, player's own kept orchid.
         cr = _COMMANDER_STYLE["r"]
@@ -3214,25 +3237,6 @@ class MapView(tk.Frame):
             cx, cy = self._display_pos(caravan)
             marks.append((cx + 0.5, cy + 0.5, px(style["r"]), _GL_RGB[style["fill"]],
                          SHAPE_CIRCLE))
-
-        # Settlement placement hint (see _score_placement_hint) -- advisory
-        # gold dots over a region's best-scoring cells while a City/Town/
-        # Castle is armed to place.
-        if self.building_mode is not None and self._placement_hint_cells:
-            for x, y in self._placement_hint_cells:
-                marks.append((x + 0.5, y + 0.5, px(4.0), _GL_RGB["#ffec78"], SHAPE_CIRCLE))
-
-        # In-progress settlement construction sites (see _draw_construction).
-        for project in wd.settlement_projects:
-            marks.append((project.pos[0] + 0.5, project.pos[1] + 0.5, px(4.0),
-                         _GL_RGB["#f2e9c9"], SHAPE_CIRCLE))
-
-        # Terrain symbols are NOT emitted here -- they are viewport-dependent
-        # (sampled over the visible rect, re-spaced by zoom), so caching them
-        # with the other markers would leave them stale the moment the camera
-        # pans. _sync_flatgl appends the live set every frame instead (see
-        # _flat_terrain_symbols), exactly as the canvas draws them every
-        # frame.
         return marks
 
     # Which GL shape each glyph-bearing biome renders as -- mirror of the
@@ -3506,25 +3510,64 @@ class MapView(tk.Frame):
         -- the one world loop (_on_frame) walks these every frame. All this does
         is install the tracks and anchor the slide's clock so it plays from the
         start; the driver draws the t=0 frame on this same tick, before anything
-        can paint the movers at their final cells."""
-        self._move_tracks = tracks or ()
-        self._last_slide_frac = None      # force the first frame to draw
+        can paint the movers at their final cells.
+
+        When a day's sim work finishes EARLY -- before the display clock has
+        reached the day boundary -- the previous slide is still mid-flight, and
+        swapping tracks now would yank the movers backward to the day's start.
+        So the new day's tracks are parked in _pending_tracks and become the
+        active slide only the frame the display clock crosses the boundary (see
+        _update_anim_positions). Drawn motion then depends only on the display
+        clock, never on when the sim happened to finish."""
+        tracks = tracks or ()
         if not tracks:
-            self._anim_pos = {}
-            self._move_active = False
+            # A day with no movement. Do NOT drop a parked day (its sim work
+            # already happened and it still has to play at the boundary), and
+            # do not end a slide that is still mid-flight. Only when nothing
+            # is in flight or parked do we stand the movers back on their
+            # real cells.
+            if self._pending_tracks is None and not self._move_tracks:
+                self._move_active = bool(self._anim_pos)
+                self._anim_pos = {}
+                self._last_slide_frac = None
             return
+        in_flight = self._slide_in_flight()   # read BEFORE _last_slide_frac resets
+        self._last_slide_frac = None          # force the first frame to draw
         if self.clock.paused or self.clock.speed <= 0:
             # Stepped by hand (E) or a slide finishing under a pause: there is
             # no running day-length to lock to, so fall back to the fixed
             # wall-clock window, eased so a caravan pulls away and settles.
+            self._pending_tracks = None
+            self._move_tracks = tracks
             self._move_seconds = self._move_anim_seconds()
             self._move_t0 = time.monotonic()
+        elif in_flight:
+            # The previous day's slide is still moving (the sim finished this
+            # day early -- the paced budget overestimated its cost). Park the
+            # new day's tracks: swapping now would jump the movers from mid-
+            # path back to the day's start. The swap happens the frame the
+            # display clock reaches the day boundary, which is also the frame
+            # the old slide's drawn position is the day end -- exactly where
+            # this day's frac 0 starts.
+            self._pending_tracks = tracks
         else:
-            # Running: anchor to the continuous display clock. frac then grows
-            # 0 -> 1 as exactly one day is demanded, and wraps cleanly to the
-            # next day's slide because that slide starts where this one ends.
+            # Running, no slide in flight: anchor to the continuous display
+            # clock. frac then grows 0 -> 1 as exactly one day is demanded,
+            # and the next day's slide starts where this one ends.
+            self._pending_tracks = None
+            self._move_tracks = tracks
             self._anim_day_base = self._sim_days
         self._update_anim_positions()
+
+    def _slide_in_flight(self):
+        """True while the current slide is actually moving (its frac is between
+        0 and 1, exclusive of a settled end). A slide that has reached frac 1
+        is not in flight: the movers are drawn at the day-end cells, which is
+        exactly where a newly installed slide's frac 0 starts, so no deferral
+        is needed."""
+        return (self._move_tracks
+                and self._last_slide_frac is not None
+                and self._last_slide_frac < 1.0)
 
     def _slide_frac(self):
         """How far through the current day's travel to draw, 0..1.
@@ -3554,6 +3597,16 @@ class MapView(tk.Frame):
             self._anim_pos = {}
             return
         frac = self._slide_frac()
+        if frac >= 1.0 and self._pending_tracks is not None:
+            # Day boundary reached while the next day's tracks were parked
+            # (the sim had finished early): swap them in. The old slide just
+            # clamped at its end -- the day-end cells -- and the new slide's
+            # frac 0 starts at those same cells, so the swap is invisible.
+            self._move_tracks = self._pending_tracks
+            self._pending_tracks = None
+            self._anim_day_base += 1.0
+            frac = 0.0
+            tracks = self._move_tracks   # the draw below must use the NEW day's
         if frac == self._last_slide_frac:
             self._move_active = False                  # settled: nothing moved
             return
@@ -3568,6 +3621,7 @@ class MapView(tk.Frame):
         already moved on from."""
         self._move_active = bool(self._anim_pos)   # need one draw to clear them
         self._move_tracks = ()
+        self._pending_tracks = None
         self._anim_pos = {}
         self._last_slide_frac = None
 
@@ -5767,8 +5821,7 @@ class MapView(tk.Frame):
             if self.selected_region is not None:
                 sc = self.selected_region.id
                 base, hi = self._px_region, self._px_region_hi
-                data = [hi[i] if cid == sc else base[i]
-                        for i, cid in enumerate(self._region_flat)]
+                data = np.where(self._region_flat[:, None] == sc, hi, base)
             else:
                 data = self._px_region
         elif self.mode == "fertility":
@@ -5782,12 +5835,10 @@ class MapView(tk.Frame):
         elif self.selected is not None:
             sel = wd.factions.index(self.selected)
             base, hi = self._px_pol, self._px_pol_hi
-            data = [hi[i] if o == sel else base[i]
-                    for i, o in enumerate(self._owner_flat)]
+            data = np.where(self._owner_flat[:, None] == sel, hi, base)
         else:
             data = self._px_pol
 
-        img = Image.new("RGB", (wd.w, wd.h))
         if self.mode == "biome":
             strength = _TEXTURE_FULL
         elif region_mode or self.mode == "political":
@@ -5798,32 +5849,105 @@ class MapView(tk.Frame):
             # Copy: the _px_* arrays are the cache the incremental patcher
             # (_update_dirty_colors) recomputes into, and they must stay
             # texture-free or the next rebuild would texture them twice.
-            data = self._texture_pixels(list(data), strength)
-        img.putdata(data)
-        self._base_img = img
+            data = self._texture_pixels(data, strength)
+        self._base_img = Image.frombytes("RGB", (wd.w, wd.h), data.tobytes())
         self._base_key = key
 
+    def _texture_cache(self):
+        """World-static inputs to the texture pass, computed once per world:
+        per-biome cell masks (minus river/lake cells) and the deterministic
+        noise fields. All depend only on geometry -- biome_grid, river/lake
+        cells, world size -- never on mode, selection or ownership, so they
+        survive every _base_key invalidation."""
+        wd = self.world
+        cached = getattr(self, "_tex_cache", None)
+        if cached is not None and cached[0] is wd:
+            return cached[1]
+        w, h = wd.w, wd.h
+        xx = np.arange(w, dtype=np.int64)[None, :]
+        yy = np.arange(h, dtype=np.int64)[:, None]
+        river = np.zeros((h, w), dtype=bool)
+        for (x, y) in wd.river_cells:
+            river[y, x] = True
+        lake = np.zeros((h, w), dtype=bool)
+        for (x, y) in wd.lake_cells:
+            lake[y, x] = True
+        grid = np.asarray(wd.biome_grid, dtype=object)
+        biomes = {}
+        for name, (density, dark, light, scale) in _BIOME_TEXTURE.items():
+            idx = np.flatnonzero((grid == name) & ~river & ~lake)
+            if idx.size == 0:
+                continue
+            patch = _terrain_noise_grid(
+                (xx // scale).astype(np.int64), (yy // scale).astype(np.int64), 3)
+            biomes[name] = (idx, patch.ravel(), density, dark, light)
+        desert_idx = np.flatnonzero((grid == "desert") & ~river & ~lake)
+        noise7 = _terrain_noise_grid(xx, yy, 7)
+        cache = {
+            "grain5": _terrain_noise_grid(xx, yy, 5).ravel(),
+            "band": ((xx + yy + noise7 * 2.5) % 7.0).ravel(),
+            "biomes": biomes,
+            "desert": desert_idx,
+        }
+        self._tex_cache = (wd, cache)
+        return cache
+
+    @staticmethod
+    def _apply_texture_amt(flat, cells, amt):
+        """Apply a per-cell texture amount to the flat (n,3) pixel array:
+        amt >= 0 lightens toward white (c + (255-c)*amt), amt < 0 scales
+        toward black (c * (1+amt)) -- the two branches of the old
+        _texture_cell, with the same truncation toward zero."""
+        pos = amt >= 0
+        if pos.any():
+            a = amt[pos][:, None]
+            c = flat[cells[pos]].astype(np.float64)
+            flat[cells[pos]] = np.clip(
+                np.floor(c + (255.0 - c) * a), 0, 255).astype(np.uint8)
+        neg = ~pos
+        if neg.any():
+            a = amt[neg][:, None]
+            c = flat[cells[neg]].astype(np.float64)
+            flat[cells[neg]] = np.clip(
+                np.floor(c * (1.0 + a)), 0, 255).astype(np.uint8)
+
     def _texture_pixels(self, data, strength):
-        """Overlay the per-biome terrain texture onto a full-map pixel list,
-        in place. Ocean cells carry no biome, and river cells are skipped
+        """Overlay the per-biome terrain texture onto a full-map pixel
+        array (n,3) uint8, on a COPY, and return the copy.
+
+        Vectorized: the per-cell scalar loop this replaces cost ~300ms on an
+        1100x660 world and sat in the frame whenever the base raster rebuilt
+        (every territory change, mode or selection switch). Bit-identical
+        output: _terrain_noise_grid reproduces the scalar hash exactly, and
+        the blend is the same IEEE double math with the same int()
+        truncation (see dev/verify_render_pixels.py).
+
+        Ocean cells carry no biome, and river/lake cells are skipped
         explicitly -- worldgen assigns river cells a biome, but they render
         as flat _RIVER_RGB water and would end up mottled. The texture is
         deterministic per cell (see _terrain_noise), so a region whose
         ownership changes later gets repainted with exactly the same
         pattern its neighbours already wear -- no seams, no flicker."""
-        wd = self.world
-        bg = wd.biome_grid
-        rivers = wd.river_cells
-        w, h = wd.w, wd.h
-        for y in range(h):
-            row = bg[y]
-            base = y * w
-            for x in range(w):
-                biome = row[x]
-                if biome and (x, y) not in rivers:
-                    i = base + x
-                    data[i] = _texture_cell(data[i], biome, x, y, strength)
-        return data
+        cache = self._texture_cache()
+        out = data.copy()
+        flat = out.reshape(out.shape[0], 3)
+        g5 = cache["grain5"]
+        for idx, patch, density, dark, light in cache["biomes"].values():
+            mix = patch[idx] + (g5[idx] - 0.5) * 0.4
+            touched = mix <= density
+            if not touched.any():
+                continue
+            amt = (dark + (light - dark)
+                   * (1.0 - mix[touched] / density)) * strength
+            self._apply_texture_amt(flat, idx[touched], amt)
+        desert_idx = cache["desert"]
+        if desert_idx.size:
+            band = cache["band"][desert_idx]
+            touched = band < 1.6
+            if touched.any():
+                amt = (1.6 - band[touched]) / 1.6 * 0.13 * strength
+                self._apply_texture_amt(flat, desert_idx[touched], amt)
+        return out
 
     def _under_pixels(self, selected_id=-1):
         """The underworld as a flat pixel list.

@@ -20,6 +20,16 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 84,
+        "title": "A World That Holds Together",
+        "items": [
+            "PERFORMANCE: the terrain raster rebuilds ~40x faster (numpy-vectorized) -- the freeze on every territory change, mode or selection switch is now a few milliseconds.",
+            "PERFORMANCE: the GPU map re-uploads roads/labels only when they change, and a day's movement slide redraws just the moving units instead of every settlement and village.",
+            "FIXED: units no longer jump backward when a day's simulation finishes early -- slides are anchored to the world clock and glide continuously across day boundaries.",
+            "CHANGED: map colour data now uses a fraction of the memory (packed pixels instead of per-cell Python objects), same rendered picture.",
+        ],
+    },
+    {
         "version": 83,
         "title": "Terrain That Reads",
         "items": [
