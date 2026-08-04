@@ -1,9 +1,10 @@
 """The settings panel.
 
 One widget, built once and reachable from both the main menu and the pause
-menu, rather than two panels that drift apart. Audio is all it holds today;
+menu, rather than two panels that drift apart. Audio is all it held at first;
 it is shaped as a general settings panel because the next thing that needs a
-slider should not have to invent this again.
+slider or a toggle should not have to invent this again. (The video frame-rate
+toggle is that next thing.)
 
 Two things here are deliberate and easy to get wrong:
 
@@ -11,7 +12,9 @@ Two things here are deliberate and easy to get wrong:
 OK button. A volume slider you have to confirm is a volume slider you cannot
 actually judge, because the only way to know whether 40% is right is to hear
 40%. Moving the effects slider plays a sound at the new level for the same
-reason -- otherwise you are setting a number, not a volume.
+reason -- otherwise you are setting a number, not a volume. The video toggle
+is the same principle: flipping it takes effect on the map the moment you go
+back to it, not on some future restart.
 
 **Nothing is saved on every drag.** A slider fires a callback per pixel, and
 writing a JSON file a hundred times while somebody drags a knob is silly. The
@@ -21,6 +24,7 @@ setting survives even if the debounce never fires.
 import tkinter as tk
 
 from app.core import audio
+from app.core import video
 from app.ui import theme
 from app.ui import widgets
 
@@ -28,13 +32,17 @@ _SAVE_DEBOUNCE_MS = 600
 
 
 class SettingsPanel(tk.Frame):
-    """Audio settings. `on_close`, if given, is called by the Back button --
-    the caller owns what "back" means (raise a screen, destroy a window), and
-    this widget deliberately does not guess."""
+    """Settings. `on_close`, if given, is called by the Back button -- the
+    caller owns what "back" means (raise a screen, destroy a window), and this
+    widget deliberately does not guess. `on_video_change`, if given, is called
+    after the frame-rate mode flips, so the caller can push it into the live
+    GPU map frame immediately."""
 
-    def __init__(self, master, on_close=None, title="Settings"):
+    def __init__(self, master, on_close=None, on_video_change=None,
+                 title="Settings"):
         super().__init__(master, bg=theme.BG)
         self._on_close = on_close
+        self._on_video_change = on_video_change
         self._save_after_id = None
         # Tk fires a Scale's command when you .set() it, including the initial
         # set below -- so without this, merely OPENING the settings panel
@@ -77,10 +85,20 @@ class SettingsPanel(tk.Frame):
             self._mute_btn.pack(fill="x", padx=16, pady=(10, 12))
             self._refresh_mute()
 
+        vcard = tk.Frame(center, bg=theme.PANEL, relief=theme.BORDER_RELIEF,
+                         borderwidth=theme.BORDER_WIDTH,
+                         highlightbackground=theme.LINE)
+        vcard.pack(fill="x", ipadx=18, ipady=14, pady=(14, 0))
+        tk.Label(vcard, text="DISPLAY", bg=theme.PANEL, fg=theme.ACCENT,
+                 font=theme.FONT_HEADER, anchor="w").pack(fill="x", padx=16,
+                                                          pady=(8, 4))
+        self._video_btn = widgets.button(vcard, "", self._toggle_video)
+        self._video_btn.pack(fill="x", padx=16, pady=(10, 12))
+        self._refresh_video()
+
         widgets.button(center, "Back", self._close, kind="accent"
                        ).pack(fill="x", pady=(18, 0))
         self._building = False
-
     # --- controls --------------------------------------------------------
     def _slider(self, parent, label, value, command):
         row = tk.Frame(parent, bg=theme.PANEL)
@@ -129,6 +147,20 @@ class SettingsPanel(tk.Frame):
         muted = audio.state()["muted"]
         self._mute_btn.config(text="Sound is OFF — click to unmute" if muted
                               else "Sound is ON — click to mute")
+
+    def _toggle_video(self):
+        video.set_uncapped(not video.state()["uncapped"])
+        self._refresh_video()
+        video.save_settings()
+        if self._on_video_change:
+            self._on_video_change()
+
+    def _refresh_video(self):
+        uncapped = video.state()["uncapped"]
+        self._video_btn.config(
+            text="Frame rate: Uncapped (up to 200 FPS) — click for smooth"
+            if uncapped else
+            "Frame rate: Smooth (vsync) — click for uncapped")
 
     # --- saving ----------------------------------------------------------
     def _queue_save(self):

@@ -276,11 +276,45 @@ class GLFlatMapFrame(OpenGLFrame):
             try:
                 self.ctx = moderngl.create_context()
                 self._setup_gl()
+                self._apply_swap_interval()
             except Exception:
                 self._failed = True
                 return
         w, h = self._size()
         self.ctx.viewport = (0, 0, w, h)
+
+    def set_uncapped(self, value):
+        """Flip the swap mode live (settings panel): uncapped = vsync off, so
+        the loop's own frame target rules; smooth = vsync on, so the visible
+        rate is the display's refresh with no tearing. No-op if the driver
+        lacks wglSwapIntervalEXT."""
+        try:
+            self.tkMakeCurrent()
+        except Exception:
+            return
+        self._swap_interval(0 if value else 1)
+
+    @staticmethod
+    def _swap_interval(interval):
+        """wglSwapIntervalEXT(interval) -- 1 (default) makes SwapBuffers block
+        until the vertical blank, 0 uncaps it. Only valid while the context is
+        current, and only present if the driver ships the extension; either
+        failure is silent (vsync stays however the driver defaulted it)."""
+        try:
+            import ctypes
+            opengl32 = ctypes.windll.opengl32
+            addr = opengl32.wglGetProcAddress(b"wglSwapIntervalEXT")
+            if addr:
+                fn = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_int)(addr)
+                fn(interval)
+        except Exception:
+            pass
+
+    def _apply_swap_interval(self):
+        """Apply the persisted video setting at context creation (initgl runs
+        with the wgl context current). See app/core/video.py."""
+        from app.core import video
+        self._swap_interval(0 if video.state()["uncapped"] else 1)
 
     def _setup_gl(self):
         ctx = self.ctx

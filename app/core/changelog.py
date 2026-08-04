@@ -20,6 +20,15 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 85,
+        "title": "Frame Rate Unlocked",
+        "items": [
+            "PERFORMANCE: the world driver now targets up to 200 FPS (1ms timers + adaptive scheduling) and paces to your display's refresh instead of a drifting 30-40.",
+            "FIXED: drag-panning no longer lags the mouse -- drag renders are throttled to the frame target instead of one per motion event.",
+            "NEW: Settings > Display -- frame-rate mode: Smooth (vsync, default, no tearing) or Uncapped (up to 200 FPS).",
+        ],
+    },
+    {
         "version": 84,
         "title": "A World That Holds Together",
         "items": [

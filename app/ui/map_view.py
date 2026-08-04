@@ -71,12 +71,16 @@ _VILLAGE_REVEAL_SPAN = 40   # world-cells across the shorter viewport edge -- be
                             # apart) landed on this as a reasonable starting point --
                             # tune by feel if it reveals villages too early/late.
 
-# The world driver's frame period (see MapView._on_frame). ~60fps: this one
-# loop both steps the world AND draws the moving map, so it has to run at the
-# rate travel is meant to look smooth at. The world's share of each frame is
-# still bounded (see _budget_ms/_MAX_BUDGET_MS) and the standing render cost is
-# cached across pans (see _sync_flatgl), so most of these frames are cheap.
-_FRAME_MS = 16
+# The world driver's frame period (see MapView._on_frame): the TARGET, not a
+# promise. _on_frame reschedules adaptively (period = max(_FRAME_MS, actual)),
+# so this is the scheduling floor -- the loop can run this fast, and what is
+# actually displayed is then decided by the swap: vsync on (the default) paces
+# the visible rate to the monitor's refresh, vsync off (the settings panel's
+# "uncapped" mode) lets the loop run at up to 200Hz. At either setting, the
+# world's share of each frame is still bounded (see _budget_ms/_MAX_BUDGET_MS)
+# and the standing render cost is cached across pans (see _sync_flatgl), so
+# most of these frames are cheap. 5ms = the 200fps target.
+_FRAME_MS = 5
 
 # Ceiling on how much of a frame the world may take, however high the speed.
 # Past this the map stops feeling like something you are watching and starts
@@ -3649,8 +3653,9 @@ class MapView(tk.Frame):
     # it owes on the day in progress, and draw. Speed is a budget, not a
     # negotiation -- see app/core/clock.py's demand/supply note.
     def _on_frame(self):
+        t0 = time.monotonic()
         try:
-            now = time.monotonic()
+            now = t0
             dt = min(0.25, now - self._last_frame)   # a stall (a battle, a
             self._last_frame = now                   # drag, a load) must not
             self._advance_world(dt)                  # cash in as world time
@@ -3663,7 +3668,16 @@ class MapView(tk.Frame):
             if self._should_render_frame():
                 self.render()
         finally:
-            self._frame_id = self.after(_FRAME_MS, self._on_frame)
+            # Next frame from the START of this one, not its end: the period
+            # becomes max(_FRAME_MS, actual), never _FRAME_MS + actual. That
+            # matters twice over -- a frame that finished fast no longer adds
+            # its own cost to the cadence, and a vsync-blocked swap (the GL
+            # map's tkSwapBuffers can hold the frame until the next refresh)
+            # no longer stacks on top of the timer. On a 60Hz display this is
+            # the difference between a steady 60fps and a drifting 30-40.
+            elapsed = (time.monotonic() - t0) * 1000.0
+            self._frame_id = self.after(
+                max(1, int(_FRAME_MS - elapsed)), self._on_frame)
 
     def _should_render_frame(self):
         """Whether this frame changed anything worth redrawing. Movement in
@@ -5520,7 +5534,15 @@ class MapView(tk.Frame):
         # up by then.
         if not self._drag_render_pending:
             self._drag_render_pending = True
-            self.after_idle(self._drag_render_tick)
+            # Throttled to the same cadence as the world driver, not an
+            # after_idle per event: motion events arrive far faster than the
+            # map can usefully redraw, and with after_idle every event that
+            # landed while the loop was free queued another render, so the
+            # loop ran flat out -- the visible map falling behind where the
+            # mouse actually is, which reads as everything lagging the drag.
+            # One render per frame budget instead, coalescing however many
+            # motion events arrive inside it.
+            self.after(_FRAME_MS, self._drag_render_tick)
 
     def _drag_render_tick(self):
         self._drag_render_pending = False

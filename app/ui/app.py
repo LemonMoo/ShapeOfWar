@@ -107,7 +107,8 @@ class App(tk.Tk):
         # Shipped in v0.12.0 and found in a v0.13.0 launch check.
         self.credits_view = CreditsView(self.content, on_close=self._close_credits)
         self.settings_view = SettingsPanel(
-            self.content, on_close=self._close_settings)
+            self.content, on_close=self._close_settings,
+            on_video_change=self._apply_video_change)
         for view in (self.menu_view, self.new_game_view, self.load_game_view,
                      self.pause_view, self.game_over_view, self.settings_view,
                      self.credits_view):
@@ -749,6 +750,15 @@ class App(tk.Tk):
         if payload.get("faction_idx") == self.world.player_faction_idx:
             self._pause_world_for(clock.PROJECT_DONE)
 
+    def _apply_video_change(self):
+        """Push the frame-rate mode into the live GPU map frame, if there is
+        one (no-op at the main menu, where there is no map yet). The GL frame
+        also reads the setting itself at creation, so this only exists to
+        make a mid-session toggle take effect immediately."""
+        if self.map_view is not None and self.map_view._flatgl is not None:
+            from app.core import video
+            self.map_view._flatgl.set_uncapped(video.state()["uncapped"])
+
     def _pause_world_for(self, reason):
         """Stop the clock because something happened, and leave the world in a
         state it is safe to walk away from.
@@ -845,4 +855,27 @@ def main():
     # release always runs on the numbers in the source.
     from app.core import tuning
     tuning.load()
+    # The frame driver targets up to 200Hz; Tk's after() timers inherit the
+    # system timer granularity, which is 15.6ms by default on Windows --
+    # enough for ~64Hz, not enough for the target. timeBeginPeriod(1) is the
+    # standard, reversible way to ask for 1ms timers (it is a process-wide
+    # request; Windows 11 often already has it granted by another app, which
+    # is why this machine may not seem to need it).
+    _raise_timer_resolution()
+    from app.core import video
+    video.load_settings()
     App().mainloop()
+
+
+def _raise_timer_resolution():
+    """Windows-only: request 1ms system-timer resolution so Tk's after() can
+    schedule faster than ~64Hz. Silent no-op anywhere else, or if the request
+    is refused. Never lowered back down -- the game is short-lived enough that
+    the handful of microseconds of wake-up cost is not worth the bookkeeping,
+    and the OS reclaims it when the process exits anyway."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            ctypes.windll.winmm.timeBeginPeriod(1)
+    except Exception:
+        pass
