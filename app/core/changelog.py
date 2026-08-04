@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 79,
+        "title": "Space Fixed",
+        "items": [
+            "FIXED: Space stopped pausing/unpausing the world after your first battle.",
+        ],
+    },
+    {
         "version": 78,
         "title": "Where You Make Your Stand",
         "items": [
