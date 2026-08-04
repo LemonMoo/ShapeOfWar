@@ -27,7 +27,8 @@ MARKERS = [
     ("app.ui.gl_common", "math", "name"),
     ("app.world.trade", "same contract as run_regional_trade_steps", "const"),
     ("app.world.resources", "Yields \"households\" between region chunks", "const"),
-    ("app.core.changelog", "A Smoother Day", "const"),
+    ("app.ui.map_view", "the frame that runs one of the day's unsplittable phases", "const"),
+    ("app.core.changelog", "The World Is Thinking", "const"),
 ]
 
 arch = CArchiveReader(EXE)
