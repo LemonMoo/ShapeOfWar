@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 80,
+        "title": "Smoother Roads",
+        "items": [
+            "CHANGED: armies, caravans and ships now glide across the map at a steady pace instead of stuttering day to day — and stay smooth after a battle.",
+        ],
+    },
+    {
         "version": 79,
         "title": "Space Fixed",
         "items": [

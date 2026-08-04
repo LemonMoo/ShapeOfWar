@@ -118,7 +118,7 @@ def test_live_turn(path):
     # And the animation must clean up after itself: once it ends, every mover
     # is back on its own real cell, or the map keeps drawing a stale position.
     view._start_move_animation(tracks)
-    check("animation is running", view._move_anim is not None)
+    check("animation is running", bool(view._move_tracks) and bool(view._anim_pos))
     view._stop_move_animation()
     check("stopping clears animated positions", not view._anim_pos)
     check("display falls back to the real cell",

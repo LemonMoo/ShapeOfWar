@@ -70,10 +70,12 @@ _VILLAGE_REVEAL_SPAN = 40   # world-cells across the shorter viewport edge -- be
                             # apart) landed on this as a reasonable starting point --
                             # tune by feel if it reveals villages too early/late.
 
-# The world driver's frame period (see MapView._on_frame). ~30fps: the world
-# map is not an action game, and every frame costs a slice of the day plus
-# whatever the map redraws.
-_FRAME_MS = 33
+# The world driver's frame period (see MapView._on_frame). ~60fps: this one
+# loop both steps the world AND draws the moving map, so it has to run at the
+# rate travel is meant to look smooth at. The world's share of each frame is
+# still bounded (see _budget_ms/_MAX_BUDGET_MS) and the standing render cost is
+# cached across pans (see _sync_flatgl), so most of these frames are cheap.
+_FRAME_MS = 16
 
 # Ceiling on how much of a frame the world may take, however high the speed.
 # Past this the map stops feeling like something you are watching and starts
@@ -193,7 +195,6 @@ def _rgb(r, g, b):
 # This one still applies when the world is not running on a clock at all --
 # stepping a day by hand with E, where there is no day-length to match.
 _MOVE_ANIM_SECONDS = 0.75
-_MOVE_ANIM_FRAME_MS = 33          # ~30fps; the map redraws fully per frame
 # At 4x a day goes by in 0.6s, and past that the sliding reads as jitter rather
 # than as travel -- so a fast clock stops shortening the window and lets the
 # movers simply cover more ground per day instead.
@@ -649,6 +650,12 @@ class MapView(tk.Frame):
         self.runner = turn_runner.TurnRunner(world)
         self._turn_pending = None    # (before_snapshot, prev_year, movement_snapshot)
         self._last_frame = time.monotonic()
+        # A continuous count of days demanded, advanced every frame at the
+        # clock's own demand rate (see _advance_world). This -- not wall time --
+        # paces the movement slide, so a mover's travel is locked to the world
+        # clock and the seam between one day's slide and the next vanishes.
+        # Never capped or dropped: it is a display clock, not the sim's.
+        self._sim_days = 0.0
         self._frame_id = None
         self._last_panel_refresh = 0.0
         # What a day of this world costs, learned rather than assumed -- see
@@ -780,10 +787,17 @@ class MapView(tk.Frame):
         self._flat_lines_cache = []
         self._flat_markers_cache = []
         self._flat_labels_cache = []
-        # End-turn movement animation state (see _start_move_animation).
-        self._move_anim = None       # pending `after` id, or None when idle
-        self._move_tracks = ()       # [(mover, t -> (x, y)), ...]
-        self._anim_pos = {}          # id(mover) -> its position this frame
+        # Movement animation state (see _start_move_animation /
+        # _update_anim_positions). There is no separate animation timer any
+        # more: the one world driver (_on_frame) advances these every frame.
+        self._move_tracks = ()       # [(mover, t -> (x, y)), ...] for the day being shown
+        self._anim_pos = {}          # id(mover) -> its drawn position this frame
+        self._move_active = False    # did a mover's drawn position change this frame?
+                                     # (the marker-rebuild signal; see _sync_flatgl)
+        self._anim_day_base = 0.0    # _sim_days value the current slide started at
+        self._last_slide_frac = None  # last frac drawn, so a settled slide stops redrawing
+        self._move_seconds = _MOVE_ANIM_SECONDS   # hand-step (paused) window only
+        self._move_t0 = 0.0                        # ...its wall-clock origin
 
         self.bottom_msg = tk.Label(self, text="", bg=theme.CANVAS, fg=theme.INK,
                                    font=("Segoe UI", 13, "bold"), padx=18, pady=10)
@@ -2542,7 +2556,7 @@ class MapView(tk.Frame):
         # three every frame. This is what took the continuous full-content
         # rebuild (measured ~4-5ms of lines alone in region view, every frame)
         # off the standing render cost that read as lag in the wide views.
-        move_animating = self._move_anim is not None
+        move_animating = self._move_active
         if structural or flashing:
             self._flat_content_sig = sig
             lines = self._map_lines(level, scale=scale)
@@ -3263,64 +3277,74 @@ class MapView(tk.Frame):
                    self.clock.seconds_per_day / self.clock.speed)
 
     def _start_move_animation(self, tracks):
-        self._stop_move_animation()
+        """Hand the driver a new day's worth of slides. It does NOT run a timer
+        -- the one world loop (_on_frame) walks these every frame. All this does
+        is install the tracks and anchor the slide's clock so it plays from the
+        start; the driver draws the t=0 frame on this same tick, before anything
+        can paint the movers at their final cells."""
+        self._move_tracks = tracks or ()
+        self._last_slide_frac = None      # force the first frame to draw
         if not tracks:
-            return
-        self._move_tracks = tracks
-        self._move_seconds = self._move_anim_seconds()
-        self._move_t0 = time.monotonic()
-        # Run the first frame SYNCHRONOUSLY, not via after(0, ...). _run_end_turn
-        # calls refresh() (which renders movers at their real, final positions)
-        # immediately before this, and refresh()'s render() is itself
-        # synchronous -- so scheduling the animation's own first frame for the
-        # next event-loop tick left a real window where Tk could actually
-        # paint that final-position frame to the screen before
-        # _step_move_animation ever ran and snapped everything back to its
-        # start position. The player saw exactly that: movers flash forward
-        # to their destination, jump back to where they started, then
-        # animate forward again. Calling it here means the canvas already
-        # shows the animation's own t=0 frame by the time anything gets a
-        # chance to paint the screen at all.
-        #
-        # _step_move_animation's own continuation check is "reschedule the
-        # next frame if _move_anim is still non-None" -- previously true by
-        # the side effect of after(0, ...) having already stashed a real
-        # after-id there before the callback ever ran. Calling it directly
-        # skips that, so it needs a truthy placeholder here instead (real
-        # after-ids overwrite it the moment the animation actually
-        # continues past this first frame).
-        self._move_anim = True
-        self._step_move_animation()
-
-    def _step_move_animation(self):
-        window = getattr(self, "_move_seconds", None) or _MOVE_ANIM_SECONDS
-        t = min(1.0, (time.monotonic() - self._move_t0) / window)
-        # Smoothstep while the world is stepped by hand -- a caravan pulls away
-        # and settles rather than snapping into motion and stopping dead on the
-        # same frame. NOT while the clock is running: easing every day would
-        # put a stop and a start into travel that is supposed to be continuous,
-        # which is the very rhythm this phase exists to remove.
-        eased = t if window > _MOVE_ANIM_SECONDS * 1.5 else t * t * (3.0 - 2.0 * t)
-        self._anim_pos = {id(obj): walk(eased) for obj, walk in self._move_tracks}
-        if t >= 1.0:
-            self._move_anim = None
-            self._move_tracks = ()
             self._anim_pos = {}
-        self.render()
-        if self._move_anim is not None:
-            self._move_anim = self.after(_MOVE_ANIM_FRAME_MS,
-                                         self._step_move_animation)
+            self._move_active = False
+            return
+        if self.clock.paused or self.clock.speed <= 0:
+            # Stepped by hand (E) or a slide finishing under a pause: there is
+            # no running day-length to lock to, so fall back to the fixed
+            # wall-clock window, eased so a caravan pulls away and settles.
+            self._move_seconds = self._move_anim_seconds()
+            self._move_t0 = time.monotonic()
+        else:
+            # Running: anchor to the continuous display clock. frac then grows
+            # 0 -> 1 as exactly one day is demanded, and wraps cleanly to the
+            # next day's slide because that slide starts where this one ends.
+            self._anim_day_base = self._sim_days
+        self._update_anim_positions()
+
+    def _slide_frac(self):
+        """How far through the current day's travel to draw, 0..1.
+
+        Running: the continuous display clock (locked to world speed). Paused /
+        hand-stepped: a fixed wall-clock window, since there is no day pace to
+        match."""
+        if self.clock.paused or self.clock.speed <= 0:
+            window = self._move_seconds or _MOVE_ANIM_SECONDS
+            t = min(1.0, (time.monotonic() - self._move_t0) / window)
+            # Smoothstep only here: easing every running day would put a stop
+            # and a start back into travel that is meant to be continuous.
+            return t * t * (3.0 - 2.0 * t)
+        return max(0.0, min(1.0, self._sim_days - self._anim_day_base))
+
+    def _update_anim_positions(self):
+        """Recompute each mover's drawn position for this frame. The single
+        writer of _anim_pos; called once per frame by the driver (and once more
+        the instant a new day's tracks arrive, to land the t=0 frame).
+
+        Sets _move_active when a position actually changed, which is both the
+        driver's "redraw this frame" cue and the marker-rebuild signal the flat
+        map reads (see _sync_flatgl) -- so a settled slide stops costing frames."""
+        tracks = self._move_tracks
+        if not tracks:
+            self._move_active = bool(self._anim_pos)   # one frame to clear stale movers
+            self._anim_pos = {}
+            return
+        frac = self._slide_frac()
+        if frac == self._last_slide_frac:
+            self._move_active = False                  # settled: nothing moved
+            return
+        self._last_slide_frac = frac
+        self._anim_pos = {id(obj): walk(frac) for obj, walk in tracks}
+        self._move_active = True
 
     def _stop_move_animation(self):
-        """Drop any animation in flight and put every mover back on its real
-        cell. Called before a new turn and on leaving the view, so a half-
+        """Drop the slide in flight and put every mover back on its real cell.
+        Called on leaving the view (and by reset_frame_clock), so a half-
         finished slide can never be left showing a position the world has
         already moved on from."""
-        if self._move_anim is not None:
-            self.after_cancel(self._move_anim)
-        self._move_anim = None
+        self._move_active = bool(self._anim_pos)   # need one draw to clear them
         self._move_tracks = ()
         self._anim_pos = {}
+        self._last_slide_frac = None
 
     def _display_pos(self, obj):
         """Where to DRAW a mover: its animated position while an end-turn
@@ -3351,13 +3375,35 @@ class MapView(tk.Frame):
             dt = min(0.25, now - self._last_frame)   # a stall (a battle, a
             self._last_frame = now                   # drag, a load) must not
             self._advance_world(dt)                  # cash in as world time
+            # One loop, one draw. The movement slide is not its own timer any
+            # more (that second loop stopped rescheduling itself the instant a
+            # slide finished, which is where the freeze-then-jump lived); the
+            # driver recomputes where the movers are and redraws every frame it
+            # needs to.
+            self._update_anim_positions()
+            if self._should_render_frame():
+                self.render()
         finally:
             self._frame_id = self.after(_FRAME_MS, self._on_frame)
+
+    def _should_render_frame(self):
+        """Whether this frame changed anything worth redrawing. Movement in
+        progress always is; a paused, idle map is not (its own flash/zoom loops
+        drive their own redraws)."""
+        if self.world is None:
+            return False
+        return bool(self._move_active)
 
     def _advance_world(self, dt):
         if self.world is None:
             return
         self.clock.tick(dt)
+        # The display clock tracks the SAME demand the sim clock does, so the
+        # movement slide advances at exactly the world's pace. Uncapped on
+        # purpose: it is what the drawn position is measured against, not a
+        # debt anything has to pay off.
+        if not self.clock.paused:
+            self._sim_days += dt * self.clock.speed / self.clock.seconds_per_day
         if not self.runner.busy and self.clock.pending < 1.0:
             return
         if not self.runner.busy:
@@ -3412,6 +3458,15 @@ class MapView(tk.Frame):
         forward. The 0.25s clamp in _on_frame bounds the damage; this removes
         it."""
         self._last_frame = time.monotonic()
+        # The display clock resets in step with the frame clock: a battle (or a
+        # load, or the pause menu) is a stretch the world was NOT simulated, so
+        # the days it would have "demanded" during it are not owed. A stale
+        # _sim_days would make the first day back start its slide already
+        # part-run -- the specific seam that made movement go choppy again right
+        # after a battle.
+        self._sim_days = 0.0
+        self._anim_day_base = 0.0
+        self._stop_move_animation()
 
     def skip_a_day(self):
         """Run the rest of today and one more, whatever the clock is doing --
