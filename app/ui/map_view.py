@@ -971,6 +971,7 @@ class MapView(tk.Frame):
             sig = self._commander_panel_sig(self.selected_commander)
             if sig is None or sig != self._panel_sig:
                 self._show_commander(self.selected_commander)
+                self._page.finish()   # single paint, not begin()'s deferred second one
         self._update_resource_bar()
         self._update_turn_label()
         self._refresh_alerts()
@@ -4286,15 +4287,36 @@ class MapView(tk.Frame):
         # is a drawn page, so a rebuild is one delete-and-draw on a canvas
         # rather than thirty widgets being destroyed and recreated while
         # mapped. There is no half-built intermediate state for Tk to paint.
-        if True:
-            if self.selected is not None:
-                self._show_faction(self.selected)
-            if self.selected_region is not None:
-                self._show_region(self.selected_region)
-            if self.selected_settlement is not None:
-                self._show_settlement(self.selected_settlement)
-            if self.selected_village is not None:
-                self._show_village(self.selected_village)
+        #
+        # ONE panel, most-specific-wins. These used to be four sequential ifs,
+        # so a wildland selected while its owner's realm was also selected drew
+        # the faction panel AND THEN the region panel over it every refresh --
+        # two full page draws a second, of two different heights, which is
+        # exactly the "panel flashes between two sizes" the player saw. Only the
+        # last one was ever visible anyway (each _show_* clears the page first);
+        # drawing just it removes the wasted first draw and the flash with it.
+        # Order is the drill-down order, innermost first: a village sits inside
+        # a region which sits inside a faction, and the innermost thing selected
+        # is the one the player is looking at.
+        drew = True
+        if self.selected_village is not None:
+            self._show_village(self.selected_village)
+        elif self.selected_settlement is not None:
+            self._show_settlement(self.selected_settlement)
+        elif self.selected_region is not None:
+            self._show_region(self.selected_region)
+        elif self.selected is not None:
+            self._show_faction(self.selected)
+        else:
+            drew = False
+        # Close the page HERE, synchronously, instead of leaving it to begin()'s
+        # after-idle. That deferred finish() re-lays the parchment sheet a
+        # second time -- from the height begin() guessed to the height the
+        # content actually used -- as its own separate repaint, so a panel
+        # redrawn every day visibly snapped between the two heights. Finishing
+        # in the same call folds both into a single paint at the right height.
+        if drew:
+            self._page.finish()
 
     def _toggle_panel_card(self, key):
         # Commanders too -- refresh() handles that one separately because it

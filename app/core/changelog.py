@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 82,
+        "title": "Steadier Panel",
+        "items": [
+            "FIXED: the wildland claim panel (and other selection panels) no longer flicker between two sizes each day while time runs.",
+        ],
+    },
+    {
         "version": 81,
         "title": "Steady Panel",
         "items": [
