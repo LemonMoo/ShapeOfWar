@@ -25,7 +25,9 @@ MARKERS = [
     ("app.ui.gl_flatmap", "wglSwapIntervalEXT", "const"),
     ("app.ui.app", "timeBeginPeriod", "name"),
     ("app.ui.gl_common", "math", "name"),
-    ("app.core.changelog", "GPU Map Restored", "const"),
+    ("app.world.trade", "same contract as run_regional_trade_steps", "const"),
+    ("app.world.resources", "Yields \"households\" between region chunks", "const"),
+    ("app.core.changelog", "A Smoother Day", "const"),
 ]
 
 arch = CArchiveReader(EXE)
