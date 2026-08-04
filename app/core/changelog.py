@@ -20,6 +20,16 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 83,
+        "title": "Terrain That Reads",
+        "items": [
+            "NEW: fantasy biome palette -- every terrain type has its own colour family (violet peaks, emerald forest, teal taiga, amber desert, ice tundra...).",
+            "NEW: per-biome terrain texture baked into the map -- forest canopy mottle, desert dune ripples, tundra frost, swamp patches.",
+            "NEW: terrain symbols for ten biomes on the political map (trees, reeds, cacti, acacia, peaks, hills) plus a legend -- now on the GPU map too.",
+            "CHANGED: political map tints each biome toward its own colour, so terrain reads under any faction's flag.",
+        ],
+    },
+    {
         "version": 82,
         "title": "Steadier Panel",
         "items": [
