@@ -957,6 +957,10 @@ class MapView(tk.Frame):
 
         self.bottom_msg = tk.Label(self, text="", bg=theme.CANVAS, fg=theme.INK,
                                    font=("Segoe UI", 13, "bold"), padx=18, pady=10)
+        # "the world is thinking…" marker for the frames that run one of the
+        # day's unsplittable phases (see _world_thinking).
+        self.thinking_msg = tk.Label(self, text="", bg=theme.CANVAS, fg=theme.INK,
+                                     font=("Segoe UI", 11, "italic"), padx=14, pady=6)
 
         # Year-rollover banner (see _show_year_banner) — a big top-of-screen
         # announcement, MMO-zone-reveal style, for the once-a-year moment a
@@ -3711,7 +3715,14 @@ class MapView(tk.Frame):
         if not self.runner.busy:
             self._begin_day()
             self._day_started = time.monotonic()
-        if self.runner.step(self._budget_ms(dt)):
+        # Mark the step that runs one of the day's unsplittable phases: show
+        # and paint BEFORE it blocks, hide after (see _world_thinking).
+        self._world_thinking(True)
+        try:
+            done = self.runner.step(self._budget_ms(dt))
+        finally:
+            self._world_thinking(False)
+        if done:
             # Rolling estimate of what a day costs on this world, which is what
             # paces the slices. Weighted toward the recent past so it follows a
             # world that is growing rather than averaging over its whole life.
@@ -5442,6 +5453,28 @@ class MapView(tk.Frame):
             return
         self.render()
         self._flash_id = self.after(40, self._flash_tick)
+
+    # --- world-thinking marker (the unsplittable phases) ---------------------
+    def _world_thinking(self, on):
+        """Mark the frame that runs one of the day's unsplittable phases (a
+        province changing hands, a brand-new trade route's first path search,
+        a settlement project finishing): each blocks the main thread for
+        ~30-130ms, and there is no way to repaint DURING the block. So the
+        marker is painted BEFORE the phase runs and removed after it -- a fast
+        step's show and hide land inside the same frame, so the marker never
+        flickers; a slow one stays on screen for exactly the freeze, which
+        reads as the world being busy instead of the game dying."""
+        if on:
+            self.thinking_msg.config(text="the world is thinking…")
+            self.thinking_msg.place(relx=0.5, rely=0.90, anchor="s")
+        else:
+            self.thinking_msg.config(text="")
+            self.thinking_msg.place_forget()
+        # Flush the show/hide to the screen right now: the show must reach
+        # the display before the phase blocks, and the hide must be gone
+        # before this frame's render, or a fast phase would leave it visible
+        # for a frame.
+        self.update_idletasks()
 
     # --- bottom banner (acquisition outcome message) -------------------------
     def show_bottom_message(self, text, ms=4200):

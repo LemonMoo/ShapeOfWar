@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 88,
+        "title": "The World Is Thinking",
+        "items": [
+            "NEW: the unsplittable pauses (a province changing hands, a new trade route's first path search, construction finalization) now show a small \"the world is thinking…\" caption for exactly as long as the freeze lasts.",
+        ],
+    },
+    {
         "version": 87,
         "title": "A Smoother Day",
         "items": [
