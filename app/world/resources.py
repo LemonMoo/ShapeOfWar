@@ -436,7 +436,12 @@ TURNS_PER_SEASON = 25
 # so this changes nothing about the result -- only how long the longest
 # uninterruptible slice of a day is, which is what decides whether the map
 # stutters while the world runs.
-REGION_CHUNK = 40
+# Regions per slice of the per-region production loop (and the same
+# REGION_CHUNK unit run_local_logistics' own chunking uses). On a developed
+# world a 40-region slice measured up to ~28ms -- over a frame, i.e. a
+# visible hitch on production days; 16 keeps a routine slice around a
+# couple of milliseconds.
+REGION_CHUNK = 16
 YEAR_LENGTH_TURNS = TURNS_PER_SEASON * len(SEASONS)
 
 # --- Phase 3: where a resource actually appears -----------------------------
@@ -5763,10 +5768,19 @@ def run_local_logistics(world):
     neighbors don't want the resource, so nothing goes unfed just because
     its closest neighbor happens to be equally short. Fully automatic --
     no player or AI decision involved, matching how the rest of this
-    economy already works."""
+    economy already works.
+
+    Yields "households" between region chunks: on a developed world this
+    loop alone measured ~80ms over 1451 regions -- a freeze one frame
+    cannot hide -- and each region dispatches its own shipments into
+    world.local_shipments independently of every other, so where the
+    breaks fall changes nothing. dev/test_turn_slice.py pins that to a
+    fingerprint."""
     world._local_path_budget = LOCAL_PATH_BUDGET_PER_TURN
     turn = getattr(world, "turn", 0)
-    for region in world.regions:
+    for i, region in enumerate(world.regions):
+        if i and not i % REGION_CHUNK:
+            yield "households"
         if region.faction_idx < 0:
             continue
         nodes = _region_logistics_nodes(world, region)
@@ -6875,7 +6889,8 @@ def day_steps(world):
     _gold_mark = _gold_snapshot(world)
     yield "workshops"
 
-    run_local_logistics(world)              # dispatch new shipments from this turn's fresh stock
+    yield from run_local_logistics(world)   # dispatch new shipments from this turn's fresh stock
+                                            # (a generator: yields 'households' between region chunks)
     advance_settlement_storage(world)
     consumption_value = advance_settlement_consumption(world)
     yield "households"
@@ -6932,7 +6947,7 @@ def day_steps(world):
     # third of it -- which is why it gets a yield to itself on either side
     # rather than being folded in with its neighbours.
     world.regional_trade_events += yield from trade.run_regional_trade_steps(world)
-    world.regional_trade_events += trade.run_sell_to_city(world)
+    world.regional_trade_events += yield from trade.run_sell_to_city(world)
     _record_gold(world, "domestic trade", _gold_mark)
     _gold_mark = _gold_snapshot(world)
     yield "sell to city"

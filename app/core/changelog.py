@@ -20,6 +20,14 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 87,
+        "title": "A Smoother Day",
+        "items": [
+            "PERFORMANCE: the heavy daily economy phases (regional trade, sell-to-city, local logistics, production) are now sliced across frames instead of running as one long unbroken call -- the same results, without the multi-frame freeze when each ran.",
+            "PERFORMANCE: finer slices on the domestic-trade and production loops so a single chunk stays inside the frame budget even on a late-game world.",
+        ],
+    },
+    {
         "version": 86,
         "title": "GPU Map Restored",
         "items": [

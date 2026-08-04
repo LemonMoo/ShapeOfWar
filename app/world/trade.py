@@ -1735,7 +1735,16 @@ def _faction_regional_nodes(world, fac_idx, nation):
 # before it offers the caller a break. See run_regional_trade_steps: the
 # breaks change nothing about the result, only the length of the longest
 # uninterruptible slice of a day.
-REGIONAL_TRADE_NODE_CHUNK = 20
+# Nodes per slice of the domestic-trade phase (the wants-scan and the
+# matching loop both yield every chunk). Tuned against the developed dev
+# world, where one 20-node slice of the largest faction measured 97-130ms --
+# three to six times the frame budget, i.e. a visible hitch per slice. Eight
+# nodes keeps a routine slice inside ~20-40ms there and scales the spike down
+# on smaller worlds; the remaining tail is the one uncached Dijkstra a new
+# route costs, which no chunking can split (see _land_path_between). Chunking
+# changes nothing else: the same node work runs, just yielding more often
+# between it, which is what test_turn_slice's fingerprint pins.
+REGIONAL_TRADE_NODE_CHUNK = 8
 
 
 def run_regional_trade(world):
@@ -2021,9 +2030,16 @@ def run_sell_to_city(world):
     that dug it over 60 turns. run_regional_trade already treats a Village as a
     first-class node (see _faction_regional_nodes) and RegionalShipment already
     carries origin_kind for exactly this; only this function was still
-    settlement-only."""
+    settlement-only.
+
+    A GENERATOR, same contract as run_regional_trade_steps: yields "sell to
+    city" between node chunks so the daily phase never freezes a frame, and
+    RETURNS the event dicts for the caller to collect via `yield from`. Each
+    node dispatches independently, so where the breaks fall changes nothing;
+    dev/test_turn_slice.py pins that to a fingerprint."""
     events = []
     season = world.season
+    seen = 0
     for fac_idx, nation in enumerate(world.factions):
         cities = _faction_cities(nation, world)
         if not cities:
@@ -2040,6 +2056,9 @@ def run_sell_to_city(world):
                     faction_supply[r] = faction_supply.get(r, 0) + amt
 
         for kind, node in nodes:
+            if seen and not seen % REGIONAL_TRADE_NODE_CHUNK:
+                yield "sell to city"
+            seen += 1
             if kind == "settlement" and node.kind == "city":
                 continue   # a City doesn't sell to itself
             if _active_regional_shipments(world, node.id, kind) >= MAX_ACTIVE_REGIONAL_SHIPMENTS_PER_SETTLEMENT:
