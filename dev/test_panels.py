@@ -362,5 +362,42 @@ else:
     print(f"  ok    a {len(mine.path)}-cell march reaches the GPU map, and the "
           f"content cache notices immediately")
 
+print("\n--- refresh() reuses the terrain raster when nothing changed ---")
+# The panels refresh every ~900ms while the clock runs. refresh() used to
+# throw away the cached terrain raster (self._base_img) unconditionally,
+# forcing render() to rebuild the full ~22ms image every time -- the periodic
+# frame spike behind the "standing lag" in the region/world views. It must
+# only rebuild when region ownership actually changed.
+view.selected = None
+view.zoom_faction = None
+view.selected_region = view.selected_settlement = view.selected_village = None
+view.selected_commander = None
+# Build the raster directly -- render() early-returns on the test's 1x1
+# canvas, but _ensure_base needs no canvas at all.
+view._ensure_base()
+before_img = view._base_img
+before_key = view._base_key
+assert before_img is not None, "no base raster to begin with"
+# A refresh with no ownership change must leave the cached raster in place.
+view._last_territory_version = getattr(world, "territory_version", 0)
+view.refresh()
+view._ensure_base()
+assert view._base_img is before_img and view._base_key == before_key, (
+    "refresh() rebuilt the terrain raster with no territory change -- this is "
+    "the wasted ~22ms rebuild that caused the standing lag")
+print("  ok    an unchanged day keeps the cached raster")
+
+# ...and when ownership DOES change, refresh() drops it so _ensure_base
+# rebuilds a fresh image.
+world.territory_version = getattr(world, "territory_version", 0) + 1
+world._dirty_color_cells = {(1, 1)}
+view.refresh()
+assert view._base_img is None, "a territory change did not invalidate the raster"
+view._ensure_base()
+assert view._base_img is not before_img and view._base_img is not None, (
+    "a territory change did not rebuild the raster -- the map would show stale "
+    "ownership")
+print("  ok    a territory change rebuilds it")
+
 root.destroy()
 print("\nPANELS TEST PASSED")

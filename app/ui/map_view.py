@@ -919,7 +919,18 @@ class MapView(tk.Frame):
             if dirty:
                 dirty.clear()
             self._last_territory_version = territory_version
-        self._base_img = self._base_key = None
+            # The precomputed pixel arrays just changed under it, so the
+            # cached raster is stale and has to be thrown away -- but ONLY
+            # then. This used to fire unconditionally, forcing render() to
+            # rebuild the full ~22ms terrain image on EVERY panel refresh
+            # (every 900ms while the clock runs), even on the overwhelming
+            # majority of days that transfer no territory at all. That
+            # needless rebuild was the periodic ~100ms frame spike behind the
+            # "standing lag" in the region/world views. Selection- and
+            # mode-change invalidation is not needed here: _ensure_base's own
+            # cache key already captures both, so a changed selection rebuilds
+            # the raster on its own without this.
+            self._base_img = self._base_key = None
         self._rebuild_selection_panel()
         # Same reasoning as the treasury below: a build menu can be left open
         # across End Turn, and until this call it was a snapshot -- you could
@@ -2518,9 +2529,21 @@ class MapView(tk.Frame):
         # while active (both are already short-lived, bounded animations,
         # not something a player spends a sustained drag inside).
         sig = self._flat_content_signature(level, scale)
-        animating = self._flash_region is not None or self._move_anim is not None
-        rebuilt = animating or sig != self._flat_content_sig
-        if rebuilt:
+        structural = sig != self._flat_content_sig
+        # A flash (post-battle region highlight) can move a line, so it forces
+        # a full rebuild -- but it is a one-shot, not a standing cost.
+        flashing = self._flash_region is not None
+        # The move animation is the STANDING cost: while the clock runs it
+        # re-renders at 30fps for the whole day to slide the movers. But only
+        # the movers move -- roads, trade routes and labels are all static
+        # between day boundaries (which bump wd.turn, so `structural` catches
+        # them). So an animation-only frame rebuilds JUST the markers and
+        # reuses last frame's lines and labels, instead of rebuilding all
+        # three every frame. This is what took the continuous full-content
+        # rebuild (measured ~4-5ms of lines alone in region view, every frame)
+        # off the standing render cost that read as lag in the wide views.
+        move_animating = self._move_anim is not None
+        if structural or flashing:
             self._flat_content_sig = sig
             lines = self._map_lines(level, scale=scale)
             markers = self._flat_markers(level)
@@ -2528,10 +2551,16 @@ class MapView(tk.Frame):
             self._flat_lines_cache = lines
             self._flat_markers_cache = markers
             self._flat_labels_cache = labels
+        elif move_animating:
+            lines = self._flat_lines_cache
+            markers = self._flat_markers(level)   # only the movers slid
+            labels = self._flat_labels_cache
+            self._flat_markers_cache = markers
         else:
             lines = self._flat_lines_cache
             markers = self._flat_markers_cache
             labels = self._flat_labels_cache
+        rebuilt = structural or flashing or move_animating
         t_content = time.perf_counter()
 
         g.set_lines(lines)
