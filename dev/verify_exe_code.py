@@ -24,7 +24,8 @@ MARKERS = [
     ("app.ui.map_view", "parked in _pending_tracks", "const"),
     ("app.ui.gl_flatmap", "wglSwapIntervalEXT", "const"),
     ("app.ui.app", "timeBeginPeriod", "name"),
-    ("app.core.changelog", "Frame Rate Unlocked", "const"),
+    ("app.ui.gl_common", "math", "name"),
+    ("app.core.changelog", "GPU Map Restored", "const"),
 ]
 
 arch = CArchiveReader(EXE)
