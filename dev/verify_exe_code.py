@@ -43,6 +43,9 @@ MARKERS = [
     ("app.ui.compendium_data", "Founding & Growth", "const"),
     ("app.ui.compendium_data", "THE DEVELOPMENT GATE", "const"),
     ("app.core.changelog", "The Compendium Pass", "const"),
+    # v0.18.3 -- dated ledger.
+    ("app.ui.map_view", "Season/day/year for any turn number", "const"),
+    ("app.core.changelog", "Dated Ledger", "const"),
 ]
 
 arch = CArchiveReader(EXE)
