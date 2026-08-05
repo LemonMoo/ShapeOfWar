@@ -1669,8 +1669,11 @@ def _labor_shares(village, potentials, by_sector_resource):
                 weights[s] = spare * potentials[s] / rest_total
         else:
             # Ordered to fish with no water in reach. Fall through to Auto
-            # rather than idling the village on an impossible order.
-            weights = {s: potentials[s] for s in live}
+            # rather than idling the village on an impossible order -- and
+            # it must be LITERALLY Auto (pool relief included), or the
+            # fallback silently reallocates a worker vs the Auto baseline.
+            weights = {s: potentials[s] * _sector_pool_relief(village, by_sector_resource, s)
+                       for s in live}
     else:   # Auto
         # Potential-weighted, then damped by how full each sector's own output
         # pool already is -- the storage feedback loop described above.
@@ -3211,6 +3214,14 @@ POPULATION_GROWTH_RATE = 0.0001  # fraction of the remaining gap to
                                   # accumulator note for why this doesn't
                                   # just round down to a permanent zero
                                   # for a small village.
+# Frontier communities (Villages and Towns) grow at 40x this rate: the
+# population gate on the ladder (a Village must reach half its ceiling to
+# be raised, a Town two-thirds to become a City -- see construction.py's
+# VILLAGE_RAISE_POPULATION_FRACTION / TOWN_UPGRADE_POPULATION_FRACTION)
+# only means something if a frontier CAN actually grow into it in a year
+# or two of game time, and a frontier that grows fast is exactly the
+# settlement-first fantasy. Established Cities keep the glacial rate.
+FRONTIER_POPULATION_GROWTH_RATE = 0.004
 ADULT_REGROWTH_FRACTION = 0.4    # adult fraction kept when a node's adults
                                   # were all lost (see _grow_population):
                                   # children mature into the missing adults
@@ -3259,8 +3270,16 @@ def _grow_population(node):
         return
     if getattr(node, "turns_without_food", 0) > 0 or getattr(node, "turns_without_firewood", 0) > 0:
         return
+    rate = (FRONTIER_POPULATION_GROWTH_RATE
+            if getattr(node, "kind", "") == "town"
+            or hasattr(node, "farm_output")   # Villages: the codebase's
+                                              # village-detection idiom is
+                                              # `not hasattr(node, "kind")`,
+                                              # and farm_output is the one
+                                              # attribute only Villages have
+            else POPULATION_GROWTH_RATE)
     accum = getattr(node, "_pop_growth_accum", 0.0)
-    accum += (max_pop - node.population) * POPULATION_GROWTH_RATE
+    accum += (max_pop - node.population) * rate
     gain = int(accum)
     node._pop_growth_accum = accum - gain
     if gain <= 0:

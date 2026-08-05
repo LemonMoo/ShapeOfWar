@@ -75,6 +75,13 @@ RAISE_VILLAGE_COST = {"Stone": 250, "Food": 500}   # the town's public stonework
                                                     # whole ladder for a log-poor
                                                     # realm.
 RAISE_VILLAGE_TURNS = 12
+# Population gates on the ladder -- growth is the real currency, not just
+# resources. A Village must reach half its population ceiling before it can
+# be raised to a Town, and a Town two-thirds before it can become a City
+# (see resources.FRONTIER_POPULATION_GROWTH_RATE for the growth that makes
+# this reachable in a year or two of game time).
+VILLAGE_RAISE_POPULATION_FRACTION = 0.5
+TOWN_UPGRADE_POPULATION_FRACTION = 0.66
 ROAD_SPEED_PENALTY = 0.5         # project progress rate while its road is incomplete
 ROAD_CELLS_PER_TURN = 6          # how much of the route gets physically drawn each turn
 _BBOX_PAD = 20
@@ -1014,6 +1021,12 @@ def start_settlement_upgrade(world, nation, settlement):
         return "You can only upgrade your own settlements."
     if settlement.kind != "town":
         return "Only a Town can be upgraded to a City."
+    max_pop = getattr(settlement, "max_population", 0) or 0
+    if max_pop and settlement.population < max_pop * TOWN_UPGRADE_POPULATION_FRACTION:
+        need = round(max_pop * TOWN_UPGRADE_POPULATION_FRACTION)
+        return (f"{settlement.name} isn't populous enough yet -- a Town "
+                f"needs {need:,} souls to rise to a City, and it has "
+                f"{settlement.population:,}. Keep it fed and growing.")
     if any(p.settlement_id == settlement.id
            for p in _upgrade_projects(world)):
         return "An upgrade is already under way there."
@@ -1116,6 +1129,13 @@ def start_raise_village(world, nation, village):
     faction_idx = world.factions.index(nation)
     if village.faction_idx != faction_idx:
         return "You can only raise your own villages."
+    max_pop = getattr(village, "max_population", 0) or 0
+    if max_pop and village.population < max_pop * VILLAGE_RAISE_POPULATION_FRACTION:
+        need = round(max_pop * VILLAGE_RAISE_POPULATION_FRACTION)
+        return (f"{village.name} isn't big enough yet -- a village needs "
+                f"{need:,} souls to grow into a Town, and it has "
+                f"{village.population:,}. Feed and shelter it and it will "
+                "grow.")
     if any(p.village_id == village.id for p in _raise_village_projects(world)):
         return "That village is already being raised."
     cost = RAISE_VILLAGE_COST
@@ -1247,14 +1267,18 @@ def advance_projects(world):
 
 
 def _pick_upgrade_town(world, fac_idx):
-    """The Town most worth raising to a City: one sitting in the faction's
-    most village-cramped region -- the settlement-first growth pressure
-    (full village slots -> upgrade -> more slots). Returns None when the
-    faction has no Town at all."""
+    """The Town most worth raising to a City: one that has GROWN past the
+    upgrade threshold (see TOWN_UPGRADE_POPULATION_FRACTION -- a town still
+    under it can't be upgraded, so picking it would just fail every turn),
+    preferring the most village-cramped region. Returns None when no Town
+    is eligible."""
     from app.world.resources import region_village_capacity
     best, best_frac = None, -1.0
     for st in world.settlements:
         if st.faction_idx != fac_idx or st.kind != "town":
+            continue
+        max_pop = getattr(st, "max_population", 0) or 0
+        if max_pop and st.population < max_pop * TOWN_UPGRADE_POPULATION_FRACTION:
             continue
         if 0 <= st.region_id < len(world.regions):
             region = world.regions[st.region_id]
@@ -1266,14 +1290,19 @@ def _pick_upgrade_town(world, fac_idx):
 
 
 def _pick_raise_village(world, fac_idx):
-    """The village most worth raising to a Town: one in the faction's most
-    village-cramped region -- the same pressure that drives _pick_upgrade_
-    town, one rung down the ladder. Returns None when the faction has no
-    villages left to raise."""
+    """The village most worth raising to a Town: the most populous one that
+    has actually GROWN past the raise threshold (see VILLAGE_RAISE_
+    POPULATION_FRACTION -- a village still under it can't be raised, so
+    picking it would just fail every turn). Falls back to the most
+    village-cramped region among the eligible. Returns None when no
+    village is eligible."""
     from app.world.resources import region_village_capacity
     best, best_frac = None, -1.0
     for v in world.villages:
         if v.faction_idx != fac_idx:
+            continue
+        max_pop = getattr(v, "max_population", 0) or 0
+        if max_pop and v.population < max_pop * VILLAGE_RAISE_POPULATION_FRACTION:
             continue
         if 0 <= v.region_id < len(world.regions):
             region = world.regions[v.region_id]
@@ -1413,30 +1442,31 @@ def run_settlement_ai(world):
         empty_regions = [r for r in world.regions
                          if r.faction_idx == fac_idx and not getattr(r, "meta_settlements", [])]
         # Settlement-first ladder: found a village wherever there is room
-        # (the cheap organic first rung) before spending on settlements.
+        # (the cheap organic first rung), then climb -- raise an eligible
+        # village to a Town, raise an eligible Town to a City. Building a
+        # whole new settlement is the LAST resort (bare claimed land), not
+        # a shortcut past the ladder: without this order an AI with any
+        # empty region would keep planting Cities and never raise a
+        # village, and the ladder would stall at its first rung.
         if _ai_found_village(world, nation, fac_idx):
             continue
-        if not empty_regions:
-            # No undeveloped land left: climb the ladder -- raise a village
-            # to a Town (more village slots, tax) in the most village-cramped
-            # region, or raise a Town to a City. Same single-project-at-a-
-            # time pacing as everything else here.
-            village = _pick_raise_village(world, fac_idx)
-            if village is not None:
-                start_raise_village(world, nation, village)
-                continue
-            town = _pick_upgrade_town(world, fac_idx)
-            if town is not None:
-                start_settlement_upgrade(world, nation, town)
+        village = _pick_raise_village(world, fac_idx)
+        if village is not None:
+            start_raise_village(world, nation, village)
             continue
-        region = random.choice(empty_regions)
-        for kind in ("city", "castle", "town"):
-            if not can_afford(nation, SETTLEMENT_BUILD_COST[kind], world):
-                continue
-            pos = _region_settlement_pos(world, region, kind)
-            if pos is not None:
-                start_settlement(world, nation, pos, kind)
-            break
+        town = _pick_upgrade_town(world, fac_idx)
+        if town is not None:
+            start_settlement_upgrade(world, nation, town)
+            continue
+        if empty_regions:
+            region = random.choice(empty_regions)
+            for kind in ("city", "castle", "town"):
+                if not can_afford(nation, SETTLEMENT_BUILD_COST[kind], world):
+                    continue
+                pos = _region_settlement_pos(world, region, kind)
+                if pos is not None:
+                    start_settlement(world, nation, pos, kind)
+                break
 
 
 # --- AI storage construction ---------------------------------------------

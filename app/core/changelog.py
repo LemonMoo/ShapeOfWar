@@ -20,6 +20,16 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 93,
+        "title": "Earned Growth",
+        "items": [
+            "GAMEPLAY: the ladder is now population-gated — a Village must grow to half its population ceiling before it can be raised to a Town, and a Town to two-thirds before it can become a City. Growth — not just resources — is the currency of your realm.",
+            "GAMEPLAY: frontier communities (Villages and Towns) grow far faster than established Cities — a fed and sheltered village reaches its first rung in about a year of game time, and the panels show its progress toward each rung.",
+            "FIX: an impossible labor order (fishing with no water in reach) now falls back to Auto exactly — the fallback previously skipped the storage feedback loop and silently shifted a worker.",
+            "FIX: the AI was planting Cities in empty regions instead of climbing the ladder — it now founds villages, raises them to Towns, then upgrades to Cities in order, so rival realms raise real Towns.",
+        ],
+    },
+    {
         "version": 92,
         "title": "Dated Ledger",
         "items": [

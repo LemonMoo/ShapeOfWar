@@ -4841,6 +4841,16 @@ class MapView(tk.Frame):
         if st.kind != "town":
             return
         from app.world import construction
+        max_pop = getattr(st, "max_population", 0) or 0
+        if max_pop and st.population < max_pop * construction.TOWN_UPGRADE_POPULATION_FRACTION:
+            need = round(max_pop * construction.TOWN_UPGRADE_POPULATION_FRACTION)
+            pct = round(100 * st.population / max_pop)
+            self._panel_text(
+                f"Rising toward a City… {st.population:,}/{need:,} souls "
+                f"({pct}% of its ceiling; needs "
+                f"{construction.TOWN_UPGRADE_POPULATION_FRACTION:.0%}). ",
+                fg=theme.MUTED)
+            return
         cost = construction.SETTLEMENT_UPGRADE_COST
         turns = construction.SETTLEMENT_UPGRADE_TURNS
         in_flight = any(p.settlement_id == st.id
@@ -5079,10 +5089,22 @@ class MapView(tk.Frame):
     def _show_raise_action(self, v, player):
         """For an owned village: the 'Raise to Town' action -- the ladder's
         second rung (a Town supports more villages, tax and people, and is
-        itself one upgrade from a City). Shows the cost and build time,
-        explains what it is for when unaffordable, and queues the project
-        when clicked."""
+        itself one upgrade from a City). Population-gated: a village must
+        grow to VILLAGE_RAISE_POPULATION_FRACTION of its ceiling first, and
+        the button shows how far along that growth is. Shows cost + build
+        time, explains what it is for when unaffordable, and queues the
+        project when clicked."""
         from app.world import construction
+        max_pop = getattr(v, "max_population", 0) or 0
+        if max_pop and v.population < max_pop * construction.VILLAGE_RAISE_POPULATION_FRACTION:
+            need = round(max_pop * construction.VILLAGE_RAISE_POPULATION_FRACTION)
+            pct = round(100 * v.population / max_pop)
+            self._panel_text(
+                f"Growing toward a Town… {v.population:,}/{need:,} souls "
+                f"({pct}% of its ceiling; needs "
+                f"{construction.VILLAGE_RAISE_POPULATION_FRACTION:.0%}). "
+                "Keep it fed and sheltered.", fg=theme.MUTED)
+            return
         cost = construction.RAISE_VILLAGE_COST
         turns = construction.RAISE_VILLAGE_TURNS
         in_flight = any(p.village_id == v.id
