@@ -4405,6 +4405,31 @@ class MapView(tk.Frame):
                               f"Build time: {turns} turns", fg=theme.INK)
                 self._panel_button(f"Build {kind.capitalize()}...",
                                 lambda r=region, k=kind: self._begin_settlement_placement(r, k))
+            # The ladder's first rung: founding a village is the cheap,
+            # organic way to fill the region (and the only way to put people
+            # on bare claimed land until a settlement's prosperity grows them).
+            for fv in getattr(wd, "found_village_projects", ()):
+                if fv.region_id != region.id:
+                    continue
+                elapsed = fv.total_turns - fv.turns_left
+                self._panel_text(f"Village under construction: "
+                                 f"{elapsed}/{fv.total_turns} turns", fg=theme.MUTED)
+            if not any(fv.region_id == region.id
+                       for fv in getattr(wd, "found_village_projects", ())):
+                from app.world.resources import region_village_capacity
+                free = region_village_capacity(wd, region) - len(getattr(region, "villages", []))
+                if free > 0:
+                    cost = construction.VILLAGE_BUILD_COST
+                    turns = construction.VILLAGE_BUILD_TURNS
+                    self._panel_text(f"Village — Cost: {_format_resources(cost)}\n"
+                                     f"Build time: {turns} turns", fg=theme.INK)
+                    self._panel_button(
+                        "Found Village...",
+                        lambda r=region: self._begin_settlement_placement(r, "village"))
+                else:
+                    self._panel_text("Village land full — raise a village to "
+                                     "a Town or build a settlement for more room.",
+                                     fg=theme.MUTED)
 
     def _show_wildland_region(self, region):
         """UNCLAIMED land: wildland garrison strength, claim cost/time/odds,
@@ -5041,6 +5066,43 @@ class MapView(tk.Frame):
         self._update_resource_bar()
         self.render()
 
+    def _show_raise_action(self, v, player):
+        """For an owned village: the 'Raise to Town' action -- the ladder's
+        second rung (a Town supports more villages, tax and people, and is
+        itself one upgrade from a City). Shows the cost and build time,
+        explains what it is for when unaffordable, and queues the project
+        when clicked."""
+        from app.world import construction
+        cost = construction.RAISE_VILLAGE_COST
+        turns = construction.RAISE_VILLAGE_TURNS
+        in_flight = any(p.village_id == v.id
+                        for p in getattr(self.world, "raise_village_projects", ()))
+        if in_flight:
+            self._panel_text("Being raised to a Town…", fg=theme.MUTED)
+            return
+        if not construction.can_afford(player, cost, self.world):
+            self._panel_text(
+                f"Raise to Town needs {_format_resources(cost)} — a Town "
+                "supports more villages, tax and people.", fg=theme.MUTED)
+            return
+        self._panel_button(
+            f"Raise to Town ({turns} turns)",
+            lambda: self._do_raise_village(v))
+
+    def _do_raise_village(self, v):
+        from app.world import construction
+        player = self._player_faction()
+        if player is None:
+            return
+        msg = construction.start_raise_village(self.world, player, v)
+        if msg:
+            self.show_bottom_message(msg)
+            return
+        self._rebuild_selection_panel()
+        self.show_bottom_message(
+            f"{v.name} will grow into a Town in "
+            f"{construction.RAISE_VILLAGE_TURNS} turns.")
+
     def _show_village(self, v):
         """Village panel, rebuilt as folding cards (see _card).
 
@@ -5081,6 +5143,7 @@ class MapView(tk.Frame):
             self._kv(body, "Needs per turn", _format_resources(needs))
 
         if own:
+            self._show_raise_action(v, player)
             self._build_entry_card(v, player)
 
         yield_ = resources.village_projected_annual_yield(wd, v)
@@ -5436,8 +5499,12 @@ class MapView(tk.Frame):
     def _begin_settlement_placement(self, region, kind):
         self.building_mode = (region, kind)
         self._placement_hint_cells = self._score_placement_hint(region, kind)
-        cost = construction.SETTLEMENT_BUILD_COST[kind]
-        turns = construction.SETTLEMENT_BUILD_TURNS[kind]
+        if kind == "village":
+            cost = construction.VILLAGE_BUILD_COST
+            turns = construction.VILLAGE_BUILD_TURNS
+        else:
+            cost = construction.SETTLEMENT_BUILD_COST[kind]
+            turns = construction.SETTLEMENT_BUILD_TURNS[kind]
         self._page_begin(None)
         self._panel_text(f"{region.name}\nClick a spot in this region to "
                               f"begin building a {kind} there.\n\n"
@@ -5456,7 +5523,7 @@ class MapView(tk.Frame):
         thousand cells, and the score doesn't change while the mode is up.
         Capped to the top decile so the hint reads as 'the good spots',
         not a full-region heatmap."""
-        from app.world.worldgen import SETTLEMENT_TYPES, _site_score
+        from app.world.worldgen import SETTLEMENT_TYPES, VILLAGE_WEIGHTS, _site_score
         import random as _random
         wd = self.world
         occupied = {st.pos for st in wd.settlements}
@@ -5467,7 +5534,7 @@ class MapView(tk.Frame):
         border_d = getattr(wd, "_settle_border_d", None)
         if coast_d is None or water_d is None or border_d is None:
             return []   # pre-Phase-2 save with no cached proximity fields yet
-        weights = SETTLEMENT_TYPES[kind]
+        weights = SETTLEMENT_TYPES[kind] if kind != "village" else VILLAGE_WEIGHTS
         rng = _random.Random(0)   # fixed seed -- a stable hint, not a new
                                    # roll of the tie-break jitter every frame
         scored = sorted(
@@ -5758,7 +5825,10 @@ class MapView(tk.Frame):
             region, kind = self.building_mode
             if wd.region_grid[gy][gx] == region.id:
                 player = self._player_faction()
-                msg = construction.start_settlement(wd, player, (gx, gy), kind)
+                if kind == "village":
+                    msg = construction.start_found_village(wd, player, (gx, gy))
+                else:
+                    msg = construction.start_settlement(wd, player, (gx, gy), kind)
                 self.building_mode = None
                 self._placement_hint_cells = None
                 self._base_key = None

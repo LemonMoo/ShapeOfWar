@@ -20,6 +20,16 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 90,
+        "title": "The Ladder",
+        "items": [
+            "WORLD: every faction starts with exactly one City and nothing else pre-grown — the capital. Newly claimed regions are BARE: no villages are handed out with them any more.",
+            "GROWTH: the settlement-first ladder is now complete — FOUND a village (cheap, fast), RAISE it into a Town as the land fills, then upgrade the Town into a City. Villages keep their people, stores and name when raised; the Town adds its village-slot allowance.",
+            "GROWTH: the region panel gains a 'Found Village' action (with the placement hints), and every owned village panel gains 'Raise to Town'. The AI climbs the same ladder.",
+            "BALANCE: a one-City start makes the opening slower and more deliberate — your capital's 11 village slots fill gradually, then each raise or upgrade is the next deliberate step outward.",
+        ],
+    },
+    {
         "version": 89,
         "title": "The Settlement-First World",
         "items": [

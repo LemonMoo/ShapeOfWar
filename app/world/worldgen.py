@@ -63,8 +63,10 @@ SETTLEMENT_TYPES = {
 # regardless of how large its home region happens to be (the area-scaled
 # min/max/per_cells counts above only kick in later, for settlements placed
 # in newly *claimed* territory — see _place_settlements_for_faction's
-# `fixed_counts` param and its two call sites).
-STARTING_SETTLEMENT_COUNTS = {"city": 1, "town": 2, "castle": 0}
+# `fixed_counts` param and its two call sites). One City and nothing else:
+# the settlement-first ladder is a CITY, then villages you raise into towns,
+# then towns you raise into cities — nothing is handed out pre-grown.
+STARTING_SETTLEMENT_COUNTS = {"city": 1, "town": 0, "castle": 0}
 
 # Satellite clustering: a Town is biased toward land near an already-placed
 # City/Castle from the SAME _place_settlements_for_faction call (never a
@@ -1296,6 +1298,42 @@ def _init_village_fields(world):
         _occupy(world._village_occupied, *st.pos)
 
 
+def spawn_village(world, rng, region, pos, namer, species):
+    """Create one village at `pos` in `region` -- the single founding used
+    by _place_villages_for_region AND the player/AI "Found Village" project
+    (construction.start_found_village), so a founded village rolls exactly
+    like a world-gen one: farm output from the surrounding patch, a
+    population roll, starting prosperity, and the tier-1 extractive camps +
+    Grange its region's land supports (see resources.seed_family_camps --
+    industry is gated on camps, so a bare founded village would extract
+    nothing)."""
+    # "land occupied": average fertility over a small patch around the
+    # village, not just the single cell, so farm output reflects the
+    # surrounding fields rather than one pixel of terrain.
+    from app.world.resources import seed_family_camps, seed_prosperity
+    x, y = pos
+    w, h = world.w, world.h
+    samples = []
+    r = _VILLAGE_FERT_PATCH
+    for dx in range(-r, r + 1):
+        for dy in range(-r, r + 1):
+            nx, ny = x + dx, y + dy
+            if (0 <= nx < w and 0 <= ny < h
+                    and world.region_grid[ny][nx] == region.id):
+                samples.append(world.fertility[ny][nx])
+    local_fert = sum(samples) / len(samples) if samples else world.fertility[y][x]
+    farm = round(rng.uniform(*_VILLAGE_FARM_RANGE) * (0.5 + 1.2 * local_fert))
+    population, adults, children, max_population = _roll_population(rng, "village")
+    prosperity = seed_prosperity()
+    v = Village(len(world.villages), region.id, region.faction_idx,
+               namer("village", species), (x, y), farm,
+               population, adults, children, prosperity, max_population)
+    world.villages.append(v)
+    _mark_occupied_both(world, x, y)
+    seed_family_camps(world, region, v)
+    return v
+
+
 def _place_villages_for_region(world, rng, region, fixed_n=None):
     """Greedily sprinkle farming villages within one region: score every
     cell (fertility + water proximity, same _site_score formula everything
@@ -1315,9 +1353,8 @@ def _place_villages_for_region(world, rng, region, fixed_n=None):
     check) until `fixed_n` is reached or land runs out. Used for the
     starting foothold's home region (STARTING_VILLAGE_COUNT) so every
     faction begins with a guaranteed small seed regardless of how mediocre
-    its capital's land happens to be, and for a freshly claimed wildland
-    region (expansion.WILDLAND_VILLAGE_MIN) for the same reason on a
-    smaller scale."""
+    its capital's land happens to be; wildland claims pass a floor of
+    expansion.WILDLAND_VILLAGE_MIN (zero -- bare land, you found your own)."""
     from app.world.resources import seed_prosperity
     w, h = world.w, world.h
     coast_d = world._settle_coast_d
@@ -1365,8 +1402,11 @@ def _place_villages_for_region(world, rng, region, fixed_n=None):
     capacity = region_village_capacity(world, region)
     # Initial pass fills partway (see WORLDGEN_VILLAGE_FILL_FRACTION): the
     # floor (starting home region, wildland claims) always fits, and the
-    # greedy loop below may not exceed the fill target.
-    fill_cap = max(int(capacity * WORLDGEN_VILLAGE_FILL_FRACTION), fixed_n or 1)
+    # greedy loop below may not exceed the fill target. A claim's floor is
+    # zero (bare land -- you found your own villages), so its fill target is
+    # zero too: 0.6*1 rounds to 0 and there must be no `or 1` to rescue it.
+    fill_cap = max(int(capacity * WORLDGEN_VILLAGE_FILL_FRACTION),
+                   fixed_n if fixed_n is not None else 0)
     if fixed_n is not None:
         fixed_n = min(fixed_n, fill_cap)
     while candidates:
@@ -1391,32 +1431,8 @@ def _place_villages_for_region(world, rng, region, fixed_n=None):
 
     vids = []
     for x, y in placed:
-        # "land occupied": average fertility over a small patch around the
-        # village, not just the single cell, so farm output reflects the
-        # surrounding fields rather than one pixel of terrain.
-        samples = []
-        r = _VILLAGE_FERT_PATCH
-        for dx in range(-r, r + 1):
-            for dy in range(-r, r + 1):
-                nx, ny = x + dx, y + dy
-                if (0 <= nx < w and 0 <= ny < h
-                        and world.region_grid[ny][nx] == region.id):
-                    samples.append(world.fertility[ny][nx])
-        local_fert = sum(samples) / len(samples) if samples else world.fertility[y][x]
-        farm = round(rng.uniform(*_VILLAGE_FARM_RANGE) * (0.5 + 1.2 * local_fert))
-        population, adults, children, max_population = _roll_population(rng, "village")
-        prosperity = seed_prosperity()
-        v = Village(len(world.villages), region.id, region.faction_idx,
-                   namer("village", species), (x, y), farm,
-                   population, adults, children, prosperity, max_population)
-        world.villages.append(v)
-        vids.append(v.id)
-        # Settlement-first extraction: a village's industry comes from its
-        # camps, not the air (see resources._village_terrain_potential), so
-        # every founding village starts with the tier-1 camps its region's
-        # land can feed. The mechanics live in what you BUILD on top -- more
-        # camps, higher tiers, more villages -- not in a free trickle.
-        seed_family_camps(world, region, v)
+        spawn_village(world, rng, region, (x, y), namer, species)
+        vids.append(world.villages[-1].id)
 
     region.villages = vids
 
@@ -2086,6 +2102,8 @@ class World:
         self.road_projects = []        # list[RoadProject] — see app/world/construction.py
         self.shipyard_projects = []    # list[ShipyardProject] — see app/world/construction.py
         self.settlement_upgrade_projects = []  # list[SettlementUpgradeProject] — see app/world/construction.py
+        self.found_village_projects = []  # list[FoundVillageProject] — see app/world/construction.py
+        self.raise_village_projects = []  # list[RaiseVillageProject] — see app/world/construction.py
         self.granary_projects = []     # list[GranaryProject] — see app/world/construction.py
         self.warehouse_projects = []   # list[WarehouseProject] — see app/world/construction.py
         self.claim_projects = []       # list[ClaimProject] — see app/world/expansion.py

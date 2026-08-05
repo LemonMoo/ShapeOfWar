@@ -1231,11 +1231,10 @@ def _expansion_article():
             "strength."
         ),
         (
-            "Win: the region transfers, and gets settled fresh — at least "
-            f"{expansion.WILDLAND_VILLAGE_MIN} Village, more wherever the "
-            "land can actually support them, but NEVER a free City/Town/"
-            "Castle; a real Settlement still has to be built there like "
-            "any other (see Construction)."
+            "Win: the region transfers BARE — no villages are handed out "
+            "with it (see Founding). You start each new holding by founding "
+            "villages, then raise them to Towns and the Towns to Cities — "
+            "nothing comes pre-grown."
         ),
         (
             "Loss: no refund. The garrison digs in — its strength rating "
@@ -1281,6 +1280,27 @@ def _construction_article():
             "gets one built alongside it automatically; construction "
             f"runs at {_pct(construction.ROAD_SPEED_PENALTY)} speed "
             "until that road is finished."
+        ),
+        "FOUNDING & RAISING (the settlement-first ladder)",
+        "\n".join([
+            "  Found Village: "
+            f"{_cost_line(construction.VILLAGE_BUILD_COST)} — "
+            f"{construction.VILLAGE_BUILD_TURNS} turns",
+            "  Raise Village to Town: "
+            f"{_cost_line(construction.RAISE_VILLAGE_COST)} — "
+            f"{construction.RAISE_VILLAGE_TURNS} turns",
+            "  Upgrade Town to City: "
+            f"{_cost_line(construction.SETTLEMENT_UPGRADE_COST)} — "
+            f"{construction.SETTLEMENT_UPGRADE_TURNS} turns",
+        ]),
+        (
+            "Claimed land is bare, so this is how a realm grows: found a "
+            "village (cheap, fast, consumes one of the region's village "
+            "slots), raise it into a Town as the land fills, and raise "
+            "the Town into a City for the biggest jump in village "
+            "capacity, tax and population. A region's village capacity is "
+            "its settlements' allowances plus one frontier homestead — "
+            "see Settlements & Villages."
         ),
         "SHIPYARD (coastal City only)",
         f"  Cost: {_cost_line(construction.SHIPYARD_COST)} — {construction.SHIPYARD_BUILD_TURNS} turns",

@@ -371,11 +371,12 @@ _NO_FREE_SETTLEMENT = {"city": 0, "town": 0, "castle": 0}   # see _place_settlem
 # gate through start_claim.
 CLAIM_DEVELOPMENT_FRACTION = 0.5
 
-WILDLAND_VILLAGE_MIN = 1   # every freshly claimed region gets at least this
-                           # many regardless of land quality (a floor, not an
-                           # exact count -- see _place_villages_for_region);
-                           # good land places however many it can actually
-                           # support beyond that, no fixed cap
+WILDLAND_VILLAGE_MIN = 0   # a freshly claimed region is BARE -- no villages
+                           # are handed out with it (you found your own, or
+                           # build a settlement and let its prosperity grow
+                           # them). Was 1 (the "frontier homestead") before
+                           # the settlement-first ladder made founding the
+                           # first rung of growth instead of a claim bonus.
 
 
 def settle_newly_claimed_region(world, region):
@@ -385,10 +386,12 @@ def settle_newly_claimed_region(world, region):
     being pre-baked at world-gen for land nobody may ever reach), and
     recompute its resource yield so next turn's advance_turn is accurate.
 
-    Wildland only ever gives up villages — no free City, Town, or Castle.
-    Getting one of those now takes an actual construction project
-    (app/world/construction.py's start_settlement/run_settlement_ai), the
-    same as everyone's very first City/Town/Castle always has."""
+    Wildland gives up NOTHING pre-grown — no villages (see
+    WILDLAND_VILLAGE_MIN), and no free City, Town, or Castle. Getting any of
+    those now takes an actual construction project
+    (app/world/construction.py's start_found_village/start_settlement/
+    run_settlement_ai) — the settlement-first ladder: found a village, raise
+    it to a Town, raise the Town to a City."""
     if not region.settlements_generated:
         namer = make_settlement_namer(random)
         _place_settlements_for_faction(world, random, region.faction_idx,

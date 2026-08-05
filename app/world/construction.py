@@ -50,6 +50,31 @@ SETTLEMENT_BUILD_TURNS = {"town": 20, "castle": 25, "city": 40}   # at full spee
 # there, so it takes noticeably less time than founding one.
 SETTLEMENT_UPGRADE_TURNS = 30
 SETTLEMENT_UPGRADE_COST = SETTLEMENT_BUILD_COST["city"]
+# The settlement-first ladder's lower rungs. FOUNDING a village is cheap and
+# quick (the organic growth rung -- the only way to put people on bare
+# claimed land until a settlement's prosperity grows them); RAISING one to a
+# Town costs about two-thirds of founding a town (the community, clearances
+# and roads already exist), and the existing Town->City upgrade closes the
+# ladder. Tuned so a fresh realm's first village is a real but affordable
+# commitment, and a raise is a strategic step, not a formality.
+VILLAGE_BUILD_COST = {"Food": 300}   # provisions for the settlers -- people,
+                                      # not timber; a claim's settlers eat the
+                                      # same way (see _pay_claim), and Food is
+                                      # abundant where the ladder starts.
+                                      # "Food" is a first-class cost resource
+                                      # -- see can_afford/_pay_cost.
+VILLAGE_BUILD_TURNS = 8
+RAISE_VILLAGE_COST = {"Stone": 250, "Food": 500}   # the town's public stonework
+                                                    # and feeding a town's worth
+                                                    # of people -- deliberately
+                                                    # log-free: the AI spends its
+                                                    # scarce Logs on camp upgrades
+                                                    # (industry is gated on them),
+                                                    # and a raise that competed
+                                                    # for timber would stall the
+                                                    # whole ladder for a log-poor
+                                                    # realm.
+RAISE_VILLAGE_TURNS = 12
 ROAD_SPEED_PENALTY = 0.5         # project progress rate while its road is incomplete
 ROAD_CELLS_PER_TURN = 6          # how much of the route gets physically drawn each turn
 _BBOX_PAD = 20
@@ -322,6 +347,46 @@ class SettlementUpgradeProject:
         self.faction_idx = faction_idx
         self.settlement_id = settlement_id
         self.total_turns = SETTLEMENT_UPGRADE_TURNS
+        self.progress_turns = 0.0
+
+    @property
+    def turns_left(self):
+        return max(0, math.ceil(self.total_turns - self.progress_turns))
+
+
+class FoundVillageProject:
+    """A village being founded -- the settlement-first ladder's first rung:
+    cheap, quick, and the only way to put people on bare claimed land until
+    a settlement's prosperity grows them. Consumes one of the region's
+    available village slots; the finished village rolls exactly like a
+    world-gen one (see worldgen.spawn_village), camps included, since
+    industry is gated on them."""
+
+    def __init__(self, faction_idx, region_id, pos):
+        self.faction_idx = faction_idx
+        self.region_id = region_id
+        self.pos = pos
+        self.total_turns = VILLAGE_BUILD_TURNS
+        self.progress_turns = 0.0
+
+    @property
+    def turns_left(self):
+        return max(0, math.ceil(self.total_turns - self.progress_turns))
+
+
+class RaiseVillageProject:
+    """A village being raised into a Town -- the ladder's second rung. The
+    community is already there, so it costs a fraction of founding a town
+    and carries its people, stores and name over; only the kind-derived
+    stats (tax income, population ceiling) are rolled like a fresh town's.
+    The new Town's kind re-keys everything the settlement economy hangs off
+    (tax, population ceiling, storage tier, prosperity target) and adds its
+    village-slot allowance (+4) to the region."""
+
+    def __init__(self, faction_idx, village_id):
+        self.faction_idx = faction_idx
+        self.village_id = village_id
+        self.total_turns = RAISE_VILLAGE_TURNS
         self.progress_turns = 0.0
 
     @property
@@ -772,6 +837,35 @@ def _faction_settlement_stock(nation, resource, world):
               for node in _faction_nodes(nation, world))
 
 
+def _faction_food_stock(nation, world):
+    """Total edible food across every settlement and village the faction
+    owns -- the aggregate view provisions are paid from (a found village's
+    settlers eat like a claim's do; see _pay_claim)."""
+    from app.world.resources import _FOOD_SOURCES
+    return sum(getattr(node, "resources", {}).get(r, 0)
+               for node in _faction_nodes(nation, world)
+               for r in _FOOD_SOURCES)
+
+
+def _pay_food(nation, amount, world):
+    """Consume `amount` of edible food from the faction's nodes, largest
+    stockpile first -- the same aggregate-economy reading _pay_cost uses for
+    storage resources. Returns how much was actually taken."""
+    from app.world.resources import _FOOD_SOURCES, _consume_from_pool
+    remaining = amount
+    ordered = sorted(_faction_nodes(nation, world),
+                     key=lambda node: sum(getattr(node, "resources", {}).get(r, 0)
+                                          for r in _FOOD_SOURCES),
+                     reverse=True)
+    for node in ordered:
+        if remaining <= 0:
+            break
+        if not hasattr(node, "resources"):
+            node.resources = {}
+        remaining -= _consume_from_pool(node.resources, _FOOD_SOURCES, remaining)
+    return amount - remaining
+
+
 def can_afford(nation, cost, world):
     """Anything in _SETTLEMENT_STORAGE_RESOURCES (as of Phase 12, that
     includes Logs/Stone/Iron -- see resources.py's Industry Specialization
@@ -779,10 +873,15 @@ def can_afford(nation, cost, world):
     Currency section) from the faction's settlements in aggregate; anything
     else from the old shared national pool (nothing left in these cost
     dicts falls in that last bucket any more, but this stays generic
-    rather than assuming that never changes)."""
+    rather than assuming that never changes). Food ("Food") is a first-
+    class cost resource too -- provisions for settlers, see _pay_claim --
+    checked against the faction's aggregate edible stock."""
     for resource, amount in cost.items():
         if resource in _SETTLEMENT_STORAGE_RESOURCES:
             if _faction_settlement_stock(nation, resource, world) < amount:
+                return False
+        elif resource == "Food":
+            if _faction_food_stock(nation, world) < amount:
                 return False
         elif nation.stats.get("resources", {}).get(resource, 0) < amount:
             return False
@@ -815,6 +914,8 @@ def _pay_cost(nation, cost, world):
                 if take:
                     node.resources[resource] = have - take
                     remaining -= take
+        elif resource == "Food":
+            _pay_food(nation, amount, world)
         else:
             res = nation.stats.setdefault("resources", {})
             res[resource] = res.get(resource, 0) - amount
@@ -940,6 +1041,129 @@ def _finish_settlement_upgrade(world, project):
     st.max_population = round(random.uniform(*POPULATION_RANGE["city"]))
 
 
+def _found_village_projects(world):
+    """world.found_village_projects, materialized on demand so saves written
+    before the ladder existed load cleanly."""
+    lst = getattr(world, "found_village_projects", None)
+    if lst is None:
+        lst = []
+        world.found_village_projects = lst
+    return lst
+
+
+def _raise_village_projects(world):
+    """world.raise_village_projects, materialized on demand (old saves)."""
+    lst = getattr(world, "raise_village_projects", None)
+    if lst is None:
+        lst = []
+        world.raise_village_projects = lst
+    return lst
+
+
+def start_found_village(world, nation, pos):
+    """Pay the cost and start founding a village at `pos`. Returns a message
+    ("" on success, why-not otherwise). Requires an owned, free cell in a
+    region that still has village capacity -- the settlement-first gate that
+    makes founding the organic growth rung of the ladder (found a village,
+    raise it to a Town, raise the Town to a City)."""
+    faction_idx = world.factions.index(nation)
+    region_id = world.region_grid[pos[1]][pos[0]]
+    if region_id < 0:
+        return "That location isn't part of any region."
+    region = world.regions[region_id]
+    if region.faction_idx != faction_idx:
+        return "You can only found villages in your own territory."
+    if any(v.pos == pos for v in world.villages):
+        return "There's already a village there."
+    if any(st.pos == pos for st in world.settlements):
+        return "There's already a settlement there."
+    if any(p.pos == pos for p in _found_village_projects(world)):
+        return "A village is already being founded there."
+    if any(p.pos == pos for p in world.settlement_projects):
+        return "Construction is already underway there."
+    from app.world.resources import region_village_capacity
+    if len(getattr(region, "villages", [])) >= region_village_capacity(world, region):
+        return ("This region's village land is full -- raise a village to a "
+                "Town, or build a settlement, for more room.")
+    cost = VILLAGE_BUILD_COST
+    if not can_afford(nation, cost, world):
+        return "You don't have enough resources to found a village."
+    _pay_cost(nation, cost, world)
+    _found_village_projects(world).append(
+        FoundVillageProject(faction_idx, region_id, pos))
+    return ""
+
+
+def _finish_found_village(world, project):
+    """The settlers arrive: roll the village exactly like a world-gen one
+    (see worldgen.spawn_village) -- camps included, since industry is gated
+    on them -- and add it to its region. Returns the village."""
+    region = world.regions[project.region_id]
+    faction = world.factions[project.faction_idx]
+    species = faction.meta.get("species", "Humans")
+    namer = make_settlement_namer(random)
+    from app.world.worldgen import spawn_village
+    v = spawn_village(world, random, region, project.pos, namer, species)
+    if not hasattr(region, "villages"):
+        region.villages = []
+    region.villages.append(v.id)
+    return v
+
+
+def start_raise_village(world, nation, village):
+    """Pay the cost and queue a village's raising to a Town. Returns a
+    message ("" on success, why-not otherwise). Works for player and AI."""
+    faction_idx = world.factions.index(nation)
+    if village.faction_idx != faction_idx:
+        return "You can only raise your own villages."
+    if any(p.village_id == village.id for p in _raise_village_projects(world)):
+        return "That village is already being raised."
+    cost = RAISE_VILLAGE_COST
+    if not can_afford(nation, cost, world):
+        return "You don't have enough resources to raise this village."
+    _pay_cost(nation, cost, world)
+    _raise_village_projects(world).append(
+        RaiseVillageProject(faction_idx, village.id))
+    return ""
+
+
+def _finish_raise_village(world, project):
+    """The village grows into a Town in place: a real Settlement carrying the
+    community over -- same name, people, stores and prosperity; only the
+    kind-derived stats (tax income, population ceiling) are rolled like a
+    fresh town's. The village leaves the village list, the Town joins the
+    settlement list and its region's settlements, and the region's village
+    capacity rises by the Town's allowance (+4) while its village count
+    falls by one. Returns the new Town (or None if the village vanished)."""
+    v = world.villages[project.village_id]
+    if v.faction_idx != project.faction_idx:
+        return None     # transferred or gone while the project ran
+    tax_income = round(random.uniform(*SETTLEMENT_TAX_INCOME["town"]))
+    st = Settlement(len(world.settlements), "town", v.name, v.pos,
+                    v.faction_idx, v.region_id, tax_income,
+                    v.population, v.adults, v.children,
+                    getattr(v, "prosperity", 0.0),
+                    getattr(v, "max_population", None))
+    st.resources = dict(getattr(v, "resources", {}))
+    world.settlements.append(st)
+    nation = world.factions[v.faction_idx]
+    nation.meta.setdefault("settlements", []).append(st.id)
+    region = world.regions[v.region_id]
+    if not hasattr(region, "meta_settlements"):
+        region.meta_settlements = []
+    region.meta_settlements.append(st.id)
+    if v.id in region.villages:
+        region.villages.remove(v.id)
+    # The village is NOT removed from world.villages: village ids are the
+    # list's indices (world.villages[vid] everywhere), so a removal would
+    # shift every higher id and corrupt the region lists. It is neutralized
+    # instead -- unowned, invisible to the economy, the trade, the army and
+    # the map, and recorded as raised into the new Town.
+    v.faction_idx = -1
+    v.raised_into = st.id
+    return st
+
+
 def _finish_road(world, road):
     """Fold a completed road into the permanent per-region road network so
     it renders like any other established road from then on, at whichever
@@ -992,6 +1216,30 @@ def advance_projects(world):
                                    "kind": "upgrade",
                                    "name": getattr(st, "name", "A settlement")})
 
+    finished_found = []
+    for project in _found_village_projects(world):
+        project.progress_turns += 1.0
+        if project.progress_turns >= project.total_turns:
+            finished_found.append(project)
+    for project in finished_found:
+        village = _finish_found_village(world, project)
+        _found_village_projects(world).remove(project)
+        bus.emit("work:finished", {"faction_idx": project.faction_idx,
+                                   "kind": "village",
+                                   "name": getattr(village, "name", "A village")})
+
+    finished_raised = []
+    for project in _raise_village_projects(world):
+        project.progress_turns += 1.0
+        if project.progress_turns >= project.total_turns:
+            finished_raised.append(project)
+    for project in finished_raised:
+        town = _finish_raise_village(world, project)
+        _raise_village_projects(world).remove(project)
+        bus.emit("work:finished", {"faction_idx": project.faction_idx,
+                                   "kind": "raise",
+                                   "name": getattr(town, "name", "A village")})
+
     finished_roads = [r for r in world.road_projects if r.complete]
     for road in finished_roads:
         _finish_road(world, road)
@@ -1015,6 +1263,47 @@ def _pick_upgrade_town(world, fac_idx):
             if frac > best_frac:
                 best_frac, best = frac, st
     return best
+
+
+def _pick_raise_village(world, fac_idx):
+    """The village most worth raising to a Town: one in the faction's most
+    village-cramped region -- the same pressure that drives _pick_upgrade_
+    town, one rung down the ladder. Returns None when the faction has no
+    villages left to raise."""
+    from app.world.resources import region_village_capacity
+    best, best_frac = None, -1.0
+    for v in world.villages:
+        if v.faction_idx != fac_idx:
+            continue
+        if 0 <= v.region_id < len(world.regions):
+            region = world.regions[v.region_id]
+            cap = region_village_capacity(world, region)
+            frac = len(getattr(region, "villages", [])) / cap if cap else 1.0
+            if frac > best_frac:
+                best_frac, best = frac, v
+    return best
+
+
+def _ai_found_village(world, nation, fac_idx):
+    """The AI's first-rung growth: found a village in the faction's region
+    with the most free capacity. Village-scale works are paced by the
+    AI_MAX_VILLAGE_PROJECTS gate at the top of run_settlement_ai. Returns
+    True if a project started."""
+    from app.world.resources import region_village_capacity
+    best_region, best_free = None, 0
+    for region in world.regions:
+        if region.faction_idx != fac_idx:
+            continue
+        cap = region_village_capacity(world, region)
+        free = cap - len(getattr(region, "villages", []))
+        if free > best_free:
+            best_free, best_region = free, region
+    if best_region is None or best_free <= 0:
+        return False
+    pos = _region_settlement_pos(world, best_region, "town")
+    if pos is None:
+        return False
+    return not start_found_village(world, nation, pos)
 
 
 # --- AI construction/expansion pacing ----------------------------------------
@@ -1052,6 +1341,10 @@ def _ai_has_active_construction(world, fac_idx):
     if any(p.faction_idx == fac_idx
            for p in _upgrade_projects(world)):
         return True
+    if any(p.faction_idx == fac_idx for p in _found_village_projects(world)):
+        return True
+    if any(p.faction_idx == fac_idx for p in _raise_village_projects(world)):
+        return True
     if any(p.faction_idx == fac_idx for p in world.claim_projects):
         return True
     return False
@@ -1078,7 +1371,7 @@ def _region_settlement_pos(world, region, kind):
     free land whatsoever."""
     occupied = {st.pos for st in world.settlements}
     occupied.update(p.pos for p in world.settlement_projects)
-    occupied.update(world.villages[vid].pos for vid in region.villages)
+    occupied.update(world.villages[vid].pos for vid in getattr(region, "villages", []))
     candidates = [c for c in region.cells
                  if c not in world.river_cells and c not in occupied]
     if not candidates:
@@ -1119,12 +1412,19 @@ def run_settlement_ai(world):
             continue
         empty_regions = [r for r in world.regions
                          if r.faction_idx == fac_idx and not getattr(r, "meta_settlements", [])]
+        # Settlement-first ladder: found a village wherever there is room
+        # (the cheap organic first rung) before spending on settlements.
+        if _ai_found_village(world, nation, fac_idx):
+            continue
         if not empty_regions:
-            # No undeveloped land left: the settlement-first path is to raise
-            # a Town in the most village-cramped region into a City -- more
-            # village slots, tax, population ceiling -- instead of stalling
-            # on the region's full capacity. Same single-project-at-a-time
-            # pacing as everything else here.
+            # No undeveloped land left: climb the ladder -- raise a village
+            # to a Town (more village slots, tax) in the most village-cramped
+            # region, or raise a Town to a City. Same single-project-at-a-
+            # time pacing as everything else here.
+            village = _pick_raise_village(world, fac_idx)
+            if village is not None:
+                start_raise_village(world, nation, village)
+                continue
             town = _pick_upgrade_town(world, fac_idx)
             if town is not None:
                 start_settlement_upgrade(world, nation, town)
@@ -1159,8 +1459,12 @@ STORAGE_AI_PRESSURE_THRESHOLD = 0.8   # trigger a Granary/Warehouse once a
 
 
 def _ai_village_project_count(world, fac_idx):
-    return sum(1 for p in _storage_projects(world)
-               if p.faction_idx == fac_idx and p.node_kind == "village")
+    return (sum(1 for p in _storage_projects(world)
+                if p.faction_idx == fac_idx and p.node_kind == "village")
+            + sum(1 for p in _found_village_projects(world)
+                  if p.faction_idx == fac_idx)
+            + sum(1 for p in _raise_village_projects(world)
+                  if p.faction_idx == fac_idx))
 
 
 def _herd_building_pressure(world, node):
