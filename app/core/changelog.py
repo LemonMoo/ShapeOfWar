@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 97,
+        "title": "The Seat of the Realm",
+        "items": [
+            "GAMEPLAY: your founding City is the Seat of the Realm — people flock to a capital, so it grows toward its population ceiling at the frontier rate, far faster than any other City. Feed and shelter it and it becomes a true metropolis.",
+        ],
+    },
+    {
         "version": 96,
         "title": "The Frontier",
         "items": [

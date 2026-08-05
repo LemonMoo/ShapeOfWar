@@ -4947,6 +4947,11 @@ class MapView(tk.Frame):
             self._panel_text(
                 f"A {resources.CHARACTER_NAMES[character]} {st.kind}. {blurb}",
                 fg=theme.ACCENT)
+        if getattr(st, "is_capital", False):
+            self._panel_text(
+                "The Seat of the Realm — people flock to the capital: it "
+                "grows toward its population ceiling far faster than any "
+                "other City.", fg=theme.ACCENT)
 
         prosperity = getattr(st, "prosperity", None)
         if prosperity is not None:

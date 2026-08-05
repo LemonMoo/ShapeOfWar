@@ -1061,6 +1061,12 @@ def _place_settlements_for_faction(world, rng, fac_idx, cells, namer, fixed_coun
                 chronicle.log(world, world.factions[fac_idx],
                               f"The realm of {world.factions[fac_idx].name} "
                               f"is founded at {st.name}.")
+                # The seat of the realm: the founding settlement is the
+                # capital, and people flock to a capital -- it grows toward
+                # its ceiling at the frontier rate (see resources._grow_
+                # population / FRONTIER_POPULATION_GROWTH_RATE), unlike
+                # every other City.
+                st.is_capital = True
             if 0 <= region_id < len(world.regions):
                 world.regions[region_id].meta_settlements.append(st.id)
             placed_by_kind[kind].append((x, y))

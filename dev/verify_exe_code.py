@@ -73,6 +73,11 @@ MARKERS = [
     ("app.core.clock", "FRONTIER", "name"),
     ("app.ui.frontier_dialog", "FrontierDialog", "name"),
     ("app.core.changelog", "The Frontier", "const"),
+    # v0.18.8 -- the seat of the realm.
+    ("app.world.worldgen", "is_capital", "name"),
+    ("app.world.resources", "FRONTIER_POPULATION_GROWTH_RATE", "name"),
+    ("app.ui.map_view", "Seat of the Realm", "const"),
+    ("app.core.changelog", "The Seat of the Realm", "const"),
 ]
 
 arch = CArchiveReader(EXE)

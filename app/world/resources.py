@@ -3287,6 +3287,9 @@ def _grow_population(node):
                                               # `not hasattr(node, "kind")`,
                                               # and farm_output is the one
                                               # attribute only Villages have
+            or getattr(node, "is_capital", False)   # the seat of the realm
+                                                    # draws people (worldgen/
+                                                    # holds stamp it)
             else POPULATION_GROWTH_RATE)
     accum = getattr(node, "_pop_growth_accum", 0.0)
     accum += (max_pop - node.population) * rate

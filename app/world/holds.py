@@ -224,6 +224,10 @@ def _settle_hold(world, rng, network, faction_idx, namer):
     # garrison, weighted for variety like the surface world.
     from app.world.resources import SETTLEMENT_CHARACTERS
     st.character = rng.choices(tuple(SETTLEMENT_CHARACTERS), weights=(25, 50, 25))[0]
+    # The first hold is a realm's capital too (see worldgen._place_settle_
+    # ments_for_faction's is_capital stamp).
+    if not world.factions[faction_idx].meta.get("settlements"):
+        st.is_capital = True
     world.settlements.append(st)
     world.factions[faction_idx].meta.setdefault("settlements", []).append(st.id)
     if st.region_id is not None and 0 <= st.region_id < len(world.regions):

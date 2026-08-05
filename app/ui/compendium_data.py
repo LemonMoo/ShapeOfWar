@@ -358,6 +358,15 @@ def _settlements_article():
             "meter eases 1.5x as quickly toward its target). Starting "
             "settlements already carry one."
         ),
+        "THE SEAT OF THE REALM",
+        (
+            "Your founding City is the capital — the Seat of the Realm. "
+            "People flock to a capital: it grows toward its population "
+            "ceiling at the frontier rate (the fast growth Villages and "
+            "Towns enjoy), far faster than any other City, so a realm "
+            "that feeds and shelters its capital is rewarded with a "
+            "metropolis in a few years."
+        ),
         "POPULATION: FLOOR, CEILING, GROWTH",
         (
             "A freshly founded settlement or village starts at only "
