@@ -1241,11 +1241,11 @@ def _raw_yield_per_cell(resource):
             else BASE_MINING_YIELD_PER_CELL)
 
 
-# The trickle every region manages regardless of biome -- see the note at the
-# bottom of compute_industry_yield. Sized so a barren region takes roughly a
-# dozen-plus turns to fund its share of a claim: enough to expand eventually,
-# never enough to build an economy on.
-BASELINE_INDUSTRY_FLOOR = {"Logs": 3, "Stone": 3}
+# The old per-region trickle is GONE (settlement-first redesign): a region
+# pays for itself through its camps and villages, not a free floor that
+# works without any of them. Keeping the (now empty) table means the two
+# application sites below stay honest no-ops instead of needing removal.
+BASELINE_INDUSTRY_FLOOR = {}
 
 
 def _industry_yield_core(biome_counts, climate, fertility_frac):
@@ -1411,7 +1411,9 @@ LABOR_SECTOR_RESERVE = 0.05
 # woodcutters to the fields. Floor rather than zero so a sector never goes
 # completely dark on a momentarily-full pool.
 LABOR_PRESSURE_FLOOR = 0.15
-
+# The food sectors' own floor -- see _sector_pool_relief for why farming/
+# fishing must never be fully shut off by a full pantry.
+FOOD_LABOR_FLOOR = 0.5
 
 def production_sector(resource):
     """Which workforce sector produces `resource`. Note this is about who
@@ -1630,6 +1632,16 @@ def _sector_pool_relief(node, potentials_by_sector_resource, sector):
     if total <= 0:
         return 1.0
     relief = sum(storage_throttle(node, r) * amt for r, amt in weights.items()) / total
+    # The food sectors (farming, fishing) are consumed every turn, so a full
+    # pantry is no reason to stop producing food: a village that idles its
+    # fields because its storehouse happens to be full is how a realm starves
+    # the moment the storehouse empties. Worlds GEN with full pantries (six
+    # turns of seeded stock), so without this floor every fresh village blocks
+    # its own farming until the seed is eaten -- and villages whose seed runs
+    # out first die permanently (adults never regrow once lost; the seed was
+    # always meant to tide a realm over, not to replace farming).
+    if sector in ("farming", "fishing"):
+        return max(relief, FOOD_LABOR_FLOOR)
     return max(LABOR_PRESSURE_FLOOR, relief)
 
 
@@ -1870,14 +1882,24 @@ def _village_terrain_potential(world, village, season):
     # sample a family uses is fixed in OUTSTATIONS, so ore can never arrive
     # in the harvest or grain out of a quarry.
     #
-    # Borrowing the village's own climate for remote cells is exact rather
-    # than approximate for Mining (every Mining resource has a
-    # climate_affinity of 1.0 in all four climates); for Forestry it is a
-    # close approximation, since a camp's woodland is in the same region and
-    # regions are climatically coherent.
-    industry_counts = biome_counts
+    # Settlement-first (phase 4): a village's own land is no different from
+    # outstation land here -- the ground offers nothing until someone digs
+    # or cuts it. The industry sample is gated family by family on the
+    # village's extractive camps: no Woodcutters' Camp, no timber; no Mining
+    # Camp, no ore or stone; no Workings, none of the highland/desert/etc.
+    # leftovers. Crops stay baseline (food is what a place is for), which is
+    # also why the Grange is a reach extender rather than a gate.
+    industry_counts = {}
+    for building, (biomes, sample, _label) in OUTSTATIONS.items():
+        if sample != OUTSTATION_INDUSTRY:
+            continue
+        if storage_tier(village, building) <= 0:
+            continue
+        for b in biomes:
+            have = biome_counts.get(b, 0)
+            if have:
+                industry_counts[b] = industry_counts.get(b, 0) + have
     if reach[OUTSTATION_INDUSTRY]:
-        industry_counts = dict(biome_counts)
         for b, cells in reach[OUTSTATION_INDUSTRY].items():
             industry_counts[b] = industry_counts.get(b, 0) + cells
     industry = _industry_yield_core(industry_counts, climate, fertility_frac)
@@ -3189,6 +3211,10 @@ POPULATION_GROWTH_RATE = 0.0001  # fraction of the remaining gap to
                                   # accumulator note for why this doesn't
                                   # just round down to a permanent zero
                                   # for a small village.
+ADULT_REGROWTH_FRACTION = 0.4    # adult fraction kept when a node's adults
+                                  # were all lost (see _grow_population):
+                                  # children mature into the missing adults
+                                  # instead of children-only growth forever
 
 
 def _apply_population_loss(settlement, loss):
@@ -3235,8 +3261,18 @@ def _grow_population(node):
     if gain <= 0:
         return
     gain = min(gain, max_pop - node.population)
+    # Children grow up: a village that lost every adult to a hard Winter is
+    # not doomed forever -- its children mature into the missing adults at
+    # ADULT_REGROWTH_FRACTION instead of the village growing children-only
+    # forever (the 0.0 adult_frac a frozen-out village settles at would
+    # otherwise be a permanent death sentence). Same hidden fractional-carry
+    # treatment as population itself, or a 1-head gain would round every
+    # adult share of it down to nothing forever.
     adult_frac = node.adults / node.population if node.population else 1.0
-    adult_gain = round(gain * adult_frac)
+    adult_frac = max(adult_frac, ADULT_REGROWTH_FRACTION)
+    a_accum = getattr(node, "_adult_growth_accum", 0.0) + gain * adult_frac
+    adult_gain = int(a_accum)
+    node._adult_growth_accum = a_accum - adult_gain
     child_gain = gain - adult_gain
     node.population += gain
     node.adults += adult_gain
@@ -3959,6 +3995,17 @@ def storage_throttle(node, resource=None):
     at that pool's capacity. Passing resource=None measures whole-node
     fullness instead (used for reporting). A node with no capacity figure or
     no storage dict yet is unthrottled."""
+    if resource == "Firewood":
+        # Firewood is a tiny, seasonal, essential good (FIREWOOD_PER_CAPITA_
+        # WINTER): a village needs only a handful of units stocked for Winter,
+        # and that stock must never be squeezed out of a full food pantry.
+        # Exempting it from the fullness throttle is why a village always
+        # stocks its winter fuel -- the hoard is naturally bounded (a few
+        # units per head), so this cannot break the storage economy. Without
+        # it, a village whose pool is full of food seeds and delivers ~zero
+        # firewood, then permanently freezes its adults out in the first
+        # Winter (adults never regrow once lost -- see _apply_population_loss).
+        return 1.0
     res = getattr(node, "resources", None)
     if not res:
         return 1.0
@@ -6381,13 +6428,63 @@ def _find_city_village_site(world, city):
     return candidates[0][1], candidates[0][2]
 
 
+# Village capacity -- the settlement-first growth gate. A region can hold a
+# base "frontier homestead" plus a per-kind allowance for each settlement
+# built in it: a Town supports a few villages, a City many more. Fill a
+# region's slots, and further growth must come from upgrading a settlement
+# or expanding to a new region. Enforcement: worldgen._place_villages_for_region
+# (initial pass and claims), _grow_city_villages (prosperity growth), and the
+# region panel's "n/m villages" readout.
+VILLAGE_SLOTS = {"city": 10, "castle": 6, "town": 4}
+REGION_BASE_VILLAGE_SLOTS = 1
+
+# Worldgen fills a region only this fraction of its capacity (see
+# region_village_capacity): the rest is prosperity growth over the game --
+# the "slowly filling your land" arc -- and keeping the initial pass below
+# the cap keeps villages on the BEST land first instead of forcing
+# placements onto marginal ground, which is how a crammed region ends up
+# with farmless mining-only villages that must live on imports.
+WORLDGEN_VILLAGE_FILL_FRACTION = 0.6
+
+
+def region_village_capacity(world, region):
+    """How many villages a region can hold: one free frontier homestead,
+    plus each settlement's per-kind allowance. Settlements built mid-game
+    raise it; a freshly claimed region starts at just the homestead (which
+    is exactly the one village WILDLAND claims plant)."""
+    slots = REGION_BASE_VILLAGE_SLOTS
+    for sid in getattr(region, "meta_settlements", ()):
+        st = world.settlements[sid]
+        slots += VILLAGE_SLOTS.get(st.kind, 0)
+    return slots
+
+
+def seed_family_camps(world, region, village):
+    """Give a freshly founded village the tier-1 extractive camps its
+    region's land supports (see OUTSTATIONS): forest/taiga/jungle feed a
+    Woodcutters' Camp, mountain a Mining Camp, and the highland/desert/
+    coastal/tundra/swamp leftovers a Workings. The Grange rides along on
+    the CROP side: it is how a village on marginal land (no crop biomes in
+    its own catchment) feeds itself at all -- without one it lives on
+    imports, which is exactly how a realm ends up with starved dead-adult
+    villages (industry is gated on the camps, see _village_terrain_potential;
+    food stays baseline, and the Grange is its reach). Only ever raises a
+    tier to 1, never touches existing camps, so it is safe to run again on
+    old saves."""
+    counts = getattr(region, "biome_counts", None) or {}
+    for building, (biomes, _sample, _label) in OUTSTATIONS.items():
+        if any(counts.get(b, 0) > 0 for b in biomes):
+            set_storage_tier(village, building, 1)
+
+
 def _grow_city_villages(world):
     """Called once per turn (after prosperity is updated): any city whose
     prosperity meter is completely full spawns a new village nearby and
-    resets to 0. villages_spawned is a hidden running counter; once no
-    valid site remains within the growth radius, the city permanently
-    stops trying (village_growth_maxed) instead of re-scanning for nothing
-    every turn thereafter."""
+    resets to 0 -- while its region still has village capacity (see
+    VILLAGE_SLOTS / region_village_capacity). Once no valid site remains
+    within the growth radius, the city permanently stops trying
+    (village_growth_maxed) instead of re-scanning for nothing every turn
+    thereafter."""
     from app.world.worldgen import (Village, _roll_population, _VILLAGE_FARM_RANGE,
                                     _VILLAGE_FERT_PATCH, _local_road_path)
     from app.world.lexicon import make_settlement_namer
@@ -6398,6 +6495,14 @@ def _grow_city_villages(world):
             st.village_growth_maxed = False
         if (st.kind != "city" or st.village_growth_maxed
                 or st.prosperity < PROSPERITY_MAX - _PROSPERITY_FULL_EPSILON):
+            continue
+        # A full region stops growing villages, however prosperous the city:
+        # capacity is the settlement-first gate -- upgrade the town, build a
+        # settlement, or expand to a new region (see VILLAGE_SLOTS).
+        if st.region_id is None or st.region_id < 0:
+            continue
+        region = world.regions[st.region_id]
+        if len(region.villages) >= region_village_capacity(world, region):
             continue
 
         site = _find_city_village_site(world, st)
@@ -6537,6 +6642,7 @@ def seed_initial_stockpiles(world):
         for vid in getattr(region, "villages", []):
             village = world.villages[vid]
             biome_counts, climate, fertility_frac = village_local_sample(world, village, region)
+            reach_crops = village_outstation_cells(world, village)[OUTSTATION_CROP]
             # Crops use their OWN harvest season, regardless of the world's
             # current season -- world.season at generation time is always
             # "Spring" (see generate_world), and no Crop's GROWTH_CYCLE
@@ -6553,8 +6659,23 @@ def seed_initial_stockpiles(world):
             # each Crop only ever contributes during its own single
             # Harvest season, so nothing double-counts.
             yield_ = {}
+            # Same outstation reach the live yield uses (see
+            # _village_terrain_potential): the seed must cover what the
+            # village will ACTUALLY produce. A village whose own catchment
+            # has no crop biomes still works the region's farmland through
+            # its Grange -- without that reach its seed is zero food, and a
+            # world that starts in Spring (no crop harvests until Summer/
+            # Autumn) starves such villages permanently before their first
+            # harvest: adults never regrow once lost (see _apply_population_
+            # loss). Found via the settlement-first pass: the new bigger
+            # regions put ~half the AI realm's villages into this trap.
+            crop_counts = biome_counts
+            if reach_crops:
+                crop_counts = dict(biome_counts)
+                for b, cells in reach_crops.items():
+                    crop_counts[b] = crop_counts.get(b, 0) + cells
             for season in SEASONS:
-                for crop, amount in _crop_yield_core(biome_counts, climate,
+                for crop, amount in _crop_yield_core(crop_counts, climate,
                                                      fertility_frac, season).items():
                     yield_[crop] = yield_.get(crop, 0) + amount
             # Forestry/Mining are continuous/season-agnostic, so this is
@@ -6955,6 +7076,15 @@ def day_steps(world):
     # Player/AI-built settlements + their connecting roads
     # (app/world/construction.py).
     from app.world import construction
+    # Settlement-first migration: saves from before camps were load-bearing
+    # have villages with no extractive camps at all -- seed the tier-1 camps
+    # their land supports exactly once so a mid-game realm doesn't deadlock
+    # into zero industry (worldgen seeds new villages the same way; this
+    # pass is a no-op for worlds that already have them).
+    if not getattr(world, "_camps_seeded", False):
+        world._camps_seeded = True
+        for village in world.villages:
+            seed_family_camps(world, world.regions[village.region_id], village)
     construction.advance_projects(world)
     construction.advance_shipyard_projects(world)
     construction.advance_granary_projects(world)     # legacy, pre-tier saves

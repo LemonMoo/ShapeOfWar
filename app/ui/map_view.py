@@ -3504,6 +3504,15 @@ class MapView(tk.Frame):
                               and getattr(obj, "leg", None) == leg0)
                 start = frac0 if same_route else 0.0
                 if abs(frac - start) < 1e-6:
+                    # No movement along the route it holds now -- but if its
+                    # route was REPLACED this turn (a caravan re-dispatched
+                    # home), the new route's start can be anywhere, and the
+                    # mover's cell may genuinely have jumped. Ease it there
+                    # instead of teleporting (found by test_move_anim on a
+                    # caravan whose replacement route happened to start at
+                    # fraction ~0).
+                    if pos0 is not None and tuple(obj.pos) != pos0:
+                        tracks.append((obj, _Lerp(pos0, tuple(obj.pos), w)))
                     continue
                 tracks.append((obj, _PathWalk(path, start, frac, w)))
             elif pos0 is not None and tuple(obj.pos) != pos0:
@@ -4350,8 +4359,19 @@ class MapView(tk.Frame):
             self._panel_text("Foreign territory — consider hostile "
                      "action below.", fg=theme.MUTED, font=theme.FONT_SMALL)
         else:
-            self._panel_text(f"{n_villages} villages — click again "
-                     "to zoom in.", fg=theme.MUTED, font=theme.FONT_SMALL)
+            # Village capacity is the settlement-first growth readout: how
+            # full the region is, and what unlocks more (upgrade a
+            # settlement, or expand). A full region stops growing villages
+            # even when a city is prosperous -- see resources.VILLAGE_SLOTS.
+            from app.world.resources import region_village_capacity
+            cap = region_village_capacity(self.world, region)
+            full = n_villages >= cap
+            text = f"{n_villages}/{cap} villages"
+            if full:
+                text += " — region full: upgrade a settlement or expand"
+            else:
+                text += " — click again to zoom in"
+            self._panel_text(text, fg=theme.MUTED, font=theme.FONT_SMALL)
 
         if is_foreign:
             player = self._player_faction()
@@ -4778,6 +4798,44 @@ class MapView(tk.Frame):
         out += [b for b in resources.HERD_BUILDINGS if b not in out]
         return out
 
+    def _show_upgrade_action(self, st, player):
+        """For an owned Town: the 'Upgrade to City' action -- the
+        settlement-first growth lever (a City supports more villages, tax,
+        population ceiling). Shows the cost and build time, explains what it
+        is for when unaffordable, and queues the project when clicked."""
+        if st.kind != "town":
+            return
+        from app.world import construction
+        cost = construction.SETTLEMENT_UPGRADE_COST
+        turns = construction.SETTLEMENT_UPGRADE_TURNS
+        in_flight = any(p.settlement_id == st.id
+                        for p in getattr(self.world, "settlement_upgrade_projects", ()))
+        if in_flight:
+            self._panel_text("City upgrade under way…", fg=theme.MUTED)
+            return
+        if not construction.can_afford(player, cost, self.world):
+            self._panel_text(
+                f"Upgrade to City needs {_format_resources(cost)} — a City "
+                "supports more villages, tax and people.", fg=theme.MUTED)
+            return
+        self._panel_button(
+            f"Upgrade to City ({turns} turns)",
+            lambda: self._do_upgrade_settlement(st))
+
+    def _do_upgrade_settlement(self, st):
+        from app.world import construction
+        player = self._player_faction()
+        if player is None:
+            return
+        msg = construction.start_settlement_upgrade(self.world, player, st)
+        if msg:
+            self.show_bottom_message(msg)
+            return
+        self._rebuild_selection_panel()
+        self.show_bottom_message(
+            f"{st.name} will rise to a City in "
+            f"{construction.SETTLEMENT_UPGRADE_TURNS} turns.")
+
     def _show_settlement(self, st):
         """Settlement panel, in the same folding-card idiom as the village one
         (see _card / _show_village).
@@ -4828,6 +4886,7 @@ class MapView(tk.Frame):
                 self._kv(body, "Built", " \u00b7 ".join(built))
 
         if own:
+            self._show_upgrade_action(st, player)
             self._build_entry_card(st, player)
             self._build_survey_card(st)
 

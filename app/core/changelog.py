@@ -20,6 +20,18 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 89,
+        "title": "The Settlement-First World",
+        "items": [
+            "WORLD: regions are ~3x larger (a full-size world now has ~550 regions instead of ~1,400) -- the per-region daily overhead (production, logistics, trade chunks) drops with them, and a region is one holding to build up rather than a tile to spam. New games only.",
+            "GROWTH: settlements have levels. A Town supports a few villages, a City many more -- a region's village capacity is the sum of its settlements' allowances. Raise a Town to a City (a long, expensive upgrade project) for more room, higher tax and a bigger population ceiling.",
+            "GROWTH: the region panel shows \"n/m villages\"; a full region stops growing villages and says so -- upgrade a settlement or expand.",
+            "RESOURCES: nothing is guaranteed any more. The old free Logs/Stone trickle per region is gone, and a village's industry output (timber, ore, stone) is gated behind its extractive camps -- Woodcutters' Camp, Mining Camp, Workings. A village without them extracts nothing; the AI builds them too.",
+            "EXPANSION: a realm may only claim new land once its own regions average half their village capacity -- expansion is the reward for filling your land, and newly claimed land is empty until you build on it (one frontier homestead per claim).",
+            "BALANCE: villages recover from disaster -- children grow into adults, so a hard Winter that takes every adult is a setback, not a permanent death sentence.",
+        ],
+    },
+    {
         "version": 88,
         "title": "The World Is Thinking",
         "items": [

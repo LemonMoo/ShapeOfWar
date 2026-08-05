@@ -45,17 +45,17 @@ SETTLEMENT_TYPES = {
     "city": {
         "name": "City",
         "fert_w": 1.0, "river_w": 0.8, "coast_w": 0.6, "border_w": 0.0,
-        "elev_w": 0.0, "per_cells": 600, "max": 4, "min": 1, "spacing": 14,
+        "elev_w": 0.0, "per_cells": 1700, "max": 4, "min": 1, "spacing": 14,
     },
     "castle": {
         "name": "Castle",
         "fert_w": 0.1, "river_w": 0.2, "coast_w": 0.0, "border_w": 1.2,
-        "elev_w": 0.8, "per_cells": 450, "max": 6, "min": 1, "spacing": 11,
+        "elev_w": 0.8, "per_cells": 1300, "max": 6, "min": 1, "spacing": 11,
     },
     "town": {
         "name": "Town",
         "fert_w": 0.7, "river_w": 0.5, "coast_w": 0.3, "border_w": 0.0,
-        "elev_w": 0.0, "per_cells": 250, "max": 10, "min": 2, "spacing": 7,
+        "elev_w": 0.0, "per_cells": 700, "max": 10, "min": 2, "spacing": 7,
     },
 }
 
@@ -321,7 +321,13 @@ def _generate_all_regions(world, rng, base_cost, land_cells):
     spaced across all land, then grown with the same river-aware weighted
     flooding used for country borders, so region borders follow rivers too.
     Every region starts UNCLAIMED; callers assign faction_idx afterward."""
-    n_regions = max(1, len(land_cells) // 200)
+    # Region count. ~550 cells per region instead of ~200: fewer, larger
+    # regions cut the per-region sim overhead (production recompute, local
+    # logistics, region chunking all loop over world.regions) roughly 3x on
+    # a full-size world, and match the settlement-first growth model -- a
+    # region is a single holding you fill and upgrade, not a tile to spam
+    # settlements across. The seed spacing below follows automatically.
+    n_regions = max(1, len(land_cells) // 550)
     min_d = max(3.0, (len(land_cells) / n_regions) ** 0.5 * 0.7)
     shuffled = land_cells[:]
     rng.shuffle(shuffled)
@@ -1349,7 +1355,23 @@ def _place_villages_for_region(world, rng, region, fixed_n=None):
     # region measures otherwise.
     candidates = list(land_cells)
     placed = []
+    # Village capacity is the settlement-first gate here too: a region is
+    # born with its settlements' slots (see resources.region_village_capacity),
+    # and the greedy pass may not overfill it. The fixed_n floor (starting
+    # home region, wildland claims) is clamped to that capacity so a claim's
+    # homestead village always fits.
+    from app.world.resources import (region_village_capacity, seed_family_camps,
+                                     WORLDGEN_VILLAGE_FILL_FRACTION)
+    capacity = region_village_capacity(world, region)
+    # Initial pass fills partway (see WORLDGEN_VILLAGE_FILL_FRACTION): the
+    # floor (starting home region, wildland claims) always fits, and the
+    # greedy loop below may not exceed the fill target.
+    fill_cap = max(int(capacity * WORLDGEN_VILLAGE_FILL_FRACTION), fixed_n or 1)
+    if fixed_n is not None:
+        fixed_n = min(fixed_n, fill_cap)
     while candidates:
+        if len(placed) >= fill_cap:
+            break
         best_score, best_i = None, None
         for i, cell in enumerate(candidates):
             s = fixed_score[cell]
@@ -1389,6 +1411,12 @@ def _place_villages_for_region(world, rng, region, fixed_n=None):
                    population, adults, children, prosperity, max_population)
         world.villages.append(v)
         vids.append(v.id)
+        # Settlement-first extraction: a village's industry comes from its
+        # camps, not the air (see resources._village_terrain_potential), so
+        # every founding village starts with the tier-1 camps its region's
+        # land can feed. The mechanics live in what you BUILD on top -- more
+        # camps, higher tiers, more villages -- not in a free trickle.
+        seed_family_camps(world, region, v)
 
     region.villages = vids
 
@@ -2057,6 +2085,7 @@ class World:
         self.settlement_projects = []  # list[SettlementProject] — see app/world/construction.py
         self.road_projects = []        # list[RoadProject] — see app/world/construction.py
         self.shipyard_projects = []    # list[ShipyardProject] — see app/world/construction.py
+        self.settlement_upgrade_projects = []  # list[SettlementUpgradeProject] — see app/world/construction.py
         self.granary_projects = []     # list[GranaryProject] — see app/world/construction.py
         self.warehouse_projects = []   # list[WarehouseProject] — see app/world/construction.py
         self.claim_projects = []       # list[ClaimProject] — see app/world/expansion.py

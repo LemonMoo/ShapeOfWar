@@ -15,7 +15,7 @@ import random
 
 from app.core.events import bus
 from app.world.worldgen import (OCEAN, Settlement, SETTLEMENT_TYPES,
-                                add_road_segments,
+                                POPULATION_RANGE, add_road_segments,
                                 SETTLEMENT_TAX_INCOME, _roll_population, _path_dijkstra,
                                 _elev_cost, _SEA_COAST_REACH, _site_score,
                                 _too_close_any, _mark_occupied_both,
@@ -43,6 +43,13 @@ SETTLEMENT_BUILD_COST = {
     "city": {"Logs": 1750, "Stone": 1500, "Iron": 750, "Gold": 2500},
 }
 SETTLEMENT_BUILD_TURNS = {"town": 20, "castle": 25, "city": 40}   # at full speed
+# Raising an existing Town into a City -- the settlement-first growth path
+# (a City grants more village slots, a higher tax rate, a bigger population
+# ceiling and the city-gated buildings). Costs the same as building a city
+# from scratch, but an existing town's roads and infrastructure are already
+# there, so it takes noticeably less time than founding one.
+SETTLEMENT_UPGRADE_TURNS = 30
+SETTLEMENT_UPGRADE_COST = SETTLEMENT_BUILD_COST["city"]
 ROAD_SPEED_PENALTY = 0.5         # project progress rate while its road is incomplete
 ROAD_CELLS_PER_TURN = 6          # how much of the route gets physically drawn each turn
 _BBOX_PAD = 20
@@ -294,6 +301,27 @@ class ShipyardProject:
         self.faction_idx = faction_idx
         self.settlement_id = settlement_id
         self.total_turns = SHIPYARD_BUILD_TURNS
+        self.progress_turns = 0.0
+
+    @property
+    def turns_left(self):
+        return max(0, math.ceil(self.total_turns - self.progress_turns))
+
+
+class SettlementUpgradeProject:
+    """A Town being raised into a City (the settlement-first growth path: a
+    City grants more village slots, a higher tax rate, a bigger population
+    ceiling and the city-gated buildings). Sited in place -- no road to
+    build -- so it's a flat time+resource sink like the shipyard. The
+    Settlement's `kind` is what everything hangs off, so changing it
+    re-keys tax, population ceiling, storage tier and prosperity target at
+    once; the population itself is untouched and simply grows toward the
+    new ceiling as it always has."""
+
+    def __init__(self, faction_idx, settlement_id):
+        self.faction_idx = faction_idx
+        self.settlement_id = settlement_id
+        self.total_turns = SETTLEMENT_UPGRADE_TURNS
         self.progress_turns = 0.0
 
     @property
@@ -864,6 +892,54 @@ def _finish_settlement(world, project):
                           list(zip(sea_lane, sea_lane[1:])), "sea")
 
 
+def _upgrade_projects(world):
+    """world.settlement_upgrade_projects, materialized on demand so worlds
+    saved before the upgrade mechanic exist get the list lazily instead of
+    crashing (the one place the settlement-first growth model touches old
+    saves)."""
+    lst = getattr(world, "settlement_upgrade_projects", None)
+    if lst is None:
+        lst = []
+        world.settlement_upgrade_projects = lst
+    return lst
+
+
+def start_settlement_upgrade(world, nation, settlement):
+    """Pay the cost and queue a Town's upgrade to a City. Returns a message
+    ("" on success, why-not otherwise), mirroring start_settlement. Works
+    for the player or an AI nation alike (see run_settlement_ai)."""
+    faction_idx = world.factions.index(nation)
+    if settlement.faction_idx != faction_idx:
+        return "You can only upgrade your own settlements."
+    if settlement.kind != "town":
+        return "Only a Town can be upgraded to a City."
+    if any(p.settlement_id == settlement.id
+           for p in _upgrade_projects(world)):
+        return "An upgrade is already under way there."
+    cost = SETTLEMENT_UPGRADE_COST
+    if not can_afford(nation, cost, world):
+        return "You don't have enough resources to start the upgrade."
+    _pay_cost(nation, cost, world)
+    _upgrade_projects(world).append(
+        SettlementUpgradeProject(faction_idx, settlement.id))
+    return ""
+
+
+def _finish_settlement_upgrade(world, project):
+    """Raise the Town to a City. Kind is what every derived stat hangs off,
+    so this re-rolls the kind-derived ones (tax income, population ceiling)
+    exactly as _finish_settlement would for a fresh city, and leaves the
+    population itself alone -- the town keeps its people and grows toward
+    the new ceiling. A settlement that was already upgraded or vanished in
+    the meantime just ends the project without effect."""
+    st = world.settlements[project.settlement_id]
+    if st.kind != "town":
+        return
+    st.kind = "city"
+    st.tax_income = round(random.uniform(*SETTLEMENT_TAX_INCOME["city"]))
+    st.max_population = round(random.uniform(*POPULATION_RANGE["city"]))
+
+
 def _finish_road(world, road):
     """Fold a completed road into the permanent per-region road network so
     it renders like any other established road from then on, at whichever
@@ -903,10 +979,42 @@ def advance_projects(world):
                                    "kind": "settlement",
                                    "name": getattr(project, "name", "A settlement")})
 
+    finished_upgrades = []
+    for project in _upgrade_projects(world):
+        project.progress_turns += 1.0
+        if project.progress_turns >= project.total_turns:
+            finished_upgrades.append(project)
+    for project in finished_upgrades:
+        _finish_settlement_upgrade(world, project)
+        _upgrade_projects(world).remove(project)
+        st = world.settlements[project.settlement_id]
+        bus.emit("work:finished", {"faction_idx": project.faction_idx,
+                                   "kind": "upgrade",
+                                   "name": getattr(st, "name", "A settlement")})
+
     finished_roads = [r for r in world.road_projects if r.complete]
     for road in finished_roads:
         _finish_road(world, road)
         world.road_projects.remove(road)
+
+
+def _pick_upgrade_town(world, fac_idx):
+    """The Town most worth raising to a City: one sitting in the faction's
+    most village-cramped region -- the settlement-first growth pressure
+    (full village slots -> upgrade -> more slots). Returns None when the
+    faction has no Town at all."""
+    from app.world.resources import region_village_capacity
+    best, best_frac = None, -1.0
+    for st in world.settlements:
+        if st.faction_idx != fac_idx or st.kind != "town":
+            continue
+        if 0 <= st.region_id < len(world.regions):
+            region = world.regions[st.region_id]
+            cap = region_village_capacity(world, region)
+            frac = len(region.villages) / cap if cap else 1.0
+            if frac > best_frac:
+                best_frac, best = frac, st
+    return best
 
 
 # --- AI construction/expansion pacing ----------------------------------------
@@ -940,6 +1048,9 @@ def _ai_has_active_construction(world, fac_idx):
            for p in _storage_projects(world)):
         return True
     if any(p.faction_idx == fac_idx for p in world.shipyard_projects):
+        return True
+    if any(p.faction_idx == fac_idx
+           for p in _upgrade_projects(world)):
         return True
     if any(p.faction_idx == fac_idx for p in world.claim_projects):
         return True
@@ -1009,6 +1120,14 @@ def run_settlement_ai(world):
         empty_regions = [r for r in world.regions
                          if r.faction_idx == fac_idx and not getattr(r, "meta_settlements", [])]
         if not empty_regions:
+            # No undeveloped land left: the settlement-first path is to raise
+            # a Town in the most village-cramped region into a City -- more
+            # village slots, tax, population ceiling -- instead of stalling
+            # on the region's full capacity. Same single-project-at-a-time
+            # pacing as everything else here.
+            town = _pick_upgrade_town(world, fac_idx)
+            if town is not None:
+                start_settlement_upgrade(world, nation, town)
             continue
         region = random.choice(empty_regions)
         for kind in ("city", "castle", "town"):
@@ -1157,6 +1276,25 @@ def run_storage_ai(world):
                 pressured.append((min(1.5, score / PRESERVE_AI_THRESHOLD), node,
                                   resources.PRESERVING_HOUSE))
             pressured.extend(_herd_building_pressure(world, node))
+            # Settlement-first extraction (resources._village_terrain_potential):
+            # a village with no extractive camp gets nothing out of the ground,
+            # so a camp family whose biomes the region actually holds is a real
+            # build pressure -- score it just under the storage crises so a
+            # realm doesn't starve its own mines before it fixes its granaries.
+            # The Grange is in the same family, on the CROP side: it is the
+            # only way a village on marginal land (no crop biomes in its own
+            # catchment) feeds itself -- without one it lives on imports, which
+            # is exactly how a realm ends up with starved dead-adult villages.
+            if getattr(node, "kind", "") == "village":
+                region = world.regions[node.region_id]
+                counts = getattr(region, "biome_counts", None) or {}
+                for building, (biomes, _sample, _label) in resources.OUTSTATIONS.items():
+                    if resources.storage_tier(node, building) > 0:
+                        continue
+                    if not resources.storage_max_tier(node, building):
+                        continue
+                    if any(counts.get(b, 0) > 0 for b in biomes):
+                        pressured.append((1.1, node, building))
         if not pressured:
             continue
 

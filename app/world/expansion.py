@@ -329,6 +329,26 @@ def start_claim(world, faction_idx, region):
         return blocked
 
     sea_only = is_sea_only_claim(world, faction_idx, region)
+    if not sea_only:
+        # Settlement-first expansion (phase 5): a realm reaches for new land
+        # when its own is genuinely full of villages, not on a whim. Claims
+        # require the faction's owned regions to average >=
+        # CLAIM_DEVELOPMENT_FRACTION of their village capacity -- the natural
+        # "we need more land" moment, shown filling up in the region panel's
+        # "n/m villages" readout. Sea claims (fleets/islands) are a different
+        # kind of expansion and are exempt. AI and player share this gate --
+        # one code path.
+        from app.world.resources import region_village_capacity
+        cap_sum = vills_sum = 0
+        for region in world.regions:
+            if region.faction_idx != faction_idx:
+                continue
+            cap_sum += region_village_capacity(world, region)
+            vills_sum += len(getattr(region, "villages", []))
+        if cap_sum and vills_sum / cap_sum < CLAIM_DEVELOPMENT_FRACTION:
+            return ("Your realm is still growing -- fill your village lands "
+                    "(raise settlements to Cities for more room) before "
+                    "reaching for new territory.")
     blocked = can_afford_claim(world, faction_idx, region, sea_only)
     if blocked:
         return blocked
@@ -342,6 +362,14 @@ def start_claim(world, faction_idx, region):
 
 
 _NO_FREE_SETTLEMENT = {"city": 0, "town": 0, "castle": 0}   # see _place_settlements_for_faction
+
+# Settlement-first expansion gate (see start_claim): a realm may only reach
+# for new land once its OWN regions average at least this fraction of their
+# village capacity -- the "we need more land" moment. 0.5 keeps the early
+# game moving (a fresh foothold is already close to half full) while making
+# claim-spam without development impossible. Tune here; the AI uses the same
+# gate through start_claim.
+CLAIM_DEVELOPMENT_FRACTION = 0.5
 
 WILDLAND_VILLAGE_MIN = 1   # every freshly claimed region gets at least this
                            # many regardless of land quality (a floor, not an
