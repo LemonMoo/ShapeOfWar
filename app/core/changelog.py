@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 96,
+        "title": "The Frontier",
+        "items": [
+            "FEATURE: newly claimed land is a frontier — for its first weeks it can throw small events at you: bandits demanding tribute, scouts finding rich soil, ruins holding salvage, a hermit's blessing, wanderers asking to settle. The world pauses for the decision; rival realms settle their own frontiers unseen.",
+        ],
+    },
+    {
         "version": 95,
         "title": "The Realm Chronicle",
         "items": [

@@ -405,6 +405,10 @@ def settle_newly_claimed_region(world, region):
     from app.world import chronicle
     chronicle.log(world, world.factions[region.faction_idx],
                   f"The claim to {getattr(region, 'name', 'new land')} is secured.")
+    # The frontier window: for the next FRONTIER_WINDOW_TURNS this region can
+    # throw small events at its new owner (app/world/frontier.py).
+    from app.world.frontier import FRONTIER_WINDOW_TURNS
+    region.frontier_turns_left = FRONTIER_WINDOW_TURNS
     # A preview only -- real per-village production (and delivery into each
     # village's own storage) happens next turn via advance_turn's own call
     # to recompute_region_resources; this just keeps the region panel's

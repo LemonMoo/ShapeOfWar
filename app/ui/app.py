@@ -15,6 +15,7 @@ from app.ui.load_game_menu import LoadGameMenuView
 from app.ui.map_view import MapView
 from app.ui.battle_view import BattleView
 from app.ui.game_over import GameOverView
+from app.ui.frontier_dialog import FrontierDialog
 from app.core.events import bus
 from app.core.save import (save_game, load_game, has_save, list_saves,
                            new_save_id, delete_save)
@@ -152,7 +153,7 @@ class App(tk.Tk):
                                     on_attack=self.stage_battle,
                                     on_end_turn=self.end_turn,
                                     on_wildland_claim=self.stage_wildland_battle,
-                                    on_turn_settled=self._flush_pending_defeat)
+                                    on_turn_settled=self._on_turn_settled)
             self.battle_view = BattleView(self.content, on_continue=self._return_from_battle)
             for view in (self.map_view, self.battle_view):
                 view.place(relx=0, rely=0, relwidth=1, relheight=1)
@@ -291,6 +292,45 @@ class App(tk.Tk):
             self._pending_defeat = payload
             return
         self.after_idle(lambda: self._show_defeat(payload))
+
+    def _on_turn_settled(self):
+        """MapView's on_turn_settled callback: the day has fully resolved.
+        Flush any pending defeat/elimination announcements, then surface
+        any frontier events staged by the world (see _check_frontier_events)
+        -- a claim's first weeks can pause the world for a small decision."""
+        self._flush_pending_defeat()
+        self._check_frontier_events()
+
+    def _check_frontier_events(self):
+        """Turn staged frontier events (app/world/frontier.py) into dialogs,
+        one at a time. The world pauses while one is up -- real minutes
+        spent reading a frontier decision are not days the world owes."""
+        from app.core import clock
+        pending = getattr(self.world, "pending_frontier_events", None)
+        if not pending:
+            return
+        event = pending.pop(0)
+        self._pause_world_for(clock.FRONTIER)
+        FrontierDialog(self, self.world, event,
+                       on_done=self._after_frontier_event)
+
+    def _after_frontier_event(self, message):
+        """One frontier event resolved: report the outcome, surface the next
+        staged one, and once they are all done hand the clock back to the
+        player at the pace they were watching (resume only undoes OUR
+        pause -- a player's own pause stands)."""
+        from app.core import clock
+        if message:
+            self.map_view.show_bottom_message(message)
+        pending = getattr(self.world, "pending_frontier_events", None)
+        if pending:
+            self._check_frontier_events()
+            return
+        if self.map_view.clock.pause_reason == clock.FRONTIER:
+            self.map_view.clock.resume()
+            self.map_view.clock.forgive_backlog()
+            self.map_view.reset_frame_clock()
+            self.map_view._refresh_time_controls()
 
     def _flush_pending_defeat(self):
         """MapView's on_turn_settled callback (main thread, right after a

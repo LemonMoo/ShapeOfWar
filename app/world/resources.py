@@ -7234,6 +7234,14 @@ def day_steps(world):
     world.survey_events = advance_surveys(world)
     yield "surveys"
 
+    # Frontier events on newly-claimed land (app/world/frontier.py): the
+    # player's are staged on world.pending_frontier_events for the UI to
+    # turn into a dialog; AI realms resolve theirs instantly. Runs near the
+    # end so a claim resolved earlier in the day starts its window at once.
+    from app.world import frontier
+    frontier.advance_frontier_events(world)
+    yield "frontier"
+
     # Fog of war: reveal whatever's now in range as territory changes hands
     # (app/world/vision.py).
     from app.world import vision

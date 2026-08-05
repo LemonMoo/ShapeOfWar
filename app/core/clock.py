@@ -56,17 +56,20 @@ MANUAL = "manual"
 BATTLE = "battle"
 ATTACKED = "attacked"
 PROJECT_DONE = "project"
+FRONTIER = "frontier"
 
 PAUSE_REASON_TEXT = {
     MANUAL: "Paused",
     BATTLE: "Paused — a battle",
     ATTACKED: "Paused — you are under attack",
     PROJECT_DONE: "Paused — work finished",
+    FRONTIER: "Paused — a frontier event",
 }
 
 # Which of them are on by default. MANUAL is not listed because it is not a
 # rule, it is the player pressing pause.
-DEFAULT_AUTO_PAUSE = {BATTLE: True, ATTACKED: True, PROJECT_DONE: True}
+DEFAULT_AUTO_PAUSE = {BATTLE: True, ATTACKED: True, PROJECT_DONE: True,
+                      FRONTIER: True}
 
 
 class Clock:

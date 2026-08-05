@@ -66,6 +66,13 @@ MARKERS = [
     ("app.world.expansion", "is secured", "const"),
     ("app.world.worldgen", "The whole game is reproducible", "const"),
     ("app.core.changelog", "The Realm Chronicle", "const"),
+    # v0.18.7 -- the frontier.
+    ("app.world.frontier", "FRONTIER_WINDOW_TURNS", "name"),
+    ("app.world.frontier", "The bandits take", "const"),
+    ("app.world.frontier", "The hermit's blessing", "const"),
+    ("app.core.clock", "FRONTIER", "name"),
+    ("app.ui.frontier_dialog", "FrontierDialog", "name"),
+    ("app.core.changelog", "The Frontier", "const"),
 ]
 
 arch = CArchiveReader(EXE)
