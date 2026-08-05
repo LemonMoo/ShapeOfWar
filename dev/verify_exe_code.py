@@ -99,7 +99,7 @@ MARKERS = [
     ("app.world.holds", "_place_gate_town", "name"),
     ("app.world.holds", "_fallback_surface_capital", "name"),
     ("app.world.holds", "_cache_network_terraces", "name"),
-    ("app.world.holds", "under_capital", "const"),
+    ("app.world.holds", "under_capital", "name"),
     ("app.world.holds", "beneath the mountains.", "const"),
     ("app.world.resources", "under_capital", "const"),
     ("app.world.startsites", "_under_key", "name"),
@@ -134,6 +134,14 @@ for mod in z.toc:
                     for x in c.co_consts:
                         walk(x)
                     names.extend(c.co_names)
+                    # A nested def's own name lives in co_name, and a closure
+                    # reference (LOAD_DEREF) is addressed by its co_freevars
+                    # index, not by co_names -- without these two, a marker
+                    # like startsites' _under_key (a local def captured by a
+                    # lambda) is invisible to the verifier.
+                    if c.co_name:
+                        names.append(c.co_name)
+                    names.extend(c.co_freevars)
                 elif isinstance(c, str):
                     consts.append(c)
 
