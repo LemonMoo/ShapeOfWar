@@ -39,6 +39,10 @@ MARKERS = [
     ("app.ui.map_view", "Raise to Town", "const"),
     ("app.world.construction", "the settlement-first ladder's first rung", "const"),
     ("app.core.changelog", "The Ladder", "const"),
+    # v0.18.2 -- the compendium pass.
+    ("app.ui.compendium_data", "Founding & Growth", "const"),
+    ("app.ui.compendium_data", "THE DEVELOPMENT GATE", "const"),
+    ("app.core.changelog", "The Compendium Pass", "const"),
 ]
 
 arch = CArchiveReader(EXE)
