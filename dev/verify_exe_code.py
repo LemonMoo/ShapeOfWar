@@ -34,6 +34,11 @@ MARKERS = [
     ("app.world.expansion", "Your realm is still growing", "const"),
     ("app.core.changelog", "The Settlement-First World", "const"),
     ("app.core.changelog", "burns its coal in Winter", "const"),
+    # v0.18.1 -- the ladder.
+    ("app.ui.map_view", "Found Village...", "const"),
+    ("app.ui.map_view", "Raise to Town", "const"),
+    ("app.world.construction", "the settlement-first ladder's first rung", "const"),
+    ("app.core.changelog", "The Ladder", "const"),
 ]
 
 arch = CArchiveReader(EXE)
