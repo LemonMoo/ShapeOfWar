@@ -43,8 +43,12 @@ land, then expand.
 
 ## Balance
 
-- Villages recover from disaster: **children grow into adults**, so a hard
-  Winter that takes every adult is a setback, not a permanent death sentence.
+- Villages recover from disaster: **children grow into adults** at a real
+  rate (~40 turns to rebuild a stripped workforce), so a hard Winter or an
+  expansion that took every adult is a setback, not a permanent death
+  sentence.
+- A village with no woodland **burns its coal** in Winter — a mining town
+  freezes while sitting on a seam no more.
 - Food/fishing labor is never fully shut off by a full pantry, and firewood
   can't be squeezed out of storage by food.
 

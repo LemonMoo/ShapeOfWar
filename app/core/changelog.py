@@ -28,7 +28,8 @@ CHANGELOG_ENTRIES = [
             "GROWTH: the region panel shows \"n/m villages\"; a full region stops growing villages and says so -- upgrade a settlement or expand.",
             "RESOURCES: nothing is guaranteed any more. The old free Logs/Stone trickle per region is gone, and a village's industry output (timber, ore, stone) is gated behind its extractive camps -- Woodcutters' Camp, Mining Camp, Workings. A village without them extracts nothing; the AI builds them too.",
             "EXPANSION: a realm may only claim new land once its own regions average half their village capacity -- expansion is the reward for filling your land, and newly claimed land is empty until you build on it (one frontier homestead per claim).",
-            "BALANCE: villages recover from disaster -- children grow into adults, so a hard Winter that takes every adult is a setback, not a permanent death sentence.",
+            "BALANCE: villages recover from disaster -- children grow into adults (a real rate: ~40 turns to rebuild a stripped workforce), so a hard Winter or a frontier that took every adult is a setback, not a permanent death sentence.",
+            "BALANCE: a village with no woodland burns its coal in Winter -- a mining town freezes while sitting on a seam no more.",
         ],
     },
     {

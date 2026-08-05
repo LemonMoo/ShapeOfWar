@@ -3215,6 +3215,11 @@ ADULT_REGROWTH_FRACTION = 0.4    # adult fraction kept when a node's adults
                                   # were all lost (see _grow_population):
                                   # children mature into the missing adults
                                   # instead of children-only growth forever
+# How fast a node's children mature into adults while the adult ratio is
+# below ADULT_REGROWTH_FRACTION: fraction of population per turn -- ~40
+# turns to rebuild a fully-stripped workforce, a real recovery instead of
+# the deliberately-glacial population growth (see _grow_population).
+ADULT_MATURITY_RATE = 0.02
 
 
 def _apply_population_loss(settlement, loss):
@@ -3277,6 +3282,20 @@ def _grow_population(node):
     node.population += gain
     node.adults += adult_gain
     node.children += child_gain
+    # Child maturation: a node whose adults were stripped -- by a famine, a
+    # freeze, or the frontier settler drain of a claim (_pay_claim takes
+    # working-age people from the villages nearest the frontier) -- regrows
+    # its workforce as its children grow up, at a REAL rate rather than the
+    # deliberately-glacial population growth. Without it, the settlement-
+    # first world's bigger regions (each claim costs ~2.75x the settlers)
+    # drained the AI realm's frontier villages of every adult permanently.
+    if node.children > 0 and node.population > 0:
+        ratio = node.adults / node.population
+        if ratio < ADULT_REGROWTH_FRACTION:
+            mature = min(node.children,
+                         max(1, round(node.population * ADULT_MATURITY_RATE)))
+            node.children -= mature
+            node.adults += mature
 
 
 def _consume_node_needs(node, season, world):
@@ -3323,6 +3342,21 @@ def _consume_node_needs(node, season, world):
         wood_needed = needs["Firewood"]
         wood_had = min(res.get("Firewood", 0), wood_needed)
         res["Firewood"] = res.get("Firewood", 0) - wood_had
+        # Fuel substitution: a village with no woodland (mountain/highland
+        # holds especially) still has to heat its homes in Winter, and it
+        # digs coal -- burn it when the firewood runs short. One coal unit
+        # covers one firewood-equivalent: coal is dense, but it comes out of
+        # the ground rather than off the land, which is exactly the point --
+        # a mining town that freezes while sitting on a seam is how the
+        # settlement-first world lost its own mine villages to a permanent
+        # Winter (see the fuel pass: the new bigger regions put far more
+        # villages on forest-poor ground).
+        if wood_had < wood_needed:
+            missing = wood_needed - wood_had
+            coal_use = min(res.get("Coal", 0), missing)
+            if coal_use > 0:
+                res["Coal"] = res["Coal"] - coal_use
+                wood_had += coal_use
         if wood_had < wood_needed:
             wood_had += (wood_needed - wood_had) * _firewood_scrounge_fraction(world, node)
         if wood_needed > 0 and wood_had < wood_needed:
