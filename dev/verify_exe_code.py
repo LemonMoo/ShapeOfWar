@@ -61,7 +61,7 @@ MARKERS = [
     ("app.core.changelog", "A Character of Its Own", "const"),
     # v0.18.6 -- the realm chronicle + seed reproducibility.
     ("app.world.chronicle", "turn_date_text", "name"),
-    ("app.world.chronicle", "chronicle.log", "name"),
+    ("app.world.chronicle", "CHRONICLE_CAP", "name"),
     ("app.world.construction", "Your settlers found", "const"),
     ("app.world.expansion", "is secured", "const"),
     ("app.world.worldgen", "The whole game is reproducible", "const"),
