@@ -326,7 +326,10 @@ def _settlements_article():
         ),
         "SETTLEMENTS (City / Castle / Town)",
         (
-            "A settlement's real population ceiling (\"max population\") "
+            "A faction begins with exactly one City and no other "
+            "settlement — its capital — and builds or raises everything "
+            "else itself (see Construction's FOUNDING & RAISING). A "
+            "settlement's real population ceiling (\"max population\") "
             f"is rolled once when it's founded, split into "
             f"adults and children ({_pct(cf[0])}–{_pct(cf[1])} of the "
             "total are children) — the ranges below:"
@@ -359,7 +362,10 @@ def _settlements_article():
             f"shrink it (see Prosperity), but never below "
             f"{_pct(R.POPULATION_MIN_FRACTION)} of its own max population "
             "— a hard-scrabble remnant survives rather than the "
-            "settlement being wiped out entirely."
+            "settlement being wiped out entirely. And a remnant is not "
+            "permanently crippled: children grow into the missing adults "
+            "over time, so a village that lost every adult to a hard "
+            "Winter or an expansion slowly rebuilds its workforce."
         ),
         (
             "A Settlement is a consumer and a converter — it eats "
@@ -372,9 +378,14 @@ def _settlements_article():
         "VILLAGES",
         f"Population: {pop['village'][0]:,}–{pop['village'][1]:,}, no tax income of its own.",
         (
-            "A Village is purely a producer — the actual farm/logging "
-            "camp/mine, wherever a region's terrain supports one (see the "
-            "Crops/Livestock/Forestry/Mining categories). It has no mill, "
+            "A Village is purely a producer — the actual farm, and the "
+            "logging camp / mine / quarry the terrain supports (see the "
+            "Crops/Livestock/Forestry/Mining categories). The forest, ore "
+            "and stone are only worked once the village has the matching "
+            "extractive camp — a Woodcutters' Camp for timber, a Mining "
+            "Camp for mountain ore and stone, Workings for the highland/"
+            "desert/coastal leftovers (see Construction) — a village "
+            "without them extracts nothing from its land. It has no mill, "
             "loom, or forge of its own: raw Logs (or any non-food raw "
             "material) sitting in a village's storage is genuinely stuck "
             "there until Local Logistics (see that article) physically "
@@ -388,9 +399,24 @@ def _settlements_article():
             "shortfall actually costs population."
         ),
         (
-            "A City can spawn a new Village nearby once its prosperity "
-            "meter fills (see Prosperity) — the only way new Villages "
-            "appear after world generation and initial wildland claims."
+            "A City whose prosperity meter fills (see Prosperity) spawns "
+            "a new Village nearby — but only while its region still has "
+            "village capacity to spare (see VILLAGE CAPACITY below), and "
+            "it is not the only source: you can Found a Village directly "
+            "on your own land, and claimed wildland no longer grants any "
+            "villages at all (see Construction, FOUNDING & RAISING, and "
+            "Expansion)."
+        ),
+        "VILLAGE CAPACITY",
+        (
+            "A region can only hold so many villages: one base frontier "
+            "homestead, plus an allowance for each settlement built in it "
+            "— a Town supports 4 more villages, a Castle 6, a City 10. "
+            "The region panel shows this as \"n/m villages\"; once the "
+            "region is full, prosperity stops spawning villages and the "
+            "only ways to grow are to raise a village into a Town, "
+            "upgrade a Town into a City, or expand to new land (see "
+            "Construction and Expansion)."
         ),
         (
             "A Village's panel shows what it actually grows and how much "
@@ -406,7 +432,10 @@ def _settlements_article():
             "own Granary, Warehouse, Vault, Barn and Preserving House "
             "(smaller and cheaper than a Settlement's), plus the four herd "
             "buildings — Pasture, Barn, Stable and Slaughterhouse — that no "
-            "Settlement can build at all. It also sets its own herd cull "
+            "Settlement can build at all, and the extractive camps that "
+            "unlock its industry: Woodcutters' Camp, Mining Camp, Workings "
+            "and Grange (a village with no Woodcutters' Camp cuts no "
+            "timber — see Construction). It also sets its own herd cull "
             "policy. See Construction and Livestock & Herds."
         ),
         "LOSING EVERYTHING",
@@ -454,6 +483,15 @@ def _storage_article():
             "through tiers rather than being a one-off — see Construction "
             "for costs. Villages build smaller and cheaper versions of all "
             "of them."
+        ),
+        "FIREWOOD IS NEVER BLOCKED",
+        (
+            "Firewood is exempt from the fullness throttle: a village "
+            "whose food pantry is full can still stock its winter fuel. "
+            "Without that, a full pantry would squeeze out the firewood, "
+            "and the village would freeze in Winter while well-fed — "
+            "exactly the kind of death spiral that one exemption "
+            "prevents (see Prosperity)."
         ),
         "BULK — NOT EVERY UNIT IS THE SAME SIZE",
         (
@@ -576,12 +614,14 @@ def _currency_article():
         "WHAT IT'S SPENT ON",
         (
             "Everything that used to draw from the old treasury still "
-            "costs Gold exactly the same way — expansion claims, "
-            "settlement/road/ship/shipyard construction — it's just paid "
+            "costs Gold exactly the same way — settlement/road/ship/"
+            "shipyard construction — it's just paid "
             "out of the faction's settlement storage now (spread across "
             "whichever settlements actually have it, largest stockpile "
-            "first, same rule Iron/Logs/Stone already followed), and "
-            "trade (see Regional Markets/Foreign Trade) pays and collects "
+            "first, same rule Iron/Logs/Stone already followed). Claims "
+            "are the exception: they cost settlers and provisions, no Gold "
+            "(see Expansion). Trade (see Regional Markets/Foreign Trade) "
+            "pays and collects "
             "it at the specific settlements actually making the deal."
         ),
         "BARTER",
@@ -599,9 +639,9 @@ def _currency_article():
             "can actually release for trade -- settlement Gold above "
             "its own 200-unit Trade Reserve, the per-settlement floor "
             "trade itself respects on both incoming and outgoing "
-            "deals. Wildland claims and construction do not -- they "
-            "draw from the full stockpile whenever the faction "
-            "decides to spend, so they're never blocked by the floor. "
+            "deals. Construction does not -- it "
+            "draws from the full stockpile whenever the faction "
+            "decides to spend, so it's never blocked by the floor. "
             "If the buyer's paying settlement can't cover a deal in "
             "Gold above the 200 floor, the deal is sized down or "
             "skipped entirely, not patched up with substitute goods. "
@@ -636,8 +676,9 @@ def _currency_article():
             "moment it lands. That buffer is only a trade-spending limit, "
             "not a hard cap on the settlement's own Gold: it still draws "
             "on its full stockpile, buffer included, when the faction "
-            "itself decides to spend it — claiming wildland (see "
-            "Expansion) or any other real cost — so the whole point of "
+            "itself decides to spend it — on a real cost like a new "
+            "settlement or a City upgrade (claims cost provisions, not "
+            "Gold — see Expansion) — so the whole point of "
             "holding it back is that it's actually there when a real "
             "opportunity comes along, not sitting empty."
         ),
@@ -724,7 +765,15 @@ def _prosperity_article():
             "The only real fix is a foreign trade route with a neighbor "
             "that does have Firewood to spare, or expanding/conquering "
             "toward forested land — this is exactly the kind of gap Trade "
-            "Routes and territorial expansion exist to solve. A settlement "
+            "Routes and territorial expansion exist to solve. A village "
+            "that digs Coal has a second, quieter answer: it burns its "
+            "Coal in Winter instead (one coal unit covers one "
+            "firewood-equivalent — dense heat out of the ground rather "
+            "than off the land), so a mining town on a seam no longer "
+            "freezes while its pantry and mine are full. And Firewood is "
+            "exempt from storage throttling entirely: a pantry full of "
+            "food can never squeeze the winter fuel out of a village's "
+            "storehouse. A settlement "
             "short on Firewood still scrounges some on its own (dung, scrub, "
             f"deadfall — up to {_pct(R.NO_FOREST_SUBSISTENCE_FRACTION)} of any "
             "shortfall with no forest at all, tapering to nothing by the time "
@@ -750,8 +799,12 @@ def _prosperity_article():
         (
             f"A City whose prosperity meter fills all the way to "
             f"{R.PROSPERITY_MAX:.0f} spawns a brand-new Village nearby "
-            "and resets to 0 — the only way new Villages appear after "
-            "world generation and initial wildland claims. The new "
+            "and resets to 0 — but only while its region still has "
+            "village capacity to spare (see Settlements & Villages' "
+            "VILLAGE CAPACITY), and it is not the only source: you can "
+            "Found a Village directly on your own land, and claimed "
+            "wildland no longer grants any (see Construction's FOUNDING "
+            "& RAISING, and Expansion). The new "
             "Village gets a road back to its founding City AND a direct "
             f"road to up to {R.VILLAGE_MESH_MAX_LINKS} other villages "
             "already in the same region (whichever are closest, within "
@@ -1193,8 +1246,10 @@ def _expansion_article():
             "Winning the fight seizes what the garrison was sitting on, "
             "not just the ground. Expect roughly "
             f"{expansion.CLAIM_SPOILS_YIELD_TURNS} turns' worth of "
-            "whatever that region produces, delivered straight into its "
-            "new villages, so rich land is worth more than a bog."
+            "whatever that region produces, delivered into your "
+            "storerooms — the new region's settlements, or your first "
+            "settlement if it has none yet (a fresh claim is bare land "
+            "until you build on it). So rich land is worth more than a bog."
         ),
         (
             f"The Gold taken is {expansion.CLAIM_SPOILS_GOLD_BASE} from the "
@@ -1206,6 +1261,19 @@ def _expansion_article():
             "be how a young realm generates money and gets its economy "
             "moving, rather than every kingdom simply starting with a heap "
             "of it."
+        ),
+        "THE DEVELOPMENT GATE",
+        (
+            "A realm may only reach for new land once its own is genuinely "
+            f"full of villages: your owned regions must average at least "
+            f"{_pct(expansion.CLAIM_DEVELOPMENT_FRACTION)} of their "
+            "village capacity (see Settlements & Villages' VILLAGE "
+            "CAPACITY) before a claim can even start. Expansion is the "
+            "reward for filling your land — raise settlements, upgrade "
+            "them to Cities, and the region panel's \"n/m villages\" "
+            "readout climbing is what unlocks the frontier. Amphibious "
+            "claims are the exception: fleets and islands are a different "
+            "kind of expansion and are exempt from the gate."
         ),
         "ODDS",
         (
@@ -1782,6 +1850,64 @@ def _military_article():
     return "\n\n".join(parts)
 
 
+def _founding_article():
+    from app.world import construction
+
+    def _cost_line(cost):
+        return ", ".join(f"{v:,} {k}" for k, v in cost.items())
+
+    parts = [
+        "Founding & Growth (the settlement-first ladder)",
+        (
+            "Growth flows through a ladder, not a menu: FOUND a Village, "
+            "RAISE it into a Town as the land fills, and UPGRADE the Town "
+            "into a City. A faction begins with exactly one City — its "
+            "capital — and no other settlement; everything else is built "
+            "or raised by hand, and nothing (claimed land included) comes "
+            "pre-grown."
+        ),
+        "THE THREE RUNGS",
+        "\n".join([
+            f"  Found Village:       {_cost_line(construction.VILLAGE_BUILD_COST)} — "
+            f"{construction.VILLAGE_BUILD_TURNS} turns",
+            f"  Raise to Town:       {_cost_line(construction.RAISE_VILLAGE_COST)} — "
+            f"{construction.RAISE_VILLAGE_TURNS} turns",
+            f"  Upgrade Town->City:  {_cost_line(construction.SETTLEMENT_UPGRADE_COST)} — "
+            f"{construction.SETTLEMENT_UPGRADE_TURNS} turns",
+        ]),
+        (
+            "Founding is provisions for the settlers (Food is a real cost "
+            "resource — see Currency); raising is a Town's public "
+            "stonework plus feeding a town's worth of people, and is "
+            "deliberately log-free so a realm that spends its scarce "
+            "timber on camps can still climb. A raised Town keeps its "
+            "village's people, stores and name — only the kind-derived "
+            "stats (tax, population ceiling) re-roll like a fresh town's."
+        ),
+        "WHY THE LADDER",
+        (
+            "Village capacity is the engine: a region holds one base "
+            "frontier homestead plus an allowance per settlement (Town 4, "
+            "Castle 6, City 10 — see Settlements & Villages). Fill a "
+            "region's slots and prosperity stops spawning villages; the "
+            "way forward is to raise a Village into a Town (which adds "
+            "its +4), upgrade a Town into a City (its +10), or expand to "
+            "new land. And because a claim is bare, every new holding "
+            "starts the ladder again — found, fill, raise, expand."
+        ),
+        "WHERE THE ACTIONS LIVE",
+        (
+            "Found Village lives on the region panel (with the same "
+            "placement hints as settlements); Raise to Town lives on the "
+            "village's own panel when you select it. The AI climbs the "
+            "same ladder. See also Expansion & Claiming Wildland (claims "
+            "are gated on your land being half full of villages) and "
+            "Construction."
+        ),
+    ]
+    return "\n\n".join(parts)
+
+
 def _overview_article():
     parts = [
         "Shapes of War — Compendium",
@@ -1845,6 +1971,7 @@ def _overview_article():
 ARTICLES = {
     "overview": ("Overview", _overview_article()),
     "settlements": ("Settlements & Villages", _settlements_article()),
+    "founding": ("Founding & Growth", _founding_article()),
     "storage": ("Storage & Spoilage", _storage_article()),
     "livestock_herds": ("Livestock & Herds", _livestock_article()),
     "currency": ("Currency", _currency_article()),
@@ -1874,6 +2001,7 @@ NAV = [
     ("luxury_goods", "Luxury Goods", "resources"),
     ("subterranean", "Subterranean", "resources"),
     ("settlements", "Settlements & Villages", "article"),
+    ("founding", "Founding & Growth", "article"),
     ("storage", "Storage & Spoilage", "article"),
     ("livestock_herds", "Livestock & Herds", "article"),
     ("currency", "Currency", "article"),

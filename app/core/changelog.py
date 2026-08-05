@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 91,
+        "title": "The Compendium Pass",
+        "items": [
+            "COMPENDIUM: a full pass over the in-game encyclopedia after the settlement-first redesign — every article updated to the current rules (one-City starts, bare claims, village capacity, camp-gated industry, the development gate on expansion, coal as winter fuel, children growing into adults), and a new 'Founding & Growth' article documents the whole ladder with live costs.",
+        ],
+    },
+    {
         "version": 90,
         "title": "The Ladder",
         "items": [
