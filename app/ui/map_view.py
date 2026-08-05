@@ -2871,70 +2871,76 @@ class MapView(tk.Frame):
         # altitude; dirt tracks are region-scale detail and would be a grey
         # haze from orbit. One factor (0.18) for every tier, matching
         # _draw_roads' own uniform width regardless of tier.
-        chains = road_chains(wd)
-        runs = [(cells, tier) for region in wd.regions if region.faction_idx >= 0
-                for cells, tier in chains.get(region.id, ())]
-        # Dirt first so the trunk network lies over it -- same reason as
-        # _draw_roads, and it has to match or the two surfaces disagree.
-        runs.sort(key=lambda run: _ROAD_DRAW_ORDER.get(run[1], 0))
-        for cells, tier in runs:
-            if tier not in ("stone", "sea") and level < 2:
-                continue
-            if tier == "sea":
-                color, width = _TRADE_SEA_COLOR, lw(1.8, 0.18)
-            elif tier == "stone":
-                color, width = _STONE_ROAD_COLOR, lw(2.2, 0.18)
-            else:
-                color, width = _DIRT_ROAD_COLOR, lw(1.6, 0.18)
-            # Fog-clipped on the CELLS, then smoothed per surviving run: the
-            # fog mask is a grid, and smoothing first would hand it points
-            # between cells it has no answer for.
-            for run in self._fog_clip_runs(cells):
-                if len(run) < 2:
+        # Roads and trade routes are SURFACE structures: a road is something
+        # you see from above ground, not from inside a cave -- drawing the
+        # overworld's infrastructure while below would hand its layout over
+        # for nothing. The under layer draws only terrain, gates, markers
+        # and marches (each already layer-gated).
+        if self.layer == layers.SURFACE:
+            chains = road_chains(wd)
+            runs = [(cells, tier) for region in wd.regions if region.faction_idx >= 0
+                    for cells, tier in chains.get(region.id, ())]
+            # Dirt first so the trunk network lies over it -- same reason as
+            # _draw_roads, and it has to match or the two surfaces disagree.
+            runs.sort(key=lambda run: _ROAD_DRAW_ORDER.get(run[1], 0))
+            for cells, tier in runs:
+                if tier not in ("stone", "sea") and level < 2:
                     continue
-                points = self._road_points(run, tier)
                 if tier == "sea":
-                    out.append((points, _GL_RGB[color], width, 2))
-                    continue
-                # Cut then surface, exactly as the canvas draws it -- the two
-                # surfaces have to agree or switching renderers changes how
-                # the world looks.
-                out.append((points, _GL_RGB[_darken(color, _ROAD_CUT_DARKEN)],
-                            width * _ROAD_CUT_WIDTH, 0))
-                out.append((points, _GL_RGB[color],
-                            width if tier == "stone"
-                            else width * _DIRT_SURFACE_NARROW,
-                            0 if tier == "stone" else 3))
+                    color, width = _TRADE_SEA_COLOR, lw(1.8, 0.18)
+                elif tier == "stone":
+                    color, width = _STONE_ROAD_COLOR, lw(2.2, 0.18)
+                else:
+                    color, width = _DIRT_ROAD_COLOR, lw(1.6, 0.18)
+                # Fog-clipped on the CELLS, then smoothed per surviving run: the
+                # fog mask is a grid, and smoothing first would hand it points
+                # between cells it has no answer for.
+                for run in self._fog_clip_runs(cells):
+                    if len(run) < 2:
+                        continue
+                    points = self._road_points(run, tier)
+                    if tier == "sea":
+                        out.append((points, _GL_RGB[color], width, 2))
+                        continue
+                    # Cut then surface, exactly as the canvas draws it -- the two
+                    # surfaces have to agree or switching renderers changes how
+                    # the world looks.
+                    out.append((points, _GL_RGB[_darken(color, _ROAD_CUT_DARKEN)],
+                                width * _ROAD_CUT_WIDTH, 0))
+                    out.append((points, _GL_RGB[color],
+                                width if tier == "stone"
+                                else width * _DIRT_SURFACE_NARROW,
+                                0 if tier == "stone" else 3))
 
-        for r in wd.trade_routes:
-            sea = r["kind"] == "sea"
-            add(r["cells"],
-                _GL_RGB[_TRADE_SEA_COLOR if sea else _TRADE_LAND_COLOR],
-                lw(1.8, 0.154) if sea else lw(2.4, 0.22), dash=2)
+            for r in wd.trade_routes:
+                sea = r["kind"] == "sea"
+                add(r["cells"],
+                    _GL_RGB[_TRADE_SEA_COLOR if sea else _TRADE_LAND_COLOR],
+                    lw(1.8, 0.154) if sea else lw(2.4, 0.22), dash=2)
 
-        for proj in wd.trade_route_projects:
-            for seg in proj.built_segments:
-                add(seg, _GL_RGB[_TRADE_ROUTE_CONSTRUCTION_COLOR],
-                    lw(1.8, 0.18), dash=3)
+            for proj in wd.trade_route_projects:
+                for seg in proj.built_segments:
+                    add(seg, _GL_RGB[_TRADE_ROUTE_CONSTRUCTION_COLOR],
+                        lw(1.8, 0.18), dash=3)
 
-        # A route with a caravan on it is redrawn brighter on top, exactly as
-        # on the flat map -- an active trade lane should be obvious from orbit.
-        player_idx = wd.player_faction_idx
-        for caravan in wd.trade_caravans:
-            mine = player_idx is not None and player_idx in (caravan.seller_idx,
-                                                             caravan.buyer_idx)
-            if caravan.kind == "sea":
-                color, width = _ACTIVE_ROUTE_SEA_COLOR, lw(2.2, 0.187)
-            elif caravan.kind == "river":
-                color, width = _RIVER_CARAVAN_STYLE["glow"], lw(2.2, 0.22)
-            else:
-                color, width = _ACTIVE_ROUTE_LAND_COLOR, lw(3.0, 0.286)
-            if not mine:
-                color = {"sea": _FOREIGN_SEA_CARAVAN_STYLE,
-                         "river": _FOREIGN_RIVER_CARAVAN_STYLE}.get(
-                             caravan.kind, _FOREIGN_CARAVAN_STYLE)["glow"]
-                width = max(1.0, width * 0.5)
-            add(caravan.path, _GL_RGB[color], width, dash=2)
+            # A route with a caravan on it is redrawn brighter on top, exactly as
+            # on the flat map -- an active trade lane should be obvious from orbit.
+            player_idx = wd.player_faction_idx
+            for caravan in wd.trade_caravans:
+                mine = player_idx is not None and player_idx in (caravan.seller_idx,
+                                                                 caravan.buyer_idx)
+                if caravan.kind == "sea":
+                    color, width = _ACTIVE_ROUTE_SEA_COLOR, lw(2.2, 0.187)
+                elif caravan.kind == "river":
+                    color, width = _RIVER_CARAVAN_STYLE["glow"], lw(2.2, 0.22)
+                else:
+                    color, width = _ACTIVE_ROUTE_LAND_COLOR, lw(3.0, 0.286)
+                if not mine:
+                    color = {"sea": _FOREIGN_SEA_CARAVAN_STYLE,
+                             "river": _FOREIGN_RIVER_CARAVAN_STYLE}.get(
+                                 caravan.kind, _FOREIGN_CARAVAN_STYLE)["glow"]
+                    width = max(1.0, width * 0.5)
+                add(caravan.path, _GL_RGB[color], width, dash=2)
 
         # A commander's queued march. The canvas has drawn this dashed preview
         # since commanders existed (_draw_commanders), but it was never added
@@ -3068,15 +3074,21 @@ class MapView(tk.Frame):
                     continue
                 placed_pts.append((cx, cy))
                 kept.append(f)
-            add([(f.name, (f.center[0] * wd.w, f.center[1] * wd.h))
-                 for f in kept],
-                15.0, _GL_LABEL_COLOR, -14.0)
+            # Realm and region names are SURFACE identity: they hang off
+            # surface centers, and printing them while underground would hand
+            # over the overworld's political map for free. The under layer
+            # labels only what is actually down there (settlements and
+            # villages below, via _node_visible).
+            if self.layer == layers.SURFACE:
+                add([(f.name, (f.center[0] * wd.w, f.center[1] * wd.h))
+                     for f in kept],
+                    15.0, _GL_LABEL_COLOR, -14.0)
         elif level == 1:
             # region_names=False (the flat map -- see this method's own
             # docstring) means genuinely nothing at this level, NOT a
             # fall-through to the settlement/village branch below -- level 1
             # is its own exclusive case regardless of what it draws.
-            if region_names:
+            if region_names and self.layer == layers.SURFACE:
                 add([(r.name, (r.center[0] * wd.w, r.center[1] * wd.h))
                      for r in wd.regions
                      if r.faction_idx >= 0 and self._is_known(wd.factions[r.faction_idx])
@@ -3211,10 +3223,12 @@ class MapView(tk.Frame):
             for x, y in self._placement_hint_cells:
                 marks.append((x + 0.5, y + 0.5, px(4.0), _GL_RGB["#ffec78"], SHAPE_CIRCLE))
 
-        # In-progress settlement construction sites (see _draw_construction).
-        for project in wd.settlement_projects:
-            marks.append((project.pos[0] + 0.5, project.pos[1] + 0.5, px(4.0),
-                         _GL_RGB["#f2e9c9"], SHAPE_CIRCLE))
+        # In-progress settlement construction sites (see _draw_construction) --
+        # a surface mode; none exist below ground, so skip them while under.
+        if self.layer == layers.SURFACE:
+            for project in wd.settlement_projects:
+                marks.append((project.pos[0] + 0.5, project.pos[1] + 0.5, px(4.0),
+                             _GL_RGB["#f2e9c9"], SHAPE_CIRCLE))
         return marks
 
     def _flat_mover_markers(self):
@@ -3253,22 +3267,27 @@ class MapView(tk.Frame):
         # already represented by its Commander marker) -- hull shape.
         aboard_ids = {cmd.aboard_ship_id for cmd in wd.commanders
                      if cmd.aboard_ship_id is not None}
-        sr = _SHIP_STYLE["r"]
-        for ship in wd.ships:
-            if ship.id in aboard_ids:
-                continue
-            sx, sy = self._display_pos(ship)
-            marks.append((sx + 0.5, sy + 0.5, px(sr), _GL_RGB[_SHIP_STYLE["fill"]],
-                         SHAPE_HULL))
+        # Ships and caravans move on the SURFACE (a hull floats, a wagon rolls
+        # above ground). They carry no layer of their own, so without this
+        # gate their markers would show while you are underground -- giving
+        # away the overworld's traffic from inside a cave.
+        if self.layer == layers.SURFACE:
+            sr = _SHIP_STYLE["r"]
+            for ship in wd.ships:
+                if ship.id in aboard_ids:
+                    continue
+                sx, sy = self._display_pos(ship)
+                marks.append((sx + 0.5, sy + 0.5, px(sr), _GL_RGB[_SHIP_STYLE["fill"]],
+                             SHAPE_HULL))
 
-        # Trade caravans, yours or foreign, land/sea/river.
-        for caravan in wd.trade_caravans:
-            if not self._cell_revealed(*self._display_cell(caravan)):
-                continue
-            style = self._caravan_style(caravan)
-            cx, cy = self._display_pos(caravan)
-            marks.append((cx + 0.5, cy + 0.5, px(style["r"]), _GL_RGB[style["fill"]],
-                         SHAPE_CIRCLE))
+            # Trade caravans, yours or foreign, land/sea/river.
+            for caravan in wd.trade_caravans:
+                if not self._cell_revealed(*self._display_cell(caravan)):
+                    continue
+                style = self._caravan_style(caravan)
+                cx, cy = self._display_pos(caravan)
+                marks.append((cx + 0.5, cy + 0.5, px(style["r"]), _GL_RGB[style["fill"]],
+                             SHAPE_CIRCLE))
         return marks
 
     # Which GL shape each glyph-bearing biome renders as -- mirror of the
@@ -3305,6 +3324,11 @@ class MapView(tk.Frame):
         Emits raw unwrapped x (gx may lie past the world edge near the seam);
         gl_flatmap's set_markers wraps each point to the copy nearest the
         camera at pack time, exactly like the canvas's per-segment drawing."""
+        # Terrain glyphs are SURFACE: forests and peaks belong to the
+        # overworld, and drawing them over the under raster would hand the
+        # ground above away while you are inside the rock.
+        if self.layer != layers.SURFACE:
+            return []
         if self.mode != "political":
             return []
         wd = self.world
@@ -3348,10 +3372,12 @@ class MapView(tk.Frame):
         (it isn't a name, alert, or region caption). Concatenate with
         _map_labels(level)'s own output when feeding gl_flatmap.set_labels."""
         wd = self.world
-        return [(project.pos[0] + 0.5, project.pos[1] + 0.5,
-                f"{project.kind[0].upper()}·{project.turns_left}t",
-                (0.95, 0.91, 0.79), 7.0, 10.0)
-                for project in wd.settlement_projects]
+        if self.layer == layers.SURFACE:
+            return [(project.pos[0] + 0.5, project.pos[1] + 0.5,
+                    f"{project.kind[0].upper()}·{project.turns_left}t",
+                    (0.95, 0.91, 0.79), 7.0, 10.0)
+                    for project in wd.settlement_projects]
+        return []
 
     def _caravan_style(self, caravan):
         """The marker style for a caravan -- yours or somebody else's, by
@@ -6225,7 +6251,8 @@ class MapView(tk.Frame):
         if self.layer == layers.UNDER:
             sc = self.selected_region.id if self.selected_region else -1
             key = ("under", len(wd.under_cells), wd.turn // 8, sc,
-                   len(getattr(wd, "under_fog", ()) or ()))
+                   len(getattr(wd, "under_fog", ()) or ()),
+                   getattr(wd, "fog_version", 0))
             if key == self._base_key and self._base_img is not None:
                 return
             img = Image.new("RGB", (wd.w, wd.h))
@@ -6398,9 +6425,14 @@ class MapView(tk.Frame):
             row = wd.owner[y]
             base = y * wd.w
             for x in range(wd.w):
-                # Ownership, not elevation: `height` is raw and the seabed is
-                # above zero, so testing it paints the entire ocean as land.
-                if row[x] != OCEAN:
+                # The landmass overhead is NOT free geography: a cave under a
+                # continent you have never seen is still a cave under a
+                # continent you have never seen. The silhouette shows only
+                # where the SURFACE itself has been revealed -- descending
+                # must not hand over the shape of the world for nothing (and
+                # _cell_revealed returns True for a sandbox world with no
+                # player, so that case keeps the full silhouette).
+                if row[x] != OCEAN and self._cell_revealed(x, y):
                     data[base + x] = above
         fcolors, _ = self._color_context()
         # Darkness (app/world/vision.py). Not the surface's grey fog overlay:
@@ -6652,11 +6684,18 @@ class MapView(tk.Frame):
         # overlay — see that method for why. No per-frame river drawing
         # needed at all.
 
-        self._draw_currents(c, screen)
-        self._draw_trade_routes(c, screen)
-        self._draw_trade_route_construction(c, screen)
-        self._draw_trade_caravans(c, screen)
-        self._draw_roads(c, screen)
+        # Everything drawn between here and the terrain-symbol pass is
+        # SURFACE-only infrastructure: currents, trade lanes and roads are
+        # things you see from above ground, and the under layer must not
+        # hand the overworld's layout over from inside a cave. Settlements,
+        # villages, labels, marches and attack outlines below are each
+        # layer-gated on their own (_node_visible / _on_layer).
+        if self.layer == layers.SURFACE:
+            self._draw_currents(c, screen)
+            self._draw_trade_routes(c, screen)
+            self._draw_trade_route_construction(c, screen)
+            self._draw_trade_caravans(c, screen)
+            self._draw_roads(c, screen)
         # One call per wrapped x-segment (see the base-image blit above) --
         # a naive single bx0..bx1 range spanning a seam-straddling viewport
         # would walk straight through out-of-bounds x values in the gap
@@ -6666,13 +6705,15 @@ class MapView(tk.Frame):
             sbx1 = min(wd.w, int(math.ceil(wx1)))
             if sbx1 > sbx0:
                 self._draw_terrain_symbols(c, screen, sbx0, by0, sbx1, by1)
-        self._draw_construction(c, screen)
-        self._draw_placement_hint(c, screen)
+        if self.layer == layers.SURFACE:
+            self._draw_construction(c, screen)
+            self._draw_placement_hint(c, screen)
         self._draw_settlements(c, screen)
         self._draw_villages(c, screen)
         self._draw_labels(c, screen)
         self._draw_attack_targets(c, screen)
-        self._draw_ships(c, screen)
+        if self.layer == layers.SURFACE:
+            self._draw_ships(c, screen)
         self._draw_commanders(c, screen)
         self._draw_flash(c, screen)
         self._draw_terrain_legend(c)
@@ -6841,6 +6882,11 @@ class MapView(tk.Frame):
         with a hard cap on total sampled points, rather than retuning the
         floor (which would just move the same cliff to a different zoom
         range instead of removing it)."""
+        # Terrain glyphs are SURFACE: forests and peaks belong to the
+        # overworld, and drawing them over the under raster would hand the
+        # ground above away while you are inside the rock.
+        if self.layer != layers.SURFACE:
+            return
         if self.mode != "political":
             return
         wd = self.world
@@ -7623,6 +7669,11 @@ class MapView(tk.Frame):
 
     def _draw_labels(self, c, screen):
         wd = self.world
+        # Realm/region names are SURFACE identity -- the under layer labels
+        # only what is actually down there (settlements and villages, drawn
+        # by their own layer-gated passes).
+        if self.layer != layers.SURFACE:
+            return
         if self._villages_visible():
             return   # zoomed to village level: region/faction name labels aren't useful here
         if self.zoom_faction is not None:

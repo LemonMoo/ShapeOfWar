@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 104,
+        "title": "No Windows on the Ceiling",
+        "items": [
+            "FIX: the underworld view no longer hands over the overworld for free. Descending used to paint the whole landmass silhouette, the surface road and trade network, terrain glyphs, ships and caravans, and realm names -- all visible from inside a cave as if you had a window on the ceiling. The land silhouette now shows only where you have actually seen the surface above; roads, trade lanes, glyphs, ships, caravans, construction sites and realm/region names simply do not exist below ground. A cave under a continent you have never seen is still a cave under a continent you have never seen.",
+        ],
+    },
+    {
         "version": 103,
         "title": "Deeper and Further",
         "items": [

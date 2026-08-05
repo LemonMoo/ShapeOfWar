@@ -122,6 +122,10 @@ MARKERS = [
     ("app.world.resources", "under_depth_info", "name"),
     ("app.world.resources", "UNDER_DEPTH_TIERS", "name"),
     ("app.core.changelog", "Deeper and Further", "const"),
+    # v0.18.15 -- the under view leaks nothing of the overworld.
+    ("app.ui.map_view", "fog_version", "name"),
+    ("app.ui.map_view", "_under_pixels", "name"),
+    ("app.core.changelog", "No Windows on the Ceiling", "const"),
 ]
 
 arch = CArchiveReader(EXE)

@@ -97,15 +97,21 @@ try:
 
     print("\n--- the sea is still the sea, so you know where you are ---")
     # Descending into an unrelieved black void with a squiggle in it is
-    # disorienting: the land above is drawn as a second shade of rock.
+    # disorienting: the land above is drawn as a second shade of rock -- but
+    # only where the SURFACE has actually been revealed. A cave under a
+    # continent you have never seen is still a cave under a continent you
+    # have never seen: the silhouette must not hand the overworld's shape
+    # over for nothing (see dev/test_under_no_leak.py).
     ocean = next((x, y) for y in range(world.h) for x in range(world.w)
                  if world.owner[y][x] == OCEAN)
-    land = next((x, y) for y in range(world.h) for x in range(world.w)
-                if world.owner[y][x] != OCEAN and (x, y) not in world.under_cells)
-    assert under_img.getpixel(ocean) != under_img.getpixel(land), (
-        "sea and land are the same colour below ground -- there is no way to "
-        "tell where on the map you are")
-    print("  ok    the coastline is still readable from below")
+    revealed_land = next((x, y) for y in range(world.h) for x in range(world.w)
+                         if world.owner[y][x] >= 0
+                         and world.fog[y * world.w + x])
+    assert under_img.getpixel(ocean) != under_img.getpixel(revealed_land), (
+        "sea and revealed land are the same colour below ground -- there is "
+        "no way to tell where on the map you are")
+    print("  ok    the coastline is still readable below where you have "
+          "actually seen it")
 
     print("\n--- gates are marked on BOTH layers ---")
     gate_rgb = tuple(c / 255.0 for c in _UNDER_GATE_RGB)
