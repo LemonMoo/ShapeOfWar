@@ -1840,6 +1840,48 @@ def advance_acclimatisation(world):
             village.acclimatisation = min(1.0, village.acclimatisation + step)
 
 
+def under_depth_tier(world, region):
+    """How deep an under region sits: the mean distance from its ground to
+    its own doors, as a 0..1 fraction of the deep-gallery scale. Derived,
+    not stored -- the deepest rock is the farthest from the doors (the
+    hold's great hall is planted in the deepest cavern already), and the
+    deeper the rock, the richer the veins. Cached on the region: the
+    distance field cannot change after worldgen."""
+    cached = getattr(region, "_under_depth", None)
+    if cached is not None:
+        return cached
+    mouths = [tuple(g["under"]) for g in getattr(world, "gates", ())]
+    cells = getattr(region, "cells", ())
+    if not cells or not mouths:
+        region._under_depth = 0.0
+        return 0.0
+    total = 0
+    count = 0
+    for x, y in cells:
+        best = min((x - mx) ** 2 + (y - my) ** 2 for mx, my in mouths)
+        total += best ** 0.5
+        count += 1
+    depth = total / max(1, count)
+    region._under_depth = depth
+    return depth
+
+
+UNDER_DEPTH_TIERS = (   # (max distance, label, ore bonus)
+    (18.0, "shallow", 1.0),
+    (45.0, "deep", 1.5),
+    (float("inf"), "abyssal", 2.0),
+)
+
+
+def under_depth_info(world, region):
+    """(tier_label, ore_bonus) for an under region's depth."""
+    depth = under_depth_tier(world, region)
+    for cap, label, bonus in UNDER_DEPTH_TIERS:
+        if depth <= cap:
+            return label, bonus
+    return UNDER_DEPTH_TIERS[-1][1], UNDER_DEPTH_TIERS[-1][2]
+
+
 def _village_terrain_potential(world, village, season):
     """({resource: amount} raw terrain yield, {sector: total},
     {sector: {resource: amount}}) -- what this village's LAND offers this
@@ -1912,6 +1954,15 @@ def _village_terrain_potential(world, village, season):
                 have = biome_counts.get(b, 0)
                 if have:
                     industry_counts[b] = industry_counts.get(b, 0) + have
+        # DEPTH (v0.18.14): the deeper the gallery, the richer the veins --
+        # an abyssal hold mines twice what a shallow one does from the same
+        # rock. The depth tier is derived from the region's mean distance to
+        # its own doors (see under_depth_info), so the deep galleries a hold
+        # plants its heart in are the ones that pay.
+        _depth_bonus = under_depth_info(world, region)[1]
+        if _depth_bonus != 1.0:
+            for _r in list(industry_counts):
+                industry_counts[_r] = round(industry_counts[_r] * _depth_bonus)
     else:
         for building, (biomes, sample, _label) in OUTSTATIONS.items():
             if sample != OUTSTATION_INDUSTRY:
@@ -7364,6 +7415,7 @@ def day_steps(world):
     # Player/AI-built settlements + their connecting roads
     # (app/world/construction.py).
     from app.world import construction
+    from app.world import holds
     # Settlement-first migration: saves from before camps were load-bearing
     # have villages with no extractive camps at all -- seed the tier-1 camps
     # their land supports exactly once so a mid-game realm doesn't deadlock
@@ -7374,6 +7426,10 @@ def day_steps(world):
         for village in world.villages:
             seed_family_camps(world, world.regions[village.region_id], village)
     construction.advance_projects(world)
+    # Tunnels (v0.18.14): the underground expansion analog of a surface
+    # claim -- a corridor of rock is carved toward the nearest unclaimed
+    # cavern network, which becomes the faction's when the work lands.
+    holds.advance_tunnel_projects(world)
     construction.advance_shipyard_projects(world)
     construction.advance_granary_projects(world)     # legacy, pre-tier saves
     construction.advance_warehouse_projects(world)   # legacy, pre-tier saves

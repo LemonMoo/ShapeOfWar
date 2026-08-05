@@ -37,6 +37,7 @@ from app.world import diplomacy
 from app.world import construction
 from app.world import trade
 from app.world import expansion
+from app.world import holds
 from app.world import commander
 from app.world import buildings
 # Sector names as the player sees them, shared with the build menu so the two
@@ -4383,6 +4384,14 @@ class MapView(tk.Frame):
             self._kv(body, "Biome", biome_line)
             self._kv(body, "Climate", region.dominant_climate.capitalize())
             self._kv(body, "This turn's yield", _format_resources(region.resources))
+            if layers.is_under(region):
+                # DEPTH (v0.18.14): the deeper the gallery, the richer the
+                # veins -- an abyssal hold mines twice what a shallow one
+                # does from the same rock (see resources.under_depth_info).
+                tier, bonus = resources.under_depth_info(wd, region)
+                self._kv(body, "Depth", f"{tier} galleries"
+                         + ("" if bonus == 1.0
+                            else f" — ore ×{bonus:g}"))
 
         sts = [wd.settlements[i] for i in getattr(region, "meta_settlements", [])]
         body = self._card("SETTLEMENTS", f"{len(sts)}", key="settlements")
@@ -4410,6 +4419,8 @@ class MapView(tk.Frame):
             else:
                 text += " — click again to zoom in"
             self._panel_text(text, fg=theme.MUTED, font=theme.FONT_SMALL)
+            if layers.is_under(region) and self._owns_region(region):
+                self._show_tunnel_action(region)
 
         if is_foreign:
             player = self._player_faction()
@@ -5162,6 +5173,118 @@ class MapView(tk.Frame):
         self._update_resource_bar()
         self.render()
 
+    def _is_goblin_player(self):
+        player = self._player_faction()
+        return (player is not None
+                and player.meta.get("species") == "Goblins")
+
+    def _show_raid_action(self, v):
+        """For an owned WARREN village of a goblin player: 'Raid the
+        Surface'. The warren's warband comes out through the doors and takes
+        the richest surface store within reach -- the same targets, carry-off
+        and victim alerts the AI's hungry-warren raids use, but the player
+        decides (and pays the same cooldown the AI's daily hunger roll does
+        not)."""
+        wd = self.world
+        if not holds.node_is_warren(wd, v):
+            return
+        if not layers.is_under(wd.regions[v.region_id]):
+            return     # a species check alone is not a warren -- it must be
+                       # UNDER the ground; surface goblin villages raid nothing
+        from app.world import resources as _res
+        turn = getattr(wd, "turn", 0)
+        cooldown = getattr(v, "raid_cooldown_until", 0)
+        if cooldown > turn:
+            self._panel_text(
+                f"The warband rests — {cooldown - turn} day(s) until it can "
+                "raid again.", fg=theme.MUTED)
+            return
+        target = holds.raid_target_summary(wd, v)
+        if target is None:
+            self._panel_text(
+                "No surface stores within reach of these doors. Raiders come "
+                "out of a door and go over the ground — a nearer gate means "
+                "richer pickings.", fg=theme.MUTED)
+            return
+        victim, food = target
+
+        def _do_raid():
+            raid = holds.player_raid(wd, v)
+            if raid is None:
+                self.show_bottom_message(
+                    "The warband found the fields empty.", ms=3600)
+                return
+            hauled = ", ".join(f"{q} {r}" for r, q in
+                               sorted(raid["hauled"].items()))
+            self.show_bottom_message(
+                f"The warband returns from {raid['victim'].name} with "
+                f"{hauled}.", ms=4800)
+            self._rebuild_panel()
+
+        self._panel_button(
+            f"Raid the Surface — {victim.name} ({food:,} food)",
+            _do_raid, kind="danger")
+        self._panel_text(
+            "The warband takes what can be eaten and carried; the victim's "
+            "realm will remember.", fg=theme.MUTED)
+
+    def _owns_region(self, region):
+        player = self._player_faction()
+        return (player is not None
+                and region.faction_idx == player.id)
+
+    def _show_tunnel_action(self, region):
+        """For the player's OWN under region: 'Dig a Tunnel' -- the
+        underground expansion analog of a surface claim. Carves a corridor
+        of rock to the nearest unclaimed cavern network and claims it (see
+        holds.start_tunnel_project). Shows the target, length and cost."""
+        from app.world import holds as _holds
+        from app.world import construction as _construction
+        wd = self.world
+        player = self._player_faction()
+        if player is None:
+            return
+        if any(p.faction_idx == player.id
+               for p in getattr(wd, "tunnel_projects", ())):
+            self._panel_text(
+                "A tunnel is already being dug — one at a time, like a "
+                "claim.", fg=theme.MUTED)
+            return
+        network, corridor = _holds._nearest_unclaimed_network(wd, player.id)
+        if network is None:
+            self._panel_text(
+                "No unclaimed galleries within digging range. A tunnel "
+                "reaches the nearest open network — the deeper it is, the "
+                "richer the veins.", fg=theme.MUTED)
+            return
+        gold = _holds.TUNNEL_GOLD_PER_CELL * len(corridor)
+        days = round(len(corridor) / _holds.TUNNEL_CELLS_PER_TURN)
+
+        def _do_tunnel():
+            if not _construction.can_afford(player, {"Gold": gold}, wd):
+                self.show_bottom_message(
+                    f"A tunnel costs {gold:,} Gold and the treasury lacks "
+                    "it.", ms=3600)
+                return
+            _construction._pay_cost(player, {"Gold": gold}, wd)
+            project = _holds.start_tunnel_project(wd, player.id, gold)
+            if project is None:
+                self.show_bottom_message(
+                    "The diggers found nothing to reach for.", ms=3600)
+                return
+            self.show_bottom_message(
+                f"The diggers set out — {len(corridor)} cells of rock, "
+                f"about {days} days, then the new galleries are yours.",
+                ms=4800)
+            self._rebuild_selection_panel()
+
+        self._panel_button(
+            f"Dig a Tunnel — {len(corridor)} cells, {gold:,} Gold "
+            f"(~{days} days)", _do_tunnel)
+        self._panel_text(
+            "Carves a corridor of rock to the nearest unclaimed galleries "
+            "and claims them for the realm.", fg=theme.MUTED)
+
     def _show_raise_action(self, v, player):
         """For an owned village: the 'Raise to Town' action -- the ladder's
         second rung (a Town supports more villages, tax and people, and is
@@ -5255,6 +5378,8 @@ class MapView(tk.Frame):
         if own:
             self._show_raise_action(v, player)
             self._build_entry_card(v, player)
+            if self._is_goblin_player():
+                self._show_raid_action(v)
 
         yield_ = resources.village_projected_annual_yield(wd, v)
         report = resources.village_labor_report(wd, v)

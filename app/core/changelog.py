@@ -20,6 +20,16 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 103,
+        "title": "Deeper and Further",
+        "items": [
+            "GAMEPLAY: goblin PLAYERS can order raids — a warren village's panel gains 'Raid the Surface', naming the richest store within reach of its doors; the warband comes out, takes it, and the warren rests (a few days) before it can raid again. Reach is measured from the whole warren network's doors, and only a warren UNDER the ground raids — a surface goblin village is not a warren.",
+            "GAMEPLAY: tunnels — an under region panel gains 'Dig a Tunnel': carve a corridor of rock to the nearest unclaimed cavern network (gold per cell, a few cells a day, visible growing like a road), and the new galleries become yours when the diggers land. The underground's answer to a surface claim.",
+            "GAMEPLAY: depth — every under region has a depth: the deeper the galleries (the farther from the doors), the richer the veins. Shallow galleries mine as before; deep galleries mine 1.5x; abyssal galleries 2x. The region panel says which you are standing in.",
+            "FIX: warren raids were mostly dead — reach was measured per-village-region, and most warren villages sit in regions that touch no door; the mechanic quietly never fired. Reach is now the whole network's doors.",
+        ],
+    },
+    {
         "version": 102,
         "title": "The Door",
         "items": [

@@ -112,6 +112,16 @@ MARKERS = [
     ("app.world.resources", "GATE_CARAVAN_QUANTITY", "name"),
     ("app.world.resources", "The underground realm's supply line", "const"),
     ("app.core.changelog", "The Door", "const"),
+    # v0.18.14 -- player raids, tunnels, depth.
+    ("app.world.holds", "player_raid", "name"),
+    ("app.world.holds", "raid_target_summary", "name"),
+    ("app.world.holds", "TunnelProject", "name"),
+    ("app.world.holds", "_nearest_unclaimed_network", "name"),
+    ("app.world.holds", "advance_tunnel_projects", "name"),
+    ("app.world.holds", "A new gallery opens beneath the mountain.", "const"),
+    ("app.world.resources", "under_depth_info", "name"),
+    ("app.world.resources", "UNDER_DEPTH_TIERS", "name"),
+    ("app.core.changelog", "Deeper and Further", "const"),
 ]
 
 arch = CArchiveReader(EXE)

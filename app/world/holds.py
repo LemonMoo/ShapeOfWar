@@ -96,9 +96,215 @@ WARREN_SCAVENGE_MULT = 2.2
 # a threshold on either.
 RAID_HUNGER_DAYS = 4          # days short of food before a warren will raid
 RAID_CHANCE_PER_DAY = 0.06    # per hungry warren node, per day
+# A PLAYER raid (map_view's "Raid the Surface" button on a warren village)
+# is a deliberate act, not a hunger reflex -- it costs nothing but a
+# cooldown, so the same warren cannot farm the same fields every day.
+RAID_COOLDOWN_DAYS = 5
+
+
+def player_raid(world, warren_node):
+    """The goblin PLAYER orders a raid: take the richest reachable surface
+    store and carry it home, exactly as the AI's hungry-warren raids do
+    (same targets, same carry-off, same victim marking that feeds the
+    alerts panel) -- the only difference is WHO decides. Returns the raid
+    dict, or None when there is nothing to raid or the warren is still on
+    cooldown. Sets warren_node.raid_cooldown_until so the same village
+    cannot raid again for RAID_COOLDOWN_DAYS."""
+    from app.world import resources as _R
+    turn = getattr(world, "turn", 0)
+    if getattr(warren_node, "raid_cooldown_until", 0) > turn:
+        return None
+    targets = _raid_targets(world, warren_node, warren_node.faction_idx)
+    if not targets:
+        return None
+    victim = max(targets, key=_node_food)
+    hauled = _carry_off(victim, warren_node)
+    if not hauled:
+        return None
+    victim.raided_turn = turn
+    victim.raided_amount = sum(hauled.values())
+    warren_node.raid_cooldown_until = turn + RAID_COOLDOWN_DAYS
+    return {"raider": warren_node, "victim": victim, "hauled": hauled}
+
+
+def raid_target_summary(world, warren_node):
+    """The richest reachable surface store a player raid would hit, or None.
+    Used by the warren panel to name the target before the button is
+    pressed -- the choice is informed even though the raid itself is one
+    click."""
+    targets = _raid_targets(world, warren_node, warren_node.faction_idx)
+    if not targets:
+        return None
+    victim = max(targets, key=_node_food)
+    return victim, _node_food(victim)
 RAID_RANGE = 22               # cells from the warren's own gates
 RAID_HAUL_FRACTION = 0.18     # of the victim's food stock, per raid
 RAID_HAUL_CAP = 260
+
+
+class TunnelProject:
+    """A tunnel under construction: carves a corridor of rock between the
+    faction's underground home and the nearest unclaimed cavern network,
+    then claims that network for the faction (v0.18.14 -- the underground
+    expansion analog of a surface claim). `path` is the corridor of rock
+    cells, in order; `built_index` grows by TUNNEL_CELLS_PER_TURN like a
+    road, and each newly reached cell becomes a CAVERN as the work arrives
+    -- so a tunnel is visible growing, exactly as a road is."""
+
+    def __init__(self, faction_idx, path, network, region_ids=None):
+        self.faction_idx = faction_idx
+        self.path = path
+        self.network = network
+        self.built_index = 0
+        self.total_turns = max(1, round(len(path) / TUNNEL_CELLS_PER_TURN))
+        self.progress_turns = 0.0
+
+    @property
+    def complete(self):
+        return self.built_index >= len(self.path)
+
+    @property
+    def built_cells(self):
+        return self.path[:self.built_index]
+
+
+TUNNEL_MAX_RANGE = 260        # cells from the home network's own edge
+TUNNEL_CELLS_PER_TURN = 6     # corridor cells carved per day (road pace)
+TUNNEL_GOLD_PER_CELL = 6      # gold cost per corridor cell
+
+
+def _home_cells(world, faction_idx):
+    """Every under cell of a faction's underground home (the network it was
+    born with), as a set."""
+    home = next((h for h in getattr(world, "under_homes", None) or ()
+                 if h["faction_idx"] == faction_idx), None)
+    if home is None:
+        return set()
+    cells = set()
+    for rid in home["regions"]:
+        cells |= set(world.regions[rid].cells)
+    return cells
+
+
+def _nearest_unclaimed_network(world, faction_idx, rng=None):
+    """(network, corridor) -- the nearest cavern network not owned by this
+    faction and the corridor of ROCK cells from the home network's edge to
+    it (in order, first cell adjacent to home), or (None, None). The search
+    walks through un-carved rock only: an unclaimed network is reached by
+    digging, not by cutting through somebody else's gallery."""
+    import heapq
+    from app.world import layers as L
+    home_cells = _home_cells(world, faction_idx)
+    if not home_cells:
+        return None, None
+    components = _components(world)
+    owned_ids = set()
+    for i, network in enumerate(components):
+        for x, y in network:
+            rid = L.region_at(world, x, y, L.UNDER)
+            if rid is not None and 0 <= rid < len(world.regions) \
+                    and world.regions[rid].faction_idx == faction_idx:
+                owned_ids.add(i)
+                break
+    targets = [i for i, network in enumerate(components) if i not in owned_ids]
+    if not targets:
+        return None, None
+    w, h = world.w, world.h
+    start = set()
+    for x, y in home_cells:
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = (x + dx) % w, y + dy
+            if 0 <= ny < h and not L.kind_at(world, nx, ny, L.UNDER):
+                start.add((nx, ny))
+    if not start:
+        return None, None
+    # BFS through rock; the first reachable unclaimed network's edge wins.
+    # Capped by DISTANCE from the home (BFS layer depth), not by cells
+    # explored: a corridor 190 cells long is a real tunnel through ~30k
+    # cells of rock, and a raw cell budget would kill the search before it
+    # ever reached the door of a merely far network.
+    prev = {s: None for s in start}
+    dist = {s: 0 for s in start}
+    queue = list(start)
+    head = 0
+    found = None
+    found_i = None
+    target_members = set()
+    for i in targets:
+        target_members |= set(components[i])
+    while head < len(queue):
+        cur = queue[head]
+        head += 1
+        if dist[cur] >= TUNNEL_MAX_RANGE:
+            continue
+        cx, cy = cur
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = (cx + dx) % w, cy + dy
+            if not (0 <= ny < h):
+                continue
+            nxt = (nx, ny)
+            if nxt in target_members:
+                # A rock cell's neighbour is the edge of an unclaimed
+                # network: the corridor ends at THIS rock cell -- the
+                # target cell itself is already cavern and is not carved.
+                found = cur
+                found_i = next(i for i in targets if nxt in set(components[i]))
+                break
+            if nxt in prev or L.kind_at(world, nx, ny, L.UNDER):
+                continue
+            prev[nxt] = cur
+            dist[nxt] = dist[cur] + 1
+            queue.append(nxt)
+        if found is not None:
+            break
+    if found is None:
+        return None, None
+    corridor = []
+    step = found
+    while step is not None:
+        corridor.append(step)
+        step = prev[step]
+    corridor.reverse()
+    return components[found_i], corridor
+
+
+def start_tunnel_project(world, faction_idx, gold):
+    """Queue a tunnel to the nearest unclaimed network. Returns the project
+    (deduped: one tunnel per faction at a time), or None when there is
+    nothing to dig to or the faction cannot pay."""
+    if any(p.faction_idx == faction_idx
+           for p in getattr(world, "tunnel_projects", ())):
+        return None
+    network, corridor = _nearest_unclaimed_network(world, faction_idx)
+    if network is None:
+        return None
+    cost = TUNNEL_GOLD_PER_CELL * len(corridor)
+    if gold < cost:
+        return None
+    project = TunnelProject(faction_idx, corridor, network)
+    if not hasattr(world, "tunnel_projects"):
+        world.tunnel_projects = []
+    world.tunnel_projects.append(project)
+    return project
+
+
+def advance_tunnel_projects(world):
+    """One day of tunnelling: carve the corridor cells as the work reaches
+    them; on completion, claim the network they connect to (the caverns
+    become the faction's)."""
+    from app.world import layers as L
+    for project in list(getattr(world, "tunnel_projects", ())):
+        if not project.complete:
+            project.built_index = min(len(project.path),
+                                      project.built_index + TUNNEL_CELLS_PER_TURN)
+            for x, y in project.built_cells:
+                L.carve(world, x, y, L.CAVERN)
+        if project.complete:
+            _claim_network(world, project.network, project.faction_idx)
+            from app.world import chronicle
+            chronicle.log(world, world.factions[project.faction_idx],
+                          f"A new gallery opens beneath the mountain.")
+            world.tunnel_projects.remove(project)
 
 
 def _components(world):
@@ -601,7 +807,21 @@ def _raid_targets(world, warren_node, faction_idx):
     raidable is what lies around the doors -- which is precisely why
     garrisoning the gate is the answer to them."""
     region = world.regions[warren_node.region_id]
-    mouths = set(region.cells) & {tuple(g["under"]) for g in world.gates}
+    # Reach is from the warren's DOORS, and a warren's doors are its whole
+    # network's: the villages cluster near the doors but the per-region model
+    # left most of them in regions that touch none -- a warren whose only
+    # door region held no village could never raid at all, which quietly
+    # killed the mechanic for most goblin realms. Any door of the network
+    # can send a party out, so the mouths are every gate under-cell inside
+    # the faction's under-home.
+    home = next((h for h in getattr(world, "under_homes", None) or ()
+                 if h["faction_idx"] == faction_idx), None)
+    if home is None:
+        return []
+    own_cells = set()
+    for rid in home["regions"]:
+        own_cells |= set(world.regions[rid].cells)
+    mouths = own_cells & {tuple(g["under"]) for g in world.gates}
     doors = [tuple(g["pos"]) for g in world.gates
              if tuple(g["under"]) in mouths]
     if not doors:
