@@ -53,6 +53,12 @@ MARKERS = [
     ("app.world.construction", "populous enough yet", "const"),
     ("app.world.resources", "FRONTIER_POPULATION_GROWTH_RATE", "name"),
     ("app.core.changelog", "Earned Growth", "const"),
+    # v0.18.5 -- settlement characters.
+    ("app.world.resources", "SETTLEMENT_CHARACTERS", "name"),
+    ("app.world.resources", "GARRISON_LEVY_EXTRA", "name"),
+    ("app.world.resources", "settlement_character", "name"),
+    ("app.world.construction", "_ai_pick_character", "name"),
+    ("app.core.changelog", "A Character of Its Own", "const"),
 ]
 
 arch = CArchiveReader(EXE)
