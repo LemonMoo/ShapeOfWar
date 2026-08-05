@@ -400,6 +400,11 @@ def settle_newly_claimed_region(world, region):
         _place_villages_for_region(world, random, region,
                                    fixed_n=WILDLAND_VILLAGE_MIN)
         region.settlements_generated = True
+    # Chronicle: a claim is the biggest deliberate act in the game -- the
+    # realm put settlers, food and a season's work into this land.
+    from app.world import chronicle
+    chronicle.log(world, world.factions[region.faction_idx],
+                  f"The claim to {getattr(region, 'name', 'new land')} is secured.")
     # A preview only -- real per-village production (and delivery into each
     # village's own storage) happens next turn via advance_turn's own call
     # to recompute_region_resources; this just keeps the region panel's

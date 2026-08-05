@@ -1053,6 +1053,14 @@ def _place_settlements_for_faction(world, rng, fac_idx, cells, namer, fixed_coun
             world.settlements.append(st)
             _mark_occupied_both(world, x, y)
             world.factions[fac_idx].meta["settlements"].append(st.id)
+            # Chronicle: the realm's founding -- one entry for the faction's
+            # first settlement (its capital), and none for the rest of the
+            # starting foothold.
+            if len(world.factions[fac_idx].meta["settlements"]) == 1:
+                from app.world import chronicle
+                chronicle.log(world, world.factions[fac_idx],
+                              f"The realm of {world.factions[fac_idx].name} "
+                              f"is founded at {st.name}.")
             if 0 <= region_id < len(world.regions):
                 world.regions[region_id].meta_settlements.append(st.id)
             placed_by_kind[kind].append((x, y))
@@ -2424,7 +2432,15 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
                     player_species=None, player_name=None, player_color=None,
                     player_ruler=None, player_start=None, _attempt=0,
                     _target_n=None, _n_plates=None):
-    """Generate a world. If `player_species`/`player_name` are given, faction
+    """Generate a world. The whole game is reproducible from `seed`:
+    worldgen uses its own seeded Random instances below, and this seeds the
+    global `random` module (which the sim -- resources.advance_turn and
+    everything it calls -- draws from, with nothing else ever seeding it) so
+    the first turn onward continues the same deterministic stream. Without
+    this, two new games with the same seed diverged from day 1, and dev
+    worlds regenerated between releases differed on every run. seed=None
+    keeps time-based behavior. If `player_species`/`player_name` are given,
+    faction
     0 is forced to that species and given that exact name (instead of a
     random roll) and `world.player_faction_idx` is set to 0, so a "New Game"
     flow can drop the player into a nation of their own choosing.
@@ -2442,6 +2458,13 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     many separate landmasses is acceptable") -- plate count and the
     continent count that results from it are no longer the same knob (see
     HANDOFF.md §9); `_n_plates` is the one that actually shapes the world."""
+    # The sim (resources.advance_turn and everything it calls) draws from
+    # the GLOBAL random module, and nothing else ever seeds it -- so seed it
+    # here, or two new games with the same seed diverge from day 1 and dev
+    # worlds regenerated between releases differ on every run. Worldgen's
+    # own rng instances above are seeded independently.
+    if seed is not None:
+        random.seed(seed)
     rng = random.Random(seed)
     nseed = rng.randint(0, 2 ** 31 - 1)
     if _target_n is None:

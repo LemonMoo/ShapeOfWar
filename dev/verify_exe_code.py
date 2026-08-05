@@ -59,6 +59,12 @@ MARKERS = [
     ("app.world.resources", "settlement_character", "name"),
     ("app.world.construction", "_ai_pick_character", "name"),
     ("app.core.changelog", "A Character of Its Own", "const"),
+    # v0.18.6 -- the realm chronicle + seed reproducibility.
+    ("app.world.chronicle", "turn_date_text", "name"),
+    ("app.world.chronicle", "Your settlers found", "const"),
+    ("app.world.chronicle", "is secured", "const"),
+    ("app.world.worldgen", "random.seed(seed)", "const"),
+    ("app.core.changelog", "The Realm Chronicle", "const"),
 ]
 
 arch = CArchiveReader(EXE)

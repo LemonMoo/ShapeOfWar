@@ -20,6 +20,14 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 95,
+        "title": "The Realm Chronicle",
+        "items": [
+            "FEATURE: the Realm Chronicle — a dated history of your realm: its founding, the first village built by your own hands, every village raised to a Town, every Town raised to a City, every claim secured. Open it from the new Chronicle button (next to Compendium); rival realms keep their own chronicles too.",
+            "FIX: the game is now reproducible from its seed — new games with the same seed play out identically (previously the sim drew from unseeded randomness and same-seed games diverged from day one).",
+        ],
+    },
+    {
         "version": 94,
         "title": "A Character of Its Own",
         "items": [

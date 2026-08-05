@@ -126,7 +126,24 @@ def worked_sectors(village):
 multi = [x for x in w.villages
          if x.faction_idx >= 0 and R.village_workforce(x) > 0
          and len(worked_sectors(x)) >= 2]
-assert multi, "no village works more than one non-fishing sector in this world"
+
+
+def _small_unsaturated(v):
+    """True when NO policy can saturate either sector, so 'focus small
+    raises it / costs big' is a statement about policy, not ceilings.
+    Both sectors' terrain ceilings (potential / per-worker output) must
+    exceed the whole workforce: if a sector's ceiling fits inside any
+    plausible allocation, the saturated sector's spillover fills the
+    other one and both policies produce identical capped outputs
+    (found when a rebalanced world picked such a village:
+    40.150704607046066 -> 40.150704607046066)."""
+    wf = R.village_workforce(v)
+    return all(worked_sectors(v)[s] / R.LABOR_OUTPUT_PER_WORKER.get(s, 1.0) > wf
+               for s in worked_sectors(v))
+
+
+multi = [x for x in multi if _small_unsaturated(x)]
+assert multi, "no unsaturated multi-sector village in this world"
 
 m = max(multi, key=lambda x: min(worked_sectors(x).values()))
 pair = sorted(worked_sectors(m), key=lambda s: -worked_sectors(m)[s])

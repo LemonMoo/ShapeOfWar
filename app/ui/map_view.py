@@ -49,6 +49,7 @@ from app.ui.gl_flatmap import (SHAPE_CIRCLE, SHAPE_TRIANGLE, SHAPE_SQUARE,
 from app.world import wrap
 from app.world.nation import is_eliminated, ruler_label
 from app.ui.compendium import CompendiumWindow
+from app.ui.chronicle import ChronicleWindow
 from app.ui import build_menu
 
 _FLASH_COLOR = (255, 236, 120)   # bright gold — region gained
@@ -880,6 +881,7 @@ class MapView(tk.Frame):
         self._flash_id = None
         self._bottom_msg_after_id = None
         self._compendium_window = None
+        self._chronicle_window = None
 
         # Resources gained/lost on the turn just ended, keyed by resource
         # name (including "Gold"); shown alongside current totals in the
@@ -2480,6 +2482,7 @@ class MapView(tk.Frame):
         page.button("View: Surface" if self.layer == layers.UNDER
                     else "View: Underworld", self.toggle_layer)
         page.button("Compendium (F1)", self.open_compendium)
+        page.button("Chronicle", self.open_chronicle)
         page.finish()
 
     def _foot_date_text(self):
@@ -3368,6 +3371,21 @@ class MapView(tk.Frame):
         now it is the date AND what the clock is doing, and that lives in
         _refresh_time_controls."""
         self._refresh_time_controls()
+
+    def open_chronicle(self):
+        """Create-or-raise the Realm Chronicle window (same idiom as
+        open_compendium): repeated presses focus the existing window rather
+        than spawning duplicates. The chronicle is the player realm's own
+        dated history -- see app/world/chronicle.py."""
+        if self._chronicle_window is not None and self._chronicle_window.winfo_exists():
+            self._chronicle_window.deiconify()
+            self._chronicle_window.lift()
+            self._chronicle_window.focus_set()
+            return
+        faction = self._player_faction()
+        if faction is None:
+            return
+        self._chronicle_window = ChronicleWindow(self, self.world, faction)
 
     def open_compendium(self):
         """Create-or-raise: repeated presses (button or the F1 shortcut in

@@ -990,6 +990,12 @@ def _finish_settlement(world, project):
     st = Settlement(len(world.settlements), kind, namer(kind, species),
                     project.pos, project.faction_idx, project.region_id, tax_income,
                     population, adults, children, prosperity, max_population)
+    # Chronicle: building a settlement outright (the expensive shortcut,
+    # as opposed to raising a village) is rare enough to be history.
+    from app.world import chronicle
+    chronicle.log(world, faction,
+                  f"{st.name} is founded as a {kind.capitalize()} — "
+                  "built from nothing rather than raised from a village.")
     world.settlements.append(st)
     _mark_occupied_both(world, *project.pos)
     faction.meta.setdefault("settlements", []).append(st.id)
@@ -1061,6 +1067,11 @@ def _finish_settlement_upgrade(world, project):
     # AI picks one; the player picks in the panel). None = no bonus (e.g.
     # direct-built settlements or pre-character saves).
     st.character = getattr(project, "character", None)
+    from app.world import chronicle
+    from app.world.resources import CHARACTER_NAMES
+    chronicle.log(world, world.factions[st.faction_idx],
+                  f"{st.name} rises to a "
+                  f"{CHARACTER_NAMES.get(st.character, '')} City.")
 
 
 def _found_village_projects(world):
@@ -1129,6 +1140,16 @@ def _finish_found_village(world, project):
     if not hasattr(region, "villages"):
         region.villages = []
     region.villages.append(v.id)
+    # Chronicle: the realm's FIRST founded village is a milestone (the
+    # moment the ladder truly begins); later ones are routine and stay out
+    # of the history.
+    from app.world import chronicle
+    founded = faction.meta.get("villages_founded", 0) + 1
+    faction.meta["villages_founded"] = founded
+    if founded == 1:
+        chronicle.log(world, faction,
+                      f"Your settlers found {v.name} — the first village "
+                      "built by the realm's own hands.")
     return v
 
 
@@ -1200,6 +1221,12 @@ def _finish_raise_village(world, project):
     # the map, and recorded as raised into the new Town.
     v.faction_idx = -1
     v.raised_into = st.id
+    from app.world import chronicle
+    from app.world.resources import CHARACTER_NAMES
+    chronicle.log(world, nation,
+                  f"{v.name} rises to a "
+                  f"{CHARACTER_NAMES.get(getattr(project, 'character', None), '')} "
+                  "Town.")
     return st
 
 

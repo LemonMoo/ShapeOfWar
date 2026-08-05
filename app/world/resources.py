@@ -2771,6 +2771,16 @@ def current_year(turn):
     return (turn - 1) // YEAR_LENGTH_TURNS + 1
 
 
+def turn_date_text(turn):
+    """Season/day/year for any turn number, world-side -- the same
+    derivation the UI's dated ledger uses (map_view._date_text_for_turn),
+    so a Realm Chronicle entry written at world.turn renders \"Winter 18,
+    Year 3\" exactly like the Trade Log rows it sits alongside."""
+    day = (turn - 1) % TURNS_PER_SEASON + 1
+    season = SEASONS[((turn - 1) // TURNS_PER_SEASON) % len(SEASONS)]
+    return f"{season} {day}, Year {current_year(turn)}"
+
+
 def _is_new_year(turn):
     """True on the first turn of every 4-season cycle -- the "every year"
     boundary births/natural deaths/slaughter fire on, unlike a Crop
