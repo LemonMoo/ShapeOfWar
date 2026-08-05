@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 105,
+        "title": "No Windows on the Ceiling (2)",
+        "items": [
+            "FIX: more overworld leaks below ground, all closed — weather outlines and badges, the attack-frontier outline and target names, in-progress road construction, alert badges on surface settlements, and the under region panel no longer names the surface biome above the rock it describes (it reads 'Cavern galleries' instead). The surface fog overlay is also never composited over the under raster, so the overworld's exploration pattern cannot appear on the cave map.",
+        ],
+    },
+    {
         "version": 104,
         "title": "No Windows on the Ceiling",
         "items": [

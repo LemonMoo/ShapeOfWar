@@ -88,6 +88,37 @@ try:
     assert labels_surface, "the surface view lost its realm labels"
     print("  ok    realm names: none below, present above")
 
+    # --- weather / attack frontier / road projects: surface only ---
+    view.attack_mode = "attack"     # arm the frontier like a real attack
+    view._attack_frontier = [world.regions[0]]
+    view.layer = L.UNDER
+    lines_under = view._map_lines(2, 4.0)
+    labels_under = view._map_labels(1)
+    view.layer = L.SURFACE
+    lines_surface = view._map_lines(2, 4.0)
+    labels_surface = view._map_labels(1)
+    view.attack_mode = None
+    view._attack_frontier = []
+    assert len(lines_under) == 0, f"{len(lines_under)} surface lines below"
+    assert not labels_under, f"{len(labels_under)} surface labels below"
+    print("  ok    weather/attack/road lines and labels: none below")
+
+    # --- the under region panel does not name the surface biome above it ---
+    from app.world import layers as L2
+    under_reg = next(r for r in world.regions if L2.is_under(r)
+                     and r.faction_idx >= 0)
+    view.selected_region = under_reg
+    view.layer = L.UNDER
+    view._rebuild_selection_panel()
+    page_texts = []
+    for item in view._page.canvas.find_all():
+        if view._page.canvas.type(item) == "text":
+            page_texts.append(str(view._page.canvas.itemcget(item, "text")))
+    joined = " | ".join(page_texts)
+    assert "Cavern galleries" in joined, (
+        f"the under region panel does not say what the rock is: {joined[:200]}")
+    print("  ok    the under region panel reads 'Cavern galleries'")
+
     print("\nUNDER NO-LEAK TEST PASSED")
 finally:
     root.destroy()

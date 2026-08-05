@@ -2968,36 +2968,43 @@ class MapView(tk.Frame):
                 width = lw(1.5, 0.14)
             add(remaining, colour, width, dash=2)
 
-        # Weather: the affected region outlined in its own colour. Drawn
-        # before the attack frontier so a region you are about to attack
-        # still reads as a target first -- war beats weather on a war map.
-        for region, event in self._weathered_regions():
-            colour = _WEATHER_MAP_COLOR.get(event.kind)
-            if not colour:
-                continue
-            severe = event.severity == weather_mod.SEVERE
-            # Separate MINIMUMS, not just separate factors. A shared floor
-            # swallowed the difference at world scale -- both severities
-            # clamped to the same width, so from orbit a mild fog and a
-            # severe blizzard drew identically. Severity has to read at the
-            # zoom where you are deciding whether to march.
-            for x0, y0, x1, y1 in self._region_border_segments(region):
-                out.append(([(x0, y0), (x1, y1)], _GL_RGB[colour],
-                            lw(2.4, 0.26, minimum=2.2) if severe
-                            else lw(1.6, 0.17, minimum=1.2),
-                            0 if severe else 3))
-
-        if self.attack_mode is not None:
-            for region in self._attack_frontier:
+        # Weather, the attack frontier and in-progress road construction are
+        # SURFACE mechanics: weather happens above, attacks march above, and
+        # a road is being built above. Outlining or drawing any of them on
+        # the under layer would hand the overworld's activity over from
+        # inside a cave. (The battle-outcome flash below stays: it marks a
+        # region you just fought for yourself, on whichever layer that was.)
+        if self.layer == layers.SURFACE:
+            # Weather: the affected region outlined in its own colour. Drawn
+            # before the attack frontier so a region you are about to attack
+            # still reads as a target first -- war beats weather on a war map.
+            for region, event in self._weathered_regions():
+                colour = _WEATHER_MAP_COLOR.get(event.kind)
+                if not colour:
+                    continue
+                severe = event.severity == weather_mod.SEVERE
+                # Separate MINIMUMS, not just separate factors. A shared floor
+                # swallowed the difference at world scale -- both severities
+                # clamped to the same width, so from orbit a mild fog and a
+                # severe blizzard drew identically. Severity has to read at the
+                # zoom where you are deciding whether to march.
                 for x0, y0, x1, y1 in self._region_border_segments(region):
-                    out.append(([(x0, y0), (x1, y1)], _GL_RGB[theme.BAD],
-                                lw(2.6, 0.3, minimum=2.0), 0))
+                    out.append(([(x0, y0), (x1, y1)], _GL_RGB[colour],
+                                lw(2.4, 0.26, minimum=2.2) if severe
+                                else lw(1.6, 0.17, minimum=1.2),
+                                0 if severe else 3))
 
-        # In-progress road construction (see _draw_construction): only the
-        # portion actually built so far, same as the canvas draws it.
-        for road in wd.road_projects:
-            if len(road.built_cells) >= 2:
-                add(road.built_cells, _GL_RGB[_DIRT_ROAD_COLOR], lw(1.6, 0.18), dash=2)
+            if self.attack_mode is not None:
+                for region in self._attack_frontier:
+                    for x0, y0, x1, y1 in self._region_border_segments(region):
+                        out.append(([(x0, y0), (x1, y1)], _GL_RGB[theme.BAD],
+                                    lw(2.6, 0.3, minimum=2.0), 0))
+
+            # In-progress road construction (see _draw_construction): only the
+            # portion actually built so far, same as the canvas draws it.
+            for road in wd.road_projects:
+                if len(road.built_cells) >= 2:
+                    add(road.built_cells, _GL_RGB[_DIRT_ROAD_COLOR], lw(1.6, 0.18), dash=2)
 
         # Battle-outcome border flash (see _draw_flash): gold for a region
         # gained, red for a failed attack, fading/pulsing over its lifetime.
@@ -3122,29 +3129,34 @@ class MapView(tk.Frame):
                 add([("!", n.pos)
                      for nodes in (wd.settlements, wd.villages) for n in nodes
                      if (alerts.get(id(n)) == "critical") == critical
-                     and id(n) in alerts and self._cell_revealed(*n.pos)],
+                     and id(n) in alerts and self._node_visible(n)],
                     14.0, colour, -12.0)
 
-        # Weather badges. Only from region view in: at world scale a dozen
-        # of these over a continent is confetti, and the outline in
-        # _map_lines already says "something is happening here" from orbit.
-        if level >= 1:
-            for region, event in self._weathered_regions():
-                glyph = _WEATHER_GLYPH.get(event.kind)
-                if not glyph:
-                    continue
-                severe = event.severity == weather_mod.SEVERE
-                add([(f"{glyph} {event.label}",
-                      (region.center[0] * wd.w, region.center[1] * wd.h))],
-                    13.0 if severe else 11.0,
-                    _GL_RGB[_WEATHER_MAP_COLOR[event.kind]], 22.0)
+        # Weather badges and attack-target names are SURFACE identity: weather
+        # happens above, and the attack frontier is a surface target list.
+        # Neither may render below ground (the outlines in _map_lines are
+        # gated the same way).
+        if self.layer == layers.SURFACE:
+            # Weather badges. Only from region view in: at world scale a dozen
+            # of these over a continent is confetti, and the outline in
+            # _map_lines already says "something is happening here" from orbit.
+            if level >= 1:
+                for region, event in self._weathered_regions():
+                    glyph = _WEATHER_GLYPH.get(event.kind)
+                    if not glyph:
+                        continue
+                    severe = event.severity == weather_mod.SEVERE
+                    add([(f"{glyph} {event.label}",
+                          (region.center[0] * wd.w, region.center[1] * wd.h))],
+                        13.0 if severe else 11.0,
+                        _GL_RGB[_WEATHER_MAP_COLOR[event.kind]], 22.0)
 
-        # Attack-target region names (see _draw_attack_targets) -- the
-        # border highlight itself is in _map_lines, this is just the label.
-        if self.attack_mode is not None and self._attack_frontier:
-            add([(r.name, (r.center[0] * wd.w, r.center[1] * wd.h))
-                 for r in self._attack_frontier],
-                12.0, _GL_LABEL_COLOR, 0.0)
+            # Attack-target region names (see _draw_attack_targets) -- the
+            # border highlight itself is in _map_lines, this is just the label.
+            if self.attack_mode is not None and self._attack_frontier:
+                add([(r.name, (r.center[0] * wd.w, r.center[1] * wd.h))
+                     for r in self._attack_frontier],
+                    12.0, _GL_LABEL_COLOR, 0.0)
         return out
 
     _SETTLE_SHAPE = {"city": SHAPE_CIRCLE, "castle": SHAPE_TRIANGLE, "town": SHAPE_SQUARE}
@@ -4407,7 +4419,14 @@ class MapView(tk.Frame):
         if body is not None:
             self._kv(body, "Area", f"{s['area']}")
             self._kv(body, "Fertility", f"{s['fertility']}%")
-            self._kv(body, "Biome", biome_line)
+            if layers.is_under(region):
+                # An under region's biome_counts read the SURFACE biome above
+                # its cells -- printing that would hand the overworld's ground
+                # over from inside a cave. The honest readout is the rock
+                # itself (depth, shown below).
+                self._kv(body, "Biome", "Cavern galleries")
+            else:
+                self._kv(body, "Biome", biome_line)
             self._kv(body, "Climate", region.dominant_climate.capitalize())
             self._kv(body, "This turn's yield", _format_resources(region.resources))
             if layers.is_under(region):
@@ -6637,7 +6656,13 @@ class MapView(tk.Frame):
 
         self._ensure_base()
         self._ensure_fog_overlay()
-        fog_active = self._fog_is_active() and self._fog_overlay_img is not None
+        # The surface fog overlay belongs to the SURFACE view: compositing it
+        # over the under raster would paint the overworld's exploration
+        # pattern onto the cave map below (the underworld's own darkness is
+        # already inside _under_pixels -- unlit rock reads exactly like
+        # rock).
+        fog_active = (self._fog_is_active() and self._fog_overlay_img is not None
+                      and self.layer == layers.SURFACE)
         vx0, vy0, vx1, vy1 = self._fit_aspect(self.view, cw / ch)
         scale = cw / (vx1 - vx0)
         self._place = (vx0, vy0, scale)
@@ -6711,7 +6736,8 @@ class MapView(tk.Frame):
         self._draw_settlements(c, screen)
         self._draw_villages(c, screen)
         self._draw_labels(c, screen)
-        self._draw_attack_targets(c, screen)
+        if self.layer == layers.SURFACE:
+            self._draw_attack_targets(c, screen)
         if self.layer == layers.SURFACE:
             self._draw_ships(c, screen)
         self._draw_commanders(c, screen)

@@ -126,6 +126,10 @@ MARKERS = [
     ("app.ui.map_view", "fog_version", "const"),
     ("app.ui.map_view", "_under_pixels", "name"),
     ("app.core.changelog", "No Windows on the Ceiling", "const"),
+    # v0.18.16 -- the rest of the under-view leaks (weather/attack/roads/
+    # alert badges/panel biome/fog overlay).
+    ("app.ui.map_view", "Cavern galleries", "const"),
+    ("app.core.changelog", "No Windows on the Ceiling (2)", "const"),
 ]
 
 arch = CArchiveReader(EXE)

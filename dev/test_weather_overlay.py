@@ -38,6 +38,9 @@ world = pickle.load(open(PATH, "rb"))
 if world.player_faction_idx is None:
     world.player_faction_idx = 0
 view = MapView(root, world, lambda *a: None, lambda *a: None)
+# A goblin-player world opens on the UNDER layer (its capital is below),
+# and weather is a SURFACE event -- view the surface for the overlay checks.
+view.layer = 0
 
 
 def badges(level):
