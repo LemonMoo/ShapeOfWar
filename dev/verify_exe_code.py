@@ -29,6 +29,11 @@ MARKERS = [
     ("app.world.resources", "Yields \"households\" between region chunks", "const"),
     ("app.ui.map_view", "the frame that runs one of the day's unsplittable phases", "const"),
     ("app.core.changelog", "The World Is Thinking", "const"),
+    # v0.18.0 -- the settlement-first world.
+    ("app.ui.map_view", "Upgrade to City (", "const"),
+    ("app.world.expansion", "Your realm is still growing", "const"),
+    ("app.core.changelog", "The Settlement-First World", "const"),
+    ("app.core.changelog", "burns its coal in Winter", "const"),
 ]
 
 arch = CArchiveReader(EXE)
