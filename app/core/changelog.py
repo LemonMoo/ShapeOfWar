@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 92,
+        "title": "Dated Ledger",
+        "items": [
+            "UI: the Trade Log and the Treasury's RECENT TURNS now timestamp entries by in-game date — \"Winter 18, Year 3\" — instead of a bare turn number, so you can actually track when a deal happened.",
+        ],
+    },
+    {
         "version": 91,
         "title": "The Compendium Pass",
         "items": [

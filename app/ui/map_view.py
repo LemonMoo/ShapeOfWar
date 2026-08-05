@@ -1749,7 +1749,8 @@ class MapView(tk.Frame):
         for g in groups:
             if g["turn"] != last_turn:
                 last_turn = g["turn"]
-                tk.Label(frame, text=f"Turn {g['turn']}", bg=theme.CANVAS, fg=theme.ACCENT,
+                tk.Label(frame, text=self._date_text_for_turn(g["turn"]),
+                         bg=theme.CANVAS, fg=theme.ACCENT,
                          font=theme.FONT_SMALL_BOLD, anchor="w"
                          ).pack(fill="x", padx=4, pady=(6, 1))
             color = {"income": theme.GOOD, "cost": theme.BAD,
@@ -2369,8 +2370,8 @@ class MapView(tk.Frame):
                 for entry in ledger[-6:]:
                     causes = "  ".join(f"{k} {v:+,}" for k, v in entry.items()
                                        if k not in ("turn", "net"))
-                    line(sec, f"  turn {entry['turn']}: {entry['net']:+,}   {causes}",
-                         theme.MUTED)
+                    line(sec, f"  {self._date_text_for_turn(entry['turn'])}: "
+                              f"{entry['net']:+,}   {causes}", theme.MUTED)
 
         page.finish()
 
@@ -3411,10 +3412,19 @@ class MapView(tk.Frame):
         foot again" -- there is nothing to config() in place."""
         self._render_foot()
 
+    def _date_text_for_turn(self, turn):
+        """Season/day/year for any turn number -- the Trade Log and the
+        Treasury's RECENT TURNS render historical entries with this, so a
+        row from last Winter reads \"Winter 18, Year 3\" instead of a bare
+        turn count (same derivation advance_turn uses to set world.season)."""
+        year = resources.current_year(turn)
+        day = (turn - 1) % resources.TURNS_PER_SEASON + 1
+        season = resources.SEASONS[
+            ((turn - 1) // resources.TURNS_PER_SEASON) % len(resources.SEASONS)]
+        return f"{season} {day}, Year {year}"
+
     def _date_text(self):
-        year = resources.current_year(self.world.turn)
-        day = (self.world.turn - 1) % resources.TURNS_PER_SEASON + 1
-        return f"{self.world.season} {day}, Year {year}"
+        return self._date_text_for_turn(self.world.turn)
 
     # --- end-turn movement animation -----------------------------------------
     # Caravans, shipments, commanders and ships used to TELEPORT: End Turn
