@@ -85,7 +85,7 @@ MARKERS = [
     ("app.core.changelog", "Season News", "const"),
     # v0.18.10 -- rivers run true (slope-weighted D8).
     ("app.world.worldgen", "_SQRT2", "name"),
-    ("app.world.worldgen", "slope-weighted steepest descent", "const"),
+    ("app.world.worldgen", "drainage hydrology", "const"),
     ("app.core.changelog", "Rivers Run True", "const"),
 ]
 
