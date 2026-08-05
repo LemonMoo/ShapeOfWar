@@ -87,6 +87,13 @@ MARKERS = [
     ("app.world.worldgen", "_SQRT2", "name"),
     ("app.world.worldgen", "drainage hydrology", "const"),
     ("app.core.changelog", "Rivers Run True", "const"),
+    # v0.18.11 -- claims + village roads.
+    ("app.world.expansion", "iterate as `r`, NEVER reuse", "const"),
+    ("app.world.expansion", "stale player claims", "const"),
+    ("app.world.commander", "Physical presence is what authorises", "const"),
+    ("app.world.construction", "joins the road network", "const"),
+    ("app.ui.map_view", "march them to the frontier first", "const"),
+    ("app.core.changelog", "Claims That Work, Villages That Connect", "const"),
 ]
 
 arch = CArchiveReader(EXE)

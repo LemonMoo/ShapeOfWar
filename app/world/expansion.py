@@ -340,11 +340,17 @@ def start_claim(world, faction_idx, region):
         # one code path.
         from app.world.resources import region_village_capacity
         cap_sum = vills_sum = 0
-        for region in world.regions:
-            if region.faction_idx != faction_idx:
+        # NOTE: iterate as `r`, NEVER reuse `region` here -- the target
+        # region is live below this gate, and rebinding it (a real bug that
+        # shipped) made every claim project start on the faction's LAST
+        # owned region instead of the wildland target: claims never began,
+        # the duplicate guard never matched, and repeated clicks piled up
+        # dead projects on the wrong region.
+        for r in world.regions:
+            if r.faction_idx != faction_idx:
                 continue
-            cap_sum += region_village_capacity(world, region)
-            vills_sum += len(getattr(region, "villages", []))
+            cap_sum += region_village_capacity(world, r)
+            vills_sum += len(getattr(r, "villages", []))
         if cap_sum and vills_sum / cap_sum < CLAIM_DEVELOPMENT_FRACTION:
             return ("Your realm is still growing -- fill your village lands "
                     "(raise settlements to Cities for more room) before "
@@ -623,6 +629,16 @@ def advance_claims_steps(world):
             project.progress_turns += 1.0
         if project.complete and project.faction_idx != player_idx:
             finished_ai.append(project)
+
+    # Retire stale player claims: a completed claim whose region is no
+    # longer wildland (someone else claimed it, or it changed hands) can
+    # never be fought -- without this, such projects sat complete in
+    # claim_projects forever (a save shipped with 25 dead claims for one
+    # region that a rival had since taken).
+    for project in list(world.claim_projects):
+        if (project.faction_idx == player_idx and project.complete
+                and world.regions[project.region_id].faction_idx >= 0):
+            world.claim_projects.remove(project)
 
     for project in finished_ai:
         world.claim_projects.remove(project)

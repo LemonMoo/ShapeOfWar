@@ -4535,6 +4535,19 @@ class MapView(tk.Frame):
             if goods:
                 line += f" + {goods:,} units of stores"
             self._panel_text(line, fg=theme.GOOD)
+        # The army marches with the commander: no commander on the frontier,
+        # no claim. Say so HERE, in the panel, instead of failing the click
+        # with a bottom-message the player may miss -- same honesty the
+        # attack menu already shows for unreachable targets.
+        from app.world import commander
+        blocked = commander.commander_block_reason(
+            self.world, faction_idx, region)
+        if blocked:
+            self._panel_text(blocked, fg=theme.MUTED)
+            self._panel_text("Select your Commander and use Move to march "
+                             "them to the frontier first.",
+                             fg=theme.MUTED, font=theme.FONT_SMALL)
+            return
         self._panel_button("Claim Territory",
                         lambda cnty=region: self._do_claim(cnty))
 

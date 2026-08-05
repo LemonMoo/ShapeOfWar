@@ -157,8 +157,10 @@ def commander_can_reach(world, faction_idx, region):
     """The commander that authorises acting on `region`, or None.
 
     Valid when the commander stands in the target itself (already yours, or
-    being defended) or in any region this faction owns that shares a border
-    with it."""
+    being defended) or in ANY region that shares a border with it -- owned,
+    unclaimed or foreign. The army is where the commander physically is; a
+    commander that marched into the wilds next door is on the frontier, not
+    absent (ownership was never the point of the gate)."""
     from app.world.worldgen import _adjacent_region_ids
     here = commander_at_region(world, faction_idx, region)
     if here is not None:
@@ -169,7 +171,14 @@ def commander_can_reach(world, faction_idx, region):
         if not (0 <= y < world.h and 0 <= x < world.w):
             continue
         cid = world.region_grid[y][x]
-        if cid in neighbours and world.regions[cid].faction_idx == faction_idx:
+        # Physical presence is what authorises: the commander standing in ANY
+        # region bordering the target -- owned or not -- has marched the army
+        # to the frontier, which is the whole point of the gate. Requiring
+        # ownership here deadlocked a commander that had marched into
+        # unclaimed wildland: it stood next door to every frontier and could
+        # authorise nothing (found via a turn-359 save: commander parked in a
+        # wildland region, every claim refused "too far away").
+        if cid in neighbours:
             return cmd
     return None
 

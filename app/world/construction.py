@@ -1140,6 +1140,31 @@ def _finish_found_village(world, project):
     if not hasattr(region, "villages"):
         region.villages = []
     region.villages.append(v.id)
+    # A founded village joins the road network, not an island: link it to
+    # nearby villages with the same terrain-aware mesh the city-growth path
+    # uses. If nothing was in reach (the first village on bare claimed
+    # land), still connect it to the realm -- a road to the faction's
+    # nearest other village, or its nearest settlement if it has no other
+    # village yet -- the same "never an island" rule the kingdom bridge
+    # applies to settlement-less regions.
+    from app.world.resources import (_connect_new_village_to_region, _dist2)
+    from app.world.worldgen import _local_road_path
+    linked = _connect_new_village_to_region(world, region, v)
+    if linked == 0:
+        others = [o for o in world.villages
+                  if o.faction_idx == region.faction_idx and o.id != v.id]
+        if not others:
+            others = [s for s in world.settlements
+                      if s.faction_idx == region.faction_idx]
+        if others:
+            target = min(others, key=lambda o: _dist2(o.pos, v.pos))
+            path = _local_road_path(world, v.pos, target.pos,
+                                    faction_idx=region.faction_idx,
+                                    allow_fallback=False)
+            if path is not None:
+                from app.world.worldgen import add_road_segments
+                add_road_segments(world, region.id,
+                                  list(zip(path, path[1:])), "dirt")
     # Chronicle: the realm's FIRST founded village is a milestone (the
     # moment the ladder truly begins); later ones are routine and stay out
     # of the history.

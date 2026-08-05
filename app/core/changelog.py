@@ -20,6 +20,15 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 100,
+        "title": "Claims That Work, Villages That Connect",
+        "items": [
+            "FIX: claiming is repaired — a variable-shadowing bug in the expansion gate made every claim start on the realm's LAST owned region instead of the target: claims never began, repeat clicks piled up dead projects, and rival realms were quietly unable to expand too. Claims now target the land you clicked, dedupe properly, and the wildland panel tells you when your commander needs to march first.",
+            "FIX: a commander that marched into unclaimed wildland now authorises claims from where it physically stands, instead of being treated as absent and blocking every claim.",
+            "FIX: a founded village now joins the road network — it is linked to nearby villages with the same terrain-aware road pathfinding the city-growth path uses, and a village founded on bare claimed land gets a road to the realm's nearest village or settlement instead of standing alone.",
+        ],
+    },
+    {
         "version": 99,
         "title": "Rivers Run True",
         "items": [

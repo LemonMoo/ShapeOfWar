@@ -6705,6 +6705,7 @@ def _connect_new_village_to_region(world, region, new_village):
         path = _local_road_path(world, new_village.pos, other.pos,
                                 faction_idx=region.faction_idx)
         add_road_segments(world, region.id, list(zip(path, path[1:])), "dirt")
+    return len(linked)   # 0 = nothing was in reach; callers may fall back
 
 
 def _dist2(a, b):
