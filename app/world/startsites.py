@@ -117,6 +117,10 @@ def _nearest_rival(world, x, y):
     return best
 
 
+from app.world.holds import (UNDERGROUND_SPECIES, _components, _caverns,
+                             HOME_NETWORK_MAX_DIST)
+
+
 def evaluate_site(world, x, y, species=None, top_resources=8):
     """Everything the card shows for a start at (x, y). Pure; changes nothing.
 
@@ -153,6 +157,28 @@ def evaluate_site(world, x, y, species=None, top_resources=8):
         far = nearest / max(1, world.w)
         room = "isolated" if far > 0.28 else "elbow room" if far > 0.16 else "crowded"
 
+    # For cave peoples (Dwarves, Goblins) the real question is whether this
+    # site sits over a cavern network: their capital lives UNDER the mountain
+    # here (holds.settle_underworld plants it under the nearest reachable
+    # network), so a start with no caves beneath is a surface-bound realm.
+    underground = None
+    if species in UNDERGROUND_SPECIES:
+        from app.world.holds import _components, _caverns, HOME_NETWORK_MAX_DIST
+        import math as _math
+        best_d2 = None
+        for network in _components(world):
+            caverns = _caverns(world, network)
+            if not caverns:
+                continue
+            cx = sum(p[0] for p in caverns) / len(caverns)
+            cy = sum(p[1] for p in caverns) / len(caverns)
+            d2 = (x - cx) ** 2 + (y - cy) ** 2
+            if best_d2 is None or d2 < best_d2:
+                best_d2 = d2
+        if best_d2 is not None:
+            dist = _math.sqrt(best_d2)
+            underground = {"ok": dist <= HOME_NETWORK_MAX_DIST, "dist": dist}
+
     return {
         "cell": (x, y),
         "biomes": shares,
@@ -165,6 +191,7 @@ def evaluate_site(world, x, y, species=None, top_resources=8):
         "affinity": homeland_affinity(species, shares) if species else None,
         "nearest_rival": nearest,
         "room": room,
+        "underground": underground,
         "sustain": {"ok": ok, "reason": reason},
     }
 
@@ -207,7 +234,21 @@ def candidate_sites(world, count, species=None, rng=None, min_spacing=None):
         picked.append((x, y, ev))
 
     if species:
-        picked.sort(key=lambda p: -(p[2]["affinity"] or 0.0))
+        if species in UNDERGROUND_SPECIES:
+            # Cave peoples sort by whether the site sits over a reachable
+            # cavern network first, then closeness, then homeland fit --
+            # a dwarf realm that cannot go under is missing its whole point.
+            def _under_key(p):
+                ev = p[2]
+                u = ev.get("underground")
+                base = (ev["affinity"] or 0.0) if ev.get("affinity") is not None else 0.0
+                if u is None:
+                    return base
+                reach = 2.0 if u["ok"] else 0.0
+                return reach + base - u["dist"] / 500.0
+            picked.sort(key=lambda p: -_under_key(p))
+        else:
+            picked.sort(key=lambda p: -(p[2]["affinity"] or 0.0))
     return [(x, y, ev) for x, y, ev in picked]
 
 

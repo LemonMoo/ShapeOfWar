@@ -91,9 +91,13 @@ print(f"  ok    {r.name}: {first!r}, stable and unchanged by save/load")
 
 print("\n--- an old save needs no migration to get one ---")
 # flavour_name is a property, not a pickled field, so a world written before
-# phase F existed still answers.
-named = sum(1 for r in w.regions if r.cells and r.flavour_name)
-total = sum(1 for r in w.regions if r.cells)
+# phase F existed still answers. Its contract (see Region.flavour_name) is
+# "None for a region with no classified land at all" -- a sea region or a
+# cavern under open ocean has no biome to flavour, and that is by design:
+# assert the COUNTRY regions, the ones with real land under them.
+landed = [r for r in w.regions if r.cells and r.dominant_biome]
+named = sum(1 for r in landed if r.flavour_name)
+total = len(landed)
 assert named == total, f"only {named}/{total} regions got a name"
 print(f"  ok    all {total} regions in a pre-phase-F save are named")
 

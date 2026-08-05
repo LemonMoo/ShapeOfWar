@@ -95,6 +95,16 @@ MARKERS = [
     ("app.world.construction", "_connect_new_village_to_region", "name"),
     ("app.ui.map_view", "march them to the frontier first", "const"),
     ("app.core.changelog", "Claims That Work, Villages That Connect", "const"),
+    # v0.18.12 -- the underground capital.
+    ("app.world.holds", "_place_gate_town", "name"),
+    ("app.world.holds", "_fallback_surface_capital", "name"),
+    ("app.world.holds", "_cache_network_terraces", "name"),
+    ("app.world.holds", "under_capital", "const"),
+    ("app.world.holds", "beneath the mountains.", "const"),
+    ("app.world.resources", "under_capital", "const"),
+    ("app.world.startsites", "_under_key", "name"),
+    ("app.world.worldgen", "UNDERGROUND_SPECIES", "name"),
+    ("app.core.changelog", "Under the Mountain", "const"),
 ]
 
 arch = CArchiveReader(EXE)

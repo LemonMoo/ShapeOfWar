@@ -189,6 +189,42 @@ def _stock_larder(node, days):
         node.resources[good] = node.resources.get(good, 0) + each
 
 
+def _cache_network_terraces(world, network, regions):
+    """Give every region of a claimed network the SAME terrace pool: the
+    mountainside within GATE_HOLDING_RADIUS of ANY of the network's doors.
+
+    The per-region model (a region's own cells that touch a door) stranded
+    the food chain: a hold plants its villages DEEP, as far from the doors
+    as possible (defensibility), so the regions that actually touch a door
+    held all the terrace cells and the deep regions held none -- and a
+    holding village that cannot reach a door works no terraces at all. The
+    result was a hold whose villages sat in doorless regions slowly eating
+    its larder dry. Terraces are a NETWORK asset; the per-node share in
+    gate_holding_cells still splits the pool between the holdings that work
+    it, so a big pool with many holdings farms the same 16 cells a holding
+    with one door farms (GATE_HOLDING_CELLS caps the per-node take)."""
+    mouths = {tuple(g["under"]) for g in getattr(world, "gates", ())}
+    door_cells = set()
+    for region in regions:
+        door_cells |= set(region.cells) & mouths
+    total = set()
+    r = R.GATE_HOLDING_RADIUS
+    for gx, gy in door_cells:
+        for dy in range(-r, r + 1):
+            ny = gy + dy
+            if not (0 <= ny < world.h):
+                continue
+            for dx in range(-r, r + 1):
+                nx = wrap.wrap_x(gx + dx, world.w)
+                if world.owner[ny][nx] == L.OCEAN or (nx, ny) in world.lake_cells:
+                    continue
+                total.add((nx, ny))
+    pool = len(total)
+    for region in regions:
+        region._gate_terrace_cells = pool
+    return pool
+
+
 def _settle_hold(world, rng, network, faction_idx, namer):
     """One great hall, a few mining villages, terraces above the doors, and a
     full larder to solve the problem in."""
@@ -201,6 +237,13 @@ def _settle_hold(world, rng, network, faction_idx, namer):
     regions = _claim_network(world, network, faction_idx)
     if not regions:
         return None
+    # The terraces are the NETWORK's, not one region's (see
+    # _cache_network_terraces): the villages are planted deep, as far from
+    # the doors as possible, and the per-region model left every holding in
+    # a doorless region unable to reach a single terrace cell -- the hold
+    # ate its larder dry. Share the door-regions' mountainside across the
+    # whole claimed network.
+    _cache_network_terraces(world, network, regions)
 
     # The great hall goes in the deepest rock -- furthest from any door, which
     # is what a hold being defensible actually means.
@@ -301,6 +344,95 @@ def _plant_village(world, rng, pos, faction_idx, namer, species, pop_mult=1.0):
     return village
 
 
+def _place_gate_town(world, rng, network, faction_idx, namer):
+    """The surface door of an underground realm: a small Town at one of the
+    network's gates. It is the realm's only above-ground settlement -- trade
+    caravans, the commander and every surface-anchored system hang off it
+    (settle_underworld inserts it first into meta['settlements']), while the
+    realm's people and its true capital live under the mountain. None if no
+    gate opens onto land (a sea-gated network) -- the realm then anchors on
+    its underground seat alone."""
+    from app.world.resources import seed_prosperity, SETTLEMENT_CHARACTERS
+    from app.world.worldgen import (_roll_population, _mark_occupied_both,
+                                    SETTLEMENT_TAX_INCOME)
+    species = world.factions[faction_idx].meta["species"]
+    gates = _network_gates(world, network)
+    spot = None
+    for g in gates:
+        sx, sy = g["pos"]   # the gate's surface mouth (its "under" end is the cave door)
+        if not (0 <= sx < world.w and 0 <= sy < world.h):
+            continue
+        o = world.owner[sy][sx]
+        # Wildland or the realm's OWN territory: a gate town sits at the
+        # realm's own door, which is usually inside its surface foothold.
+        # Rival-owned mouths are rejected.
+        if o < 0 or o == faction_idx:
+            spot = (sx, sy)
+            break
+    if spot is None:
+        return None
+    region_id = L.region_at(world, spot[0], spot[1], L.SURFACE)
+    if region_id is None:
+        return None
+    kind = "town"
+    tax_income = round(rng.uniform(*SETTLEMENT_TAX_INCOME[kind]))
+    population, adults, children, max_population = _roll_population(rng, kind)
+    st = Settlement(len(world.settlements), kind, namer(kind, species),
+                    spot, faction_idx, region_id, tax_income,
+                    population, adults, children, seed_prosperity(),
+                    max_population)
+    # A door town rolls a character like any other settlement (it is one).
+    st.character = rng.choices(tuple(SETTLEMENT_CHARACTERS),
+                               weights=(40, 30, 30))[0]
+    world.settlements.append(st)
+    _mark_occupied_both(world, spot[0], spot[1])
+    world.regions[region_id].meta_settlements.append(st.id)
+    return st
+
+
+def _fallback_surface_capital(world, rng, faction_idx, namer):
+    """A cave realm whose mountains have no reachable cave network still
+    gets a home: a plain surface capital, the pre-underground behavior.
+    Called by settle_underworld when a dwarf/goblin faction cannot reach
+    any cavern network -- the start-site preview steers the PLAYER toward
+    cavern-over sites, but AI realms scatter blindly and must not end up
+    homeless (before the underground capital, every faction had a surface
+    capital; the surface-skip in worldgen is only safe when the hold
+    actually lands)."""
+    from app.world.resources import seed_prosperity, SETTLEMENT_CHARACTERS
+    from app.world.worldgen import (_roll_population, _mark_occupied_both,
+                                    SETTLEMENT_TAX_INCOME)
+    nation = world.factions[faction_idx]
+    species = nation.meta["species"]
+    capital = nation.meta.get("capital")
+    if capital is None:
+        return None
+    x, y = capital
+    if not (0 <= x < world.w and 0 <= y < world.h):
+        return None
+    kind = "city"
+    tax_income = round(rng.uniform(*SETTLEMENT_TAX_INCOME[kind]))
+    population, adults, children, max_population = _roll_population(rng, kind)
+    region_id = world.region_grid[y][x]
+    st = Settlement(len(world.settlements), kind, namer(kind, species),
+                    (x, y), faction_idx, region_id, tax_income,
+                    population, adults, children, seed_prosperity(),
+                    max_population)
+    st.character = rng.choices(tuple(SETTLEMENT_CHARACTERS),
+                               weights=(40, 30, 30))[0]
+    world.settlements.append(st)
+    _mark_occupied_both(world, x, y)
+    nation.meta["settlements"].append(st.id)
+    nation.meta["capital"] = st.pos
+    st.is_capital = True
+    from app.world import chronicle
+    chronicle.log(world, nation,
+                  f"The realm of {nation.name} is founded at {st.name}.")
+    if 0 <= region_id < len(world.regions):
+        world.regions[region_id].meta_settlements.append(st.id)
+    return st
+
+
 def settle_underworld(world, rng=None):
     """Put dwarf holds and goblin warrens under the mountains.
 
@@ -341,18 +473,69 @@ def settle_underworld(world, rng=None):
         if best is None:
             # No range near enough. That is a real outcome, not a failure: a
             # dwarf realm placed on an island of hills simply lives above
-            # ground, and the galleries elsewhere stay open for anybody who
-            # can take a gate.
+            # ground (its capital is a plain surface city, the pre-
+            # underground shape), and the galleries elsewhere stay open for
+            # anybody who can take a gate.
+            if not nation.meta.get("settlements"):
+                _fallback_surface_capital(world, rng, idx, namer)
+                summary["surface_fallbacks"] = summary.get(
+                    "surface_fallbacks", 0) + 1
             continue
         taken.add(best)
         home = (_settle_hold if kind == HOLD else _settle_warren)(
             world, rng, networks[best], idx, namer)
         if home is None:
+            if not nation.meta.get("settlements"):
+                _fallback_surface_capital(world, rng, idx, namer)
+                summary["surface_fallbacks"] = summary.get(
+                    "surface_fallbacks", 0) + 1
             continue
         homes.append(home)
         summary["holds" if kind == HOLD else "warrens"] += 1
         summary["settlements"] += 1 if home["seat"] is not None else 0
         summary["villages"] += len(home["villages"])
+        # The underground capital (phase A of the underworld rework): the
+        # hold/warren is the realm's HOME -- the seat carries the Seat of
+        # the Realm stamp, and the founding chronicle fires here, not on
+        # the surface (cave peoples skipped their surface capital in
+        # worldgen). Their only above-ground anchor is a GATE TOWN at the
+        # doors, which is inserted FIRST into meta["settlements"] so the
+        # surface-anchored systems (trade caravans, commander spawn,
+        # region panels) all point at a place a surface unit can reach.
+        seat = home["seat"]
+        meta = nation.meta
+        gate_town = _place_gate_town(world, rng, networks[best], idx, namer)
+        if gate_town is not None:
+            # The realm that lives under a mountain is anchored at its door:
+            # the gate town is settlements[0], which the surface-anchored
+            # systems (trade caravans, commander spawn, region panels) all
+            # hang off, and meta["capital"] points there too.
+            meta["settlements"].insert(0, gate_town.id)
+            meta["capital"] = gate_town.pos
+            summary["gate_towns"] = summary.get("gate_towns", 0) + 1
+        if seat is not None:
+            # The underground capital: the hold is the Seat of the Realm and
+            # the founding chronicle fires here, not on the surface (cave
+            # peoples skipped their surface capital in worldgen). An
+            # under-city is NOT stamped for the frontier population draw
+            # (under_capital): people flocking to a visible capital is a
+            # surface phenomenon, and a cave city's food is hard-capped by
+            # terraces and fungus -- growing it by magic starvation pressure
+            # instead of by breaking out to farmland is the wrong loop.
+            seat.is_capital = True
+            seat.under_capital = True
+            from app.world import chronicle
+            chronicle.log(world, nation,
+                          f"The realm of {nation.name} is founded at "
+                          f"{seat.name}, beneath the mountains.")
+        elif gate_town is not None:
+            # A warren has no great hall (that is the goblin way): the realm's
+            # seat is its door town; the warren villages below are its people.
+            gate_town.is_capital = True
+            from app.world import chronicle
+            chronicle.log(world, nation,
+                          f"The realm of {nation.name} is founded at "
+                          f"{gate_town.name}, at the mountain's door.")
 
     world.under_homes = [{"kind": h["kind"], "faction_idx": h["faction_idx"],
                           "regions": h["regions"]} for h in homes]

@@ -20,6 +20,18 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 101,
+        "title": "Under the Mountain",
+        "items": [
+            "GAMEPLAY: Dwarves and Goblins now truly live under the mountain — their capital is the underground hold/warren itself, not a surface city with a cave bonus under it. At worldgen their only above-ground settlement is a gate town at the doors, which is where caravans and commanders anchor; the realm's seat is the great hall (or the warren's door town) beneath.",
+            "GAMEPLAY: the New Game preview for a Dwarf or Goblin start shows whether the site sits over a cave network and ranks cave-over sites first — pick a mountain with caves beneath, and your city IS under it.",
+            "GAMEPLAY: a cave realm whose mountains have no reachable cave network (rare, mostly AI scatter) falls back to a plain surface capital rather than starting homeless.",
+            "GAMEPLAY: cave players open the map on the Underworld layer, looking at their own capital.",
+            "FIX: the terrace food chain was broken for holds — villages are planted deep, and the per-region terrace model left every holding in a doorless region unable to reach a single terrace cell, so holds slowly ate their larders dry. Terraces are now a whole-network asset shared across the claimed galleries; holds feed themselves again.",
+            "FIX: the underground mining inheritance was dead — a gallery under an iron range offered no ore because industry was camp-gated and no camp could be built below. The rock overhead is now the mine itself: a hold under a range mines it, one under chalk doesn't, and no surface family is offered below.",
+        ],
+    },
+    {
         "version": 100,
         "title": "Claims That Work, Villages That Connect",
         "items": [

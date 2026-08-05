@@ -1128,6 +1128,18 @@ def _generate_settlements(world, rng):
                 cells_by_fac[o].append((x, y))
 
     for fac_idx, cells in cells_by_fac.items():
+        from app.world.holds import UNDERGROUND_SPECIES
+        if world.factions[fac_idx].meta.get("species") in UNDERGROUND_SPECIES:
+            # Cave peoples (Dwarves, Goblins) found no surface capital: their
+            # seat is the underground hold/warren, placed by
+            # holds.settle_underworld right after this, with a surface gate
+            # town at the doors as their only above-ground anchor. Skipping
+            # the surface foothold settlements is what makes the capital
+            # actually live under the mountain; the home region's villages
+            # still land in the later _generate_villages pass.
+            for cid in world.factions[fac_idx].meta.get("regions", []):
+                world.regions[cid].settlements_generated = True
+            continue
         _place_settlements_for_faction(world, rng, fac_idx, cells, namer,
                                        fixed_counts=STARTING_SETTLEMENT_COUNTS)
         for cid in world.factions[fac_idx].meta.get("regions", []):

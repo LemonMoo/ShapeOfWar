@@ -633,6 +633,14 @@ class NewGameView(tk.Frame):
             parts.append(water)
         if ev["room"]:
             parts.append(ev["room"])
+        # Cave peoples read their underground prospects on the card: the
+        # capital will be under the mountain here, so "no caves beneath" is
+        # a surface-bound realm and worth saying before the player commits.
+        under = ev.get("underground")
+        if under is not None:
+            parts.append("sits above a cave network"
+                         if under["ok"] else "no caves beneath (this realm "
+                         "would live above ground)")
         self._start_note.config(text=" · ".join(parts) + "\n" + f"Goods: {goods}")
         self._start_warn.config(
             text="" if ev["sustain"]["ok"] else "⚠  " + ev["sustain"]["reason"])

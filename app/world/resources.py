@@ -1893,15 +1893,35 @@ def _village_terrain_potential(world, village, season):
     # leftovers. Crops stay baseline (food is what a place is for), which is
     # also why the Grange is a reach extender rather than a gate.
     industry_counts = {}
-    for building, (biomes, sample, _label) in OUTSTATIONS.items():
-        if sample != OUTSTATION_INDUSTRY:
-            continue
-        if storage_tier(village, building) <= 0:
-            continue
-        for b in biomes:
-            have = biome_counts.get(b, 0)
-            if have:
-                industry_counts[b] = industry_counts.get(b, 0) + have
+    if under:
+        # The underground INHERITS the mining economy (SUBTERRANEAN_PLAN
+        # phase 4): a gallery under a range is the mine -- the hold itself
+        # is the Mining Camp, and the rock overhead (already sampled into
+        # biome_counts by village_local_sample) is its land. No camp gate:
+        # "the ground offers nothing until someone digs it" is a surface
+        # settlement-first rule, and making a hold build a camp on top of
+        # the very ore it stands in is the one place that rule makes no
+        # sense. Surface FAMILIES are still not offered below (build_options
+        # excludes them) -- this is purely the land's offer, exactly as the
+        # original design intended ("the underground inherits a working
+        # mining economy rather than needing a new one").
+        for building, (biomes, sample, _label) in OUTSTATIONS.items():
+            if sample != OUTSTATION_INDUSTRY:
+                continue
+            for b in biomes:
+                have = biome_counts.get(b, 0)
+                if have:
+                    industry_counts[b] = industry_counts.get(b, 0) + have
+    else:
+        for building, (biomes, sample, _label) in OUTSTATIONS.items():
+            if sample != OUTSTATION_INDUSTRY:
+                continue
+            if storage_tier(village, building) <= 0:
+                continue
+            for b in biomes:
+                have = biome_counts.get(b, 0)
+                if have:
+                    industry_counts[b] = industry_counts.get(b, 0) + have
     if reach[OUTSTATION_INDUSTRY]:
         for b, cells in reach[OUTSTATION_INDUSTRY].items():
             industry_counts[b] = industry_counts.get(b, 0) + cells
@@ -3287,9 +3307,16 @@ def _grow_population(node):
                                               # `not hasattr(node, "kind")`,
                                               # and farm_output is the one
                                               # attribute only Villages have
-            or getattr(node, "is_capital", False)   # the seat of the realm
-                                                    # draws people (worldgen/
-                                                    # holds stamp it)
+            or (getattr(node, "is_capital", False)
+                and not getattr(node, "under_capital", False))
+                                              # the seat of the realm draws
+                                              # people -- but an UNDERGROUND
+                                              # capital (under_capital, see
+                                              # holds.settle_underworld) does
+                                              # not: its food is hard-capped
+                                              # by terraces and fungus, so
+                                              # growth must come from
+                                              # breaking out, not magic
             else POPULATION_GROWTH_RATE)
     accum = getattr(node, "_pop_growth_accum", 0.0)
     accum += (max_pop - node.population) * rate

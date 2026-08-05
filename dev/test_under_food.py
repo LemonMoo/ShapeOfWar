@@ -72,6 +72,10 @@ assert not crops, f"a hold grew crops out of solid rock: {crops}"
 print("  ok    no crop of any kind from a hold's own ground")
 
 print("\n--- ...but the ore above it is real ---")
+# The underground INHERITS the mining economy: no camp gate below (a gallery
+# under a range IS the mine -- see _village_terrain_potential's under
+# branch), so a bare hold in a range offers ore straight off its own land.
+raw, potentials, _by_sector = R._village_terrain_potential(world, hold, season)
 mining = {r: a for r, a in raw.items()
           if R.RESOURCES.get(r, {}).get("category") == "Mining"}
 assert mining, ("a gallery under a mountain range offers no ore at all -- the "

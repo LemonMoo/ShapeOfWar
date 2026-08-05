@@ -1019,6 +1019,16 @@ class MapView(tk.Frame):
     # --- world binding -----------------------------------------------------
     def set_world(self, world):
         self.world = world
+        # Cave peoples (Dwarves, Goblins) wake up underground: their capital
+        # is the hold/warren beneath the mountain, so a cave-player's new
+        # game opens on the underworld layer, not the surface.
+        from app.world.holds import UNDERGROUND_SPECIES
+        player_idx = getattr(world, "player_faction_idx", -1)
+        if 0 <= player_idx < len(world.factions):
+            player = world.factions[player_idx]
+            self.layer = (layers.UNDER
+                          if player.meta.get("species") in UNDERGROUND_SPECIES
+                          else layers.SURFACE)
         self._flat_content_sig = None   # force a rebuild -- see _sync_flatgl
         self.selected = None
         self.zoom_faction = None

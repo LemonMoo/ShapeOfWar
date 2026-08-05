@@ -344,6 +344,11 @@ mine = next((c for c in world.commanders if c.faction_idx == pidx), None)
 if mine is None:
     print("  skip  the player has no commander on this save")
 else:
+    # Cave players open the map on the UNDER layer (their capital is under
+    # the mountain), so a surface march would not be on the layer being
+    # looked at -- view the surface, as the player would to give the order.
+    from app.world import layers as _L
+    view.layer = _L.SURFACE
     view.selected_commander = mine
     before = len(view._map_lines(2, 4.0))
     sig_before = view._flat_content_signature(2, 4.0)

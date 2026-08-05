@@ -169,7 +169,13 @@ else:
 
 print("\n--- a needed building is flagged, and sorts first ---")
 orig = dict(getattr(village, "resources", {}) or {})
+herd_orig = dict(getattr(village, "herds", None) or {})
 try:
+    # A real herd emergency (fodder running short for winter) outranks a
+    # full pool in the urgency sort, and which villages own herds depends on
+    # the world -- clear the herd so THIS test is only about the pool.
+    if hasattr(village, "herds"):
+        village.herds = {}
     cap = R.node_pool_capacity(village, "household")
     village.resources = {"Barley": int(cap / R.resource_bulk("Barley")) + 10}
     win = build_menu.BuildMenuWindow(_root, w, village, nation)
@@ -183,6 +189,8 @@ try:
     print(f"  ok    urgent card present and first: {first.label} — {first.reason}")
 finally:
     village.resources = orig
+    if hasattr(village, "herds"):
+        village.herds = herd_orig
 
 print("\n--- the Build button actually starts a project, once ---")
 cost = construction.storage_build_cost(village, "granary", 1)
@@ -463,11 +471,41 @@ print("\n--- ...but the menu is NOT rebuilt under the player every day ---")
 # The real-time bug: _render tore down and rebuilt every widget in the window,
 # and in a running world that happens every day. A menu that reconstructs
 # itself under the pointer cannot be read, never mind clicked.
+# First let the countdown section's project FINISH: its completion
+# legitimately rebuilds the menu (a card flips from "under construction" to
+# "built"), and this test is about QUIET days, not project milestones.
+completion_guard = 0
+while (completion_guard < 60
+       and any(o.in_progress for o in B.build_options(w, village, nation))):
+    R.advance_turn(w)
+    build_menu.refresh_open(_root)
+    reopened.update_idletasks()
+    completion_guard += 1
 rebuilds = []
 real_inner = build_menu.BuildMenuWindow._render_inner
-build_menu.BuildMenuWindow._render_inner = (
-    lambda self: (rebuilds.append(1), real_inner(self))[1])
+def _spy_inner(self):
+    # Count only the menu this test is holding open: the settlement's menu
+    # from the "both node kinds" section is open too, and its own live
+    # economy legitimately rebuilds it -- not the menu under test.
+    if self is reopened:
+        rebuilds.append(1)
+    return real_inner(self)
+build_menu.BuildMenuWindow._render_inner = _spy_inner
+herd_orig = dict(getattr(village, "herds", None) or {})
+res_orig = dict(getattr(village, "resources", None) or {})
 try:
+    # A live herd economy legitimately crosses urgency/affordability
+    # thresholds day to day (fodder running short flips a Barn card's
+    # priority), and a menu that REBUILDS because the cards really changed
+    # is the fix working, not the bug. Zero the herd AND the stores so the
+    # window is quiet: nothing is urgent, nothing is affordable, and four
+    # days of production cannot fill a pool from zero. This test is about
+    # the menu NOT tearing itself down on a quiet day, which is the
+    # property the real-time fix was for.
+    if hasattr(village, "herds"):
+        village.herds = {}
+    if hasattr(village, "resources"):
+        village.resources = {}
     for _ in range(4):
         R.advance_turn(w)
         build_menu.refresh_open(_root)
@@ -478,6 +516,10 @@ try:
     reopened.update_idletasks()
 finally:
     build_menu.BuildMenuWindow._render_inner = real_inner
+    if hasattr(village, "herds"):
+        village.herds = herd_orig
+    if hasattr(village, "resources"):
+        village.resources = res_orig
 print(f"  {quiet} rebuild(s) over 4 days, {len(rebuilds) - quiet} on a click")
 assert quiet <= 1, (
     f"{quiet} full rebuilds in four days -- the menu is still being torn "
