@@ -105,6 +105,13 @@ MARKERS = [
     ("app.world.startsites", "_under_key", "name"),
     ("app.world.worldgen", "UNDERGROUND_SPECIES", "name"),
     ("app.core.changelog", "Under the Mountain", "const"),
+    # v0.18.13 -- the gate lifeline + blockade.
+    ("app.world.resources", "run_gate_logistics", "name"),
+    ("app.world.resources", "_faction_gate_link", "name"),
+    ("app.world.resources", "gate_blocked", "name"),
+    ("app.world.resources", "GATE_CARAVAN_QUANTITY", "name"),
+    ("app.world.resources", "The underground realm's supply line", "const"),
+    ("app.core.changelog", "The Door", "const"),
 ]
 
 arch = CArchiveReader(EXE)

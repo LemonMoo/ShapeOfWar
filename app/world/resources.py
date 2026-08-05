@@ -5995,6 +5995,145 @@ def advance_local_shipments(world):
     world.local_shipments = remaining
 
 
+# --- the gate lifeline (v0.18.13): goods cross the door ----------------------
+# A cave realm's hold sits in under-regions no surface wagon can reach, and
+# run_local_logistics matches only within a single region -- so the hold's
+# food gap and the gate town's cave goods could never meet. run_gate_logistics
+# moves one shipment per direction per turn between the hold's network and its
+# gate town, along a real two-layer route through the door: the underground
+# realm's supply line. A foreign army standing at the door (gate_blocked)
+# holds it -- no lifeline that turn -- which is what makes a gate siege mean
+# something (the safety/starvation spine of the underground capital).
+GATE_CARAVAN_QUANTITY = 40
+GATE_BLOCKADE_RADIUS = 6
+
+
+def _faction_gate_link(world, faction_idx):
+    """(under_nodes, gate_town, gate) for a cave realm, or None when it has
+    no reachable link (no under-home, no gate town, or no gate opening into
+    the town's own region)."""
+    homes = getattr(world, "under_homes", None) or []
+    home = next((h for h in homes if h["faction_idx"] == faction_idx), None)
+    if home is None:
+        return None
+    nation = world.factions[faction_idx]
+    sids = nation.meta.get("settlements", [])
+    if not sids:
+        return None
+    gate_town = world.settlements[sids[0]]
+    gate = None
+    for g in getattr(world, "gates", ()):
+        sx, sy = g["pos"]
+        rid = layers.region_at(world, sx, sy, layers.SURFACE)
+        if rid == gate_town.region_id:
+            gate = g
+            break
+    if gate is None:
+        return None
+    under_nodes = []
+    for rid in home["regions"]:
+        region = world.regions[rid]
+        under_nodes.extend(_region_logistics_nodes(world, region))
+    if not under_nodes:
+        return None
+    return under_nodes, gate_town, gate
+
+
+def gate_blocked(world, gate, faction_idx):
+    """A foreign commander within GATE_BLOCKADE_RADIUS of the door's surface
+    mouth holds the gate: the lifeline does not run that turn. Dead
+    commanders are removed from world.commanders (see commander succession),
+    so anything still in the list counts."""
+    sx, sy = gate["pos"]
+    r2 = GATE_BLOCKADE_RADIUS * GATE_BLOCKADE_RADIUS
+    for cmd in getattr(world, "commanders", ()):
+        if cmd.faction_idx == faction_idx or cmd.faction_idx < 0:
+            continue
+        if (cmd.pos[0] - sx) ** 2 + (cmd.pos[1] - sy) ** 2 <= r2:
+            return True
+    return False
+
+
+def _gate_ship(world, faction_idx, sources, source_needs, sinks, sink_needs,
+               turn, open_sink=False, no_food=False):
+    """Dispatch at most ONE gate shipment: the first resource (by the shared
+    household priority) any source has surplus of, to the first sink that can
+    take it. open_sink=True treats the sink as an open market (the gate town's
+    export staging) instead of requiring a real need match, so a hold's cave
+    goods move up to the door even when the town does not personally want
+    them. no_food=True keeps the hold's FOOD at home: a cave realm's grain
+    is its own lifeblood -- the door exports what the rock makes (ore, gems,
+    crafts), and the gate town buys its grain from surface trade like any
+    other town."""
+    from app.world import commander
+    for kind, node in sources:
+        if (_active_outgoing_shipments(world, kind, node.id)
+                >= MAX_ACTIVE_LOCAL_SHIPMENTS_PER_NODE):
+            continue
+        own_needs = source_needs.get((kind, node.id), {})
+        for resource in local_shipment_priority(turn, node.id):
+            if no_food and resource in _FOOD_SOURCES:
+                continue
+            surplus = _node_surplus(node, resource, own_needs)
+            if surplus < LOCAL_SHIPMENT_MIN_QUANTITY:
+                continue
+            for sink_kind, sink in sinks:
+                if not open_sink and not _node_wants(
+                        sink_kind, sink, resource,
+                        sink_needs.get((sink_kind, sink.id), {})):
+                    continue
+                qty = min(surplus, GATE_CARAVAN_QUANTITY)
+                if not hasattr(node, "resources"):
+                    node.resources = {}
+                node.resources[resource] = node.resources.get(resource, 0) - qty
+                src_layer = layers.region_layer(world.regions[node.region_id])
+                dst_layer = layers.region_layer(world.regions[sink.region_id])
+                path, _layers = commander._two_layer_path(
+                    world, node.pos, src_layer, sink.pos, dst_layer)
+                world.local_shipments.append(LocalShipment(
+                    faction_idx, resource, qty, kind, node.id,
+                    sink_kind, sink.id, node.pos, sink.pos, path=path,
+                    transit_cells=path_transit_cells(world, path) if path else None))
+                return
+    return
+
+
+def run_gate_logistics(world):
+    """The underground realm's supply line: one shipment per direction per
+    turn through its door -- surface food DOWN to the hold, cave goods UP to
+    the gate town's staging -- along the real two-layer gate route. Called
+    from day_steps right after run_local_logistics (which cannot see across
+    the door; this is the only cross-region, cross-layer logistics in the
+    game). Yields "gate" between factions, like the other chunked phases."""
+    turn = getattr(world, "turn", 0)
+    homes = getattr(world, "under_homes", None) or []
+    for home in homes:
+        faction_idx = home["faction_idx"]
+        link = _faction_gate_link(world, faction_idx)
+        if link is None:
+            continue
+        under_nodes, gate_town, gate = link
+        if gate_blocked(world, gate, faction_idx):
+            continue
+        gate_region = world.regions[gate_town.region_id]
+        gate_nodes = _region_logistics_nodes(world, gate_region)
+        season = world.season
+        gate_needs = {("settlement", gate_town.id): settlement_needs(gate_town, season)}
+        under_needs = {(kind, n.id): settlement_needs(n, season)
+                       for kind, n in under_nodes}
+        # DOWN: the gate town's surplus (surface food) feeds the hold.
+        _gate_ship(world, faction_idx, gate_nodes, gate_needs,
+                   under_nodes, under_needs, turn)
+        # UP: the hold's surplus stages at the gate town -- its export door.
+        # no_food: the hold's food stays home; only what the rock makes
+        # (ore, gems, crafts) crosses up. The gate town buys its grain from
+        # surface trade like any other town.
+        _gate_ship(world, faction_idx, under_nodes, under_needs,
+                   [("settlement", gate_town)], gate_needs, turn,
+                   open_sink=True, no_food=True)
+        yield "gate"
+
+
 # --- biome / climate classification -----------------------------------------
 # BIOME_YIELDS/CLIMATE_MODIFIERS/SEASON_MODIFIERS (the old geography-driven
 # aggregate-resource system that predates the tier-based registry above)
@@ -7156,6 +7295,11 @@ def day_steps(world):
 
     yield from run_local_logistics(world)   # dispatch new shipments from this turn's fresh stock
                                             # (a generator: yields 'households' between region chunks)
+    # The gate lifeline (v0.18.13): one shipment per direction per turn
+    # between a cave realm's hold network and its gate town, through the
+    # door -- the only cross-region, cross-layer logistics in the game
+    # (run_local_logistics is per-region and cannot see across the door).
+    yield from run_gate_logistics(world)
     advance_settlement_storage(world)
     consumption_value = advance_settlement_consumption(world)
     yield "households"

@@ -9,7 +9,7 @@ REM  match the release tag you're about to cut.
 REM ==========================================================
 setlocal
 cd /d "%~dp0"
-set APP_VERSION=0.18.12
+set APP_VERSION=0.18.13
 
 echo Generating version resource ...
 python make_version_file.py "build_version_game.txt" "%APP_VERSION%" "Shapes of War" "Shapes of War" "ShapesOfWar.exe"

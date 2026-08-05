@@ -20,6 +20,15 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 102,
+        "title": "The Door",
+        "items": [
+            "GAMEPLAY: the gate lifeline — a cave realm's hold and its gate town now trade through the door. One shipment per direction per turn, along the real two-layer route: the hold's cave goods (ore, gems, crafts — never its own food) stage at the gate town's market, and surplus food at the door feeds a hungry hold. This is the underground realm's supply line: growth is what you can feed through the door.",
+            "GAMEPLAY: the blockade — a foreign army standing at the door's surface mouth holds the gate, and no supplies move that turn. Sieging a cave realm means taking the door: starve it, or storm it (the two-layer march through a gate already works).",
+            "FIX: the hold's food stays home — the lifeline exports only what the rock makes, never the hold's grain, so a marginal hold is not drained by its own door.",
+        ],
+    },
+    {
         "version": 101,
         "title": "Under the Mountain",
         "items": [

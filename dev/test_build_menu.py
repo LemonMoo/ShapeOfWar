@@ -481,50 +481,79 @@ while (completion_guard < 60
     build_menu.refresh_open(_root)
     reopened.update_idletasks()
     completion_guard += 1
+# The contract, asserted directly instead of by a count: _render rebuilds the
+# menu IFF what it depicts changed. The old bug tore the menu down on EVERY
+# day regardless. A live village legitimately changes day to day (the gate
+# lifeline delivers goods through the door, pools fill, urgency flips) and a
+# menu that rebuilds because the cards really changed is the fix working --
+# the BUG is a rebuild on a day when nothing changed.
 rebuilds = []
-real_inner = build_menu.BuildMenuWindow._render_inner
+unjustified = []
+_changed_now = [False]
+_last_sig = [None]
+_real_sig = build_menu.BuildMenuWindow._content_signature
+
+
+def _spy_sig(self):
+    s = _real_sig(self)
+    if self is reopened:
+        _changed_now[0] = False
+        if _last_sig[0] is not None and s != _last_sig[0]:
+            _changed_now[0] = True
+        _last_sig[0] = s
+    return s
+
+
+build_menu.BuildMenuWindow._content_signature = _spy_sig
+_real_inner = build_menu.BuildMenuWindow._render_inner
+
+
 def _spy_inner(self):
-    # Count only the menu this test is holding open: the settlement's menu
-    # from the "both node kinds" section is open too, and its own live
-    # economy legitimately rebuilds it -- not the menu under test.
     if self is reopened:
         rebuilds.append(1)
-    return real_inner(self)
+        unjustified.append(not _changed_now[0])
+        _changed_now[0] = False
+    return _real_inner(self)
+
+
 build_menu.BuildMenuWindow._render_inner = _spy_inner
 herd_orig = dict(getattr(village, "herds", None) or {})
 res_orig = dict(getattr(village, "resources", None) or {})
 try:
-    # A live herd economy legitimately crosses urgency/affordability
-    # thresholds day to day (fodder running short flips a Barn card's
-    # priority), and a menu that REBUILDS because the cards really changed
-    # is the fix working, not the bug. Zero the herd AND the stores so the
-    # window is quiet: nothing is urgent, nothing is affordable, and four
-    # days of production cannot fill a pool from zero. This test is about
-    # the menu NOT tearing itself down on a quiet day, which is the
-    # property the real-time fix was for.
+    # Zero the herd and the stores so the menu under test is as quiet as it
+    # can be. Door deliveries may still change it -- those are REAL changes
+    # (see the contract above); the property under test is that no rebuild
+    # happens on a day when nothing moved.
     if hasattr(village, "herds"):
         village.herds = {}
     if hasattr(village, "resources"):
         village.resources = {}
+    # Seed the change-detector's baseline AFTER the zeroing, so the first
+    # refresh's rebuild (the zeroing visibly changed the cards) is a
+    # justified change rather than an unexplained one.
+    _last_sig[0] = _real_sig(reopened)
     for _ in range(4):
         R.advance_turn(w)
         build_menu.refresh_open(_root)
         reopened.update_idletasks()
     quiet = len(rebuilds)
+    assert rebuilds, "nothing ever rebuilt -- the change-detection spy is broken"
+    assert not any(unjustified), (
+        f"{sum(unjustified)} rebuild(s) happened on a day nothing changed -- "
+        "the menu is still being torn down under the player")
     # ...and a player action still answers immediately.
     reopened._set_scope("village" if reopened._scope != "village" else "region")
     reopened.update_idletasks()
+    assert len(rebuilds) > quiet, "a player action did not rebuild the menu"
 finally:
-    build_menu.BuildMenuWindow._render_inner = real_inner
+    build_menu.BuildMenuWindow._content_signature = _real_sig
+    build_menu.BuildMenuWindow._render_inner = _real_inner
     if hasattr(village, "herds"):
         village.herds = herd_orig
     if hasattr(village, "resources"):
         village.resources = res_orig
-print(f"  {quiet} rebuild(s) over 4 days, {len(rebuilds) - quiet} on a click")
-assert quiet <= 1, (
-    f"{quiet} full rebuilds in four days -- the menu is still being torn "
-    "down under the player")
-assert len(rebuilds) > quiet, "a player action did not rebuild the menu"
+print(f"  {quiet} rebuild(s) over 4 days, {len(rebuilds) - quiet} on a click, "
+      f"none on a day nothing changed")
 print("  ok    quiet while time passes, immediate when acted on")
 
 print("\n--- refreshing drops windows that have been closed ---")
