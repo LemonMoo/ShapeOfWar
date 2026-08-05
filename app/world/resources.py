@@ -7061,6 +7061,14 @@ def day_steps(world):
     """
     world.turn += 1
     world.season = SEASONS[((world.turn - 1) // TURNS_PER_SEASON) % len(SEASONS)]
+    # Season news beats: on the first turn of a season, compress the last
+    # season's chronicle entries into one line of world news for the UI's
+    # bottom banner (app/world/news.py). Rides world.season_news_turn so the
+    # UI can show it exactly once, at the flip.
+    if _is_new_season(world.turn):
+        from app.world import news
+        world.season_news = news.compose_season_news(world)
+        world.season_news_turn = world.turn
     # Weather: rolled/advanced before production, so this turn's harvest
     # already reflects whatever's active right now (see advance_weather).
     advance_weather(world)

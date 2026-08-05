@@ -19,7 +19,8 @@ def log(world, nation, text):
     """Append a dated milestone to a nation's chronicle. `world` supplies
     the turn the date is derived from (the sim's single clock)."""
     entries = nation.meta.setdefault("chronicle", [])
-    entries.append({"date": turn_date_text(world.turn), "text": text})
+    entries.append({"date": turn_date_text(world.turn), "turn": world.turn,
+                    "text": text})
     if len(entries) > CHRONICLE_CAP:
         del entries[:len(entries) - CHRONICLE_CAP]
 

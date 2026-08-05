@@ -295,10 +295,15 @@ class App(tk.Tk):
 
     def _on_turn_settled(self):
         """MapView's on_turn_settled callback: the day has fully resolved.
-        Flush any pending defeat/elimination announcements, then surface
-        any frontier events staged by the world (see _check_frontier_events)
-        -- a claim's first weeks can pause the world for a small decision."""
+        Flush any pending defeat/elimination announcements, surface the
+        season's news beat once (world.season_news is stamped at the season
+        flip), then surface any frontier events staged by the world (see
+        _check_frontier_events) -- a claim's first weeks can pause the
+        world for a small decision."""
         self._flush_pending_defeat()
+        if (getattr(self.world, "season_news_turn", 0) == self.world.turn
+                and getattr(self.world, "season_news", None)):
+            self.map_view.show_bottom_message(self.world.season_news, ms=6000)
         self._check_frontier_events()
 
     def _check_frontier_events(self):

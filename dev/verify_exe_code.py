@@ -78,6 +78,11 @@ MARKERS = [
     ("app.world.resources", "FRONTIER_POPULATION_GROWTH_RATE", "name"),
     ("app.ui.map_view", "Seat of the Realm", "const"),
     ("app.core.changelog", "The Seat of the Realm", "const"),
+    # v0.18.9 -- season news.
+    ("app.world.news", "compose_season_news", "name"),
+    ("app.world.news", "raised a new Town", "const"),
+    ("app.world.resources", "season_news", "name"),
+    ("app.core.changelog", "Season News", "const"),
 ]
 
 arch = CArchiveReader(EXE)

@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 98,
+        "title": "Season News",
+        "items": [
+            "FEATURE: at every season change the world speaks — a one-line digest of what the realms actually did last season: who raised new Towns or Cities, who claimed new land, who founded their first village. Your rivals' progress is visible now, not happening behind the fog.",
+        ],
+    },
+    {
         "version": 97,
         "title": "The Seat of the Realm",
         "items": [
