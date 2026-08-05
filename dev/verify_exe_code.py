@@ -46,6 +46,13 @@ MARKERS = [
     # v0.18.3 -- dated ledger.
     ("app.ui.map_view", "Season/day/year for any turn number", "const"),
     ("app.core.changelog", "Dated Ledger", "const"),
+    # v0.18.4 -- earned growth (population-gated ladder).
+    ("app.world.construction", "VILLAGE_RAISE_POPULATION_FRACTION", "name"),
+    ("app.world.construction", "TOWN_UPGRADE_POPULATION_FRACTION", "name"),
+    ("app.world.construction", "isn't big enough yet", "const"),
+    ("app.world.construction", "populous enough yet", "const"),
+    ("app.world.resources", "FRONTIER_POPULATION_GROWTH_RATE", "name"),
+    ("app.core.changelog", "Earned Growth", "const"),
 ]
 
 arch = CArchiveReader(EXE)
