@@ -4833,6 +4833,22 @@ class MapView(tk.Frame):
         out += [b for b in resources.HERD_BUILDINGS if b not in out]
         return out
 
+    def _show_character_choice(self, verb, kind, turns, handler):
+        """The ladder's rung choice -- Market / Garrison / Cathedral -- as
+        three inline buttons (see resources.SETTLEMENT_CHARACTERS). Each is
+        one persistent, modest bonus keyed to a real mechanic, spelled out
+        so the choice is informed before it's made."""
+        from app.world import resources
+        self._panel_text(
+            "Choose its character — Market: goods worth 25% more · "
+            "Garrison: arms its whole population · Cathedral: recovers "
+            "from hardship faster", fg=theme.MUTED)
+        for char in resources.SETTLEMENT_CHARACTERS:
+            self._panel_button(
+                f"{verb} {resources.CHARACTER_NAMES[char]} {kind} "
+                f"({turns} turns)",
+                lambda c=char: handler(c))
+
     def _show_upgrade_action(self, st, player):
         """For an owned Town: the 'Upgrade to City' action -- the
         settlement-first growth lever (a City supports more villages, tax,
@@ -4863,22 +4879,25 @@ class MapView(tk.Frame):
                 f"Upgrade to City needs {_format_resources(cost)} — a City "
                 "supports more villages, tax and people.", fg=theme.MUTED)
             return
-        self._panel_button(
-            f"Upgrade to City ({turns} turns)",
-            lambda: self._do_upgrade_settlement(st))
+        self._show_character_choice(
+            "Rise to", "City", turns,
+            lambda c: self._do_upgrade_settlement(st, c))
 
-    def _do_upgrade_settlement(self, st):
+    def _do_upgrade_settlement(self, st, character=None):
         from app.world import construction
         player = self._player_faction()
         if player is None:
             return
-        msg = construction.start_settlement_upgrade(self.world, player, st)
+        msg = construction.start_settlement_upgrade(
+            self.world, player, st, character)
         if msg:
             self.show_bottom_message(msg)
             return
         self._rebuild_selection_panel()
+        from app.world import resources
         self.show_bottom_message(
-            f"{st.name} will rise to a City in "
+            f"{st.name} will rise to a "
+            f"{resources.CHARACTER_NAMES.get(character, '')} City in "
             f"{construction.SETTLEMENT_UPGRADE_TURNS} turns.")
 
     def _show_settlement(self, st):
@@ -4899,6 +4918,17 @@ class MapView(tk.Frame):
         self._page_begin(None)
         self._panel_text(f"{st.kind.capitalize()} in {region}\n"
                  f"{wd.factions[st.faction_idx].name}", fg=theme.MUTED)
+        character = getattr(st, "character", None)
+        if character:
+            from app.world import resources
+            blurb = {
+                "market": "Its goods command better prices — worth 25% more.",
+                "garrison": "It arms its whole population for the levy.",
+                "cathedral": "Its community recovers from hardship faster.",
+            }[character]
+            self._panel_text(
+                f"A {resources.CHARACTER_NAMES[character]} {st.kind}. {blurb}",
+                fg=theme.ACCENT)
 
         prosperity = getattr(st, "prosperity", None)
         if prosperity is not None:
@@ -5117,22 +5147,24 @@ class MapView(tk.Frame):
                 f"Raise to Town needs {_format_resources(cost)} — a Town "
                 "supports more villages, tax and people.", fg=theme.MUTED)
             return
-        self._panel_button(
-            f"Raise to Town ({turns} turns)",
-            lambda: self._do_raise_village(v))
+        self._show_character_choice(
+            "Raise to", "Town", turns,
+            lambda c: self._do_raise_village(v, c))
 
-    def _do_raise_village(self, v):
+    def _do_raise_village(self, v, character=None):
         from app.world import construction
         player = self._player_faction()
         if player is None:
             return
-        msg = construction.start_raise_village(self.world, player, v)
+        msg = construction.start_raise_village(self.world, player, v, character)
         if msg:
             self.show_bottom_message(msg)
             return
         self._rebuild_selection_panel()
+        from app.world import resources
         self.show_bottom_message(
-            f"{v.name} will grow into a Town in "
+            f"{v.name} will grow into a "
+            f"{resources.CHARACTER_NAMES.get(character, '')} Town in "
             f"{construction.RAISE_VILLAGE_TURNS} turns.")
 
     def _show_village(self, v):

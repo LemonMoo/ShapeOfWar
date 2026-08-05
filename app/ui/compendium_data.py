@@ -346,6 +346,18 @@ def _settlements_article():
             "Currency) — it's purely a Prosperity input now, folded into "
             "how big a settlement's target meter is."
         ),
+        "CHARACTERS (MARKET / GARRISON / CATHEDRAL)",
+        (
+            "Every settlement has a character — Market, Garrison, or "
+            "Cathedral — a persistent, modest bonus keyed to a real "
+            "mechanic. When you raise a village to a Town, or a Town to a "
+            "City, you choose it; a Market settlement's goods are worth "
+            "25% more (a higher Prosperity target), a Garrison arms its "
+            "whole population (extra strength for the levy), and a "
+            "Cathedral recovers from hardship faster (its Prosperity "
+            "meter eases 1.5x as quickly toward its target). Starting "
+            "settlements already carry one."
+        ),
         "POPULATION: FLOOR, CEILING, GROWTH",
         (
             "A freshly founded settlement or village starts at only "
@@ -355,10 +367,15 @@ def _settlements_article():
             "yet. From there it climbs back toward that ceiling on its "
             "own, very slowly, closing a small fraction of the remaining "
             "gap each turn (only while it's not currently in a Food/"
-            "Firewood shortage grace period) — this genuinely takes "
-            "decades of in-game time to meaningfully close, by design; "
-            "expect a settlement to still be well under half its ceiling "
-            "after 10-20 years. A bad enough sustained shortage can still "
+            "Firewood shortage grace period) — for an established City "
+            "this genuinely takes decades of in-game time to "
+            "meaningfully close, by design. Frontier communities are "
+            "another story: Villages and Towns grow 40x as fast, so a "
+            "fed and sheltered village reaches half its ceiling — the "
+            "population it needs before it can be raised to a Town — in "
+            "about a year of game time. Expect a settlement to still be "
+            "well under half its ceiling after 10-20 years. A bad "
+            "enough sustained shortage can still "
             f"shrink it (see Prosperity), but never below "
             f"{_pct(R.POPULATION_MIN_FRACTION)} of its own max population "
             "— a hard-scrabble remnant survives rather than the "

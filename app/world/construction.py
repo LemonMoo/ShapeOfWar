@@ -350,9 +350,11 @@ class SettlementUpgradeProject:
     once; the population itself is untouched and simply grows toward the
     new ceiling as it always has."""
 
-    def __init__(self, faction_idx, settlement_id):
+    def __init__(self, faction_idx, settlement_id, character=None):
         self.faction_idx = faction_idx
         self.settlement_id = settlement_id
+        self.character = character   # the ladder's choice at this rung -- see
+                                     # resources.SETTLEMENT_CHARACTERS
         self.total_turns = SETTLEMENT_UPGRADE_TURNS
         self.progress_turns = 0.0
 
@@ -390,9 +392,11 @@ class RaiseVillageProject:
     (tax, population ceiling, storage tier, prosperity target) and adds its
     village-slot allowance (+4) to the region."""
 
-    def __init__(self, faction_idx, village_id):
+    def __init__(self, faction_idx, village_id, character=None):
         self.faction_idx = faction_idx
         self.village_id = village_id
+        self.character = character   # the ladder's choice at this rung -- see
+                                     # resources.SETTLEMENT_CHARACTERS
         self.total_turns = RAISE_VILLAGE_TURNS
         self.progress_turns = 0.0
 
@@ -1012,10 +1016,11 @@ def _upgrade_projects(world):
     return lst
 
 
-def start_settlement_upgrade(world, nation, settlement):
-    """Pay the cost and queue a Town's upgrade to a City. Returns a message
-    ("" on success, why-not otherwise), mirroring start_settlement. Works
-    for the player or an AI nation alike (see run_settlement_ai)."""
+def start_settlement_upgrade(world, nation, settlement, character=None):
+    """Pay the cost and queue a Town's upgrade to a City, choosing the
+    City's character (see resources.SETTLEMENT_CHARACTERS). Returns a
+    message ("" on success, why-not otherwise), mirroring start_settlement.
+    Works for the player or an AI nation alike (see run_settlement_ai)."""
     faction_idx = world.factions.index(nation)
     if settlement.faction_idx != faction_idx:
         return "You can only upgrade your own settlements."
@@ -1035,7 +1040,7 @@ def start_settlement_upgrade(world, nation, settlement):
         return "You don't have enough resources to start the upgrade."
     _pay_cost(nation, cost, world)
     _upgrade_projects(world).append(
-        SettlementUpgradeProject(faction_idx, settlement.id))
+        SettlementUpgradeProject(faction_idx, settlement.id, character))
     return ""
 
 
@@ -1052,6 +1057,10 @@ def _finish_settlement_upgrade(world, project):
     st.kind = "city"
     st.tax_income = round(random.uniform(*SETTLEMENT_TAX_INCOME["city"]))
     st.max_population = round(random.uniform(*POPULATION_RANGE["city"]))
+    # The ladder's choice at this rung carries onto the finished City (the
+    # AI picks one; the player picks in the panel). None = no bonus (e.g.
+    # direct-built settlements or pre-character saves).
+    st.character = getattr(project, "character", None)
 
 
 def _found_village_projects(world):
@@ -1123,8 +1132,9 @@ def _finish_found_village(world, project):
     return v
 
 
-def start_raise_village(world, nation, village):
-    """Pay the cost and queue a village's raising to a Town. Returns a
+def start_raise_village(world, nation, village, character=None):
+    """Pay the cost and queue a village's raising to a Town, choosing the
+    Town's character (see resources.SETTLEMENT_CHARACTERS). Returns a
     message ("" on success, why-not otherwise). Works for player and AI."""
     faction_idx = world.factions.index(nation)
     if village.faction_idx != faction_idx:
@@ -1143,8 +1153,16 @@ def start_raise_village(world, nation, village):
         return "You don't have enough resources to raise this village."
     _pay_cost(nation, cost, world)
     _raise_village_projects(world).append(
-        RaiseVillageProject(faction_idx, village.id))
+        RaiseVillageProject(faction_idx, village.id, character))
     return ""
+
+
+def _ai_pick_character():
+    """The AI's character choice at a ladder rung -- weighted for variety
+    (a realm full of identical Market Towns would read as a bug), market
+    slightly favored as the economy-friendly default."""
+    from app.world.resources import SETTLEMENT_CHARACTERS
+    return random.choices(tuple(SETTLEMENT_CHARACTERS), weights=(40, 30, 30))[0]
 
 
 def _finish_raise_village(world, project):
@@ -1164,6 +1182,7 @@ def _finish_raise_village(world, project):
                     v.population, v.adults, v.children,
                     getattr(v, "prosperity", 0.0),
                     getattr(v, "max_population", None))
+    st.character = getattr(project, "character", None)
     st.resources = dict(getattr(v, "resources", {}))
     world.settlements.append(st)
     nation = world.factions[v.faction_idx]
@@ -1452,11 +1471,11 @@ def run_settlement_ai(world):
             continue
         village = _pick_raise_village(world, fac_idx)
         if village is not None:
-            start_raise_village(world, nation, village)
+            start_raise_village(world, nation, village, _ai_pick_character())
             continue
         town = _pick_upgrade_town(world, fac_idx)
         if town is not None:
-            start_settlement_upgrade(world, nation, town)
+            start_settlement_upgrade(world, nation, town, _ai_pick_character())
             continue
         if empty_regions:
             region = random.choice(empty_regions)

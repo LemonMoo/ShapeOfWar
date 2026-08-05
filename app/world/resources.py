@@ -6216,6 +6216,16 @@ def _recompute_military(nation, world, fac_idx=None):
     nodes = _faction_nodes(nation, world, fac_idx)
 
     adults = sum(getattr(n, "adults", 0) for n in nodes)
+    # Garrison settlements arm their whole population: every adult in a
+    # garrison-character settlement counts one extra toward the levy (see
+    # GARRISON_LEVY_EXTRA).
+    if fac_idx is None:
+        fac_idx = world.factions.index(nation)
+    garrison_extra = sum(getattr(st, "adults", 0)
+                         for st in world.settlements
+                         if st.faction_idx == fac_idx
+                         and settlement_character(st) == "garrison")
+    adults += round(garrison_extra * GARRISON_LEVY_EXTRA)
     weapons = sum(getattr(n, "resources", {}).get("Weapons", 0) for n in nodes)
     shields = sum(getattr(n, "resources", {}).get("Shields", 0) for n in nodes)
 
@@ -6273,6 +6283,33 @@ def _resource_bundle_value(resource_amounts):
     return sum(resource_value(r, a) for r, a in resource_amounts.items())
 
 
+# --- settlement characters: the ladder's choice at each rung ------------
+# (see construction.start_raise_village / start_settlement_upgrade; the AI
+# picks via construction._ai_pick_character, worldgen starting settlements
+# roll one for flavor, and the panel buttons offer the choice to the
+# player). Each character is a persistent, modest bonus keyed to a REAL
+# mechanic -- wealth -> prosperity target, levy -> military, ease -> how
+# fast the prosperity meter recovers -- so the choice reads through the
+# economy instead of being a flat stat sticker.
+SETTLEMENT_CHARACTERS = ("market", "garrison", "cathedral")
+CHARACTER_NAMES = {"market": "Market", "garrison": "Garrison",
+                   "cathedral": "Cathedral"}
+# Market: the settlement's goods+tax wealth is worth 1.25x (its goods
+# command better prices), raising its prosperity target.
+CHARACTER_WEALTH_MULT = {"market": 1.25}
+# Garrison: the settlement's adults count GARRISON_LEVY_EXTRA extra toward
+# the faction levy (a walled, drilled town arms more of its people).
+GARRISON_LEVY_EXTRA = 1.0
+# Cathedral: the prosperity meter eases CATHEDRAL_EASE_MULT x faster toward
+# its target (a cathedral lifts the community after hard times).
+CATHEDRAL_EASE_MULT = 1.5
+
+
+def settlement_character(st):
+    """A settlement's character, defaulting safely for old saves."""
+    return getattr(st, "character", None)
+
+
 def settlement_goods_wealth_value(settlement, season, tax_income):
     """A city/castle/town's per-turn "goods & wealth" figure: the gold-
     value of what it needs under Phase 8's consumption model (see
@@ -6280,6 +6317,8 @@ def settlement_goods_wealth_value(settlement, season, tax_income):
     to be the gold-value of its flat SETTLEMENT_UPKEEP roll; that's gone
     (see the module docstring), replaced by the real, population-scaled
     figure."""
+    if settlement_character(settlement) == "market":
+        tax_income = round(tax_income * CHARACTER_WEALTH_MULT["market"])
     return settlement_needs_value(settlement, season) + tax_income
 
 
@@ -6389,7 +6428,10 @@ def _update_prosperity(world, production_value, consumption_value):
             target = _prosperity_target(
                 settlement_goods_wealth_value(st, world.season, st.tax_income),
                 health, _prosperity_condition(st))
-            st.prosperity += (target - st.prosperity) * PROSPERITY_EASE
+            ease = PROSPERITY_EASE * (CATHEDRAL_EASE_MULT
+                                      if settlement_character(st) == "cathedral"
+                                      else 1.0)
+            st.prosperity += (target - st.prosperity) * ease
         for v in villages_by_fac.get(fac_idx, []):
             target = _prosperity_target(village_goods_wealth_value(v),
                                         health, _prosperity_condition(v))

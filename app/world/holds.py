@@ -219,6 +219,11 @@ def _settle_hold(world, rng, network, faction_idx, namer):
                     adults=round(adults * scale), children=round(children * scale),
                     prosperity=seed_prosperity(),
                     max_population=round((max_population or population) * scale))
+    # A hold is a Settlement like any other, so it gets a character (see
+    # resources.SETTLEMENT_CHARACTERS) -- a fortress-realm's holds lean
+    # garrison, weighted for variety like the surface world.
+    from app.world.resources import SETTLEMENT_CHARACTERS
+    st.character = rng.choices(tuple(SETTLEMENT_CHARACTERS), weights=(25, 50, 25))[0]
     world.settlements.append(st)
     world.factions[faction_idx].meta.setdefault("settlements", []).append(st.id)
     if st.region_id is not None and 0 <= st.region_id < len(world.regions):

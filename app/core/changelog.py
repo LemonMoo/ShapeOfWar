@@ -20,6 +20,15 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 94,
+        "title": "A Character of Its Own",
+        "items": [
+            "GAMEPLAY: every settlement has a character — when you raise a village to a Town, or a Town to a City, you choose Market, Garrison, or Cathedral. Market: its goods are worth 25% more (a higher Prosperity target). Garrison: it arms its whole population (extra levy strength). Cathedral: its Prosperity recovers 1.5x as fast.",
+            "GAMEPLAY: rival realms pick characters too — the map's Towns and Cities now read as Market, Garrison, or Cathedral settlements, and worldgen starting settlements (and underground holds) each carry one.",
+            "UI: the settlement panel shows a settlement's character and what it does; the raise/upgrade buttons are now three-way character choices.",
+        ],
+    },
+    {
         "version": 93,
         "title": "Earned Growth",
         "items": [

@@ -1043,6 +1043,13 @@ def _place_settlements_for_faction(world, rng, fac_idx, cells, namer, fixed_coun
             st = Settlement(len(world.settlements), kind, namer(kind, species),
                             (x, y), fac_idx, region_id, tax_income,
                             population, adults, children, prosperity, max_population)
+            # Starting settlements roll a character for flavor (the ladder
+            # asks for a choice at each rung; worldgen is before any choice,
+            # so it just gives the pre-made realm variety). See
+            # resources.SETTLEMENT_CHARACTERS.
+            from app.world.resources import SETTLEMENT_CHARACTERS
+            st.character = rng.choices(tuple(SETTLEMENT_CHARACTERS),
+                                       weights=(40, 30, 30))[0]
             world.settlements.append(st)
             _mark_occupied_both(world, x, y)
             world.factions[fac_idx].meta["settlements"].append(st.id)
