@@ -83,6 +83,10 @@ MARKERS = [
     ("app.world.news", "raised a new Town", "const"),
     ("app.world.resources", "season_news", "name"),
     ("app.core.changelog", "Season News", "const"),
+    # v0.18.10 -- rivers run true (slope-weighted D8).
+    ("app.world.worldgen", "_SQRT2", "name"),
+    ("app.world.worldgen", "slope-weighted steepest descent", "const"),
+    ("app.core.changelog", "Rivers Run True", "const"),
 ]
 
 arch = CArchiveReader(EXE)

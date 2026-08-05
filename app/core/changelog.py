@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 99,
+        "title": "Rivers Run True",
+        "items": [
+            "FIX: rivers no longer cut across the map in long straight diagonals. Flow direction now judges each drop per unit distance (a diagonal drop counts as drop/sqrt(2)), which removes the D8 diagonal bias — river networks are balanced and meandering instead of 69% diagonal.",
+        ],
+    },
+    {
         "version": 98,
         "title": "Season News",
         "items": [
