@@ -1992,7 +1992,12 @@ class MapView(tk.Frame):
         A settlement is visible at the region-view zoom _enter_region_view
         already lands on; a village needs the camera pulled in tighter than
         that -- close enough to cross the _villages_visible threshold --
-        since villages only appear/are clickable once actually zoomed in."""
+        since villages only appear/are clickable once actually zoomed in.
+        Alerts are surface realm data: while underground the jump is ignored
+        (no surface panel below), the same way the alert badges themselves do
+        not render on the under layer."""
+        if self.layer != layers.SURFACE:
+            return
         wd = self.world
         faction = wd.factions[node.faction_idx]
         self._enter_region_view(faction)
@@ -2715,7 +2720,7 @@ class MapView(tk.Frame):
         t_base = time.perf_counter()
         self._ensure_fog_overlay()
         t_fog = time.perf_counter()
-        fog_active = self._fog_is_active() and self._fog_overlay_img is not None
+        fog_active = self._fog_overlay_active()
         vx0, vy0, vx1, vy1 = self._fit_aspect(self.view, cw / ch)
         scale = cw / (vx1 - vx0)
         self._place = (vx0, vy0, scale)
@@ -2812,9 +2817,11 @@ class MapView(tk.Frame):
                 labels_set=(t_labels_set - t_markers_set) * 1000,
                 render_now=(t_render - t_labels_set) * 1000,
                 n_lines=len(lines), n_markers=len(markers), n_labels=len(labels))
-        if self.mode == "political":
+        if self.mode == "political" and self.layer == layers.SURFACE:
             # Just right of the left sidebar (which overlays the map's own
-            # corner), so the key is visible while the panel is open.
+            # corner), so the key is visible while the panel is open. The
+            # legend explains surface terrain glyphs; it must not linger
+            # over the under raster (see _draw_terrain_legend).
             self._flat_legend.place(x=_LEFT_PANEL_W + 8, y=12)
             # tk.Canvas overrides tkraise/lift to mean tag_raise (a canvas
             # ITEM operation) -- Misc.tkraise (raise this WIDGET in the
@@ -4028,6 +4035,19 @@ class MapView(tk.Frame):
         e.g. mid-click."""
         wd = self.world
         return wd.player_faction_idx is not None and hasattr(wd, "fog")
+
+    def _fog_overlay_active(self):
+        """Whether the SURFACE fog mask composites over the current raster.
+
+        The fog belongs to the overworld: compositing it over the under
+        raster would paint the surface's exploration pattern onto the cave
+        map below (the underworld's own darkness is already inside
+        _under_pixels -- unlit rock reads exactly like rock). ONE helper for
+        both renderers (canvas and GL), so the gate can never drift apart
+        again: it did once, and the GPU map spent two releases showing the
+        surface's revealed/unrevealed patchwork underground."""
+        return (self._fog_is_active() and self._fog_overlay_img is not None
+                and self.layer == layers.SURFACE)
 
     def _on_layer(self, obj):
         """Whether this thing is on the layer currently being looked at.
@@ -6488,6 +6508,16 @@ class MapView(tk.Frame):
         self.layer = (layers.UNDER if self.layer == layers.SURFACE
                       else layers.SURFACE)
         self.selected_region = None
+        # The selection panels are SURFACE panels: a settlement, village,
+        # faction or commander selected above ground must not survive the
+        # descent and redraw its surface data over the cave map (they did --
+        # the panels are re-shown by _rebuild_selection_panel on the next
+        # refresh, with no layer gate). Clearing them here means going under
+        # shows nothing until you pick an under region.
+        self.selected_settlement = None
+        self.selected_village = None
+        self.selected_commander = None
+        self.selected = None
         self._base_key = None
         audio.play("panel")
         # The sound of the place changes with the place. This is most of what
@@ -6661,8 +6691,7 @@ class MapView(tk.Frame):
         # pattern onto the cave map below (the underworld's own darkness is
         # already inside _under_pixels -- unlit rock reads exactly like
         # rock).
-        fog_active = (self._fog_is_active() and self._fog_overlay_img is not None
-                      and self.layer == layers.SURFACE)
+        fog_active = self._fog_overlay_active()
         vx0, vy0, vx1, vy1 = self._fit_aspect(self.view, cw / ch)
         scale = cw / (vx1 - vx0)
         self._place = (vx0, vy0, scale)
@@ -6981,8 +7010,10 @@ class MapView(tk.Frame):
         the map area's top-left corner (not tied to world coordinates, so
         it never pans/zooms with the map), like a real map legend. Political
         mode only, matching the symbols it explains. Placed just right of
-        the left sidebar, which overlays the canvas's own corner."""
-        if self.mode != "political":
+        the left sidebar, which overlays the canvas's own corner. It belongs
+        to the SURFACE view: the under layer has no terrain glyphs for it to
+        explain."""
+        if self.mode != "political" or self.layer != layers.SURFACE:
             return
         self._build_terrain_legend(c, _LEFT_PANEL_W + 8, 12)
 

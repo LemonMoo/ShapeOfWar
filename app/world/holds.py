@@ -58,6 +58,13 @@ MIN_WARREN_CELLS = 40
 # is a colony -- and colonising is what the expansion AI is for.
 HOME_NETWORK_MAX_DIST = 140
 
+# How far from the great hall the capital's front gate may exit, in cells.
+# The shaft is 'straight up' in spirit, but it gets to land on the realm's
+# OWN ground (see _settle_hold's probe), which the hall's exact column often
+# is not -- a few cells of give is what makes the garrison town a town of
+# the realm instead of a lone house in the wild.
+_FRONT_GATE_RING = 6
+
 # What a hold is: one great hall and a few mining villages around it.
 HOLD_VILLAGES = (2, 4)
 WARREN_VILLAGES = (4, 7)
@@ -495,17 +502,39 @@ def _settle_hold(world, rng, network, faction_idx, namer):
     # re-cached below to include them).
     capital_door = None
     sx, sy = st.pos
-    for probe_x, probe_y in ((sx, sy),
-                             (wrap.wrap_x(sx + 1, world.w), sy),
-                             (wrap.wrap_x(sx - 1, world.w), sy),
-                             (sx, max(0, sy - 1)),
-                             (sx, min(world.h - 1, sy + 1))):
-        if (world.owner[probe_y][probe_x] != L.OCEAN
-                and (probe_x, probe_y) not in world.lake_cells):
+    # Prefer the realm's OWN ground for the door: the gate town above it is
+    # the realm's front gate (see _place_gate_town), and a front gate that
+    # exits into unclaimed wild -- or a rival's foothold -- strands the
+    # garrison town outside the territory the realm actually owns. Search a
+    # small ring around the hall for an owned open cell first, then fall
+    # back to the first open cell, exactly as before.
+    probes = [(sx, sy)]
+    for ring in range(1, _FRONT_GATE_RING + 1):
+        probes += [(wrap.wrap_x(sx + dx, world.w),
+                    max(0, min(world.h - 1, sy + dy)))
+                   for dx in range(-ring, ring + 1)
+                   for dy in range(-ring, ring + 1)
+                   if max(abs(dx), abs(dy)) == ring]
+
+    def _open(cell):
+        px, py = cell
+        return (world.owner[py][px] != L.OCEAN
+                and (px, py) not in world.lake_cells)
+
+    for probe_x, probe_y in probes:
+        if (world.owner[probe_y][probe_x] == faction_idx
+                and _open((probe_x, probe_y))):
             capital_door = L.add_gate(world, (probe_x, probe_y), st.pos,
                                       name="Front Gate")
             capital_door["is_capital_door"] = True
             break
+    if capital_door is None:
+        for probe_x, probe_y in probes:
+            if _open((probe_x, probe_y)):
+                capital_door = L.add_gate(world, (probe_x, probe_y), st.pos,
+                                          name="Front Gate")
+                capital_door["is_capital_door"] = True
+                break
     # The new door's mountainside belongs to the hold's own front terraces.
     if capital_door is not None:
         _cache_network_terraces(world, network, regions)
@@ -582,28 +611,61 @@ def _place_gate_town(world, rng, network, faction_idx, namer):
     (settle_underworld inserts it first into meta['settlements']), while the
     realm's people and its true capital live under the mountain. None if no
     gate opens onto land (a sea-gated network) -- the realm then anchors on
-    its underground seat alone."""
+    its underground seat alone.
+
+    The town sits on the realm's OWN territory, always: a garrison town in
+    the wild (or worse, on a rival's foothold) anchors the caravans and the
+    commander outside the land the player actually owns. Prefers the
+    capital's own door; if no door opens on owned ground yet, the unclaimed
+    region the door opens onto is claimed for the realm (never a rival's),
+    so the front gate is always inside the realm's own land."""
     from app.world.resources import seed_prosperity, SETTLEMENT_CHARACTERS
     from app.world.worldgen import (_roll_population, _mark_occupied_both,
                                     SETTLEMENT_TAX_INCOME)
     species = world.factions[faction_idx].meta["species"]
     gates = _network_gates(world, network)
-    spot = None
-    gate_chosen = None
+    if not gates:
+        return None
     # The realm's FRONT gate is the capital's own door (see _settle_hold):
     # the gate town is the door town, and a door town that isn't at the
-    # capital's door is not the front gate. Prefer it; fall back to any
-    # acceptable door.
-    candidates = ([g for g in gates if g.get("is_capital_door")] + gates)
+    # capital's door is not the front gate. Prefer it; among the other doors
+    # take the one nearest the network's centre, so a fallback is the closest
+    # real door, never a random adit.
+    centre = _network_centre(network)
+    candidates = ([g for g in gates if g.get("is_capital_door")]
+                  + sorted((g for g in gates if not g.get("is_capital_door")),
+                           key=lambda g: ((g["pos"][0] - centre[0]) ** 2
+                                          + (g["pos"][1] - centre[1]) ** 2)))
+    spot = None
+    gate_chosen = None
     for g in candidates:
-        sx, sy = g["pos"]   # the gate's surface mouth (its "under" end is the cave door)
+        sx, sy = g["pos"]
         if not (0 <= sx < world.w and 0 <= sy < world.h):
             continue
-        o = world.owner[sy][sx]
-        # Wildland or the realm's OWN territory: a gate town sits at the
-        # realm's own door, which is usually inside its surface foothold.
-        # Rival-owned mouths are rejected.
-        if o < 0 or o == faction_idx:
+        if world.owner[sy][sx] == faction_idx:
+            spot = (sx, sy)
+            gate_chosen = g
+            break
+    if spot is None:
+        # No door opens on the realm's own ground yet -- but the realm's own
+        # front door should be inside its own territory, not a lone house in
+        # the wild. Claim the unclaimed region the door opens onto (never a
+        # rival's), making the garrison town a town of the realm's own land.
+        for g in candidates:
+            sx, sy = g["pos"]
+            if not (0 <= sx < world.w and 0 <= sy < world.h):
+                continue
+            o = world.owner[sy][sx]
+            if o >= 0 or o == L.OCEAN or (sx, sy) in world.lake_cells:
+                continue
+            rid = L.region_at(world, sx, sy, L.SURFACE)
+            if rid is None or world.regions[rid].faction_idx >= 0:
+                continue
+            region = world.regions[rid]
+            region.faction_idx = faction_idx
+            for x, y in region.cells:
+                world.owner[y][x] = faction_idx
+            world.factions[faction_idx].meta.setdefault("regions", []).append(rid)
             spot = (sx, sy)
             gate_chosen = g
             break

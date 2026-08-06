@@ -119,6 +119,49 @@ try:
         f"the under region panel does not say what the rock is: {joined[:200]}")
     print("  ok    the under region panel reads 'Cavern galleries'")
 
+    # --- the surface fog mask never composites below (the GL map's leak) ---
+    view.layer = L.UNDER
+    view._ensure_fog_overlay()
+    assert not view._fog_overlay_active(), (
+        "surface fog composited over the under raster -- the GPU map showed "
+        "the surface's revealed/unrevealed patchwork below ground")
+    view.layer = L.SURFACE
+    assert view._fog_overlay_active(), "surface fog missing above ground"
+    print("  ok    surface fog mask: never below (canvas AND GL), only above")
+
+    # --- terrain legend: surface only ---
+    view.layer = L.UNDER
+    view.mode = "political"
+    legend = tk.Canvas(root, width=200, height=200)
+    view._draw_terrain_legend(legend)
+    assert len(legend.find_all()) == 0, "terrain legend drawn below ground"
+    view.layer = L.SURFACE
+    view._draw_terrain_legend(legend)
+    assert len(legend.find_all()) > 0, "terrain legend missing above ground"
+    print("  ok    terrain legend: none below, drawn above")
+
+    # --- alert jumps: ignored below ground ---
+    node = next(s for s in world.settlements if s.faction_idx == 0)
+    view.layer = L.UNDER
+    view.selected_settlement = None
+    view._jump_to_alert_node(node)
+    assert view.selected_settlement is None, (
+        "alert jump opened a surface settlement panel below ground")
+    print("  ok    alert jumps: ignored below (surface data stays up top)")
+
+    # --- descending clears the surface selection panels ---
+    view.layer = L.SURFACE
+    view.selected_settlement = node
+    view.selected_village = None
+    view.selected_commander = None
+    view.selected = world.factions[0]
+    view.toggle_layer()
+    assert view.layer == L.UNDER
+    assert view.selected_settlement is None and view.selected is None, (
+        "a surface selection survived the descent and redrew its panel "
+        "over the cave map")
+    print("  ok    descending clears the surface selection panels")
+
     print("\nUNDER NO-LEAK TEST PASSED")
 finally:
     root.destroy()
