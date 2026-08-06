@@ -136,6 +136,9 @@ MARKERS = [
     ("app.core.changelog", "The Front Gate", "const"),
     # v0.18.18 -- the wrap seam is a wandering deep channel.
     ("app.core.changelog", "The Map Is a Seamless Sea", "const"),
+    # v0.18.19 -- the New Game preview: mountain doors, bigger map, no
+    # stray default ring.
+    ("app.core.changelog", "The Mountain Doors", "const"),
 ]
 
 arch = CArchiveReader(EXE)

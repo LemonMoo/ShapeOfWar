@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 108,
+        "title": "The Mountain Doors",
+        "items": [
+            "NEW GAME: a cave people now sees its way in before committing -- the world preview marks every underground entrance (each mountain door of the cave networks) with a violet diamond, so a dwarf or goblin can choose a start by one. The preview itself is a lot larger (about 2.2x the area, in a bigger window), and the stray white circle that used to linger at the default start spot after you picked a different one is gone -- your chosen start is the only ring.",
+        ],
+    },
+    {
         "version": 107,
         "title": "The Map Is a Seamless Sea",
         "items": [

@@ -49,8 +49,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Shapes of War")
-        self.geometry("1180x720")
-        self.minsize(880, 560)
+        self.geometry("1360x800")
+        self.minsize(1024, 640)
         self.configure(bg=theme.BG)
 
         # Sound. Never fatal: audio.init() returns False on a machine with no

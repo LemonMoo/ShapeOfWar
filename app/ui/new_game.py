@@ -33,6 +33,7 @@ from app.world.lexicon import (RULER_TITLES, SPECIES, make_faction_namer,
                                species_stat_chips, species_units)
 from app.world.worldgen import apply_player_identity, generate_world, OCEAN
 from app.world import startsites
+from app.world.holds import UNDERGROUND_SPECIES
 
 # (label, width, height, rivals, blurb). Measured generation cost is 8s / 18s /
 # 37s respectively -- which is exactly why the preview generates in the
@@ -47,7 +48,14 @@ MIN_RIVALS, MAX_RIVALS = 3, 24
 
 # The preview box, in pixels. Everything in the right-hand column is sized off
 # it, so the column and the map can never disagree about how wide they are.
-PREVIEW_W, PREVIEW_H = 430, 258
+PREVIEW_W, PREVIEW_H = 640, 384
+
+# Cave-door marker on the preview: a violet diamond per network gate mouth --
+# the mountainous cells a cave people can walk into the underearth from. The
+# gold dots are start sites, the green ring is your chosen start; the door
+# diamonds are a third thing and get their own colour so none of them blur.
+_DOOR_FILL = "#b06ad4"
+_DOOR_RING = "#2a1233"
 
 # Was a blue-grey set (#1b2029, #0d1017, ...) left from before the palette
 # existed -- the New Game screen was the last place in the game still painted
@@ -548,13 +556,29 @@ class NewGameView(tk.Frame):
         world = self._world
         if world is None:
             return
-        img = render_world(world, (PREVIEW_W, PREVIEW_H)).copy()
+        # Once a start is CHOSEN, the default capital ring (render_world's
+        # white one) must not linger where the realm would otherwise be
+        # founded -- the green ring at the chosen cell replaces it, so
+        # suppressing the default here is what stops the stray circle that
+        # used to stay behind at the original spot.
+        img = render_world(world, (PREVIEW_W, PREVIEW_H),
+                           mark_player=self._start_cell is None).copy()
         # render_world takes the aspect from the world, so the image can be
         # letterboxed inside the box; this is the exact scale it used, and the
         # one _on_preview_click inverts to turn a click back into a cell.
         scale = min(PREVIEW_W / world.w, PREVIEW_H / world.h)
         self._preview_scale = scale
         draw = ImageDraw.Draw(img)
+        # A cave people reads the mountain doors straight off the map: every
+        # network gate's surface mouth, so the player can pick a start by one.
+        # (Gates are only placed on mountain cells -- see underworld.py's
+        # adits -- so each diamond sits on exactly the terrain it means.)
+        if self.species in UNDERGROUND_SPECIES and world.gates:
+            for gate in world.gates:
+                gx, gy = gate["pos"]
+                px, py = gx * scale, gy * scale
+                draw.polygon([(px, py - 4), (px + 4, py), (px, py + 4),
+                              (px - 4, py)], fill=_DOOR_FILL, outline=_DOOR_RING)
         for cx, cy, _ev in self._candidates:
             px, py = cx * scale, cy * scale
             draw.ellipse([px - 2, py - 2, px + 2, py + 2],
