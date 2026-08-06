@@ -121,7 +121,12 @@ def _nearest_coastal_cell(world, landmass, toward):
 
 def test_no_fake_road_across_ocean():
     print("\n--- new settlement on a different landmass: no fake straight road ---")
-    world = generate_world(width=1400, height=840, seed=17, n_factions=6,
+    # Seed choice is fixture detail: the scenario needs two landmasses close
+    # enough across water that the bbox-limited sea search (SEA_LANE_BBOX_PAD)
+    # finds a lane. 17 used to provide that; the meandering seam channel
+    # moved the coastlines and 29 (verified: also 47, 53) does now. The map
+    # is regenerated each worldgen change -- hence the skip paths below.
+    world = generate_world(width=1400, height=840, seed=29, n_factions=6,
                            player_species="Humans", player_name="SeaTest")
     faction = world.factions[0]
     capital = faction.meta["capital"]
@@ -129,7 +134,7 @@ def test_no_fake_road_across_ocean():
 
     region = _find_other_landmass_region(world, home, 0)
     if region is None:
-        print("  (skipped: seed 17 didn't produce a usable second landmass "
+        print("  (skipped: seed 29 didn't produce a usable second landmass "
              "-- not a failure, just an unlucky map)")
         return
 
@@ -163,7 +168,7 @@ def test_no_fake_road_across_ocean():
     # start_settlement, since all that matters here is that it EXISTS).
     home_dock = _nearest_coastal_cell(world, home, target)
     if home_dock is None:
-        print("  (skipped: seed 17's home landmass has no cell within sea "
+        print("  (skipped: seed 29's home landmass has no cell within sea "
              "range of a dock -- not a failure, just an unlucky map)")
         return
     home_region_id = world.region_grid[home_dock[1]][home_dock[0]]

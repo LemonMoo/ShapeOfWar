@@ -206,6 +206,12 @@ def resolve_event(world, event, choice_id):
             if not nodes:
                 nodes = [st for st in world.settlements
                          if st.faction_idx == region.faction_idx]
+            if not nodes:
+                # The claiming faction has no settlements anywhere either
+                # (e.g. an AI realm wiped out before its first town rose):
+                # there is no host for anyone to settle with, so the event
+                # quietly passes rather than crashing on an empty max().
+                return "Wanderers pass through the empty frontier and move on."
             host = max(nodes, key=lambda n: getattr(n, "max_population", 0) or 0)
             gain = max(20, round((getattr(host, "max_population", 200) or 200) * 0.04))
             host.population = min(getattr(host, "max_population", host.population)

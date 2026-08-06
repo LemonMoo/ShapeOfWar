@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 107,
+        "title": "The Map Is a Seamless Sea",
+        "items": [
+            "WORLDGEN: the east-west wrap no longer meets itself with a ruler-straight cut of ocean. The seam is now a wandering deep channel -- its centreline meanders down the map like a real strait, coastlines and depth contours follow the curve, and the floor has pools and sills along its length. It stays reliably open ocean (land still never straddles it), but crossing the wrap now reads as sailing a natural sea rather than hitting a straight seam.",
+        ],
+    },
+    {
         "version": 106,
         "title": "The Front Gate",
         "items": [

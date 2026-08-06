@@ -1986,9 +1986,11 @@ def _overview_article():
             "domestic shipment, a foreign trade route, or plain vision "
             "will. The map's north and south edges are real edges, "
             "though — only east-west wraps, not top-to-bottom. Landmasses "
-            "themselves never straddle the wrap seam — it's reliably open "
-            "ocean there, the same way any other stretch of open sea "
-            "works for sailing between continents."
+            "themselves never straddle the wrap seam — a deep ocean "
+            "channel keeps it open at every latitude. The channel is no "
+            "straight cut either: it meanders down the map like a real "
+            "strait, so crossing the wrap sails a wandering sea instead "
+            "of hitting a ruler-straight seam."
         ),
     ]
     return "\n\n".join(parts)

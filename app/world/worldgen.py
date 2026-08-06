@@ -2562,12 +2562,49 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     # the whole field (which would just shift sea_level, not add texture).
     v = v + DETAIL_AMPLITUDE * (detail - detail.mean())
 
-    xs = np.arange(width, dtype=np.float64)
+    # The east-west seam is a deep ocean CHANNEL, not a ruler-straight cut:
+    # its centreline meanders in x as a smooth, seed-derived function of y (a
+    # few gentle waves down the map), and the elevation falloff follows the
+    # curved centreline -- so crossing the wrap reads as a wandering strait
+    # with wiggly coastlines and depth contours instead of an abrupt straight
+    # ocean band. The meander amplitude stays well under seam_margin, so the
+    # real seam (x=0/width) always sits INSIDE the channel: "land never
+    # straddles the east-west seam" (see wrap.py / the compendium) remains a
+    # structural invariant, and the noise fields were already periodic in x
+    # (see _vhash's period_x), so nothing at the wrap itself jumps.
     seam_margin = max(6, round(width * 0.03))
-    seam_d = np.minimum(xs, width - xs)
-    fade = np.clip(seam_d / seam_margin, 0.0, 1.0)
-    fade = fade * fade * (3 - 2 * fade)      # smoothstep: 0 at the seam, 1 inland of it
-    v = v * fade - 3.0 * (1 - fade)          # firmly underwater at the seam itself
+    meander_amp = 0.55 * seam_margin
+    # Sample the meander as column 0 of a low-frequency periodic field. A
+    # 2-wide grid is enough: with these frequencies period_x rounds to 1, so
+    # the x axis collapses to a single lattice cell and column 0 is exactly
+    # the smooth 1-D y signal we want -- ~2-4 gentle waves down the map.
+    meander_octaves = _periodic_octaves(2, [(0.0035, 1.0), (0.007, 0.45)])
+    meander = noise.fbm_grid(2, height, nseed + 303, meander_octaves)[:, 0]
+    meander = meander - meander.mean()
+    meander = meander * (meander_amp / max(1e-9, np.abs(meander).max()))
+    # Channel depth varies gently along its length (deep pools / sills), so
+    # the floor is not a uniform dark band either.
+    depth_octaves = _periodic_octaves(2, [(0.004, 1.0)])
+    floor_var = noise.fbm_grid(2, height, nseed + 404, depth_octaves)[:, 0]
+    floor_var = (floor_var - floor_var.min()) / max(1e-9, floor_var.max())
+    floor_depth = -(2.8 + 0.8 * floor_var)           # [-3.6, -2.8], always deep
+    p = meander[:, None]                             # (height, 1) centreline offset per row
+    xs = np.arange(width, dtype=np.float64)
+    seam_d = (xs[None, :] - p) % width               # wrap-aware signed offset from the line
+    seam_d = np.minimum(seam_d, width - seam_d)      # circle distance to the centreline
+    # The fade keeps a flat zero-zone out to the meander's own reach: the
+    # wrap columns sit at distance |p| <= meander_amp from the centreline, so
+    # if the ramp started at the line itself they would land mid-blend -- half
+    # field, half floor -- and high terrain could still rise above sea level
+    # there (the old straight fade was safe only because the seam sat exactly
+    # at fade 0). With the zero-zone covering the swing, the seam columns are
+    # the channel floor BY CONSTRUCTION at every row, and the ramp to the
+    # undisturbed field runs over [meander_amp, seam_margin] -- same outer
+    # channel edge as before, now following the meander.
+    fade = np.clip((seam_d - meander_amp) / max(1e-9, seam_margin - meander_amp),
+                   0.0, 1.0)
+    fade = fade * fade * (3 - 2 * fade)              # smoothstep: 0 on the line, 1 inland
+    v = v * fade + floor_depth[:, None] * (1 - fade) # channel floor (negative) on the line, field inland
 
     lo, hi = float(v.min()), float(v.max())
     span = (hi - lo) or 1.0
@@ -2580,6 +2617,20 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     flat_sorted = np.sort(world_height, axis=None)
     world.sea_level = float(flat_sorted[int(flat_sorted.size * 0.58)])
     land_mask = world_height > world.sea_level
+
+    # Structural safety net for the seam invariant: the meander keeps the
+    # channel over the wrap by construction, but an exceptionally high plate
+    # ridge sitting exactly on a wrap column while the channel swings wide
+    # could still leave that column above sea level -- which would break the
+    # "land never straddles the seam" guarantee the whole game relies on
+    # (see wrap.py). Sink any such cell back to the map floor so the seam
+    # stays open ocean at every row, as a fact, not a hope.
+    for edge in (0, width - 1):
+        bad = land_mask[:, edge]
+        if bad.any():
+            world_height[bad, edge] = world_height.min()
+            land_mask[bad, edge] = False
+    world.height = world_height.tolist()
     land = land_mask.tolist()
     land_cells = [(x, y) for y in range(height) for x in range(width) if land[y][x]]
     if not land_cells and _attempt < 6:      # extremely unlucky seed; retry

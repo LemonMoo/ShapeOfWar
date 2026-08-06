@@ -13,7 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.world.worldgen import generate_world, OCEAN
+from app.world.worldgen import generate_world
 from app.world import startsites as S
 
 world = generate_world(560, 340, seed=7, n_factions=6,
@@ -55,8 +55,16 @@ assert ok >= len(world.factions) - 1, (
 print("  ok    the evaluator and the generator agree on viable ground")
 
 print("\n--- open sea is never sustainable ---")
-sea = next((x, y) for y in range(world.h) for x in range(world.w)
-           if world.owner[y][x] == OCEAN)
+# A genuine mid-ocean site: an ocean cell whose whole homeland neighbourhood
+# is water (biome None == ocean). The seam is a wandering strait now, not a
+# deep straight band, so "first ocean cell" is no longer guaranteed to sit in
+# open water -- it can land beside the strait's shore and legitimately read
+# as sustainable. Pick water that is unambiguously the middle of the ocean.
+r = S._HOMELAND_RADIUS
+sea = next((x, y) for y in range(r, world.h - r) for x in range(r, world.w - r)
+           if all(world.biome_grid[yy][xx] is None
+                  for yy in range(y - r, y + r + 1)
+                  for xx in range(x - r, x + r + 1)))
 ev = S.evaluate_site(world, sea[0], sea[1])
 assert not ev["sustain"]["ok"], "the middle of the ocean read as farmable"
 assert "water" in ev["sustain"]["reason"].lower()
