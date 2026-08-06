@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 110,
+        "title": "Rivers That Meander",
+        "items": [
+            "WORLDGEN: rivers no longer run ruler-straight. The flood-fill that drains each basin raises its floor to one perfectly uniform micro-gradient, and D8 flow on that plain has exactly one strictly-downhill neighbour -- so every river crossing a plain was forced into a dead-straight line (measured: 60-80% of river cells sat in straight runs of 4+, the longest 40-140 cells). Flow now treats level ground beside the best drop as an equal choice (a tiny deterministic noise breaks the tie), so rivers wander across plains and meander on gentle slopes -- measured after: ~12% of river cells in straight runs, longest 10-32. Every river still reaches the sea or a lake.",
+        ],
+    },
+    {
         "version": 109,
         "title": "The Realm's Own Door",
         "items": [

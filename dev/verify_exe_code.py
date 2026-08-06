@@ -141,6 +141,8 @@ MARKERS = [
     ("app.core.changelog", "The Mountain Doors", "const"),
     # v0.18.20 -- the realm's own door, and no surface vision below.
     ("app.core.changelog", "The Realm's Own Door", "const"),
+    # v0.18.21 -- rivers that meander.
+    ("app.core.changelog", "Rivers That Meander", "const"),
 ]
 
 arch = CArchiveReader(EXE)
