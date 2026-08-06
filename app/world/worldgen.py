@@ -800,9 +800,29 @@ def _generate_hydrology(world, land, rng):
     # 3a. D8 flow direction on the filled DEM (steepest descent).
     land_cells = [(x, y) for y in range(h) for x in range(w) if land[y][x]]
     down = {}
+    rseed = rng.randrange(1 << 30)   # deterministic per world, for the noise below
+    # The priority flood raises a basin floor to one uniform level (plus an
+    # eps chain), and that perfectly uniform micro-gradient is exactly what
+    # a straight river is: on it only ONE neighbour is strictly downhill, so
+    # the flow direction is forced -- measured, 60-80% of river cells sat in
+    # straight runs of 4+ cells, the longest 40-140. Three things fix that:
+    #
+    #  * LEVEL neighbours (score 0, the plain's lateral ground) are allowed
+    #    into the near-tie set. On a plain the best drop is a near-tie with
+    #    the level neighbours, so the river can wander sideways across it
+    #    instead of locking onto the fill gradient; on real slopes the
+    #    level neighbours fall outside the tie band and are ignored.
+    #  * near-tie breaking among those neighbours with a tiny deterministic,
+    #    seam-safe noise, so the choice varies cell to cell.
+    #  * a cycle-break pass afterwards: level moves can point two cells at
+    #    each other, and a 2-cycle would double-count flow accumulation.
+    _RIVER_TIE_EPS = 0.004
+    _flow_best = {}
+    _flow_near = {}
     for x, y in land_cells:
-        best, best_score = None, 0.0
+        down[(x, y)] = None
         c = filled[y][x]
+        scores = []
         for dx, dy in _NEIGH8:
             nx, ny = x + dx, y + dy
             if 0 <= nx < w and 0 <= ny < h:
@@ -817,9 +837,61 @@ def _generate_hydrology(world, land, rng):
                 # diagonal before this, 46% after).
                 dist = 1.0 if (dx == 0 or dy == 0) else _SQRT2
                 score = (c - fe) / dist
-                if score > best_score:
-                    best_score, best = score, (nx, ny)
-        down[(x, y)] = best
+                if score >= 0:
+                    scores.append((score, nx, ny))
+        if scores:
+            best_score = max(s for s, _nx, _ny in scores)
+            if best_score > 0:
+                near = [(s, nx, ny) for s, nx, ny in scores
+                        if s >= best_score - _RIVER_TIE_EPS]
+                _flow_best[(x, y)] = best_score
+                _flow_near[(x, y)] = sorted(near, reverse=True)
+                # Among the equivalent drops, the largest per-neighbour noise
+                # wins -- deterministic per world, and periodic in x so the
+                # flow field has no seam discontinuity.
+                _s, nx, ny = max(near,
+                                 key=lambda t: _vhash(t[1], t[2], rseed, w))
+                down[(x, y)] = (nx, ny)
+            # else: a pure flat (best drop 0) -- no flow, river ends here.
+        # else: no downhill/level neighbour at all (map edge or a pit the
+        # fill left) -- no flow, river ends here.
+
+    # Break flow cycles: level moves (the plain meanders) can point two
+    # cells at each other, and a cycle would double-count flow accumulation
+    # (water counted twice) and draw nonsense rivers. Standard functional-
+    # graph pass: walk each cell's chain; on finding a cycle, redirect its
+    # weakest member (smallest best drop) to its next-best neighbour outside
+    # the cycle. Redirecting can surface a new cycle, so repeat until clean.
+    for _pass in range(8):
+        colour = {}
+        found = False
+        for start in land_cells:
+            if colour.get(start, 0):
+                continue
+            path = []
+            cur = start
+            while cur is not None and not colour.get(cur, 0):
+                colour[cur] = 1
+                path.append(cur)
+                cur = down.get(cur)      # ocean target = chain end, not a cycle
+            if cur is not None and colour.get(cur) == 1:
+                found = True
+                cyc = path[path.index(cur):]
+                cyc_set = set(cyc)
+                path_set = set(path)
+                for cell in sorted(cyc,
+                                   key=lambda c: _flow_best.get(c, 0.0)):
+                    for _s, nx, ny in _flow_near.get(cell, ()):
+                        if (nx, ny) not in cyc_set and (nx, ny) not in path_set:
+                            down[cell] = (nx, ny)
+                            break
+                    else:
+                        continue
+                    break
+            for p in path:
+                colour[p] = 2
+        if not found:
+            break
 
     # 3b. flow accumulation: high cells first, push their water downstream.
     acc = {p: 1.0 for p in land_cells}
