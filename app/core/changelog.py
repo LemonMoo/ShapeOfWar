@@ -20,6 +20,14 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 109,
+        "title": "The Realm's Own Door",
+        "items": [
+            "UNDERWORLD: the garrison town now lives in the realm's OWN territory. It used to sit at whichever cave door happened to be acceptable -- measured, 7 of 10 dwarf starts put it in the wild, outside the land you actually own -- because the front gate was cut wherever the rock opened and the town accepted unclaimed ground. The capital's front gate now prefers the realm's own mountainside, and the garrison town requires owned territory (capital's door first, then the nearest real door; never a rival's foothold). If no door opens on owned ground yet, the unclaimed region the door opens onto is claimed for the realm, so the town is always a town of your own land.",
+            "FIX: the under view gave away map vision one more time. The GPU flat map was compositing the SURFACE fog mask over the cave raster, so below ground you could read the overworld's revealed/unrevealed exploration pattern -- the canvas path had been gated in 0.18.16 but the GL path never got the same gate. Both renderers now share one gate (it can't drift again). Also closed below: stale surface selection panels (settlement/village/commander/faction) that survived a descent and redrew over the cave map, alert jumps that opened surface panels underground, and the terrain legend that lingered on the under layer.",
+        ],
+    },
+    {
         "version": 108,
         "title": "The Mountain Doors",
         "items": [

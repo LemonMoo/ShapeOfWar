@@ -139,6 +139,8 @@ MARKERS = [
     # v0.18.19 -- the New Game preview: mountain doors, bigger map, no
     # stray default ring.
     ("app.core.changelog", "The Mountain Doors", "const"),
+    # v0.18.20 -- the realm's own door, and no surface vision below.
+    ("app.core.changelog", "The Realm's Own Door", "const"),
 ]
 
 arch = CArchiveReader(EXE)
