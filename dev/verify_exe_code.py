@@ -130,6 +130,10 @@ MARKERS = [
     # alert badges/panel biome/fog overlay).
     ("app.ui.map_view", "Cavern galleries", "const"),
     ("app.core.changelog", "No Windows on the Ceiling (2)", "const"),
+    # v0.18.17 -- the capital's own front gate.
+    ("app.world.holds", "is_capital_door", "const"),
+    ("app.world.holds", "Front Gate", "const"),
+    ("app.core.changelog", "The Front Gate", "const"),
 ]
 
 arch = CArchiveReader(EXE)

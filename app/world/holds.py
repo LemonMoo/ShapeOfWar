@@ -485,6 +485,31 @@ def _settle_hold(world, rng, network, faction_idx, namer):
     # the stores are.
     R.set_storage_tier(st, R.FUNGUS_GALLERY, 1)
 
+    # The capital's OWN door (v0.18.17): the great hall sits in the deepest
+    # rock -- furthest from any door, defensible -- but a realm whose only
+    # openings are a day's march through the dark never sees the sun. Cut a
+    # private shaft straight up from the hall to the surface and mark it as
+    # the capital's door: the gate town above it is the realm's FRONT gate,
+    # the hall has a way out of its own city, and the mountainside over the
+    # shaft becomes the hold's own front terraces (the terrace pool is
+    # re-cached below to include them).
+    capital_door = None
+    sx, sy = st.pos
+    for probe_x, probe_y in ((sx, sy),
+                             (wrap.wrap_x(sx + 1, world.w), sy),
+                             (wrap.wrap_x(sx - 1, world.w), sy),
+                             (sx, max(0, sy - 1)),
+                             (sx, min(world.h - 1, sy + 1))):
+        if (world.owner[probe_y][probe_x] != L.OCEAN
+                and (probe_x, probe_y) not in world.lake_cells):
+            capital_door = L.add_gate(world, (probe_x, probe_y), st.pos,
+                                      name="Front Gate")
+            capital_door["is_capital_door"] = True
+            break
+    # The new door's mountainside belongs to the hold's own front terraces.
+    if capital_door is not None:
+        _cache_network_terraces(world, network, regions)
+
     villages = []
     wanted = rng.randint(*HOLD_VILLAGES)
     for pos in _spread([p for p in caverns if p != seat], wanted, 6):
@@ -564,7 +589,13 @@ def _place_gate_town(world, rng, network, faction_idx, namer):
     species = world.factions[faction_idx].meta["species"]
     gates = _network_gates(world, network)
     spot = None
-    for g in gates:
+    gate_chosen = None
+    # The realm's FRONT gate is the capital's own door (see _settle_hold):
+    # the gate town is the door town, and a door town that isn't at the
+    # capital's door is not the front gate. Prefer it; fall back to any
+    # acceptable door.
+    candidates = ([g for g in gates if g.get("is_capital_door")] + gates)
+    for g in candidates:
         sx, sy = g["pos"]   # the gate's surface mouth (its "under" end is the cave door)
         if not (0 <= sx < world.w and 0 <= sy < world.h):
             continue
@@ -574,6 +605,7 @@ def _place_gate_town(world, rng, network, faction_idx, namer):
         # Rival-owned mouths are rejected.
         if o < 0 or o == faction_idx:
             spot = (sx, sy)
+            gate_chosen = g
             break
     if spot is None:
         return None

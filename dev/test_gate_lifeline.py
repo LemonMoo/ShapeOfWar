@@ -72,9 +72,10 @@ print(f"  ok    {down[0].resource} {down[0].quantity} -> under node "
 print("\n--- a foreign army at the door holds it (blockade) ---")
 world.commanders.append(Commander(9999, 5, tuple(gate["pos"])))
 assert R.gate_blocked(world, gate, 0), "an enemy at the door is not a blockade"
-count_before = len(gate_ships())
+ids_before = {id(s) for s in gate_ships()}
 R.advance_turn(world)
-assert len(gate_ships()) == count_before, (
+new_while_blocked = [s for s in gate_ships() if id(s) not in ids_before]
+assert not new_while_blocked, (
     "the lifeline ran while the door was held")
 print("  ok    no gate shipments while the door is held")
 print("\nGATE LIFELINE TEST PASSED")

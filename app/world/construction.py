@@ -1354,7 +1354,9 @@ def _pick_upgrade_town(world, fac_idx):
         if 0 <= st.region_id < len(world.regions):
             region = world.regions[st.region_id]
             cap = region_village_capacity(world, region)
-            frac = len(region.villages) / cap if cap else 1.0
+            # getattr: a mid-game-claimed region may never have run the
+            # village pass, and the attribute only exists on regions that did.
+            frac = len(getattr(region, "villages", ())) / cap if cap else 1.0
             if frac > best_frac:
                 best_frac, best = frac, st
     return best

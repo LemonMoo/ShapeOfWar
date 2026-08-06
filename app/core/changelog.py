@@ -20,6 +20,14 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 106,
+        "title": "The Front Gate",
+        "items": [
+            "GAMEPLAY: a cave realm's capital now has its own door. The great hall sat in the deepest rock -- defensible, but its openings were all at the far edge of the cave network, so the capital was a day's march from the nearest way up and the gate town could sit at any random door. Now a private shaft is cut straight up from the great hall to the surface: the capital's Front Gate. The gate town is the realm's front gate (it always sits on it), the hall has a way out of its own city, the mountainside over the shaft is the hold's own front terraces, and the trade lifeline runs through the front door too -- blockading one door can no longer be quietly sidestepped by rerouting to another.",
+            "FIX: a crash when the AI upgraded a town in a region that had never run the village pass (mid-game wildland claims) -- regions now always carry their village/settlement lists.",
+        ],
+    },
+    {
         "version": 105,
         "title": "No Windows on the Ceiling (2)",
         "items": [

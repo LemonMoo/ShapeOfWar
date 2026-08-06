@@ -253,6 +253,12 @@ class Region:
         # deaths/slaughter -- unlike `resources` above (recomputed fresh
         # every turn), this genuinely persists and accumulates over time.
         self.livestock = {}
+        # Village/settlement lists are filled by the generation passes, so a
+        # region that never ran them (a mid-game wildland claim, an under
+        # region) would lack the attributes entirely -- every reader must be
+        # able to ask "how many?" of any region.
+        self.villages = []
+        self.meta_settlements = []
         # Progressive expansion (see app/world/expansion.py): garrison rating
         # for UNCLAIMED land (irrelevant once claimed), whether this region's
         # settlements/villages have been generated yet (False for every

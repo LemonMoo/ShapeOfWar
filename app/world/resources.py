@@ -6072,8 +6072,17 @@ def _faction_gate_link(world, faction_idx):
     if not sids:
         return None
     gate_town = world.settlements[sids[0]]
+    gates = list(getattr(world, "gates", ()))
     gate = None
-    for g in getattr(world, "gates", ()):
+    # The lifeline runs through the realm's FRONT gate: the capital's own
+    # door (see _settle_hold), which is also where the gate town sits. This
+    # keeps the link stable across turns -- scanning plain world.gates order
+    # could pick a different door in the same surface region each call, and
+    # a blockade of one door would not stop a lifeline quietly rerouted to
+    # another.
+    candidates = ([g for g in gates if g.get("is_capital_door")]
+                  + [g for g in gates])
+    for g in candidates:
         sx, sy = g["pos"]
         rid = layers.region_at(world, sx, sy, layers.SURFACE)
         if rid == gate_town.region_id:
