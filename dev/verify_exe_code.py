@@ -134,6 +134,8 @@ MARKERS = [
     ("app.world.holds", "is_capital_door", "const"),
     ("app.world.holds", "Front Gate", "const"),
     ("app.core.changelog", "The Front Gate", "const"),
+    # v0.18.18 -- the wrap seam is a wandering deep channel.
+    ("app.core.changelog", "The Map Is a Seamless Sea", "const"),
 ]
 
 arch = CArchiveReader(EXE)
