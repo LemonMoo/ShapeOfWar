@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 111,
+        "title": "The World at a Glance",
+        "items": [
+            "LOAD MENU: selecting a save now reveals its details -- name, species, creation date, and a small map-preview thumbnail of the world -- before you commit to loading it.",
+        ],
+    },
+    {
         "version": 110,
         "title": "Rivers That Meander",
         "items": [
