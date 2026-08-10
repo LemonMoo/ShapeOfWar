@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 113,
+        "title": "Only the Mountain and Its Door",
+        "items": [
+            "FIX: a cave realm is only its mountain and its door again. A new dwarf or goblin world was handing the player TWO surface territories -- the gate town's door region (the right one) plus a leftover starting foothold with three villages in it -- and the surface fog of war was revealing the whole UNDERGROUND network (every hold, tunnel and warren) as if it had been walked. Cave peoples now get no surface starting foothold (their realm is the under network plus the door), and the surface-fog recompute no longer seeds itself from under regions -- the underground keeps its own darkness and must be walked to be known. A cave realm whose map has no reachable network (or no underworld at all) still gets a proper plain surface start with its villages.",
+        ],
+    },
+    {
         "version": 112,
         "title": "A Real Map Preview",
         "items": [

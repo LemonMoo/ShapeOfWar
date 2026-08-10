@@ -143,6 +143,8 @@ MARKERS = [
     ("app.core.changelog", "The Realm's Own Door", "const"),
     # v0.18.21 -- rivers that meander.
     ("app.core.changelog", "Rivers That Meander", "const"),
+    # v0.18.24 -- only the mountain and its door.
+    ("app.core.changelog", "Only the Mountain and Its Door", "const"),
     # v0.18.23 -- a real map preview.
     ("app.core.changelog", "A Real Map Preview", "const"),
     # v0.18.22 -- the world at a glance.
