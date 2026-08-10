@@ -714,6 +714,26 @@ def _fallback_surface_capital(world, rng, faction_idx, namer):
     tax_income = round(rng.uniform(*SETTLEMENT_TAX_INCOME[kind]))
     population, adults, children, max_population = _roll_population(rng, kind)
     region_id = world.region_grid[y][x]
+    # Cave peoples got NO surface foothold in worldgen (their realm is the
+    # under network; see step 8) -- so a realm that falls back to the
+    # surface must claim its own home ground here, or it would be a city on
+    # land it does not own. Give it the normal starting treatment: claim the
+    # capital's home region (+ bordering padding to the usual minimum) and
+    # sprinkle its starting villages, so the fallback realm is a real
+    # surface realm, not a lone city in the wild.
+    from app.world.worldgen import (_assign_starting_footholds,
+                                    MIN_FOOTHOLD_CELLS, STARTING_VILLAGE_COUNT,
+                                    _place_villages_for_region)
+    claimed = _assign_starting_footholds(
+        world, [(x, y)], min_cells=MIN_FOOTHOLD_CELLS, indices=[faction_idx])
+    if claimed:
+        # The faction's meta already exists (unlike the worldgen step-8
+        # call): put the claimed region ids in it, or every territory-aware
+        # system would see a realm that owns land on the grid but no regions
+        # in its own meta.
+        for cid in claimed[0]:
+            if cid not in nation.meta.setdefault("regions", []):
+                nation.meta["regions"].append(cid)
     st = Settlement(len(world.settlements), kind, namer(kind, species),
                     (x, y), faction_idx, region_id, tax_income,
                     population, adults, children, seed_prosperity(),
@@ -730,6 +750,8 @@ def _fallback_surface_capital(world, rng, faction_idx, namer):
                   f"The realm of {nation.name} is founded at {st.name}.")
     if 0 <= region_id < len(world.regions):
         world.regions[region_id].meta_settlements.append(st.id)
+        _place_villages_for_region(world, rng, world.regions[region_id],
+                                   fixed_n=STARTING_VILLAGE_COUNT)
     return st
 
 
@@ -746,6 +768,18 @@ def settle_underworld(world, rng=None):
     L.ensure_layers(world)
     summary = {"holds": 0, "warrens": 0, "settlements": 0, "villages": 0}
     if not world.under_cells or not world.gates:
+        # No underworld on this map at all (no mountain ranges carved -- an
+        # unlucky plate layout or a tiny test map). Cave realms cannot go
+        # under, so every cave faction gets a plain surface start: the
+        # step-8 foothold was SKIPPED for them (their realm was supposed to
+        # be the under network), so without this they would own nothing.
+        namer = make_settlement_namer(rng)
+        for idx, nation in enumerate(world.factions):
+            if (UNDERGROUND_SPECIES.get(nation.meta.get("species"))
+                    and not nation.meta.get("settlements")):
+                _fallback_surface_capital(world, rng, idx, namer)
+                summary["surface_fallbacks"] = summary.get(
+                    "surface_fallbacks", 0) + 1
         world.under_settlement_summary = summary
         return summary
 

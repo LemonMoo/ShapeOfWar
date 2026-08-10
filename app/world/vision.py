@@ -226,7 +226,13 @@ def fog_mask_bytes(world):
 
 def _owned_frac(world):
     player = world.factions[world.player_faction_idx]
-    return player.meta.get("cells", 0) / max(1, world.total_land_cells)
+    cids = player.meta.get("regions", [])
+    # SURFACE cells only: a cave realm's under network is not surface land,
+    # and counting it toward the owned fraction would let a dwarf who digs
+    # deep cross the full-map-reveal threshold and hand over the overworld.
+    cells = sum(world.regions[cid].stats["area"] for cid in cids
+                if not L.is_under(world.regions[cid]))
+    return cells / max(1, world.total_land_cells)
 
 
 def _vision_radius(world):
@@ -284,7 +290,16 @@ def recompute(world):
         dist = {}
         frontier = deque()
         for cid in world.factions[player_idx].meta.get("regions", []):
-            for (x, y) in world.regions[cid].cells:
+            # The player's UNDER regions are not surface knowledge: revealing
+            # them here wrote the whole cave network -- every hold, tunnel and
+            # warren -- into the SURFACE fog mask, readable on the overground
+            # map through the fog of war (the underground has its own darkness,
+            # recompute_under, and must be walked to be known). Only surface
+            # regions seed the overworld reveal.
+            region = world.regions[cid]
+            if L.is_under(region):
+                continue
+            for (x, y) in region.cells:
                 if (x, y) not in dist:
                     dist[(x, y)] = 0
                     frontier.append((x, y))

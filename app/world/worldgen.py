@@ -623,13 +623,36 @@ def _nearest_unclaimed_region(world, pos):
     return best
 
 
-def _assign_starting_footholds(world, capitals, min_cells=MIN_FOOTHOLD_CELLS):
+def _assign_starting_footholds(world, capitals, min_cells=MIN_FOOTHOLD_CELLS,
+                              skip=(), indices=None):
     """Hand each faction only its capital's home region (plus enough
     bordering unclaimed regions to reach `min_cells`, largest first) —
     everything else on the map stays UNCLAIMED for players/AI to expand
     into over time, instead of the old "claim the whole map instantly"
-    flood-fill."""
-    for idx, (cx, cy) in enumerate(capitals):
+    flood-fill.
+
+    The capitals list is normally the full roster in faction-index order;
+    `indices` lets a caller hand over a SUBSET (e.g. one capital) while
+    still claiming for the right faction -- without it, `_assign_starting_
+    footholds(world, [(x, y)])` would claim for faction 0.
+
+    `skip` is a set of faction indices that get NO surface foothold at all:
+    cave peoples (Dwarves, Goblins) live under the mountain, and their only
+    surface territory is the door region the gate town claims for them in
+    holds.settle_underworld -- a surface starting foothold would hand a
+    dwarf realm a second territory it has no business owning (with villages
+    in it, see _generate_villages).
+
+    Returns the list of claimed region-id sets, one per capital (callers
+    that need the ids -- e.g. holds._fallback_surface_capital, which claims
+    after the factions' meta already exists -- sync the faction's own
+    meta["regions"] from it; the worldgen step-8 call discards it, since
+    step 9 derives meta["regions"] from the owner grid afterwards)."""
+    result = []
+    for pos, (cx, cy) in enumerate(capitals):
+        idx = indices[pos] if indices else pos
+        if idx in skip:
+            continue
         home_id = world.region_grid[cy][cx]
         if home_id < 0 or world.regions[home_id].faction_idx >= 0:
             home_id = _nearest_unclaimed_region(world, (cx, cy))
@@ -653,6 +676,8 @@ def _assign_starting_footholds(world, capitals, min_cells=MIN_FOOTHOLD_CELLS):
             region.faction_idx = idx
             for x, y in region.cells:
                 world.owner[y][x] = idx
+        result.append(claimed)
+    return result
 
 
 _LAKE_DEPTH = 0.011       # filled-minus-original elevation that counts as lake.
@@ -2879,7 +2904,14 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     # 8. hand each faction only a small starting foothold around its capital
     #    — everything else on the map stays UNCLAIMED for players/AI to
     #    expand into over time, instead of claiming the whole map at once.
-    _assign_starting_footholds(world, capitals)
+    #    Cave peoples get NO surface foothold: their realm is the under
+    #    network, claimed in settle_underworld (step 11b), and their only
+    #    above-ground territory is the gate town's door region. A surface
+    #    foothold would hand them a second territory full of villages they
+    #    have no business owning.
+    from app.world.holds import UNDERGROUND_SPECIES
+    cave_idx = {i for i, s in enumerate(roster) if s in UNDERGROUND_SPECIES}
+    _assign_starting_footholds(world, capitals, skip=cave_idx)
 
     # 9. build factions (species, color, stats, centroid) from their foothold.
     #    The species roster was rolled in step 5b, where the capitals were
@@ -2991,6 +3023,27 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     #      trade with, and a warren needs somebody to raid.
     from app.world.holds import settle_underworld
     settle_underworld(world, rng)
+
+    # 11c. a cave realm's territory is the under network plus the gate
+    #      town's door region, NOT a surface foothold (skipped in step 8), so
+    #      the nation stats step 9 derived from the surface owner grid are
+    #      empty for it. Recompute cells/fertility/bbox (and center, which
+    #      _recompute_faction_totals deliberately does not touch) from what
+    #      settle_underworld actually gave them.
+    from app.world.territory import _recompute_faction_totals
+    from app.world.holds import UNDERGROUND_SPECIES as _US
+    for _idx, _nation in enumerate(world.factions):
+        if (_nation.meta.get("species") in _US
+                and _nation.meta.get("regions")):
+            _recompute_faction_totals(world, _nation, _idx)
+            _xs, _ys = [], []
+            for _cid in _nation.meta["regions"]:
+                for _x, _y in world.regions[_cid].cells:
+                    _xs.append(_x)
+                    _ys.append(_y)
+            if _xs:
+                _nation._center = (sum(_xs) / len(_xs) / width,
+                                   sum(_ys) / len(_ys) / height)
 
     # 12. trade routes start nonexistent — no nation is pre-connected to any
     #     other; land routes must be discovered (diplomacy) and physically
