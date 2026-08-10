@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 112,
+        "title": "A Real Map Preview",
+        "items": [
+            "FIX: the load menu's map preview is now an actual map. It shipped as a thumbnail of the world's top-left 30x30 cells -- at 1 px per cell a default 1100x660 world is bigger than the preview box, so the 'preview' was a corner of the seam ocean. It now uses the same renderer as the New Game screen: a true miniature of the whole world -- ocean depth, lakes and rivers, your realm in its colour, and a ring on the capital.",
+        ],
+    },
+    {
         "version": 111,
         "title": "The World at a Glance",
         "items": [
