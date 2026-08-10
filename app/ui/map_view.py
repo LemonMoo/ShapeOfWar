@@ -303,6 +303,54 @@ _WEATHER_GLYPH = {
     "fog": "\u2248",         # approximately-equal, which reads as haze
 }
 
+# Physical precipitation, drawn over the affected region when you are close
+# enough for it to read: a storm streaks rain, a blizzard streaks snow, fog
+# settles as soft banks. Drought is the absence of weather -- nothing falls,
+# and its dusty-gold outline + sun badge carry it (see _weather_particles).
+_WEATHER_STREAK_COLOR = {
+    "storm": "#b9cfe6",    # rain blue
+    "blizzard": "#eef6fd", # snow white
+    "fog": None,
+}
+_WEATHER_PUFF_COLOR = {
+    "storm": "#42536b",    # dark storm cloud
+    "blizzard": "#dce9f4", # pale snow sky
+    "fog": "#c8d0d8",      # flat fog bank
+}
+
+
+def _wpart(region_id, turn, i):
+    """Deterministic per-(region, turn, particle) hash for the weather
+    precipitation: stable within a turn (no flicker), shifts each turn,
+    and two regions never share a pattern."""
+    n = (region_id * 73856093) ^ ((turn + 1) * 19349663) ^ (i * 83492791)
+    n = (n ^ (n >> 13)) * 1274126177
+    return (n ^ (n >> 16)) & 0xFFFFFFFF
+
+# Physical precipitation, drawn over the affected region once you are close
+# enough for it to read: a storm streaks rain, a blizzard streaks snow, fog
+# settles as soft banks. Drought is the absence of weather -- nothing falls,
+# and its dusty-gold outline + sun badge carry it (see _weather_particles).
+_WEATHER_STREAK_COLOR = {
+    "storm": "#b9cfe6",    # rain blue
+    "blizzard": "#eef6fd", # snow white
+    "fog": None,
+}
+_WEATHER_PUFF_COLOR = {
+    "storm": "#42536b",    # dark storm cloud
+    "blizzard": "#dce9f4", # pale snow sky
+    "fog": "#c8d0d8",      # flat fog bank
+}
+
+
+def _wpart(region_id, turn, i):
+    """Deterministic per-(region, turn, particle) hash for the weather
+    precipitation: stable within a turn (no flicker), shifts each turn,
+    and two regions never share a pattern."""
+    n = (region_id * 73856093) ^ ((turn + 1) * 19349663) ^ (i * 83492791)
+    n = (n ^ (n >> 13)) * 1274126177
+    return (n ^ (n >> 16)) & 0xFFFFFFFF
+
 
 def _lighten(rgb, amt):
     r, g, b = rgb
@@ -3001,6 +3049,18 @@ class MapView(tk.Frame):
                                 else lw(1.6, 0.17, minimum=1.2),
                                 0 if severe else 3))
 
+            # PHYSICAL weather: when you are close enough for it to read, the
+            # affected region also shows its precipitation -- rain streaks for
+            # a storm, snow for a blizzard -- so weather is a thing happening
+            # in the world, not just an outline around it. (Fog has no
+            # streaks; its banks are the puff markers in _flat_markers.)
+            if level >= 1:
+                for region, event in self._weathered_regions():
+                    streaks, _puffs = self._weather_particles(region, event)
+                    for x0, y0, x1, y1, colour in streaks:
+                        out.append(([(x0, y0), (x1, y1)],
+                                    _GL_RGB[colour], 1.6, 0))
+
             if self.attack_mode is not None:
                 for region in self._attack_frontier:
                     for x0, y0, x1, y1 in self._region_border_segments(region):
@@ -3248,6 +3308,16 @@ class MapView(tk.Frame):
             for project in wd.settlement_projects:
                 marks.append((project.pos[0] + 0.5, project.pos[1] + 0.5, px(4.0),
                              _GL_RGB["#f2e9c9"], SHAPE_CIRCLE))
+
+        # Physical weather: storm clouds, snow sky and fog banks drift over
+        # the affected region from region view in (see _map_lines for the
+        # rain/snow streaks). Fog-gated by the same region-centre reveal as
+        # the outline, so weather you could not know about stays hidden.
+        if level >= 1 and self.layer == layers.SURFACE:
+            for region, event in self._weathered_regions():
+                _streaks, puffs = self._weather_particles(region, event)
+                for cx, cy, r, colour in puffs:
+                    marks.append((cx, cy, r, _GL_RGB[colour], SHAPE_CIRCLE))
         return marks
 
     def _flat_mover_markers(self):
@@ -6762,6 +6832,7 @@ class MapView(tk.Frame):
         if self.layer == layers.SURFACE:
             self._draw_construction(c, screen)
             self._draw_placement_hint(c, screen)
+            self._draw_weather(c, screen)
         self._draw_settlements(c, screen)
         self._draw_villages(c, screen)
         self._draw_labels(c, screen)
@@ -7104,6 +7175,65 @@ class MapView(tk.Frame):
         (_on_click) so a marker's clickable area always matches what's
         actually drawn."""
         return max(_MARKER_MIN_R, min(_MARKER_MAX_R, base_world_size * self._place[2]))
+
+    def _draw_weather(self, c, screen):
+        """The weather physically manifested on the canvas map: the affected
+        region outlined in its weather's colour at every zoom (parity with
+        the flat map -- see _map_lines), a glyph badge at its centre from
+        region view in (parity with _map_labels), and its precipitation --
+        rain streaks and storm clouds, snow, or fog banks -- drifting over
+        the region's own cells once you are close enough for them to read.
+
+        Weather is a SURFACE mechanic; the caller only invokes this on the
+        surface layer."""
+        wd = self.world
+        scale = self._place[2]
+        zoomed = scale >= 3.0
+        for region, event in self._weathered_regions():
+            colour = _WEATHER_MAP_COLOR.get(event.kind)
+            if colour:
+                severe = event.severity == weather_mod.SEVERE
+                width = (max(2.2, scale * 0.26) if severe
+                         else max(1.2, scale * 0.17))
+                dash = () if severe else (6, 4)
+                for x0, y0, x1, y1 in self._region_border_segments(region):
+                    sx0, sy0 = screen(x0, y0)
+                    sx1, sy1 = screen(x1, y1)
+                    if not self._visible_bbox(min(sx0, sx1), min(sy0, sy1),
+                                              max(sx0, sx1), max(sy0, sy1)):
+                        continue
+                    c.create_line(sx0, sy0, sx1, sy1, fill=colour, width=width,
+                                  capstyle="round", joinstyle="round", dash=dash)
+            if not zoomed:
+                continue
+            cx = int(region.center[0] * wd.w)
+            cy = int(region.center[1] * wd.h)
+            sx, sy = screen(cx, cy)
+            if not self._visible_point(sx, sy, pad=40):
+                continue
+            glyph = _WEATHER_GLYPH.get(event.kind)
+            if glyph and colour:
+                c.create_text(sx, sy - 8, text=glyph, fill=colour,
+                              font=_LABEL_FONT)
+                c.create_text(sx, sy + 8, text=event.kind.title(),
+                              fill=colour, font=_LABEL_FONT)
+            streaks, puffs = self._weather_particles(region, event)
+            for x0, y0, x1, y1, sc in streaks:
+                sx0, sy0 = screen(x0, y0)
+                sx1, sy1 = screen(x1, y1)
+                if not self._visible_bbox(min(sx0, sx1), min(sy0, sy1),
+                                          max(sx0, sx1), max(sy0, sy1)):
+                    continue
+                c.create_line(sx0, sy0, sx1, sy1, fill=sc,
+                              width=max(1.0, scale * 0.09), capstyle="round")
+            for x, y, r, pc in puffs:
+                sx, sy = screen(x, y)
+                rr = max(3.0, r * scale)
+                if not self._visible_bbox(sx - rr, sy - rr, sx + rr, sy + rr):
+                    continue
+                stipple = "gray50" if event.kind != weather_mod.FOG else "gray25"
+                c.create_oval(sx - rr, sy - rr, sx + rr, sy + rr,
+                              fill=pc, outline="", stipple=stipple)
 
     def _draw_settlements(self, c, screen):
         """Markers: city = circle, castle = triangle, town = square. The world
@@ -7804,6 +7934,57 @@ class MapView(tk.Frame):
             out.append((region, event))
         self._weather_cache = (key, out)
         return out
+
+    def _weather_particles(self, region, event):
+        """Deterministic-per-turn precipitation for one weathered region:
+        (streaks, puffs). Streaks are short world-space line segments --
+        (x0, y0, x1, y1, colour_hex) -- rain for a storm, snow for a
+        blizzard; puffs are (cx, cy, radius_cells, colour_hex) soft cloud
+        banks for storm/blizzard/fog. Seeded from the region id and the
+        current turn, so a frame never flickers and the next turn shifts
+        the weather; drought is the absence of weather and draws nothing.
+        Severe weather drops about 40% more of everything."""
+        wd = self.world
+        kind = event.kind
+        streak_colour = _WEATHER_STREAK_COLOR.get(kind)
+        puff_colour = _WEATHER_PUFF_COLOR.get(kind)
+        if not streak_colour and not puff_colour:
+            return [], []
+        cells = region.cells
+        n = len(cells)
+        if not n:
+            return [], []
+        severe = event.severity == weather_mod.SEVERE
+        mult = 1.4 if severe else 1.0
+        if kind == "storm":
+            n_streaks, n_puffs = max(30, min(120, n // 7)), max(2, n // 180)
+        elif kind == "blizzard":
+            n_streaks, n_puffs = max(24, min(100, n // 8)), max(2, n // 200)
+        else:  # fog -- only banks, no streaks
+            n_streaks, n_puffs = 0, max(5, min(20, n // 70))
+        n_streaks = int(n_streaks * mult)
+        n_puffs = max(1, int(n_puffs * mult))
+        turn = wd.turn
+        streaks, puffs = [], []
+        for i in range(n_streaks + n_puffs):
+            h = _wpart(region.id, turn, i)
+            x, y = cells[h % n]
+            ox = ((h >> 7) & 0xFF) / 255.0 - 0.5
+            oy = ((h >> 15) & 0xFF) / 255.0 - 0.5
+            cx, cy = x + 0.5 + ox, y + 0.5 + oy
+            if i < n_streaks:
+                ang = ((h >> 23) & 0xFF) / 255.0
+                if kind == "blizzard":
+                    dx, dy, length = 0.85, 0.45, 0.5 + 0.5 * ang
+                else:
+                    dx, dy, length = 0.5, 1.0, 0.5 + 0.5 * ang
+                streaks.append((cx, cy, cx + dx * length, cy + dy * length,
+                                streak_colour))
+            else:
+                r = (1.0 + ((h >> 11) & 0xFF) / 255.0) * (
+                    1.9 if kind == "fog" else 1.1)
+                puffs.append((cx, cy, r, puff_colour))
+        return streaks, puffs
 
     def _region_border_segments(self, region):
         """Screen-space-independent (x,y) edge list tracing a region's
