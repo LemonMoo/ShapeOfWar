@@ -9,6 +9,7 @@ from tkinter import messagebox
 
 from app.ui import parchment
 from app.ui import theme
+from app.core.save import load_game
 
 _WIDTH = 460
 
@@ -64,6 +65,33 @@ class LoadGameMenuView(tk.Frame):
                                   relief="flat", font=theme.FONT_BOLD,
                                   activebackground=theme.ACCENT, state="disabled")
         self.load_btn.pack(side="right", padx=8, pady=8)
+        
+        # Details panel for selected world
+        self._details_frame = tk.Frame(holder, bg=theme.PANEL)
+        self._details_frame.pack(fill="x", pady=(5, 0))
+        self._details_frame.pack_forget()  # Initially hidden
+        
+        # Create details labels
+        self._details_title = tk.Label(self._details_frame, text="", font=theme.FONT_BOLD, 
+                                       bg=theme.PANEL, fg=theme.ACCENT)
+        self._details_title.pack(pady=(5, 0))
+        
+        self._details_species = tk.Label(self._details_frame, text="", font=theme.FONT, 
+                                         bg=theme.PANEL, fg=theme.INK)
+        self._details_species.pack()
+        
+        self._details_date = tk.Label(self._details_frame, text="", font=theme.FONT, 
+                                      bg=theme.PANEL, fg=theme.MUTED)
+        self._details_date.pack()
+        
+        self._details_map_preview = tk.Label(self._details_frame, text="Map Preview", 
+                                             bg=theme.PANEL, fg=theme.INK)
+        self._details_map_preview.pack(pady=(5, 0))
+        
+        # Map preview canvas
+        self._map_canvas = tk.Canvas(self._details_frame, width=120, height=120, 
+                                     bg=theme.PANEL_ALT, highlightthickness=0)
+        self._map_canvas.pack(pady=5)
 
     def refresh(self, saves):
         self._saves = list(saves)
@@ -100,6 +128,10 @@ class LoadGameMenuView(tk.Frame):
         self._selected_name = name
         self.load_btn.config(state="normal")
         self.delete_btn.config(state="normal")
+        
+        # Show details for the selected world
+        if save_id:
+            self._show_details(save_id)
         self._render()
 
     def _load(self):
@@ -119,3 +151,112 @@ class LoadGameMenuView(tk.Frame):
         self._selected_id = None
         self._selected_name = None
         self.on_cancel()
+
+    def _show_details(self, save_id):
+        """Show expanded details about the selected world"""
+        # Get the metadata for display (before load_game, so the
+        # except-fallback below can rely on `meta` being defined).
+        meta = None
+        for save_meta in self._saves:
+            if save_meta["id"] == save_id:
+                meta = save_meta
+                break
+
+        if meta is None:
+            return
+
+        try:
+            # Load the world to get more information
+            world = load_game(save_id)
+
+            # Update details labels
+            self._details_title.config(text=meta.get("name", "Unnamed World"))
+            self._details_species.config(text=f"Species: {meta.get('species', '?')}")
+            self._details_date.config(text=f"Created: {meta.get('created_at', 'unknown date')}")
+            
+            # Create map preview
+            self._create_map_preview(world)
+            
+            # Show the details panel
+            self._details_frame.pack(fill="x", pady=(5, 0))
+            
+        except Exception as e:
+            print(f"Error loading world details: {e}")
+            # If we can't load the world, just show basic info
+            self._details_title.config(text="World Details")
+            self._details_species.config(text=f"Species: {meta.get('species', '?') if meta else '?'}")
+            self._details_date.config(text=f"Created: {meta.get('created_at', 'unknown date') if meta else 'unknown date'}")
+            # Show a placeholder for the map
+            self._map_canvas.delete("all")
+            self._map_canvas.create_text(60, 60, text="Map Preview", fill=theme.MUTED)
+
+    def _create_map_preview(self, world):
+        """Create a small preview of the world map"""
+        self._map_canvas.delete("all")
+        
+        # Get world dimensions
+        if not hasattr(world, 'w') or not hasattr(world, 'h'):
+            self._map_canvas.create_text(60, 60, text="Map Preview", fill=theme.MUTED)
+            return
+            
+        w = world.w
+        h = world.h
+        
+        # Draw a simple map preview with basic colors for land/ocean
+        cell_size = min(120 // max(w, h), 4)  # Size of each cell in the preview
+        if cell_size < 1:
+            cell_size = 1
+            
+        # Calculate offset to center the map
+        map_width = w * cell_size
+        map_height = h * cell_size
+        offset_x = (120 - map_width) // 2
+        offset_y = (120 - map_height) // 2
+        
+        # Create a simple preview using basic world data
+        try:
+            # Draw ocean cells (blue)
+            for y in range(min(h, 30)):  # Limit to prevent performance issues
+                for x in range(min(w, 30)):
+                    if y < len(world.owner) and x < len(world.owner[0]):
+                        cell_owner = world.owner[y][x]
+                        if cell_owner == -1:  # OCEAN
+                            self._map_canvas.create_rectangle(
+                                offset_x + x * cell_size, 
+                                offset_y + y * cell_size,
+                                offset_x + (x + 1) * cell_size,
+                                offset_y + (y + 1) * cell_size,
+                                fill="#1a5fb4", outline="",  # Blue for ocean
+                                tags="map"
+                            )
+                        else:
+                            # Land cells - use a simple color scheme
+                            self._map_canvas.create_rectangle(
+                                offset_x + x * cell_size, 
+                                offset_y + y * cell_size,
+                                offset_x + (x + 1) * cell_size,
+                                offset_y + (y + 1) * cell_size,
+                                fill="#5d8a34", outline="",  # Green for land
+                                tags="map"
+                            )
+            
+            # Draw some additional features like settlements or regions if available
+            if hasattr(world, 'settlements') and world.settlements:
+                # Draw a few settlements as small circles
+                for i, settlement in enumerate(world.settlements[:5]):  # Show first 5 settlements
+                    if hasattr(settlement, 'x') and hasattr(settlement, 'y'):
+                        x = min(max(0, settlement.x), w-1)
+                        y = min(max(0, settlement.y), h-1)
+                        self._map_canvas.create_oval(
+                            offset_x + x * cell_size - 2,
+                            offset_y + y * cell_size - 2,
+                            offset_x + (x + 1) * cell_size + 2,
+                            offset_y + (y + 1) * cell_size + 2,
+                            fill="#f0d9b5", outline="",  # Light brown for settlements
+                            tags="settlement"
+                        )
+                        
+        except Exception as e:
+            print(f"Error creating map preview: {e}")
+            # Draw a simple placeholder if there's an error
+            self._map_canvas.create_text(60, 60, text="Map Preview", fill=theme.MUTED)
