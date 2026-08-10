@@ -2827,16 +2827,23 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     # placement onto poor ground is allowed on purpose (the New Game screen
     # warns rather than forbids). Clamped to a real land cell so a click just
     # off the coast still founds a realm on the nearest ground.
+    # A lake is water, not ground, for the purposes of *standing* on it:
+    # capitals (player-chosen or scattered) found on a lake's shore, never
+    # in the lake itself. land_cells includes lake cells (they are above
+    # sea level, so `land`/`land_set` can't tell them apart), so sample
+    # from this filtered pool instead.
+    dry_land = [c for c in land_cells if c not in world.lake_cells] or land_cells
     capitals = []
     if player_start is not None:
         px, py = player_start
-        if not (0 <= px < width and 0 <= py < height and land[py][px]):
-            px, py = min(land_cells, key=lambda c: (c[0] - px) ** 2 + (c[1] - py) ** 2)
+        if not (0 <= px < width and 0 <= py < height and land[py][px]
+                and (px, py) not in world.lake_cells):
+            px, py = min(dry_land, key=lambda c: (c[0] - px) ** 2 + (c[1] - py) ** 2)
         capitals.append((px, py))
     tries = 0
     while len(capitals) < n_factions and tries < 6000:
         tries += 1
-        x, y = rng.choice(land_cells)
+        x, y = rng.choice(dry_land)
         if not _capital_has_nearby_farmland(world, x, y, mseed, land_set, coast_d):
             continue
         if all((x - px) ** 2 + (y - py) ** 2 >= min_dist ** 2 for px, py in capitals):
@@ -2847,9 +2854,9 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
         # farmland nearby" for the rest, rather than leaving factions
         # unplaced; if even that comes up empty, fall back to any land cell
         # at all so world-gen never simply fails.
-        farmable = [c for c in land_cells
+        farmable = [c for c in dry_land
                    if _capital_has_nearby_farmland(world, c[0], c[1], mseed, land_set, coast_d)]
-        capitals.append(rng.choice(farmable) if farmable else rng.choice(land_cells))
+        capitals.append(rng.choice(farmable) if farmable else rng.choice(dry_land))
 
     # 4. mark every land cell UNCLAIMED (distinct from OCEAN) before anyone
     #    owns anything — geography (fertility/biome/region shape) no longer

@@ -394,8 +394,12 @@ def _bbox_cellset(world, a, b, include_ocean):
     xs = wrap.bbox_span_wrap(a[0], b[0], world.w, _BBOX_PAD)
     if include_ocean:
         return {(x, y) for y in range(by0, by1) for x in xs}
+    # Lakes are water: a foot commander walks no more through a lake than
+    # through the sea. (Lake cells keep the owner grid's UNCLAIMED value,
+    # so the owner != OCEAN test alone would let an army wade across them.)
     return {(x, y) for y in range(by0, by1) for x in xs
-            if world.owner[y][x] != OCEAN}
+            if world.owner[y][x] != OCEAN
+            and (x, y) not in world.lake_cells}
 
 
 _NEIGH8 = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
@@ -422,7 +426,10 @@ def _shore_neighbor(world, ocean_cell, toward):
         nx, ny = wrap.wrap_x(x + dx, world.w), y + dy
         if not (0 <= ny < world.h):
             continue
-        if world.owner[ny][nx] == OCEAN:
+        # A lake is water too: you disembark onto the shore beside the sea,
+        # not into an inland lake. (Lake cells read as land here -- they
+        # keep owner UNCLAIMED -- so the == OCEAN test alone would pick one.)
+        if world.owner[ny][nx] == OCEAN or (nx, ny) in world.lake_cells:
             continue
         d2 = wrap.dist2_wrap((nx, ny), toward, world.w)
         if best_d2 is None or d2 < best_d2:
@@ -994,19 +1001,20 @@ def advance_commanders(world):
                         cmd.aboard_ship_id = None
                         break
             elif getattr(cmd, "path_layers", None) is None:
-                # On foot: never step onto an ocean cell. Freshly planned
+                # On foot: never step onto a water cell. Freshly planned
                 # paths can't contain one (see set_move_order), but this
                 # guards a path that already existed before that guarantee
                 # -- e.g. an old save -- from stranding the commander
-                # mid-ocean instead of just stopping short. Skipped entirely
-                # for a route that goes below: an underground cell's
-                # coordinates sit under whatever the surface has there, ocean
+                # mid-ocean (or mid-lake) instead of just stopping short.
+                # Skipped entirely for a route that goes below: an
+                # underground cell's coordinates sit under whatever the
+                # surface has there, ocean
                 # included where a gallery runs out beneath the shore, and
                 # reading the surface grid for it would strand the column in
                 # a gallery it is perfectly able to walk down.
                 for i in range(old_index, new_index + 1):
                     px, py = cmd.path[i]
-                    if world.owner[py][px] == OCEAN:
+                    if world.owner[py][px] == OCEAN or (px, py) in world.lake_cells:
                         new_index = max(old_index, i - 1)
                         break
 
