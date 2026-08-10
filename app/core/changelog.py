@@ -20,6 +20,14 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 114,
+        "title": "Weather You Can See",
+        "items": [
+            "WEATHER: the sky does something. A storm rains on the map -- pale streaks and dark cloud puffs over the affected region -- a blizzard streaks snow, and fog drifts as soft banks; drought gets no rain, the outline and the sun badge carry it. Drawn on the flat map and on the canvas, deterministic per region and turn, only where the fog of war has lifted, and never below ground.",
+            "FIX: lakes are water again. Armies no longer march across a lake (a lake cell is not the ocean, but it is not land either, and a stale save mid-lake stops at the shore too), a ship can't land its men on one, and no realm starts in one -- a player-chosen start that lands on a lake snaps to the nearest shore, and AI capitals are drawn from dry land only. Settlements already refused to build on water, and lake shores irrigate the land around them exactly like a coast.",
+        ],
+    },
+    {
         "version": 113,
         "title": "Only the Mountain and Its Door",
         "items": [
