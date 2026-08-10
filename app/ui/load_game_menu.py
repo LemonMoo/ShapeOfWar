@@ -7,9 +7,12 @@ what a load screen is.
 import tkinter as tk
 from tkinter import messagebox
 
+from PIL import ImageTk
+
 from app.ui import parchment
 from app.ui import theme
 from app.core.save import load_game
+from app.ui.world_preview import render_world
 
 _WIDTH = 460
 
@@ -92,6 +95,7 @@ class LoadGameMenuView(tk.Frame):
         self._map_canvas = tk.Canvas(self._details_frame, width=120, height=120, 
                                      bg=theme.PANEL_ALT, highlightthickness=0)
         self._map_canvas.pack(pady=5)
+        self._map_img = None  # Tk drops unreferenced PhotoImages, so keep it
 
     def refresh(self, saves):
         self._saves = list(saves)
@@ -191,72 +195,24 @@ class LoadGameMenuView(tk.Frame):
             self._map_canvas.create_text(60, 60, text="Map Preview", fill=theme.MUTED)
 
     def _create_map_preview(self, world):
-        """Create a small preview of the world map"""
+        """A real miniature of the world on the details canvas.
+
+        Uses the same thumbnail pipeline as the New Game screen
+        (world_preview.render_world), so the preview shows the actual
+        geography -- ocean depth, lakes and rivers, the player's own realm
+        in its colour, a ring on the capital. The naive per-cell loop this
+        replaces could never scale: at 1 px per cell a default 1100x660
+        world is bigger than the 120 px canvas, so it settled for drawing
+        the top-left 30x30 cells -- a corner of the seam ocean, not a map.
+        """
         self._map_canvas.delete("all")
-        
-        # Get world dimensions
-        if not hasattr(world, 'w') or not hasattr(world, 'h'):
-            self._map_canvas.create_text(60, 60, text="Map Preview", fill=theme.MUTED)
-            return
-            
-        w = world.w
-        h = world.h
-        
-        # Draw a simple map preview with basic colors for land/ocean
-        cell_size = min(120 // max(w, h), 4)  # Size of each cell in the preview
-        if cell_size < 1:
-            cell_size = 1
-            
-        # Calculate offset to center the map
-        map_width = w * cell_size
-        map_height = h * cell_size
-        offset_x = (120 - map_width) // 2
-        offset_y = (120 - map_height) // 2
-        
-        # Create a simple preview using basic world data
         try:
-            # Draw ocean cells (blue)
-            for y in range(min(h, 30)):  # Limit to prevent performance issues
-                for x in range(min(w, 30)):
-                    if y < len(world.owner) and x < len(world.owner[0]):
-                        cell_owner = world.owner[y][x]
-                        if cell_owner == -1:  # OCEAN
-                            self._map_canvas.create_rectangle(
-                                offset_x + x * cell_size, 
-                                offset_y + y * cell_size,
-                                offset_x + (x + 1) * cell_size,
-                                offset_y + (y + 1) * cell_size,
-                                fill="#1a5fb4", outline="",  # Blue for ocean
-                                tags="map"
-                            )
-                        else:
-                            # Land cells - use a simple color scheme
-                            self._map_canvas.create_rectangle(
-                                offset_x + x * cell_size, 
-                                offset_y + y * cell_size,
-                                offset_x + (x + 1) * cell_size,
-                                offset_y + (y + 1) * cell_size,
-                                fill="#5d8a34", outline="",  # Green for land
-                                tags="map"
-                            )
-            
-            # Draw some additional features like settlements or regions if available
-            if hasattr(world, 'settlements') and world.settlements:
-                # Draw a few settlements as small circles
-                for i, settlement in enumerate(world.settlements[:5]):  # Show first 5 settlements
-                    if hasattr(settlement, 'x') and hasattr(settlement, 'y'):
-                        x = min(max(0, settlement.x), w-1)
-                        y = min(max(0, settlement.y), h-1)
-                        self._map_canvas.create_oval(
-                            offset_x + x * cell_size - 2,
-                            offset_y + y * cell_size - 2,
-                            offset_x + (x + 1) * cell_size + 2,
-                            offset_y + (y + 1) * cell_size + 2,
-                            fill="#f0d9b5", outline="",  # Light brown for settlements
-                            tags="settlement"
-                        )
-                        
+            img = render_world(world, (120, 120))
+            self._map_img = ImageTk.PhotoImage(img)
+            self._map_canvas.create_image(60, 60, image=self._map_img)
         except Exception as e:
             print(f"Error creating map preview: {e}")
-            # Draw a simple placeholder if there's an error
+            # Draw a simple placeholder if there's an error; drop the stale
+            # image reference so the canvas can never show yesterday's map.
+            self._map_img = None
             self._map_canvas.create_text(60, 60, text="Map Preview", fill=theme.MUTED)
