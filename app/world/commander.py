@@ -546,6 +546,24 @@ def path_layer_at(commander, index):
     return seq[index]
 
 
+
+
+_TWO_LAYER_CACHE_MAX = 256     # gate pairs are a handful; marching orders churn
+
+
+def _two_layer_terrain_sig(world):
+    """A cheap stamp of everything that can change what a gate route costs:
+    the tunnel network (layers.carve/fill) and the road network
+    (construction). Both bump `world.terrain_version` at their single
+    mutation choke point (add_road_segments / carve / fill), so this is one
+    int read -- and unlike a segment COUNT, it also catches a road that is
+    REPLACED by a better one with no change in count (dirt -> stone). Gates
+    are in too, for the same reason, though a gate is added at worldgen and
+    essentially never again (see gate_at)."""
+    return (getattr(world, "terrain_version", 0),
+            len(getattr(world, "gates", ())))
+
+
 def _two_layer_path(world, start, start_layer, dest, dest_layer):
     """A route that may pass through a gate, as (cells, layers).
 
@@ -564,6 +582,46 @@ def _two_layer_path(world, start, start_layer, dest, dest_layer):
     Never fails into a straight line: where there is no route at all it walks
     as far as it can and stops, the same `_path_dijkstra_nearest` contract the
     surface search uses, for the same fog reason.
+
+    Cached per endpoint pair, because the dominant caller -- gate logistics
+    (resources.run_gate_logistics) -- asks for the SAME node-to-node route
+    every day the hold and its gate town have surplus, and the terrain that
+    could change the answer (tunnels, roads) changes rarely. Every hit is
+    validated against _two_layer_terrain_sig, so a tunnel carved or a road
+    laid anywhere recomputes instead of serving a stale route (construction
+    finishing a road mid-day is caught on the very next call, not "next day"
+    -- the sig is cheap enough to check always). Bounded, so a long game's
+    marching-order churn cannot grow it forever.
+    """
+    cache = getattr(world, "_two_layer_path_cache", None)
+    if cache is None:
+        cache = {}
+        world._two_layer_path_cache = cache
+    key = (start[0], start[1], start_layer, dest[0], dest[1], dest_layer)
+    hit = cache.get(key)
+    if hit is not None and hit[2] == _two_layer_terrain_sig(world):
+        return hit[0], hit[1]
+    path, layers = _two_layer_path_search(
+        world, start, start_layer, dest, dest_layer)
+    if path is None:
+        return None, None
+    if len(cache) >= _TWO_LAYER_CACHE_MAX:
+        cache.clear()
+    cache[key] = (path, layers, _two_layer_terrain_sig(world))
+    return path, layers
+
+
+def _two_layer_path_search(world, start, start_layer, dest, dest_layer):
+    """The uncached gate-route search. Same graph, same costs, same
+    "closest reachable cell if there is no route" fallback as the original
+    tuple-keyed Dijkstra; this version encodes each state as a flat int
+    (layer * w*h + y*w + x), inlines the per-step cost, and drops the
+    neighbour generator's redundant openness filter. Together those are what
+    made the original ~40% of a day's sim cost on a developed world (see
+    dev/bench_turn.py --profile). The graph is identical -- same cellset,
+    same road lookup, same gate index, same eight-neighbour order, same
+    gate-transit edge, same openness tests on every neighbour including the
+    gate exit -- so the cheapest route and its cost are unchanged.
     """
     import heapq
     cellset = _bbox_cellset(world, start, dest, False)
@@ -576,37 +634,42 @@ def _two_layer_path(world, start, start_layer, dest, dest_layer):
                  min(world.h - 1, dest[1] + _UNDER_BBOX_EXTRA))
         cellset |= _bbox_cellset(world, pad_a, pad_b, False)
     roads = road_cells(world)
+    w, h = world.w, world.h
+    n_cells = w * h
+    under_kind = world.under_kind
+    biome_grid = world.biome_grid
+    passable = L.PASSABLE_KINDS
+    gate_index = getattr(world, "_gate_index", None)
+    if gate_index is None:
+        gate_index = {}
+        for gate in world.gates:
+            gate_index[(gate["pos"][0], gate["pos"][1], L.SURFACE)] = gate
+            gate_index[(gate["under"][0], gate["under"][1], L.UNDER)] = gate
+        world._gate_index = gate_index
 
-    def open_here(x, y, layer):
-        if layer == L.UNDER:
-            return world.under_kind.get((x, y)) in L.PASSABLE_KINDS
-        return (x, y) in cellset
-
-    def step_cost(fx, fy, flayer, tx, ty, tlayer):
-        if flayer != tlayer:
-            return L.GATE_TRANSIT_COST
-        if tlayer == L.UNDER:
-            base = L.move_cost(world, tx, ty, L.UNDER)
-        else:
-            base = cell_move_cost(world, (tx, ty), roads)
-        return base * (_DIAG if fx != tx and fy != ty else 1.0)
-
-    src = (start[0], start[1], start_layer)
-    goal = (dest[0], dest[1], dest_layer)
-    if not open_here(*src):
-        return None, None
+    sx, sy = start
+    dx0, dy0 = dest
+    if start_layer == L.UNDER:
+        if under_kind.get((sx, sy)) not in passable:
+            return None, None
+    else:
+        if (sx, sy) not in cellset:
+            return None, None
+    src = start_layer * n_cells + sy * w + sx
+    goal = dest_layer * n_cells + dy0 * w + dx0
     dist = {src: 0.0}
     parent = {}
     pq = [(0.0, src)]
-    best, best_d2 = src, wrap.dist2_wrap(start, dest, world.w)
+    best, best_d2 = src, wrap.dist2_wrap(start, dest, w)
     if start_layer != dest_layer:
         best_d2 += _WRONG_LAYER_PENALTY
     while pq:
         d, cur = heapq.heappop(pq)
         if d > dist.get(cur, 1e18):
             continue
-        cx, cy, clayer = cur
-        d2 = wrap.dist2_wrap((cx, cy), dest, world.w)
+        clayer, rest = divmod(cur, n_cells)
+        cy, cx = divmod(rest, w)
+        d2 = wrap.dist2_wrap((cx, cy), dest, w)
         if clayer != dest_layer:
             # Standing on the wrong layer is never "as close as it gets" while
             # anything on the right one has been reached: without this a march
@@ -616,22 +679,67 @@ def _two_layer_path(world, start, start_layer, dest, dest_layer):
             best_d2, best = d2, cur
         if cur == goal:
             break
-        for nx, ny, nlayer in L.neighbours(world, cx, cy, clayer):
-            if not open_here(nx, ny, nlayer):
-                continue
-            nb = (nx, ny, nlayer)
-            nd = d + step_cost(cx, cy, clayer, nx, ny, nlayer)
-            if nd < dist.get(nb, 1e18):
-                dist[nb] = nd
-                parent[nb] = cur
-                heapq.heappush(pq, (nd, nb))
+        # The eight around this cell, same order L.neighbours walks them.
+        # Openness is checked directly against the sets the old search used
+        # (cellset for the surface, PASSABLE_KINDS below) instead of
+        # L.neighbours' own is_open filter -- same answer, one filter.
+        for nx0, ny0 in L._NEIGH8:
+            nx = cx + nx0
+            ny = cy + ny0
+            if 0 <= nx < w and 0 <= ny < h:
+                if clayer == L.UNDER:
+                    kind = under_kind.get((nx, ny))
+                    if kind not in passable:
+                        continue
+                    base = L.UNDER_MOVE_COST.get(kind, L.UNDER_DEFAULT_MOVE_COST)
+                else:
+                    if (nx, ny) not in cellset:
+                        continue
+                    if (nx, ny) in roads:
+                        base = ROAD_MOVE_COST
+                    else:
+                        base = TERRAIN_MOVE_COST.get(
+                            biome_grid[ny][nx], DEFAULT_MOVE_COST)
+                nd = d + base * (_DIAG if nx0 and ny0 else 1.0)
+                nidx = clayer * n_cells + ny * w + nx
+                if nd < dist.get(nidx, 1e18):
+                    dist[nidx] = nd
+                    parent[nidx] = cur
+                    heapq.heappush(pq, (nd, nidx))
+        # The gate, if this cell is a door's mouth on this layer. The exit
+        # must itself be open -- the old search ran every neighbour,
+        # including the gate exit, through the same open_here filter.
+        gate = gate_index.get((cx, cy, clayer))
+        if gate is not None:
+            if clayer == L.SURFACE:
+                nx, ny = gate["under"]
+                nlayer = L.UNDER
+            else:
+                nx, ny = gate["pos"]
+                nlayer = L.SURFACE
+            if (nlayer == L.UNDER and under_kind.get((nx, ny)) in passable) or (
+                    nlayer == L.SURFACE and (nx, ny) in cellset):
+                nd = d + L.GATE_TRANSIT_COST
+                nidx = nlayer * n_cells + ny * w + nx
+                if nd < dist.get(nidx, 1e18):
+                    dist[nidx] = nd
+                    parent[nidx] = cur
+                    heapq.heappush(pq, (nd, nidx))
 
+    cells = []
+    layers = []
     node = best
-    nodes = [node]
-    while nodes[-1] != src:
-        nodes.append(parent[nodes[-1]])
-    nodes.reverse()
-    return [(x, y) for x, y, _lay in nodes], [lay for _x, _y, lay in nodes]
+    while True:
+        clayer, rest = divmod(node, n_cells)
+        cy, cx = divmod(rest, w)
+        cells.append((cx, cy))
+        layers.append(clayer)
+        if node == src:
+            break
+        node = parent[node]
+    cells.reverse()
+    layers.reverse()
+    return cells, layers
 
 
 _UNDER_BBOX_EXTRA = 25          # see _two_layer_path: a door is off to one side

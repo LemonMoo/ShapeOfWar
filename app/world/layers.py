@@ -170,6 +170,9 @@ def carve(world, x, y, kind=GALLERY):
         raise ValueError(f"unknown underground kind: {kind!r}")
     world.under_cells.add((x, y))
     world.under_kind[(x, y)] = kind
+    # Terrain changed: any cached route over the tunnel network is stale.
+    # Same counter add_road_segments bumps -- the underground is terrain too.
+    world.terrain_version = getattr(world, "terrain_version", 0) + 1
 
 
 def fill(world, x, y):
@@ -178,6 +181,7 @@ def fill(world, x, y):
     world.under_cells.discard((x, y))
     world.under_kind.pop((x, y), None)
     world.under_owner.pop((x, y), None)
+    world.terrain_version = getattr(world, "terrain_version", 0) + 1
     world.under_region.pop((x, y), None)
 
 

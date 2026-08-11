@@ -20,6 +20,14 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 115,
+        "title": "A Lighter Day",
+        "items": [
+            "PERF: a day now costs about 30% less sim time on a developed world. The route a cave realm's lifeline ships through its door (hold to gate town, food down and ore up) was re-searched from scratch every single day -- it is now computed once and reused until the tunnels or roads actually change (a carve, a fill, or a new road invalidates it), and the search itself was tightened about 4x. A cheaper day means the map keeps up: faster days, faster saves, shorter stalls before a battle.",
+            "PERF: a shipment that cannot reach its destination (two ports with no land or sea route between them) now fails fast -- a cost-free connectivity check runs before the expensive route search, so a disconnected trade lane stops looking after a moment instead of walking the whole map to conclude there is no way. Connected routes are bit-for-bit unchanged.",
+        ],
+    },
+    {
         "version": 114,
         "title": "Weather You Can See",
         "items": [

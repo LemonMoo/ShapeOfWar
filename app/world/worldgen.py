@@ -1867,6 +1867,12 @@ def add_road_segments(world, region_id, segments, tier):
         covered = {frozenset((a, b)) for a, b, t in segs if t == tier}
     segs.extend((a, b, tier) for a, b in incoming
                 if frozenset((a, b)) not in covered)
+    # The road network changed (or was offered a change that may replace an
+    # existing segment -- the dirt-to-stone case keeps the same segment count,
+    # so a COUNT-based stamp would miss it). This is the single choke point
+    # every road mutation during play routes through (construction, regional
+    # roads, claim-win relays), so one bump here is every bump needed.
+    world.terrain_version = getattr(world, "terrain_version", 0) + 1
 
 
 def road_chains(world):
