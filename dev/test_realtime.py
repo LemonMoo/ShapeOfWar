@@ -198,6 +198,33 @@ try:
         view._finish_day()
     assert not view.runner.busy
     print("  ok    finish_day() closes out whatever was in progress")
+
+    print("\n--- a second world in the same view is the world that advances ---")
+    # The runner is born with the first world; a second game (or a load) in
+    # the same session must rebind it, or the new world's date sits on day 1
+    # forever while the old one quietly keeps running. Reported from a dwarf
+    # start after an earlier game in the same session.
+    world_b = pickle.load(open(PATH, "rb"))
+    if world_b.player_faction_idx is None:
+        world_b.player_faction_idx = 0
+    Cmd.ensure_faction_commanders(world_b)
+    turn_a = world.turn
+    view.set_world(world_b)
+    assert view.runner.world is world_b, (
+        "the runner kept stepping the world it was born with")
+    assert view.clock.paused, (
+        "a freshly opened world should start paused, not at the old speed")
+    assert view.clock.pending == 0.0, (
+        "the old world's days-in-debt were not forgiven on the new world")
+    start_b = world_b.turn
+    view._set_speed(1.0)
+    for _ in range(400):                      # 400 frames of 1/30s = 13.3s
+        view._advance_world(1 / 30)
+    assert world_b.turn > start_b, (
+        "the second world's day counter never advanced")
+    assert world.turn == turn_a, (
+        "the first world is still being stepped by this view")
+    print("  ok    the runner follows the world it was given, and only that one")
 finally:
     try:
         root.destroy()

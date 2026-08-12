@@ -88,6 +88,21 @@ class TurnRunner:
         start another day, until this goes false."""
         return self._steps is not None
 
+    def set_world(self, world):
+        """Rebind the runner to a different world (a second game in the same
+        session, a load). Without this the runner keeps stepping the world it
+        was born with: a day of game two would advance game one, the clock
+        would call day_done() against days that never happened, and the new
+        world's date would sit on day 1 forever while the old one quietly
+        ran on. Any day in progress is discarded -- it belongs to the old
+        world, and a half-run day must never finish against a different one
+        (the world is coherent at every yield, and this is a yield point:
+        set_world is only ever called between phases)."""
+        self.world = world
+        self._steps = None
+        self.phase = None
+        self.phases_done = 0
+
     def begin_day(self):
         """Start a day. Harmless if one is already running -- a day in progress
         is never restarted, since that would replay phases that already

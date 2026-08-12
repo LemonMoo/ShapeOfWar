@@ -1078,6 +1078,20 @@ class MapView(tk.Frame):
     # --- world binding -----------------------------------------------------
     def set_world(self, world):
         self.world = world
+        # The runner steps the world it was BORN with unless told otherwise --
+        # a second game in the same session (or a load) would otherwise keep
+        # advancing the first world while this one's date sat on day 1. Rebinding
+        # here also discards any day of the old world still in progress.
+        self.runner.set_world(world)
+        # A fresh world opens PAUSED, like the first one did (see the clock's
+        # construction above): the player's first look at it is not spent
+        # watching it do things, and the old world's days-in-debt are not owed
+        # by this one.
+        self.clock.pause(clock.MANUAL)
+        self.clock.forgive_backlog()
+        # The day-cost estimate is a rolling average learned on a SPECIFIC
+        # world -- a new world starts from scratch, not from the old one's.
+        self._day_ms_estimate = 0.0
         # Cave peoples (Dwarves, Goblins) wake up underground: their capital
         # is the hold/warren beneath the mountain, so a cave-player's new
         # game opens on the underworld layer, not the surface.
@@ -1133,6 +1147,10 @@ class MapView(tk.Frame):
         self._update_resource_bar()
         self._update_turn_label()
         self._refresh_alerts()
+        # The drawn foot controls were showing the previous world's clock
+        # state (a running speed button, a different date) -- repaint them
+        # for the fresh, paused world before the first frame sees it.
+        self._refresh_time_controls()
         self.render()
 
     def refresh(self):

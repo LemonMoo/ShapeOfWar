@@ -20,6 +20,15 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 118,
+        "title": "Time and Tide",
+        "items": [
+            "FIX: a new game could sit on day 1 forever — the world runner kept advancing the PREVIOUS game in the same session, so the new realm's calendar never moved (easiest to hit as a dwarf or goblin start after any earlier game). New games and loads now rebind the runner to the world actually on screen, and open paused, exactly like the first game.",
+            "WORLD: the sea shelves at every shore — water slopes out from the beach over a shallow ramp instead of dropping straight to depth at the waterline, so a coast reads as a coast, not a cliff into the abyss.",
+            "WORLD: coastlines are carved by their own current — the longshore flow cuts where it runs fast or accelerates (headlands, channel mouths) and lays down spits and bars where it slackens, compounding over three passes instead of by coincidence of noise.",
+        ],
+    },
+    {
         "version": 117,
         "title": "The Underworld Is a Place",
         "items": [

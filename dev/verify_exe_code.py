@@ -151,6 +151,11 @@ MARKERS = [
     ("app.ui.theme", "ROW_SELECT", "name"),
     ("app.ui.map_view", "_UNDER_SETTLE_STYLE", "name"),
     ("app.core.changelog", "The Underworld Is a Place", "const"),
+    # v0.18.27 -- time and tide: the frozen-clock fix and the coastal shelf.
+    ("app.world.turn_runner", "set_world", "name"),
+    ("app.world.currents", "apply_erosion_shelf", "name"),
+    ("app.world.currents", "SHELF_REACH", "name"),
+    ("app.core.changelog", "Time and Tide", "const"),
     # v0.18.26.2 -- the economy is readable.
     ("app.core.changelog", "The Economy Is Readable", "const"),
     # v0.18.26.1 -- a lighter day.

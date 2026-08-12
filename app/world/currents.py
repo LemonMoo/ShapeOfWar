@@ -9,6 +9,10 @@ climate system already uses, and used for two things --
      real one: a fast channel cutting a strait, a sheltered bay silting up
      into a spit, both on the SAME coastline for a reason the game can point
      to (a current runs through here) rather than by coincidence of noise.
+     The shelf pass (apply_erosion_shelf) then lays shallow water along every
+     shore, so a coast slopes out to sea instead of stopping straight at the
+     waterline; worldgen applies it to whatever layout survives its landmass
+     checks, carved or not.
   2. Sea travel speed. A route that runs with a strong current is faster to
      sail than one that fights it (see CURRENT_SPEED_CAP and app/world/trade.py
      / commander.py's sea-cost functions).
@@ -218,13 +222,118 @@ def solve_currents(land_mask, width, height):
 # --- coastal carving --------------------------------------------------------
 BAND_BLUR_RADIUS = 2       # cells; controls how wide the "coastal band" that
                           # carving is allowed to touch actually is
-EROSION_COEFF = 0.05
-DEPOSITION_COEFF = 0.035
-CARVE_ITERATIONS = 2       # recompute currents against the refined coastline
+# Erosion is driven by the FLOW, not by noise: where the longshore current is
+# fast it attacks the shore, and where its transport capacity RISES along its
+# own path (a headland squeezes the streamlines, a channel mouth funnels them)
+# it picks up material and carries it away -- cut. Where the capacity FALLS
+# (a sheltered bay, the lee of a headland) it drops its load -- fill. The
+# noise `detail` only decides WHERE within a favoured stretch the bite lands,
+# so a coast reads as carved by the current, not by coincidence of noise.
+ERODE_CURRENT = 0.015      # cut where the longshore current runs fast
+ERODE_ACCEL = 0.18         # cut where the current accelerates along the coast
+DEPOSE_SLACK = 0.18        # build where the current decelerates (spits, bars)
+DEPOSE_ONSHORE = 0.04      # build where the current pushes onshore
+CARVE_ITERATIONS = 3       # recompute currents against the refined coastline
                           # this many times, so a cut this pass can deepen
                           # (or a bar this pass built can grow) next pass --
                           # the compounding is what gives carved features
                           # their shape instead of a single uniform nudge
+# Per-pass cap on how much any single cell's height may move. The gradient
+# of current speed (the acceleration term) can spike at sharp coastline
+# corners -- a discretization artifact, not a real current -- and uncapped it
+# could excavate a whole coast in one pass. The cap bounds the damage while
+# still letting a real strait or headland compound over the iterations.
+CARVE_DELTA_CAP = 0.15
+
+# The underwater shelf: how far out from the shore the sea floor is pulled up
+# into a gentle ramp (the "erosion layer" a coast actually has -- the water
+# slopes out over a beach and shelf instead of dropping straight to depth at
+# the waterline). Depth grows linearly with distance from shore, influence
+# fades to zero at SHELF_REACH cells out.
+SHELF_REACH = 5
+SHELF_SHALLOW = 0.05       # target depth (fraction of sea level) at the waterline
+                           # itself; the first water cell (d=1) lands at
+                           # SHALLOW + SLOPE = 0.15
+SHELF_SLOPE = 0.10         # target depth added per cell of distance from shore
+
+
+def _extend_currents_to_coast(u, v, land, width, height):
+    """Diffuse the current field one cell INLAND across the coastline, so
+    `along`/`cross` are meaningful at coastal LAND cells. solve_currents
+    hard-zeros u/v on land (sea travel only ever samples ocean cells), but a
+    coastline is a streamline -- the longshore current does not stop at the
+    waterline -- and the carving term lives exactly at the coastline. Each
+    coastal land cell adopts the mean of its ocean neighbours' currents; the
+    band_weight falloff already confines the carving to the coastal band, so
+    one cell inland is all the erosion term needs. Carving only; the returned
+    cu/cv stored on the world stay zeroed on land."""
+    u = u.copy()
+    v = v.copy()
+    ocean = ~land
+    su = np.zeros_like(u)
+    sv = np.zeros_like(v)
+    cnt = np.zeros_like(land, dtype=np.float64)
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        if dx:
+            nu = np.roll(u, -dx, axis=1)        # value at (x+dx, y)
+            nv = np.roll(v, -dx, axis=1)
+            no = np.roll(ocean, -dx, axis=1)
+        else:
+            nu = np.roll(u, -dy, axis=0)        # value at (x, y+dy)
+            nv = np.roll(v, -dy, axis=0)
+            no = np.roll(ocean, -dy, axis=0)
+            # no wrap in y: kill the rolled edge row so the map's poles
+            # don't see a neighbour from the other side
+            if dy == 1:
+                nu[-1] = nv[-1] = 0.0
+                no[-1] = False
+            else:
+                nu[0] = nv[0] = 0.0
+                no[0] = False
+        su += np.where(no, nu, 0.0)
+        sv += np.where(no, nv, 0.0)
+        cnt += no
+    adopt = (cnt > 0) & land
+    u = np.where(adopt, su / np.maximum(cnt, 1.0), u)
+    v = np.where(adopt, sv / np.maximum(cnt, 1.0), v)
+    return u, v
+
+
+def _distance_from_land(land, width, height, max_d):
+    """4-connected distance from land for every cell, wrap-aware in x (the
+    seam is ocean, so distance legitimately crosses it), clipped to max_d.
+    Iterative numpy dilation -- cheap for the small reach the shelf needs."""
+    dist = np.full(land.shape, float(max_d + 1), dtype=np.float64)
+    dist[land] = 0.0
+    for _ in range(max_d):
+        nxt = dist.copy()
+        nxt = np.minimum(nxt, np.roll(dist, 1, axis=1) + 1.0)
+        nxt = np.minimum(nxt, np.roll(dist, -1, axis=1) + 1.0)
+        nxt = np.minimum(nxt, np.vstack([dist[1:], dist[-1:]]) + 1.0)  # y+1,
+        nxt = np.minimum(nxt, np.vstack([dist[:1], dist[:-1]]) + 1.0)  # y-1
+        dist = nxt
+    return dist
+
+
+def apply_erosion_shelf(height_field, land, sea_level, width, height):
+    """Pull the near-shore sea floor up into a smooth ramp -- the shelf a
+    coast actually has, so water shallows out gradually from the beach instead
+    of dropping straight to depth at the waterline. Target depth grows
+    linearly with distance from shore; influence fades smoothly to zero at
+    SHELF_REACH cells out, where the natural (current-carved) floor takes
+    over. Only ever raises OCEAN heights and never past sea level, so it can
+    neither drown land nor build new land -- it shapes the water, not the
+    coastline. Called by worldgen on the final layout (carved or not) after
+    the landmass checks, so every world gets the shelf even when a seed's
+    carving was rejected."""
+    d = _distance_from_land(land, width, height, SHELF_REACH + 1)
+    ocean = ~land
+    # 1 at the waterline (d=1), 0 at SHELF_REACH; land is masked out anyway.
+    w = np.clip((SHELF_REACH + 1.0 - d) / SHELF_REACH, 0.0, 1.0)
+    w = np.where(ocean, w, 0.0)
+    target_depth = SHELF_SHALLOW + SHELF_SLOPE * d
+    target_h = sea_level * (1.0 - np.minimum(1.0, target_depth))
+    return height_field + (target_h - height_field) * w
 
 
 def _box_blur(field, radius):
@@ -256,6 +365,12 @@ def carve_coastline(height_field, land_mask, sea_level, width, height, seed,
     cu = cv = None
     for i in range(max(1, iterations)):
         cu, cv = solve_currents(land, width, height)
+        # The flow is zeroed on land by solve_currents (travel only samples
+        # ocean), but the coastline is a streamline: extend the current a
+        # couple of cells inland so `along`/`cross` are nonzero AT the coast,
+        # which is where the erosion term has to bite. Without this the
+        # erosion channel is dead and carving can only ever silt up.
+        eu, ev = _extend_currents_to_coast(cu, cv, land, width, height)
 
         land_f = land.astype(np.float64)
         land_blur = _box_blur(land_f, BAND_BLUR_RADIUS)
@@ -272,17 +387,38 @@ def carve_coastline(height_field, land_mask, sea_level, width, height, seed,
         nx, ny = -gx / gmag_safe, -gy / gmag_safe
         tx, ty = -ny, nx                      # tangent: normal rotated 90 deg
 
-        along = cu * tx + cv * ty             # signed longshore current speed
-        cross = cu * nx + cv * ny             # + = flowing out to sea (offshore)
+        along = eu * tx + ev * ty             # signed longshore current speed
+        cross = eu * nx + ev * ny             # + = flowing out to sea (offshore)
+
+        # Transport-capacity divergence: d|along|/ds along the FLOW direction.
+        # Where the longshore current accelerates along its own path it has
+        # spare capacity to pick material up (erode a headland, deepen a
+        # channel mouth); where it decelerates it must drop its load (build a
+        # bar, silt a bay). This is what makes the carving follow the flow
+        # instead of a noise field.
+        al = np.abs(along)
+        dal_dx = 0.5 * (np.roll(al, -1, axis=1) - np.roll(al, 1, axis=1))
+        dal_dy = np.gradient(al, axis=0)
+        speed = np.hypot(eu, ev)
+        us = np.where(speed > 1e-9, eu / np.maximum(speed, 1e-9), 0.0)
+        vs = np.where(speed > 1e-9, ev / np.maximum(speed, 1e-9), 0.0)
+        dq_ds = dal_dx * us + dal_dy * vs
 
         detail = _coast_detail_noise(width, height, seed + 5000 + i)
 
-        erosion = -EROSION_COEFF * np.abs(along) * detail
-        deposition = DEPOSITION_COEFF * np.maximum(0.0, -cross) * (1.0 - detail)
-        delta = band_weight * (erosion + deposition)
+        erosion = (ERODE_CURRENT * al
+                   + ERODE_ACCEL * np.maximum(0.0, dq_ds)) * detail
+        deposition = (DEPOSE_SLACK * np.maximum(0.0, -dq_ds)
+                      + DEPOSE_ONSHORE * np.maximum(0.0, -cross)) * (1.0 - detail)
+        delta = band_weight * (deposition - erosion)
+        delta = np.clip(delta, -CARVE_DELTA_CAP, CARVE_DELTA_CAP)
 
         h = h + delta
         land = h > sea_level
+
+    # The shelf is NOT applied here: worldgen applies it to whichever layout
+    # survives its landmass checks (see apply_erosion_shelf), so a seed whose
+    # carving gets rejected still gets the shallow-water coastline.
 
     # `cu`/`cv` were zeroed against the land mask as it stood BEFORE this
     # final pass's own delta was applied, but a handful of coastal-band
