@@ -20,6 +20,13 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 120,
+        "title": "The Road to the Gate",
+        "items": [
+            "FIX: a founded surface village's road now anchors at the nearest SURFACE node — for a cave realm, the gate town actually sitting on its door — instead of the nearest faction village of any layer, which for a hold lived UNDERGROUND at the mountain base beside the gate, so the road ended out to the side of the city on the mountain gate. An under node is not addressable from the surface, so it can never anchor a surface road.",
+        ],
+    },
+    {
         "version": 119,
         "title": "Dry Stone",
         "items": [

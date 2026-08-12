@@ -110,5 +110,50 @@ gate_town = world.settlements[nation.meta["settlements"][0]]
 assert H.node_kind_name(world, gate_town) == "Town"
 print("  ok    the door town keeps its ordinary name")
 
+print("\n--- a surface village's fallback road anchors at the gate town, not an under-village ---")
+# Reported with a screenshot: a village founded on the surface got a road
+# that ended BESIDE the gate-town city on the mountain gate. The "never an
+# island" fallback drew it to the faction's nearest OTHER village -- which,
+# for a hold, lives UNDERGROUND at the mountain base next to the door --
+# instead of to the gate town actually sitting on the gate. An under node
+# is not addressable from the surface, so a surface road must never anchor
+# at one. (The gate town and the great hall share an (x, y) -- the shaft
+# goes straight up -- so "is this node under" must be judged by REGION
+# layer, never by position.)
+from app.world.worldgen import road_chains
+gate_region = world.regions[gate_town.region_id]
+assert not L.is_under(gate_region)
+def _node_layer(node):
+    rid = getattr(node, "region_id", None)
+    if rid is None or not (0 <= rid < len(world.regions)):
+        return False
+    return L.is_under(world.regions[rid])
+surface_node_positions = {o.pos for o in list(world.settlements) + list(world.villages)
+                          if o.faction_idx == idx and not _node_layer(o)}
+under_positions = {o.pos for o in list(world.settlements) + list(world.villages)
+                   if _node_layer(o)}
+assert under_positions, "the hold has no under nodes to misanchor on"
+occupied = {o.pos for o in list(world.settlements) + list(world.villages)}
+from app.world.resources import _dist2
+candidates = [c for c in gate_region.cells
+              if c not in occupied
+              and all(_dist2(c, p) > 26 for p in surface_node_positions)]
+assert candidates, "no cell far enough from every surface node to force the fallback"
+cell = candidates[0]
+fund()
+msg = C.start_found_village(world, nation, cell)
+assert msg == "", msg
+v = C._finish_found_village(world, world.found_village_projects[-1])
+runs = [(cells, tier) for cells, tier in road_chains(world).get(gate_region.id, ())
+        if tuple(v.pos) in cells]
+assert runs, "the founded village got no road at all -- it is an island"
+cells, tier = runs[0]
+end = cells[-1] if cells[0] == tuple(v.pos) else cells[0]
+assert end in surface_node_positions, (
+    f"surface road from {v.pos} terminates at {end}, not a surface node "
+    f"(under-village anchor? {end in under_positions})")
+print(f"  ok    {v.name} at {v.pos} anchors at a surface node, not "
+      f"{sorted(under_positions - surface_node_positions)[:2]}")
+
 print("\nUNDER LADDER TEST PASSED")
 sys.exit(0)

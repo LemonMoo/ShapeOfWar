@@ -36,6 +36,8 @@ MARKERS = [
     ("app.world.buildings", "dry_stone", "name"),
     ("app.ui.build_menu", "Dry stone — this region has no timber", "const"),
     ("app.core.changelog", "Dry Stone", "const"),
+    # v0.20.0 -- the road to the gate: surface roads anchor at surface nodes.
+    ("app.core.changelog", "The Road to the Gate", "const"),
     # v0.18.0 -- the settlement-first world.
     ("app.ui.map_view", "Choose its character", "const"),
     ("app.world.expansion", "Your realm is still growing", "const"),
