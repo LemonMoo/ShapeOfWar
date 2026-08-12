@@ -6,8 +6,9 @@ import math
 
 from app.core.events import bus
 from app.world import wrap
+from app.world import layers as L
 from app.world.nation import is_eliminated
-from app.world.worldgen import OCEAN, _bfs_distance
+from app.world.worldgen import OCEAN, UNCLAIMED, _bfs_distance
 from app.world.resources import _SETTLEMENT_STORAGE_RESOURCES
 
 _NEIGH4 = ((1, 0), (-1, 0), (0, 1), (0, -1))
@@ -71,7 +72,12 @@ def gate_bordering_regions(world, attacker_idx, defender_idx):
             if L.owner_at(world, near[0], near[1], near_layer) != attacker_idx:
                 continue
             far_owner = L.owner_at(world, far[0], far[1], far_layer)
-            far_owner = -1 if far_owner is None else far_owner
+            # Unowned is UNCLAIMED, not OCEAN: an absent sparse-map entry
+            # means nobody holds it, and an underground cell is never ocean.
+            # Mapping None to -1 (OCEAN) here is what silently made every
+            # unclaimed far side fail the `!= defender_idx` test, so the
+            # gate frontier could never contain wildland at all.
+            far_owner = UNCLAIMED if far_owner is None else far_owner
             if far_owner != defender_idx:
                 continue
             rid = L.region_at(world, far[0], far[1], far_layer)
@@ -247,8 +253,20 @@ def transfer_region(world, region, new_faction_idx):
     old_faction = world.factions[old_faction_idx] if old_faction_idx >= 0 else None
     new_faction = world.factions[new_faction_idx]
 
-    for x, y in region.cells:
-        world.owner[y][x] = new_faction_idx
+    # Ownership is per-layer: an underground region's cells live in the
+    # sparse `under_owner` map, and the SAME coordinates on the surface
+    # belong to whoever owns the mountainside above (usually nobody, or a
+    # different realm entirely). Writing the dense surface grid for an
+    # under region would hand the conqueror a second, bogus surface
+    # territory and leave the galleries owned by the loser -- the
+    # half-implemented "take a gate" that shipped before this. See
+    # app/world/layers.py's owner_at/set_owner_at.
+    if L.is_under(region):
+        for x, y in region.cells:
+            L.set_owner_at(world, x, y, L.UNDER, new_faction_idx)
+    else:
+        for x, y in region.cells:
+            world.owner[y][x] = new_faction_idx
     region.faction_idx = new_faction_idx
     world.territory_version = getattr(world, "territory_version", 0) + 1
     mark_cells_dirty(world, region.cells)

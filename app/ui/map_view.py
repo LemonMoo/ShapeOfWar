@@ -647,6 +647,15 @@ _SETTLE_STYLE = {
     "town":   {"fill": "#d9b98a", "outline": "#4a3a24", "base": 0.38},
 }
 _VILLAGE_STYLE = {"fill": "#c9a06a", "outline": "#4a3418", "base": 0.28}
+
+# The underworld reads as HALLS, not towns (v0.18.27): an under-settlement
+# or under-village is a DIAMOND -- a great hall seen in plan -- in a deep
+# forge-gold, against the surface's circles/squares/triangles. Same relative
+# sizing (a hall is bigger than a hall-stead, exactly as a city is bigger
+# than a village), so nothing about map readability changes; the shape family
+# alone says "carved rock" at a glance.
+_UNDER_SETTLE_STYLE = {"fill": "#e8c268", "outline": "#4a3a14", "base": 0.55}
+_UNDER_VILLAGE_STYLE = {"fill": "#c9a84f", "outline": "#3f3318", "base": 0.28}
 _MARKER_MIN_R = 4.5    # never smaller than this, however far zoomed out
 _MARKER_MAX_R = 26.0   # never larger than this, however far zoomed in --
                         # raised so a settlement actually reaches a full,
@@ -1473,11 +1482,14 @@ class MapView(tk.Frame):
         vbar.pack(side="right", fill="y")
         canvas.configure(yscrollcommand=vbar.set)
         self._trade_log_canvas = canvas
-        self._trade_log_rows_frame = tk.Frame(canvas, bg=theme.CANVAS)
-        window = canvas.create_window((0, 0), window=self._trade_log_rows_frame, anchor="nw")
-        self._trade_log_rows_frame.bind(
-            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(window, width=e.width))
+        # The rows are DRAWN onto this canvas via a parchment page -- the
+        # same borrowed-canvas pattern the right panel uses -- so the log is
+        # a page of the ledger rather than a strip of packed Labels (the one
+        # flat-widget seam left inside the map, kit-coverage pass v0.18.27).
+        # The page width tracks the canvas, which is itself resizable by the
+        # drag handle; begin() re-lays the sheet at the current width.
+        self._trade_log_page = parchment.Page(None, 220, seed=5, canvas=canvas)
+        canvas.bind("<Configure>", self._on_trade_log_canvas_resize)
         canvas.bind("<Enter>", lambda e: canvas.bind_all(
             "<MouseWheel>", lambda ev: canvas.yview_scroll(int(-ev.delta / 120), "units")))
         canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
@@ -1774,24 +1786,36 @@ class MapView(tk.Frame):
         if getattr(self, "_trade_log_open", False):
             self._refresh_trade_log_rows()
 
+    def _on_trade_log_canvas_resize(self, event):
+        """Keep the drawn page's width matched to its canvas -- the log is
+        resizable by the drag handle, and a sheet narrower than its frame
+        shows dead margin. Redrawn only when the width actually moved (the
+        drag fires a <Configure> per pixel; a redraw per pixel is a texture
+        regeneration per pixel) and only while the log is open."""
+        page = self._trade_log_page
+        width = max(80, event.width)
+        if abs(width - page.width) > 4:
+            page.width = width
+            if getattr(self, "_trade_log_open", False):
+                self._refresh_trade_log_rows()
+
     def _refresh_trade_log_rows(self):
-        """Rebuild the visible row widgets for the current tab from
-        self._trade_log_entries -- same full-rebuild-on-refresh approach
-        the RESOURCES sidebar and changelog panel already use, cheap
-        enough at this data volume (a few hundred entries, trimmed).
-        Consecutive same-turn "cost" entries sharing a `group` label (the
-        buying settlement/faction) collapse into one summary row that
-        expands to show each individual purchase — see
+        """Rebuild the visible rows for the current tab on the parchment
+        page -- drawn onto the scrollable canvas (same full-rebuild-on-
+        refresh approach the RESOURCES sidebar uses), not packed Labels, so
+        the log reads as a page of the ledger instead of a strip of flat
+        widgets. Consecutive same-turn "cost" entries sharing a `group` label
+        (the buying settlement/faction) collapse into one summary row that
+        expands to show each individual purchase -- see
         _trade_log_expanded. A group of exactly one entry is shown plain,
         no point collapsing a single line."""
-        frame = self._trade_log_rows_frame
-        for w in frame.winfo_children():
-            w.destroy()
+        page = self._trade_log_page
+        page.begin()
 
         entries = [e for e in self._trade_log_entries if e["tab"] == self._trade_log_tab]
         if not entries:
-            tk.Label(frame, text="No trades yet.", bg=theme.CANVAS, fg=theme.MUTED,
-                     font=theme.FONT_SMALL, anchor="w").pack(fill="x", padx=4, pady=4)
+            page.text("No trades yet.", fill=page.pal["muted"])
+            page.finish()
             self._scroll_trade_log_to_end()
             return
 
@@ -1814,24 +1838,20 @@ class MapView(tk.Frame):
         for g in groups:
             if g["turn"] != last_turn:
                 last_turn = g["turn"]
-                tk.Label(frame, text=self._date_text_for_turn(g["turn"]),
-                         bg=theme.CANVAS, fg=theme.ACCENT,
-                         font=theme.FONT_SMALL_BOLD, anchor="w"
-                         ).pack(fill="x", padx=4, pady=(6, 1))
+                page.text(self._date_text_for_turn(g["turn"]),
+                          fill=page.pal["gold"], font=theme.FONT_SMALL_BOLD)
             color = {"income": theme.GOOD, "cost": theme.BAD,
-                    "muted": theme.MUTED}[g["kind"]]
+                    "muted": page.pal["muted"]}[g["kind"]]
             # A row that moved no coin is drawn muted and tagged, so a barter
             # transfer stops looking like gold you gained or spent -- the
             # single biggest reason this log and the Gold figure read as
             # contradicting each other. See _payment_has_coin.
             no_coin = all(not it.get("coin", True) for it in g["items"])
             if no_coin and g["kind"] != "muted":
-                color = theme.MUTED
+                color = page.pal["muted"]
             if len(g["items"]) == 1:
                 tag = "  (barter — no coin)" if no_coin and g["kind"] != "muted" else ""
-                tk.Label(frame, text="  " + g["items"][0]["text"] + tag, bg=theme.CANVAS,
-                         fg=color, font=theme.FONT_SMALL, anchor="w", justify="left"
-                         ).pack(fill="x", padx=4)
+                page.text("  " + g["items"][0]["text"] + tag, fill=color)
                 continue
 
             expanded = g["key"] in self._trade_log_expanded
@@ -1845,16 +1865,15 @@ class MapView(tk.Frame):
                          f"this turn ({'-' if g['kind'] == 'cost' else '+'}"
                          f"{total_value:,}g total)")
             arrow = "▾" if expanded else "▸"
-            row = tk.Label(frame, text=f"  {arrow} {total_desc}", bg=theme.CANVAS, fg=color,
-                           font=theme.FONT_SMALL, anchor="w", justify="left", cursor="hand2")
-            row.pack(fill="x", padx=4)
-            row.bind("<Button-1>", lambda e, k=g["key"]: self._toggle_trade_log_group(k))
+            y0 = page.mark()
+            page.text(f"  {arrow} {total_desc}", fill=color)
             if expanded:
                 for it in g["items"]:
-                    tk.Label(frame, text="      " + it["text"], bg=theme.CANVAS, fg=color,
-                             font=theme.FONT_SMALL, anchor="w", justify="left"
-                             ).pack(fill="x", padx=4)
+                    page.text("      " + it["text"], fill=color)
+            # The whole group block is the control: one click flips it.
+            page.hit_region(y0, lambda k=g["key"]: self._toggle_trade_log_group(k))
 
+        page.finish()
         self._scroll_trade_log_to_end()
 
     def _scroll_trade_log_to_end(self):
@@ -3553,23 +3572,28 @@ class MapView(tk.Frame):
                     and self._node_visible(s)]
         for sid in sids:
             st = wd.settlements[sid]
-            style = _SETTLE_STYLE[st.kind]
+            under = self._under_node(st)
+            style = _UNDER_SETTLE_STYLE if under else _SETTLE_STYLE[st.kind]
             r = self._marker_radius(style["base"])
             if st is self.selected_settlement:
                 ring(st.pos[0] + 0.5, st.pos[1] + 0.5, r)
             marks.append((st.pos[0] + 0.5, st.pos[1] + 0.5, px(r),
-                         _GL_RGB[style["fill"]], self._SETTLE_SHAPE[st.kind]))
+                         _GL_RGB[style["fill"]],
+                         SHAPE_DIAMOND if under else self._SETTLE_SHAPE[st.kind]))
 
         if level >= 2:
             zf = wd.factions.index(self.zoom_faction)
-            r = self._marker_radius(_VILLAGE_STYLE["base"])
             for v in wd.villages:
                 if v.faction_idx != zf or not self._node_visible(v):
                     continue
+                under = self._under_node(v)
+                style = _UNDER_VILLAGE_STYLE if under else _VILLAGE_STYLE
+                r = self._marker_radius(style["base"])
                 if v is self.selected_village:
                     ring(v.pos[0] + 0.5, v.pos[1] + 0.5, r)
                 marks.append((v.pos[0] + 0.5, v.pos[1] + 0.5, px(r),
-                             _GL_RGB[_VILLAGE_STYLE["fill"]], SHAPE_CIRCLE))
+                             _GL_RGB[style["fill"]],
+                             SHAPE_DIAMOND if under else SHAPE_CIRCLE))
 
         # Settlement placement hint (see _score_placement_hint) -- advisory
         # gold dots over a region's best-scoring cells while a City/Town/
@@ -4809,7 +4833,7 @@ class MapView(tk.Frame):
         if body is not None:
             if sts:
                 for st in sts:
-                    self._kv(body, st.name, st.kind.capitalize())
+                    self._kv(body, st.name, self._kind_name(st))
             else:
                 self._panel_text("No settlements.", fg=theme.MUTED)
 
@@ -4824,7 +4848,9 @@ class MapView(tk.Frame):
             from app.world.resources import region_village_capacity
             cap = region_village_capacity(self.world, region)
             full = n_villages >= cap
-            text = f"{n_villages}/{cap} villages"
+            from app.world import holds
+            word = holds.region_village_word(self.world, region)
+            text = f"{n_villages}/{cap} {word}"
             if full:
                 text += " — region full: upgrade a settlement or expand"
             else:
@@ -4848,12 +4874,14 @@ class MapView(tk.Frame):
             # here by hand, same as a Castle always did. See
             # app/world/expansion.py's settle_newly_claimed_region.
             player = self._player_faction()
+            from app.world import holds
             projects_here = [p for p in wd.settlement_projects if p.region_id == region.id]
             for project in projects_here:
                 note = " (half speed — road not yet finished)" if project.half_speed else ""
                 elapsed = project.total_turns - project.turns_left
-                self._panel_text(f"{project.kind.capitalize()} under "
-                         f"construction: {elapsed}/{project.total_turns} turns{note}", fg=theme.MUTED)
+                label = holds.region_kind_name(wd, region, project.kind)
+                self._panel_text(f"{label} under construction: "
+                         f"{elapsed}/{project.total_turns} turns{note}", fg=theme.MUTED)
             building_kinds = {p.kind for p in projects_here}
             for kind in ("city", "town", "castle"):
                 if kind in building_kinds:
@@ -4861,9 +4889,10 @@ class MapView(tk.Frame):
                 cost = construction.SETTLEMENT_BUILD_COST[kind]
                 turns = construction.SETTLEMENT_BUILD_TURNS[kind]
                 afford = construction.can_afford(player, cost, self.world)
-                self._panel_text(f"{kind.capitalize()} — Cost: {_format_resources(cost)}\n"
+                label = holds.region_kind_name(wd, region, kind)
+                self._panel_text(f"{label} — Cost: {_format_resources(cost)}\n"
                               f"Build time: {turns} turns", fg=theme.INK)
-                self._panel_button(f"Build {kind.capitalize()}...",
+                self._panel_button(f"Build {label}...",
                                 lambda r=region, k=kind: self._begin_settlement_placement(r, k))
             # The ladder's first rung: founding a village is the cheap,
             # organic way to fill the region (and the only way to put people
@@ -4872,8 +4901,9 @@ class MapView(tk.Frame):
                 if fv.region_id != region.id:
                     continue
                 elapsed = fv.total_turns - fv.turns_left
-                self._panel_text(f"Village under construction: "
-                                 f"{elapsed}/{fv.total_turns} turns", fg=theme.MUTED)
+                self._panel_text(f"{holds.region_kind_name(wd, region, 'village')} "
+                                 f"under construction: {elapsed}/{fv.total_turns} turns",
+                                 fg=theme.MUTED)
             if not any(fv.region_id == region.id
                        for fv in getattr(wd, "found_village_projects", ())):
                 from app.world.resources import region_village_capacity
@@ -4881,14 +4911,17 @@ class MapView(tk.Frame):
                 if free > 0:
                     cost = construction.VILLAGE_BUILD_COST
                     turns = construction.VILLAGE_BUILD_TURNS
-                    self._panel_text(f"Village — Cost: {_format_resources(cost)}\n"
+                    vlabel = holds.region_kind_name(wd, region, "village")
+                    self._panel_text(f"{vlabel} — Cost: {_format_resources(cost)}\n"
                                      f"Build time: {turns} turns", fg=theme.INK)
                     self._panel_button(
-                        "Found Village...",
+                        f"Found {vlabel}...",
                         lambda r=region: self._begin_settlement_placement(r, "village"))
                 else:
-                    self._panel_text("Village land full — raise a village to "
-                                     "a Town or build a settlement for more room.",
+                    tlabel = holds.region_kind_name(wd, region, "town")
+                    self._panel_text(f"{word.capitalize()} full — raise a "
+                                     f"{holds.region_kind_name(wd, region, 'village')} "
+                                     f"to a {tlabel} or build a settlement for more room.",
                                      fg=theme.MUTED)
 
     def _show_wildland_region(self, region):
@@ -4901,13 +4934,25 @@ class MapView(tk.Frame):
             f"{biome.capitalize()} ({round(100 * count / total_cells)}%)"
             for biome, count in sorted(region.biome_counts.items(),
                                        key=lambda kv: -kv[1])) or "Unclassified"
-        lines = [f"{region.name}", "Unclaimed wildland"]
+        under = layers.is_under(region)
+        lines = [f"{region.name}",
+                 "Unclaimed galleries" if under else "Unclaimed wildland"]
         flavour = region.flavour_name        # phase F, see Region.flavour_name
         if flavour:
             lines.append(flavour)
-        lines += [f"Area {region.stats['area']} · Fertility {region.stats['fertility']}%",
-                  f"Biome: {biome_line}",
-                  f"Wildland garrison strength: {region.wildland_strength}"]
+        if under:
+            # The biome/fertility readout describes the mountainside OVERHEAD
+            # (an under region's biome_counts are empty by design); the honest
+            # line for a cave is the rock itself.
+            tier, bonus = resources.under_depth_info(wd, region)
+            lines += [f"Area {region.stats['area']} · Unclaimed caverns",
+                      f"Depth: {tier} galleries"
+                      + ("" if bonus == 1.0 else f" — ore ×{bonus:g}"),
+                      f"Wildland garrison strength: {region.wildland_strength}"]
+        else:
+            lines += [f"Area {region.stats['area']} · Fertility {region.stats['fertility']}%",
+                      f"Biome: {biome_line}",
+                      f"Wildland garrison strength: {region.wildland_strength}"]
         sea_only = False
         if player is not None:
             faction_idx = wd.factions.index(player)
@@ -5350,7 +5395,8 @@ class MapView(tk.Frame):
             need = round(max_pop * construction.TOWN_UPGRADE_POPULATION_FRACTION)
             pct = round(100 * st.population / max_pop)
             self._panel_text(
-                f"Rising toward a City… {st.population:,}/{need:,} souls "
+                f"Rising toward a {self._kind_name(st, 'city')}… "
+                f"{st.population:,}/{need:,} souls "
                 f"({pct}% of its ceiling; needs "
                 f"{construction.TOWN_UPGRADE_POPULATION_FRACTION:.0%}). ",
                 fg=theme.MUTED)
@@ -5360,15 +5406,19 @@ class MapView(tk.Frame):
         in_flight = any(p.settlement_id == st.id
                         for p in getattr(self.world, "settlement_upgrade_projects", ()))
         if in_flight:
-            self._panel_text("City upgrade under way…", fg=theme.MUTED)
+            self._panel_text(
+                f"{self._kind_name(st, 'city')} rising under way…", fg=theme.MUTED)
             return
         if not construction.can_afford(player, cost, self.world):
+            from app.world import holds
+            word = holds.region_village_word(self.world, self.world.regions[st.region_id])
             self._panel_text(
-                f"Upgrade to City needs {_format_resources(cost)} — a City "
-                "supports more villages, tax and people.", fg=theme.MUTED)
+                f"Rise to a {self._kind_name(st, 'city')} needs "
+                f"{_format_resources(cost)} — a {self._kind_name(st, 'city')} "
+                f"supports more {word}, tax and people.", fg=theme.MUTED)
             return
         self._show_character_choice(
-            "Rise to", "City", turns,
+            "Rise to a", self._kind_name(st, "city"), turns,
             lambda c: self._do_upgrade_settlement(st, c))
 
     def _do_upgrade_settlement(self, st, character=None):
@@ -5404,7 +5454,7 @@ class MapView(tk.Frame):
         region = (wd.regions[st.region_id].name
                   if 0 <= st.region_id < len(wd.regions) else "?")
         self._page_begin(None)
-        self._panel_text(f"{st.kind.capitalize()} in {region}\n"
+        self._panel_text(f"{self._kind_name(st)} in {region}\n"
                  f"{wd.factions[st.faction_idx].name}", fg=theme.MUTED)
         character = getattr(st, "character", None)
         if character:
@@ -5415,7 +5465,7 @@ class MapView(tk.Frame):
                 "cathedral": "Its community recovers from hardship faster.",
             }[character]
             self._panel_text(
-                f"A {resources.CHARACTER_NAMES[character]} {st.kind}. {blurb}",
+                f"A {resources.CHARACTER_NAMES[character]} {self._kind_name(st)}. {blurb}",
                 fg=theme.ACCENT)
         if getattr(st, "is_capital", False):
             self._panel_text(
@@ -5733,11 +5783,12 @@ class MapView(tk.Frame):
         project when clicked."""
         from app.world import construction
         max_pop = getattr(v, "max_population", 0) or 0
+        target = self._kind_name(v, "town")
         if max_pop and v.population < max_pop * construction.VILLAGE_RAISE_POPULATION_FRACTION:
             need = round(max_pop * construction.VILLAGE_RAISE_POPULATION_FRACTION)
             pct = round(100 * v.population / max_pop)
             self._panel_text(
-                f"Growing toward a Town… {v.population:,}/{need:,} souls "
+                f"Growing toward a {target}… {v.population:,}/{need:,} souls "
                 f"({pct}% of its ceiling; needs "
                 f"{construction.VILLAGE_RAISE_POPULATION_FRACTION:.0%}). "
                 "Keep it fed and sheltered.", fg=theme.MUTED)
@@ -5747,15 +5798,17 @@ class MapView(tk.Frame):
         in_flight = any(p.village_id == v.id
                         for p in getattr(self.world, "raise_village_projects", ()))
         if in_flight:
-            self._panel_text("Being raised to a Town…", fg=theme.MUTED)
+            self._panel_text(f"Being raised into a {target}…", fg=theme.MUTED)
             return
         if not construction.can_afford(player, cost, self.world):
+            from app.world import holds
+            word = holds.region_village_word(self.world, self.world.regions[v.region_id])
             self._panel_text(
-                f"Raise to Town needs {_format_resources(cost)} — a Town "
-                "supports more villages, tax and people.", fg=theme.MUTED)
+                f"Raise to a {target} needs {_format_resources(cost)} — a "
+                f"{target} supports more {word}, tax and people.", fg=theme.MUTED)
             return
         self._show_character_choice(
-            "Raise to", "Town", turns,
+            "Raise to a", target, turns,
             lambda c: self._do_raise_village(v, c))
 
     def _do_raise_village(self, v, character=None):
@@ -5771,7 +5824,8 @@ class MapView(tk.Frame):
         from app.world import resources
         self.show_bottom_message(
             f"{v.name} will grow into a "
-            f"{resources.CHARACTER_NAMES.get(character, '')} Town in "
+            f"{resources.CHARACTER_NAMES.get(character, '')} "
+            f"{self._kind_name(v, 'town')} in "
             f"{construction.RAISE_VILLAGE_TURNS} turns.")
 
     def _show_village(self, v):
@@ -5787,7 +5841,7 @@ class MapView(tk.Frame):
         self.title_lbl.config(text=v.name)
         region = wd.regions[v.region_id]
         self._page_begin(None)
-        self._panel_text(f"Village in {region.name}\n{wd.factions[v.faction_idx].name}", fg=theme.MUTED)
+        self._panel_text(f"{self._kind_name(v)} in {region.name}\n{wd.factions[v.faction_idx].name}", fg=theme.MUTED)
 
         prosperity = getattr(v, "prosperity", None)
         if prosperity is not None:
@@ -6197,8 +6251,10 @@ class MapView(tk.Frame):
             cost = construction.SETTLEMENT_BUILD_COST[kind]
             turns = construction.SETTLEMENT_BUILD_TURNS[kind]
         self._page_begin(None)
+        verb = "carving" if layers.is_under(region) else "building"
         self._panel_text(f"{region.name}\nClick a spot in this region to "
-                              f"begin building a {kind} there.\n\n"
+                              f"begin {verb} a {self._region_kind_name(region, kind)} "
+                              f"there.\n\n"
                               f"Cost: {_format_resources(cost)}\n"
                               f"Build time: {turns} turns", fg=theme.MUTED)
         self._panel_button("Cancel", self._cancel_settlement_placement)
@@ -6217,6 +6273,13 @@ class MapView(tk.Frame):
         from app.world.worldgen import SETTLEMENT_TYPES, VILLAGE_WEIGHTS, _site_score
         import random as _random
         wd = self.world
+        if layers.is_under(region):
+            # The site score reads surface geography (fertility, rivers,
+            # coasts, borders) which says nothing about a gallery -- and
+            # would hand the player a heatmap of the mountain overhead.
+            # Below ground every carved cell is as good a hall as the next,
+            # so there is no hint to draw.
+            return []
         occupied = {st.pos for st in wd.settlements}
         occupied.update(p.pos for p in wd.settlement_projects)
         occupied.update(wd.villages[vid].pos for vid in region.villages)
@@ -6486,10 +6549,61 @@ class MapView(tk.Frame):
             return
 
         if self.layer == layers.UNDER:
-            # Below ground the only thing to pick is a hall. Attacking,
-            # settling and every other surface mode are simply not offered
-            # here yet -- there is nothing down here to attack or build on
-            # until the phases that put people in the galleries.
+            # Below ground a great hall, a warren village or a mining town
+            # is a real place: pick it exactly as a surface node would be
+            # picked (markers of the faction being viewed, then the region
+            # behind them). Attacking stays surface-side, but settling --
+            # founding villages, building towns, claiming the wildland
+            # behind a door -- is the point of the galleries now.
+            if self.building_mode is not None:
+                # --- SETTLEMENT PLACEMENT, armed from the region panel ---
+                region, kind = self.building_mode
+                if layers.region_at(wd, gx, gy, layers.UNDER) == region.id:
+                    player = self._player_faction()
+                    if kind == "village":
+                        msg = construction.start_found_village(
+                            wd, player, (gx, gy), layer=layers.UNDER)
+                    else:
+                        msg = construction.start_settlement(
+                            wd, player, (gx, gy), kind, layer=layers.UNDER)
+                    self.building_mode = None
+                    self._placement_hint_cells = None
+                    self._base_key = None
+                    self.show_bottom_message(msg)
+                    if self.selected_region is region:
+                        self._show_region(region)
+                    self.render()
+                return
+            if self.zoom_faction is not None:
+                zf = wd.factions.index(self.zoom_faction)
+                if self._villages_visible():
+                    for v in wd.villages:
+                        if v.faction_idx != zf:
+                            continue
+                        rid = getattr(v, "region_id", None)
+                        if rid is None or not layers.is_under(wd.regions[rid]):
+                            continue
+                        sx, sy = self.world_to_screen(
+                            v.pos[0] + 0.5, v.pos[1] + 0.5)
+                        hit_r = self._marker_radius(self._village_base(v)) + 4
+                        if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= hit_r ** 2:
+                            self.selected_village = v
+                            self._show_village(v)
+                            self.render()
+                            return
+                for sid in self.zoom_faction.meta.get("settlements", []):
+                    st = wd.settlements[sid]
+                    rid = getattr(st, "region_id", None)
+                    if rid is None or not layers.is_under(wd.regions[rid]):
+                        continue
+                    sx, sy = self.world_to_screen(
+                        st.pos[0] + 0.5, st.pos[1] + 0.5)
+                    hit_r = self._marker_radius(self._settle_base(st)) + 4
+                    if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= hit_r ** 2:
+                        self.selected_settlement = st
+                        self._show_settlement(st)
+                        self.render()
+                        return
             rid = layers.region_at(wd, gx, gy, layers.UNDER)
             gate = layers.gate_at(wd, gx, gy, layers.UNDER)
             if rid is not None:
@@ -6601,7 +6715,7 @@ class MapView(tk.Frame):
                     if v.faction_idx != zf or not self._on_layer(v):
                         continue        # a hall is not clickable from above
                     sx, sy = self.world_to_screen(v.pos[0] + 0.5, v.pos[1] + 0.5)
-                    hit_r = self._marker_radius(_VILLAGE_STYLE["base"]) + 4
+                    hit_r = self._marker_radius(self._village_base(v)) + 4
                     if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= hit_r ** 2:
                         self.selected_village = v
                         self._show_village(v)
@@ -6613,7 +6727,7 @@ class MapView(tk.Frame):
                 if not self._on_layer(st):
                     continue
                 sx, sy = self.world_to_screen(st.pos[0] + 0.5, st.pos[1] + 0.5)
-                hit_r = self._marker_radius(_SETTLE_STYLE[st.kind]["base"]) + 4
+                hit_r = self._marker_radius(self._settle_base(st)) + 4
                 if (sx - event.x) ** 2 + (sy - event.y) ** 2 <= hit_r ** 2:
                     self.selected_settlement = st
                     self._show_settlement(st)
@@ -7488,6 +7602,36 @@ class MapView(tk.Frame):
             c.create_polygon(x, y - r, x + r, y, x, y + r, x - r, y,
                              fill=fill, outline=outline, width=1.5)
 
+    def _under_node(self, node):
+        """Whether this node lives below ground -- its region is an under
+        one. Decides both the marker style (diamond hall vs surface town)
+        and the player-facing kind name."""
+        wd = self.world
+        rid = getattr(node, "region_id", None)
+        return (rid is not None and 0 <= rid < len(wd.regions)
+                and layers.is_under(wd.regions[rid]))
+
+    def _kind_name(self, node, kind=None):
+        """Player-facing kind name: "Great Hall" for a dwarf city under the
+        mountain, "Town" for a surface gate town, "Village" above ground --
+        the underworld is halls, not towns (see holds.node_kind_name)."""
+        from app.world import holds
+        return holds.node_kind_name(self.world, node, kind)
+
+    def _region_kind_name(self, region, kind):
+        """Region-based display name for a settlement kind (no node yet) --
+        the region panel's build buttons and project readouts."""
+        from app.world import holds
+        return holds.region_kind_name(self.world, region, kind)
+
+    def _settle_base(self, st):
+        return (_UNDER_SETTLE_STYLE["base"] if self._under_node(st)
+                else _SETTLE_STYLE[st.kind]["base"])
+
+    def _village_base(self, v):
+        return (_UNDER_VILLAGE_STYLE["base"] if self._under_node(v)
+                else _VILLAGE_STYLE["base"])
+
     def _marker_radius(self, base_world_size):
         """Screen-pixel radius for a settlement/village marker: `base_world_size`
         (world-cell units) times the current zoom scale, floored/capped so a
@@ -7572,7 +7716,8 @@ class MapView(tk.Frame):
 
         for sid in sids:
             st = wd.settlements[sid]
-            style = _SETTLE_STYLE[st.kind]
+            under = self._under_node(st)
+            style = _UNDER_SETTLE_STYLE if under else _SETTLE_STYLE[st.kind]
             x, y = screen(st.pos[0] + 0.5, st.pos[1] + 0.5)
             if not self._visible_point(x, y):
                 continue
@@ -7580,7 +7725,13 @@ class MapView(tk.Frame):
             if st is self.selected_settlement:      # selection ring
                 c.create_oval(x - r - 3, y - r - 3, x + r + 3, y + r + 3,
                               outline="#ffffff", width=2)
-            if st.kind == "city":
+            if under:
+                # A hall is a DIAMOND -- carved rock in plan, against the
+                # surface's circles/squares/triangles (v0.18.27).
+                c.create_polygon(x, y - r - 1, x + r, y, x, y + r + 1, x - r, y,
+                                 fill=style["fill"], outline=style["outline"],
+                                 width=1.5)
+            elif st.kind == "city":
                 c.create_oval(x - r, y - r, x + r, y + r, fill=style["fill"],
                               outline=style["outline"], width=1.5)
             elif st.kind == "castle":
@@ -8149,8 +8300,6 @@ class MapView(tk.Frame):
         if not self._villages_visible():
             return
         wd = self.world
-        style = _VILLAGE_STYLE
-        r = self._marker_radius(style["base"])
         zf = wd.factions.index(self.zoom_faction)
         visible = []
         for v in wd.villages:
@@ -8163,11 +8312,20 @@ class MapView(tk.Frame):
         show_names = (len(visible) <= _VILLAGE_LABEL_LIMIT
                       and self._place[2] >= _VILLAGE_LABEL_MIN_SCALE)
         for v, x, y in visible:
+            under = self._under_node(v)
+            style = _UNDER_VILLAGE_STYLE if under else _VILLAGE_STYLE
+            r = self._marker_radius(style["base"])
             if v is self.selected_village:          # selection ring
                 c.create_oval(x - r - 3, y - r - 3, x + r + 3, y + r + 3,
                               outline="#ffffff", width=2)
-            c.create_oval(x - r, y - r, x + r, y + r, fill=style["fill"],
-                          outline=style["outline"], width=1)
+            if under:
+                # A hall-stead is a small diamond, matching its hall (v0.18.27).
+                c.create_polygon(x, y - r, x + r, y, x, y + r, x - r, y,
+                                 fill=style["fill"], outline=style["outline"],
+                                 width=1)
+            else:
+                c.create_oval(x - r, y - r, x + r, y + r, fill=style["fill"],
+                              outline=style["outline"], width=1)
             if show_names:
                 c.create_text(x + 1, y + r + 7, text=v.name, fill="#000000",
                               font=("Segoe UI", 6))

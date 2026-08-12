@@ -64,7 +64,7 @@ class LoadGameMenuView(tk.Frame):
                                     state="disabled")
         self.delete_btn.pack(side="left")
         self.load_btn = tk.Button(self._actions, text="Load", command=self._load,
-                                  width=12, bg=theme.ACCENT, fg="#241a0a",
+                                  width=12, bg=theme.ACCENT, fg=theme.ACCENT_INK,
                                   relief="flat", font=theme.FONT_BOLD,
                                   activebackground=theme.ACCENT, state="disabled")
         self.load_btn.pack(side="right", padx=8, pady=8)

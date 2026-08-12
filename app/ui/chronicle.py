@@ -25,7 +25,7 @@ class ChronicleWindow(tk.Toplevel):
                  bg=theme.PANEL, fg=theme.INK, font=theme.FONT_TITLE
                  ).pack(side="left", padx=14, pady=10)
         tk.Button(top, text="Close (Esc)", command=self.destroy,
-                  bg="#232a36", fg=theme.INK, activebackground=theme.ACCENT,
+                  bg=theme.PANEL_ALT, fg=theme.INK, activebackground=theme.ACCENT,
                   relief="flat", font=theme.FONT).pack(side="right", padx=10, pady=8)
 
         self._text = tk.Text(self, bg=theme.BG, fg=theme.INK,

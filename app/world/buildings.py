@@ -618,14 +618,16 @@ def _storage_effect_lines(node, building, to_tier):
 
 # --- the list ----------------------------------------------------------------
 
-def _all_buildings(node):
+def _all_buildings(node, under=False):
     """Every building this KIND of node could ever have, in menu order.
     Discovered from construction.py's own tables rather than listed again
     here, so a new building appears in the menu the turn it is added.
 
-    Kind gating only (storage_max_tier takes no world). The Gold Mine's second
-    gate -- is there actually a seam under this village -- is applied in
-    build_options, which does have one."""
+    Kind gating only (storage_max_tier takes no world -- `under` is threaded
+    through from build_options for the one decision that needs it: whether
+    an under-SETTLEMENT may build the extractive camps). The Gold Mine's
+    second gate -- is there actually a seam under this village -- is applied
+    in build_options, which does have one."""
     order = [resources.STORAGE_BUILDING_BY_POOL[p] for p in resources.STORAGE_POOLS]
     order.append(resources.PRESERVING_HOUSE)
     for herd_building in resources.HERD_BUILDINGS:
@@ -637,7 +639,7 @@ def _all_buildings(node):
               resources.GOLD_MINE, resources.MINT, resources.CARTOGRAPHER]
     if node_kind(node) == "settlement":
         order.append("shipyard")
-    return [b for b in order if resources.storage_max_tier(node, b) > 0
+    return [b for b in order if resources.storage_max_tier(node, b, under=under) > 0
             or b == "shipyard"]
 
 
@@ -684,7 +686,8 @@ def build_options(world, node, nation):
     most-worth-building first. Nothing here spends anything -- see the module
     docstring."""
     options = []
-    for building in _all_buildings(node):
+    under = _node_is_under(world, node)
+    for building in _all_buildings(node, under=under):
         if building == "shipyard":
             options.append(_shipyard_option(world, node, nation))
             continue
@@ -713,10 +716,10 @@ def build_options(world, node, nation):
                 and not _node_is_under(world, node)):
             continue
         current = resources.storage_tier(node, building)
-        max_tier = resources.storage_max_tier(node, building)
+        max_tier = resources.storage_max_tier(node, building, under=under)
         progress = _in_progress(world, node, building)
         to_tier = construction.storage_next_tier(world, node, building)
-        cost = (construction.storage_build_cost(node, building, to_tier)
+        cost = (construction.storage_build_cost(node, building, to_tier, under=under)
                 if to_tier is not None else None) or {}
         blocked = None
         if progress is not None:

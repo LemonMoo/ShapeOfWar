@@ -73,6 +73,11 @@ print(f"  ok    tier 1 needs {sorted(cost1)}, tier 2 needs {sorted(cost2)}")
 print("\n--- a camp adds ore, and only ore ---")
 v = max(eligible, key=lambda x: R.region_mountain_cells(w, w.regions[x.region_id]))
 region = w.regions[v.region_id]
+# A mountain-region village may already be BORN with a tier-1 camp (the
+# worldgen seed_family_camps bootstrap -- this dev world is one such), so
+# the before/after measurement is taken around an explicit strip-and-build:
+# the point under test is that the CAMP is what unlocks the ore.
+R.set_storage_tier(v, R.MINING_CAMP, 0)
 before_farm = sector_potential(v, "farming")
 before_mine = sector_potential(v, "mining")
 try:

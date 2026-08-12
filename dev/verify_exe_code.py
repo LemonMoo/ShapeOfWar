@@ -35,7 +35,7 @@ MARKERS = [
     ("app.core.changelog", "The Settlement-First World", "const"),
     ("app.core.changelog", "burns its coal in Winter", "const"),
     # v0.18.1 -- the ladder.
-    ("app.ui.map_view", "Found Village...", "const"),
+    ("app.world.construction", "village land is full", "const"),
     ("app.ui.map_view", "Raise to Town", "const"),
     ("app.world.construction", "the settlement-first ladder's first rung", "const"),
     ("app.core.changelog", "The Ladder", "const"),
@@ -143,6 +143,14 @@ MARKERS = [
     ("app.core.changelog", "The Realm's Own Door", "const"),
     # v0.18.21 -- rivers that meander.
     ("app.core.changelog", "Rivers That Meander", "const"),
+    # v0.18.26.3 -- the underworld is a place (halls not towns); the HUD kit.
+    ("app.world.holds", "UNDER_KIND_NAMES", "name"),
+    ("app.world.holds", "node_kind_name", "name"),
+    ("app.world.holds", "region_kind_name", "name"),
+    ("app.world.holds", "HOLD_TOWNS", "name"),
+    ("app.ui.theme", "ROW_SELECT", "name"),
+    ("app.ui.map_view", "_UNDER_SETTLE_STYLE", "name"),
+    ("app.core.changelog", "The Underworld Is a Place", "const"),
     # v0.18.26.2 -- the economy is readable.
     ("app.core.changelog", "The Economy Is Readable", "const"),
     # v0.18.26.1 -- a lighter day.

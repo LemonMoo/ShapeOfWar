@@ -20,6 +20,18 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 117,
+        "title": "The Underworld Is a Place",
+        "items": [
+            "UNDERGROUND: the galleries are now a place any realm can live in, not dwarf/goblin-only decoration. Claim an underground region through a gate you hold (settlers + provisions, like any claim); found villages, raise them to towns and cities, build new ones, and conquer them cleanly — the full settlement ladder works below ground.",
+            "UNDERGROUND: a dwarf hold is now a real realm under the mountain — a Great Hall (capital), Carven Halls (towns) and hall-steadings (mining villages born with terraces, stalls and a mine); goblin warrens run more burrows. The ladder presents as halls, not towns.",
+            "UNDERGROUND: hybrid mining. The great hall works its own ore for free; every other hall, burrow and stead must sink a Mining Camp / Workings, exactly like a surface village — and a deep (abyssal) town still out-mines a shallow one.",
+            "UNDERGROUND: conquest now changes hands on the right layer — taking a hold's halls transfers the galleries, not the mountainside above them.",
+            "UI: underground settlements and villages render as diamond forge-gold halls on the map, unmistakably different from surface cities and towns.",
+            "UI/THEME: the fantasy HUD kit is everywhere — the last slate-blue chrome is gone (every colour lives in theme.py), the frontier-event dialog and the trade log are now drawn parchment pages.",
+        ],
+    },
+    {
         "version": 116,
         "title": "The Economy Is Readable",
         "items": [

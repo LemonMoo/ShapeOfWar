@@ -16,7 +16,7 @@ _BUTTON_KINDS = {
                     activeforeground=theme.ACCENT_INK),
     "danger": dict(bg=theme.BAD, fg=theme.INK, activebackground=theme.WARN,
                     activeforeground=theme.ACCENT_INK),
-    "success": dict(bg="#1f3a24", fg=theme.GOOD, activebackground=theme.ACCENT,
+    "success": dict(bg=theme.BTN_GOOD_BG, fg=theme.GOOD, activebackground=theme.ACCENT,
                      activeforeground=theme.ACCENT_INK),
     "active": dict(bg=theme.ACCENT, fg=theme.ACCENT_INK, activebackground=theme.ACCENT,
                     activeforeground=theme.ACCENT_INK),

@@ -86,7 +86,8 @@ def test_realm(world, species):
           f"{len(surf)}")
     if surf:
         gate_towns = [world.settlements[s] for s in meta["settlements"]
-                      if world.settlements[s].kind == "town"]
+                      if world.settlements[s].kind == "town"
+                      and not L.is_under(world.regions[world.settlements[s].region_id])]
         check("that region is the gate town's", gate_towns
               and all(st.region_id == surf[0].id for st in gate_towns))
         check("no starting villages in the surface region",
@@ -119,14 +120,25 @@ def test_realm(world, species):
           and (cx, cy) != (0, 0), f"cells={cells} bbox={bbox} center={(cx, cy)}")
 
     # 4. the realm's settlements are where they should be: a dwarf hold's
-    #    capital is the city under the mountain; a goblin warren has no
+    #    capital is the great hall under the mountain, with carven halls
+    #    (under towns) and one surface door town; a goblin warren has no
     #    great hall, so its capital IS the door town.
-    kinds = sorted(world.settlements[s].kind for s in meta["settlements"])
-    caps = [world.settlements[s].kind for s in meta["settlements"]
-            if getattr(world.settlements[s], "is_capital", False)]
+    meta_sts = [world.settlements[s] for s in meta["settlements"]]
+    kinds = sorted(s.kind for s in meta_sts)
+    caps = [s.kind for s in meta_sts if getattr(s, "is_capital", False)]
     if species == "Dwarves":
-        check("hold: city under the mountain, town at the door",
-              kinds == ["city", "town"] and caps == ["city"], f"{kinds} cap={caps}")
+        under_towns = [s for s in meta_sts
+                       if s.kind == "town"
+                       and L.is_under(world.regions[s.region_id])]
+        surf_towns = [s for s in meta_sts
+                      if s.kind == "town"
+                      and not L.is_under(world.regions[s.region_id])]
+        check("hold: one great hall under the mountain, at least one carven "
+              "hall, and exactly one door town on the surface",
+              kinds.count("city") == 1 and len(under_towns) >= 1
+              and len(surf_towns) == 1 and caps == ["city"],
+              f"{kinds} cap={caps} (under towns: {len(under_towns)}, "
+              f"door towns: {len(surf_towns)})")
     else:
         check("warren: the door town is the capital",
               kinds == ["town"] and caps == ["town"], f"{kinds} cap={caps}")

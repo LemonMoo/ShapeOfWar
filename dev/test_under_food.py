@@ -71,16 +71,26 @@ crops = {r: a for r, a in raw.items()
 assert not crops, f"a hold grew crops out of solid rock: {crops}"
 print("  ok    no crop of any kind from a hold's own ground")
 
-print("\n--- ...but the ore above it is real ---")
-# The underground INHERITS the mining economy: no camp gate below (a gallery
-# under a range IS the mine -- see _village_terrain_potential's under
-# branch), so a bare hold in a range offers ore straight off its own land.
+print("\n--- ...but the ore above it is real, once someone digs ---")
+# HYBRID (v0.18.27): the capital seat inherits the mine -- it IS the mine,
+# see holds._settle_hold's under_capital stamp -- and every OTHER under node
+# is a mining settlement like any surface one: no camp, no ore (see
+# _village_terrain_potential's under branch).
 raw, potentials, _by_sector = R._village_terrain_potential(world, hold, season)
 mining = {r: a for r, a in raw.items()
           if R.RESOURCES.get(r, {}).get("category") == "Mining"}
-assert mining, ("a gallery under a mountain range offers no ore at all -- the "
-                "underground was supposed to INHERIT the mining economy")
-print(f"  ok    {', '.join(sorted(mining))}")
+assert not mining, ("a bare gallery offered ore for nothing -- the hybrid "
+                    "gate is off (only the capital seat inherits the mine)")
+print("  ok    a bare hall mines nothing until a camp is sunk")
+# Seed the camps its own overhead rock supports (mountain -> Mining Camp,
+# highland -> Workings, forest -> Woodcutters'), the same bootstrap every
+# born village gets -- then the ore above the gallery is real.
+R.seed_family_camps(world, region, hold)
+raw, potentials, _by_sector = R._village_terrain_potential(world, hold, season)
+mining = {r: a for r, a in raw.items()
+          if R.RESOURCES.get(r, {}).get("category") == "Mining"}
+assert mining, "a camp did not unlock the ore above a gallery"
+print(f"  ok    a camp unlocks: {', '.join(sorted(mining))}")
 
 print("\n--- the floor: guano and blind fish, and not enough of either ---")
 floor = R.under_floor_yield(world, hold, region)
@@ -188,13 +198,20 @@ above_options = {o.building for o in B.build_options(world, above, world.faction
 for building in (R.GATE_HOLDING, R.FUNGUS_GALLERY, R.STALLS):
     assert building not in above_options, (
         f"{building} was offered to a village on the surface")
-# ...and the surface families are not offered below, which is what keeps the
-# outstation fairness guarantee intact with a fifth member in the family.
+# ...and the CROP outstation is not offered below -- the Grange extends crop
+# reach, and there are no crops in a gallery (v0.18.27). The extractive
+# camps ARE offered below: that is the hybrid ore model -- an under node
+# builds the Mining Camp / Workings its overhead rock supports, exactly like
+# a surface village (see test_under_mining.py). The Gold Mine stays gone
+# below (its seam gate reads the surface grid) and the surface keeps the
+# underground three hidden.
 for building in R.OUTSTATIONS:
-    assert building not in options, (
-        f"{building} was offered underground -- an underground region has no "
-        f"biome counts, and the family's shared cell table assumes it does")
-print("  ok    three buildings below, four above, and no overlap")
+    if building == R.GRANGE:
+        assert building not in options, "the crop Grange was offered in a gallery"
+assert any(b in options for b in (R.MINING_CAMP, R.WORKINGS, R.WOODCUTTERS_CAMP)), (
+    "no extractive camp offered to an under village -- the hybrid ore model "
+    "gates mining on camps, so the camps must be buildable below")
+print("  ok    the beds, the terraces and the mines below, and no overlap")
 
 print("\n--- a hold with the whole loop running feeds itself ---")
 # Not a balance claim: what is asserted is that the CHAIN closes -- terraces

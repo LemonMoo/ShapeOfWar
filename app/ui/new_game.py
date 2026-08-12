@@ -70,7 +70,7 @@ _ROW_BG = theme.PANEL_ALT
 # keeps a dark background -- lifted a shade so it still reads as "this one" --
 # and is flagged by a gold bar down its left edge and its name in gold, both
 # of which stay legible because the background under them is still dark.
-_ROW_SEL_BG = "#40301c"          # a warm lift on _ROW_BG, not the accent
+_ROW_SEL_BG = theme.ROW_SELECT    # a warm lift on _ROW_BG, not the accent
 _ROW_MARK = theme.ACCENT         # the left-edge selection bar
 _BTN_BG = theme.PANEL_ALT        # the old blue-grey button face
 _BTN_SEL_INK = theme.ACCENT_INK  # text on an accent/selected control

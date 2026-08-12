@@ -501,12 +501,16 @@ _ORDER_CUE_RGB = {}
 
 def _init_cue_colors():
     from app.battle import orders
+    from app.ui import theme
+    # The stance cues ARE theme.ORDER_CUE_* (battle_view's _ORDER_CUE reads
+    # the same table) -- restated here as RGB only because the GL pass needs
+    # tuples, so the hex lives in exactly one place.
     _ORDER_CUE_RGB.update({
-        orders.STANCE_HOLD: hex_rgb("#7fd6ff"),
-        orders.STANCE_CHARGE: hex_rgb("#ff9b57"),
-        orders.STANCE_SHIELD_WALL: hex_rgb("#9fe0a8"),
-        orders.STANCE_CYCLE_CHARGE: hex_rgb("#ffd166"),
-        orders.STANCE_FIRING_LINE: hex_rgb("#d3a6f2"),
+        orders.STANCE_HOLD: hex_rgb(theme.ORDER_CUE_HOLD),
+        orders.STANCE_CHARGE: hex_rgb(theme.ORDER_CUE_CHARGE),
+        orders.STANCE_SHIELD_WALL: hex_rgb(theme.ORDER_CUE_SHIELD_WALL),
+        orders.STANCE_CYCLE_CHARGE: hex_rgb(theme.ORDER_CUE_CYCLE_CHARGE),
+        orders.STANCE_FIRING_LINE: hex_rgb(theme.ORDER_CUE_FIRING_LINE),
     })
 
 

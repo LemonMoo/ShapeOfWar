@@ -10,6 +10,7 @@ import math
 import random
 
 from app.world import territory
+from app.world import layers
 from app.world.nation import is_eliminated
 from app.world import resources
 from app.world import wrap
@@ -276,8 +277,19 @@ def claimable_frontier(world, faction_idx):
     """UNCLAIMED regions adjacent (by land, or by sea if there's no land
     connection) to a faction's own territory — the only land it can
     legally claim next; this *is* the no-leapfrogging rule, not just a
-    check for one."""
+    check for one.
+
+    An underground region borders you through a DOOR you hold, not across
+    any cell edge — the two layers share none (see app/world/layers.py),
+    so territory.bordering_regions above can never see it. territory.
+    gate_bordering_regions is that border: whoever holds the near end of a
+    gate may claim what lies at the far end of it. That is what makes the
+    galleries a claimable part of the world for every species, not
+    dwarf/goblin-only decoration — the plan's "anyone can go down if they
+    can take a gate" made real in the ordinary claim economy (settlers,
+    provisions, a commander at the door)."""
     return (territory.bordering_regions(world, faction_idx, UNCLAIMED)
+            + territory.gate_bordering_regions(world, faction_idx, UNCLAIMED)
             + territory.naval_reachable_regions(world, faction_idx, UNCLAIMED))
 
 
@@ -399,22 +411,37 @@ def settle_newly_claimed_region(world, region):
     run_settlement_ai) — the settlement-first ladder: found a village, raise
     it to a Town, raise the Town to a City."""
     if not region.settlements_generated:
-        namer = make_settlement_namer(random)
-        _place_settlements_for_faction(world, random, region.faction_idx,
-                                       list(region.cells), namer,
-                                       fixed_counts=_NO_FREE_SETTLEMENT)
-        _place_villages_for_region(world, random, region,
-                                   fixed_n=WILDLAND_VILLAGE_MIN)
-        region.settlements_generated = True
+        if layers.is_under(region):
+            # An underground claim is BARE GALLERIES, the same "you found
+            # your own" deal a surface wildland claim gets -- but there is
+            # also nothing the surface placement machinery could put down
+            # here even if it tried: _place_villages_for_region scores
+            # surface fertility and water, which describe the mountainside
+            # overhead and would scatter bogus farming hamlets through a
+            # cavern. The ladder works down here (found a village, raise
+            # it, build a town, via app/world/construction.py); the claim
+            # just hands over the rock.
+            region.settlements_generated = True
+        else:
+            namer = make_settlement_namer(random)
+            _place_settlements_for_faction(world, random, region.faction_idx,
+                                           list(region.cells), namer,
+                                           fixed_counts=_NO_FREE_SETTLEMENT)
+            _place_villages_for_region(world, random, region,
+                                       fixed_n=WILDLAND_VILLAGE_MIN)
+            region.settlements_generated = True
     # Chronicle: a claim is the biggest deliberate act in the game -- the
     # realm put settlers, food and a season's work into this land.
     from app.world import chronicle
     chronicle.log(world, world.factions[region.faction_idx],
                   f"The claim to {getattr(region, 'name', 'new land')} is secured.")
     # The frontier window: for the next FRONTIER_WINDOW_TURNS this region can
-    # throw small events at its new owner (app/world/frontier.py).
-    from app.world.frontier import FRONTIER_WINDOW_TURNS
-    region.frontier_turns_left = FRONTIER_WINDOW_TURNS
+    # throw small events at its new owner (app/world/frontier.py). Below
+    # ground the events are surface-flavored (soil, hermit's hut, bandits on
+    # the road) and a cavern has none of it -- galleries stay event-free.
+    if not layers.is_under(region):
+        from app.world.frontier import FRONTIER_WINDOW_TURNS
+        region.frontier_turns_left = FRONTIER_WINDOW_TURNS
     # A preview only -- real per-village production (and delivery into each
     # village's own storage) happens next turn via advance_turn's own call
     # to recompute_region_resources; this just keeps the region panel's

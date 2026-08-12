@@ -17,6 +17,13 @@ METER_TRACK = "#170f09"  # empty-meter background
 ALERT_BG = "#241009"     # distinct danger tint for the alerts panel
 ALERT_BG_HOVER = "#341412"
 
+# Button faces beyond the default carved plaque: a success-action green and
+# a selected-row highlight. Both were invented independently inside screens
+# (widgets.py, new_game.py) -- kept here so one hex lives in one place, the
+# same rule that killed the old slate-blue `#232a36` chrome.
+BTN_GOOD_BG = "#1f3a24"
+ROW_SELECT = "#40301c"   # a warm lift on the row background, never the accent
+
 # Fonts: a serif display face for titles/headers only (built into Windows
 # since Vista, so no bundling risk); body text stays sans-serif since a
 # serif reads worse at small sizes and the goal includes bigger, clearer

@@ -34,7 +34,7 @@ class CompendiumWindow(tk.Toplevel):
         top.pack(fill="x")
         tk.Label(top, text="Compendium", bg=theme.PANEL, fg=theme.INK,
                  font=theme.FONT_TITLE).pack(side="left", padx=14, pady=8)
-        tk.Button(top, text="Close (Esc)", command=self.destroy, bg="#232a36",
+        tk.Button(top, text="Close (Esc)", command=self.destroy, bg=theme.PANEL_ALT,
                   fg=theme.INK, activebackground=theme.ACCENT, relief="flat",
                   font=theme.FONT).pack(side="right", padx=10, pady=8)
 

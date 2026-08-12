@@ -1936,19 +1936,21 @@ def _village_terrain_potential(world, village, season):
     # also why the Grange is a reach extender rather than a gate.
     industry_counts = {}
     if under:
-        # The underground INHERITS the mining economy (SUBTERRANEAN_PLAN
-        # phase 4): a gallery under a range is the mine -- the hold itself
-        # is the Mining Camp, and the rock overhead (already sampled into
-        # biome_counts by village_local_sample) is its land. No camp gate:
-        # "the ground offers nothing until someone digs it" is a surface
-        # settlement-first rule, and making a hold build a camp on top of
-        # the very ore it stands in is the one place that rule makes no
-        # sense. Surface FAMILIES are still not offered below (build_options
-        # excludes them) -- this is purely the land's offer, exactly as the
-        # original design intended ("the underground inherits a working
-        # mining economy rather than needing a new one").
+        # HYBRID (v0.18.27): the capital seat IS the mine -- a hold's great
+        # hall stands in the deepest rock and works it by right of being
+        # there (under_capital, see holds._settle_hold). Every OTHER
+        # underground node is a mining settlement like any surface one: no
+        # camp, no ore. The camp gate is family-by-family, exactly as on the
+        # surface (the branch below), so a village or town must build -- or
+        # be born with -- the Mining Camp / Workings / Woodcutters' Camp its
+        # overhead rock supports. The depth bonus then multiplies whatever
+        # the camps unlock, so a deep mining town still out-mines a shallow
+        # one, but neither mines for nothing.
+        is_seat = bool(getattr(village, "under_capital", False))
         for building, (biomes, sample, _label) in OUTSTATIONS.items():
             if sample != OUTSTATION_INDUSTRY:
+                continue
+            if not is_seat and storage_tier(village, building) <= 0:
                 continue
             for b in biomes:
                 have = biome_counts.get(b, 0)
@@ -3935,11 +3937,17 @@ VILLAGE_STORAGE_TIER_BONUS = {
 }
 
 
-def storage_max_tier(node, building):
+def storage_max_tier(node, building, under=False):
     """Highest tier of `building` this node kind can reach. Covers the
     Preserving House (Phase 5) as well as the three pool buildings -- it uses
     the same project/tier machinery but grants conversion throughput rather
-    than capacity, so its tiers come from a different table."""
+    than capacity, so its tiers come from a different table.
+
+    `under` is whether the node's region is an underground one -- it takes
+    no world, so callers that have one supply it (build_options, storage_
+    next_tier). It matters for exactly one decision: whether a SETTLEMENT
+    (Town/City) may build the extractive camps, which is a mining-town thing
+    and only ever true below ground."""
     village = not hasattr(node, "kind")
     if building == PRESERVING_HOUSE:
         table = VILLAGE_PRESERVING_CAP_MULT if village else PRESERVING_CAP_MULT
@@ -3963,12 +3971,19 @@ def storage_max_tier(node, building):
             return (len(GATE_HOLDING_CELLS) - 1) if village else 0
         return (len(STALLS_MANURE_PER_HEAD) - 1) if village else 0
     if building in OUTSTATIONS:
-        # Village-only, every member of the family: an outstation is people
-        # walking out to ground nobody lives on and carrying the work home,
-        # which is a village's work. The does-the-region-hold-that-land gate
-        # needs the world and lives in buildings.py, same split as the Gold
+        # Village-only on the surface, every member of the family: an
+        # outstation is people walking out to ground nobody lives on and
+        # carrying the work home, which is a village's work. Below ground
+        # that rule inverts for settlements: a Town or City down here is a
+        # MINING town -- the whole reason a settlement exists in a gallery
+        # is the ore it stands in -- so the extractive camps are open to
+        # under-settlements too (`under` is supplied by callers that have a
+        # world; this function itself takes none). The does-the-region-
+        # hold-that-land gate lives in buildings.py, same split as the Gold
         # Mine's seam check.
-        return (len(OUTSTATION_CELLS) - 1) if village else 0
+        if village or under:
+            return len(OUTSTATION_CELLS) - 1
+        return 0
     if building == GOLD_MINE:
         # Village-only, and the seam gate lives in buildings.py rather than
         # here: this function takes no world, and "is there ore under this
@@ -4746,7 +4761,18 @@ def has_region_outstation_land(world, village, building):
     REGION rather than the village's own catchment (which is what gates the
     Gold Mine): gating on catchment is what left the mining tier unreachable,
     since almost no village is sited on a mountain in the first place, and
-    the same trap applies to every other kind of country."""
+    the same trap applies to every other kind of country.
+
+    Below ground the region's own biome_counts are empty by design (an
+    under region has no biome), so the land question is answered by the
+    rock OVERHEAD -- the same local surface sample the yield reads (see
+    _village_terrain_potential's under branch): a gallery under a mountain
+    can always sink a Mining Camp, one under highland a Workings, and so
+    on. One source of truth for what the ground offers."""
+    region = world.regions[village.region_id]
+    if layers.is_under(region):
+        counts, _climate, _fert = village_local_sample(world, village, region)
+        return any(counts.get(b, 0) > 0 for b in outstation_biomes(building))
     return region_outstation_cells(
         world, world.regions[village.region_id], building) > 0
 
@@ -6805,20 +6831,26 @@ def _find_city_village_site(world, city):
     """A land cell owned by the city's own faction, within
     CITY_VILLAGE_GROWTH_RADIUS of it, at least CITY_VILLAGE_MIN_SPACING
     cells from every existing settlement/village/road cell — or None if
-    the area around this city is already full (see village_growth_maxed)."""
+    the area around this city is already full (see village_growth_maxed).
+
+    Layer-aware: an under-city (a hold's great hall) grows villages in
+    ITS OWN galleries -- `under_owner` is the ownership test and there is
+    no surface fertility to score, so the tie-break is a plain jitter."""
     from app.world.worldgen import _too_close, _occupy
 
     cx, cy = city.pos
     r = CITY_VILLAGE_GROWTH_RADIUS
     min_dist = random.uniform(*CITY_VILLAGE_MIN_SPACING)
+    under = layers.is_under(world.regions[city.region_id])
 
     occupied = {}
     for st in world.settlements:
         _occupy(occupied, *st.pos)
     for v in world.villages:
         _occupy(occupied, *v.pos)
-    for x, y in _nearby_road_cells(world, city.pos, r):
-        _occupy(occupied, x, y)
+    if not under:
+        for x, y in _nearby_road_cells(world, city.pos, r):
+            _occupy(occupied, x, y)
 
     candidates = []
     for dy in range(-r, r + 1):
@@ -6828,13 +6860,18 @@ def _find_city_village_site(world, city):
             x, y = cx + dx, cy + dy
             if not (0 <= x < world.w and 0 <= y < world.h):
                 continue
-            if world.owner[y][x] != city.faction_idx:
-                continue
-            if (x, y) in world.river_cells or (x, y) in world.lake_cells:
-                continue
+            if under:
+                if layers.owner_at(world, x, y, layers.UNDER) != city.faction_idx:
+                    continue
+            else:
+                if world.owner[y][x] != city.faction_idx:
+                    continue
+                if (x, y) in world.river_cells or (x, y) in world.lake_cells:
+                    continue
             if _too_close(occupied, x, y, min_dist):
                 continue
-            candidates.append((world.fertility[y][x] + random.uniform(0.0, 0.1), x, y))
+            fert = 0.0 if under else world.fertility[y][x]
+            candidates.append((fert + random.uniform(0.0, 0.1), x, y))
     if not candidates:
         return None
     candidates.sort(reverse=True)
@@ -6883,9 +6920,22 @@ def seed_family_camps(world, region, village):
     villages (industry is gated on the camps, see _village_terrain_potential;
     food stays baseline, and the Grange is its reach). Only ever raises a
     tier to 1, never touches existing camps, so it is safe to run again on
-    old saves."""
+    old saves.
+
+    Below ground the region's own biome_counts are empty by design (an
+    under region has no biome -- see underworld._partition_regions), so the
+    land question is answered by the rock OVERHEAD: the same local surface
+    sample the yield reads (see _village_terrain_potential's under branch).
+    Only the extractive camps are seeded there -- the Grange extends CROP
+    reach, and there are no crops in a gallery; an under village feeds
+    through fungus, stalls and gate holdings instead."""
     counts = getattr(region, "biome_counts", None) or {}
-    for building, (biomes, _sample, _label) in OUTSTATIONS.items():
+    under = layers.is_under(region)
+    if under:
+        counts, _climate, _fert = village_local_sample(world, village, region)
+    for building, (biomes, sample, _label) in OUTSTATIONS.items():
+        if under and sample != OUTSTATION_INDUSTRY:
+            continue
         if any(counts.get(b, 0) > 0 for b in biomes):
             set_storage_tier(village, building, 1)
 
@@ -6924,19 +6974,27 @@ def _grow_city_villages(world):
             continue
 
         x, y = site
-        region_id = world.region_grid[y][x]
+        under = layers.is_under(world.regions[st.region_id])
+        region_id = (layers.region_at(world, x, y, layers.UNDER) if under
+                     else world.region_grid[y][x])
+        if region_id is None:
+            continue
         region = world.regions[region_id]
         faction = world.factions[st.faction_idx]
         species = faction.meta.get("species", "Humans")
         namer = make_settlement_namer(random)
 
-        rr = _VILLAGE_FERT_PATCH
-        samples = [world.fertility[ny][nx]
-                  for ny in range(max(0, y - rr), min(world.h, y + rr + 1))
-                  for nx in range(max(0, x - rr), min(world.w, x + rr + 1))
-                  if world.region_grid[ny][nx] == region_id]
-        local_fert = sum(samples) / len(samples) if samples else world.fertility[y][x]
-        farm = round(random.uniform(*_VILLAGE_FARM_RANGE) * (0.5 + 1.2 * local_fert))
+        if under:
+            # A gallery has no fertility to average (see spawn_village).
+            farm = 0
+        else:
+            rr = _VILLAGE_FERT_PATCH
+            samples = [world.fertility[ny][nx]
+                      for ny in range(max(0, y - rr), min(world.h, y + rr + 1))
+                      for nx in range(max(0, x - rr), min(world.w, x + rr + 1))
+                      if world.region_grid[ny][nx] == region_id]
+            local_fert = sum(samples) / len(samples) if samples else world.fertility[y][x]
+            farm = round(random.uniform(*_VILLAGE_FARM_RANGE) * (0.5 + 1.2 * local_fert))
         population, adults, children, max_population = _roll_population(random, "village")
         prosperity = seed_prosperity()
 
@@ -6945,9 +7003,13 @@ def _grow_city_villages(world):
                    population, adults, children, prosperity, max_population)
         world.villages.append(v)
         region.villages.append(v.id)
-        path = _local_road_path(world, st.pos, v.pos, faction_idx=st.faction_idx)
-        add_road_segments(world, region_id, list(zip(path, path[1:])), "dirt")
-        _connect_new_village_to_region(world, region, v)
+        if not under:
+            # Roads are a surface thing; below ground the galleries ARE the
+            # roads (layers.UNDER_MOVE_COST), so an under-village needs no
+            # surface road carved through the mountain above it.
+            path = _local_road_path(world, st.pos, v.pos, faction_idx=st.faction_idx)
+            add_road_segments(world, region_id, list(zip(path, path[1:])), "dirt")
+            _connect_new_village_to_region(world, region, v)
 
         st.villages_spawned += 1
         st.prosperity = 0.0

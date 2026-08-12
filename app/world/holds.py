@@ -49,6 +49,75 @@ WARREN = "warren"
 # is why this is a small table rather than a general rule.
 UNDERGROUND_SPECIES = {"Dwarves": HOLD, "Goblins": WARREN}
 
+# --- the underworld is halls, not towns (v0.18.27) --------------------------
+# Mechanically an under-settlement IS a city/town/village -- same ladder,
+# capacity, tax, storage, economy. But it must not PRESENT as one: a dwarf
+# kingdom is a great hall, carven halls and hall-steadings cut into the rock,
+# and a goblin warren lives in burrows. Only the player-facing NAME differs;
+# nothing here changes a mechanic. The gate town is a SURFACE settlement and
+# keeps its ordinary name (see node_kind_name).
+UNDER_KIND_NAMES = {
+    HOLD:   {"city": "Great Hall", "town": "Carven Hall", "village": "Hall-stead"},
+    WARREN: {"city": "Warren-hold", "town": "Warren-hold", "village": "Burrow"},
+}
+# The word the region panel's capacity readout uses below ground ("n/m ...").
+UNDER_VILLAGE_WORD = {HOLD: "halls", WARREN: "burrows"}
+
+
+def node_kind_name(world, node, kind=None):
+    """The player-facing kind name of a settlement/village node: "Great
+    Hall" for a dwarf city under the mountain, "Town" for the surface gate
+    town, "Village" for anything above ground. Used everywhere the panels
+    and buttons would otherwise print st.kind.capitalize(). `kind` may be
+    given explicitly to ask what a node WOULD be called at that kind (the
+    upgrade target: a surface town becomes a "City", an under town a
+    "Great Hall")."""
+    if kind is None:
+        kind = getattr(node, "kind", None)
+    rid = getattr(node, "region_id", None)
+    if rid is None or not (0 <= rid < len(world.regions)):
+        return {"city": "City", "castle": "Castle", "town": "Town"}.get(
+            kind, "Village")
+    region = world.regions[rid]
+    if not L.is_under(region):
+        return {"city": "City", "castle": "Castle", "town": "Town"}.get(
+            kind, "Village")
+    idx = getattr(node, "faction_idx", -1)
+    which = HOLD
+    if 0 <= idx < len(world.factions):
+        which = UNDERGROUND_SPECIES.get(
+            world.factions[idx].meta.get("species"), HOLD)
+    return UNDER_KIND_NAMES[which].get(kind or "village", "Hall")
+
+
+def region_kind_name(world, region, kind):
+    """The display name a settlement of `kind` would have in `region` —
+    "Great Hall" in a dwarf hold's galleries, "Burrow" in a goblin warren,
+    "City"/"Town"/"Village" on the surface. Region-based (no node yet), for
+    the region panel's build buttons and project readouts."""
+    if not L.is_under(region):
+        return {"city": "City", "castle": "Castle", "town": "Town"}.get(
+            kind, kind)
+    idx = region.faction_idx
+    which = HOLD
+    if 0 <= idx < len(world.factions):
+        which = UNDERGROUND_SPECIES.get(
+            world.factions[idx].meta.get("species"), HOLD)
+    return UNDER_KIND_NAMES[which].get(kind, kind)
+
+
+def region_village_word(world, region):
+    """The capacity-readout word for a region's villages: "villages" above
+    ground, "halls" or "burrows" below, by whoever owns the rock."""
+    if not L.is_under(region):
+        return "villages"
+    idx = region.faction_idx
+    which = HOLD
+    if 0 <= idx < len(world.factions):
+        which = UNDERGROUND_SPECIES.get(
+            world.factions[idx].meta.get("species"), HOLD)
+    return UNDER_VILLAGE_WORD.get(which, "halls")
+
 # A network smaller than this is a working, not a kingdom: it gets nobody.
 MIN_HOLD_CELLS = 60
 MIN_WARREN_CELLS = 40
@@ -65,9 +134,11 @@ HOME_NETWORK_MAX_DIST = 140
 # the realm instead of a lone house in the wild.
 _FRONT_GATE_RING = 6
 
-# What a hold is: one great hall and a few mining villages around it.
+# What a hold is: one great hall, a town or two in the deep galleries, and
+# hall-steadings (mining villages) around them. Warrens are numerous and poor.
 HOLD_VILLAGES = (2, 4)
-WARREN_VILLAGES = (4, 7)
+HOLD_TOWNS = (1, 2)
+WARREN_VILLAGES = (5, 8)
 # Warrens are numerous and poor; a hold's people are few and rich. Both are
 # fractions of the ordinary roll for that node kind (see _roll_population).
 WARREN_POP_MULT = 0.55
@@ -548,11 +619,49 @@ def _settle_hold(world, rng, network, faction_idx, namer):
             continue
         # Born with its terraces, which is the bootstrap the whole food design
         # rests on -- a hold that has to BUILD its first farm starves before it
-        # can. Stalls too: the beasts are what the beds run on.
+        # can. Stalls too: the beasts are what the beds run on. And a mine:
+        # the hybrid ore model (see resources._village_terrain_potential)
+        # gates everything except the great hall on camps, so a hold's
+        # steadings are born as what they are -- mining villages.
         R.set_storage_tier(village, R.GATE_HOLDING, 1)
         R.set_storage_tier(village, R.STALLS, 1)
         R.set_storage_tier(village, R.FUNGUS_GALLERY, 1)
+        R.set_storage_tier(village, R.MINING_CAMP, 1)
         villages.append(village)
+
+    # The carven halls (v0.18.27): a hold is a real realm under the mountain
+    # -- one great hall, a town or two cut into the deep galleries, and
+    # steadings around them. The towns are what make the ladder meaningful
+    # below ground: they tax, store and convert like any town (and a deep
+    # one sits on abyssal ore); they simply PRESENT as halls, not towns (see
+    # UNDER_KIND_NAMES). They share the claim -- meta["settlements"] is
+    # theirs too -- and the gate town stays settlements[0] (settle_underworld
+    # inserts it), which every surface-anchored system depends on.
+    from app.world.resources import SETTLEMENT_CHARACTERS
+    from app.world.worldgen import (_roll_population, SETTLEMENT_TAX_INCOME)
+    for pos in _spread([p for p in caverns if p != seat],
+                       rng.randint(*HOLD_TOWNS), 12):
+        region_id = L.region_at(world, pos[0], pos[1], L.UNDER)
+        if region_id is None:
+            continue
+        population, adults, children, max_population = _roll_population(rng, "town")
+        town = Settlement(len(world.settlements), "town",
+                          namer("town", species), pos, faction_idx, region_id,
+                          tax_income=round(rng.uniform(*SETTLEMENT_TAX_INCOME["town"])),
+                          population=round(population * HOLD_POP_MULT),
+                          adults=round(adults * HOLD_POP_MULT),
+                          children=round(children * HOLD_POP_MULT),
+                          prosperity=seed_prosperity(),
+                          max_population=round((max_population or population) * HOLD_POP_MULT))
+        town.character = rng.choices(tuple(SETTLEMENT_CHARACTERS),
+                                     weights=(25, 50, 25))[0]
+        # A hall runs the beds at settlement scale, like the great hall does.
+        R.set_storage_tier(town, R.FUNGUS_GALLERY, 1)
+        world.settlements.append(town)
+        world.factions[faction_idx].meta.setdefault("settlements", []).append(town.id)
+        if 0 <= region_id < len(world.regions):
+            world.regions[region_id].meta_settlements.append(town.id)
+        villages.append(town)
     return {"kind": HOLD, "faction_idx": faction_idx, "seat": st,
             "villages": villages, "regions": [r.id for r in regions]}
 

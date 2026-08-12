@@ -448,8 +448,8 @@ class App(tk.Tk):
             self.nav_frame.pack(side="left")
             for n, b in self.nav_buttons.items():
                 active = n == name
-                b.config(bg=theme.ACCENT if active else "#232a36",
-                         fg="#06121f" if active else theme.INK,
+                b.config(bg=theme.ACCENT if active else theme.PANEL_ALT,
+                         fg=theme.ACCENT_INK if active else theme.INK,
                          activebackground=theme.ACCENT)
             view.render()
         else:

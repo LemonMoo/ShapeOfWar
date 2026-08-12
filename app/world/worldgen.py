@@ -1457,27 +1457,38 @@ def spawn_village(world, rng, region, pos, namer, species):
     nothing)."""
     # "land occupied": average fertility over a small patch around the
     # village, not just the single cell, so farm output reflects the
-    # surrounding fields rather than one pixel of terrain.
+    # surrounding fields rather than one pixel of terrain. Below ground
+    # there is no land to average: nothing grows in a gallery (see
+    # resources._village_terrain_potential's under branch -- crop_counts
+    # is empty there by design), so the farm roll is zero and no fertility
+    # sample is taken at all.
+    from app.world import layers as _L
     from app.world.resources import seed_family_camps, seed_prosperity
     x, y = pos
     w, h = world.w, world.h
-    samples = []
-    r = _VILLAGE_FERT_PATCH
-    for dx in range(-r, r + 1):
-        for dy in range(-r, r + 1):
-            nx, ny = x + dx, y + dy
-            if (0 <= nx < w and 0 <= ny < h
-                    and world.region_grid[ny][nx] == region.id):
-                samples.append(world.fertility[ny][nx])
-    local_fert = sum(samples) / len(samples) if samples else world.fertility[y][x]
-    farm = round(rng.uniform(*_VILLAGE_FARM_RANGE) * (0.5 + 1.2 * local_fert))
+    under = _L.is_under(region)
+    if under:
+        local_fert = 0.0
+        farm = 0
+    else:
+        samples = []
+        r = _VILLAGE_FERT_PATCH
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                nx, ny = x + dx, y + dy
+                if (0 <= nx < w and 0 <= ny < h
+                        and world.region_grid[ny][nx] == region.id):
+                    samples.append(world.fertility[ny][nx])
+        local_fert = sum(samples) / len(samples) if samples else world.fertility[y][x]
+        farm = round(rng.uniform(*_VILLAGE_FARM_RANGE) * (0.5 + 1.2 * local_fert))
     population, adults, children, max_population = _roll_population(rng, "village")
     prosperity = seed_prosperity()
     v = Village(len(world.villages), region.id, region.faction_idx,
                namer("village", species), (x, y), farm,
                population, adults, children, prosperity, max_population)
     world.villages.append(v)
-    _mark_occupied_both(world, x, y)
+    if not under:
+        _mark_occupied_both(world, x, y)
     seed_family_camps(world, region, v)
     return v
 
@@ -2790,7 +2801,28 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
                                                  min_count=max(2, _target_n - 1)):
         world_height, land_mask, land, land_cells = (
             carved_height, carved_land, carved_land.tolist(), carved_cells)
-        world.height = world_height.tolist()
+    else:
+        # The carve was rejected -- it would have merged or shrunk a continent
+        # past the multi-landmass bar -- so the PRE-carve layout survives, and
+        # the currents carve_coastline returned were solved against the carved
+        # coastline that was just thrown away. Re-solve against the layout
+        # that actually survived, so the stored current field matches
+        # world.height (trade's sea-speed and the rendered streamlines sample
+        # it). One coarse Poisson solve; this path is rare by design.
+        cu, cv = currents.solve_currents(land_mask, width, height)
+
+    # The erosion layer: pull the near-shore sea floor up into a shallow ramp
+    # along EVERY coast, so water slopes out from the beach instead of
+    # dropping straight to depth at the waterline. Applied to whichever
+    # layout just survived the landmass check -- carved or (when a seed's
+    # carving was rejected) the pre-carve field -- because the shelf only
+    # ever raises ocean heights and can never move the coastline itself, so
+    # it is safe no matter which layout won. See currents.apply_erosion_shelf.
+    land_mask = world_height > world.sea_level
+    world_height = currents.apply_erosion_shelf(
+        world_height, land_mask, world.sea_level, width, height)
+    world.height = world_height.tolist()
+
     world.current_u = cu.tolist()
     world.current_v = cv.tolist()
     # Traced once here rather than per-frame by the renderer, which draws

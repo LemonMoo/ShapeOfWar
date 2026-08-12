@@ -25,6 +25,7 @@ from app.world.resources import (seed_prosperity, _SETTLEMENT_STORAGE_RESOURCES,
                                  settlement_storage_capacity)
 from app.world import wrap
 from app.world import resources
+from app.world import layers as L
 from app.world.nation import is_eliminated
 
 # Cost/time to build each settlement kind. City is the crown jewel (biggest
@@ -531,6 +532,16 @@ def _node_kind_of(node):
     return "settlement" if hasattr(node, "kind") else "village"
 
 
+def _node_under(world, node):
+    """Whether this node's region is an underground one -- the layer flag
+    resources.storage_max_tier needs but cannot compute itself (it takes no
+    world)."""
+    rid = getattr(node, "region_id", None)
+    if rid is None or not (0 <= rid < len(world.regions)):
+        return False
+    return L.is_under(world.regions[rid])
+
+
 def _storage_projects(world):
     """The live StorageProject list, created on demand so worlds pickled
     before this existed pick it up on load rather than needing a migration."""
@@ -541,13 +552,16 @@ def _storage_projects(world):
     return projects
 
 
-def storage_build_cost(node, building, to_tier):
+def storage_build_cost(node, building, to_tier, under=False):
     """Resource cost to take `node`'s `building` up to `to_tier`, or None if
-    that tier doesn't exist for this kind of node."""
+    that tier doesn't exist for this kind of node. `under` is the node's
+    layer (see resources.storage_max_tier) -- it only matters for an under-
+    SETTLEMENT building an extractive camp, where the village-only rule
+    inverts."""
     costs = STORAGE_BUILD_COSTS.get(building)
     if not costs or to_tier <= 0 or to_tier >= len(costs):
         return None
-    if to_tier > resources.storage_max_tier(node, building):
+    if to_tier > resources.storage_max_tier(node, building, under=under):
         return None
     cost = costs[to_tier]
     if _node_kind_of(node) == "village":
@@ -571,7 +585,8 @@ def storage_next_tier(world, node, building):
            and p.building == building for p in _storage_projects(world)):
         return None
     current = resources.storage_tier(node, building)
-    if current >= resources.storage_max_tier(node, building):
+    under = _node_under(world, node)
+    if current >= resources.storage_max_tier(node, building, under=under):
         return None
     return current + 1
 
@@ -587,10 +602,12 @@ def start_storage_building(world, nation, node, building):
     to_tier = storage_next_tier(world, node, building)
     if to_tier is None:
         current = resources.storage_tier(node, building)
-        if current >= resources.storage_max_tier(node, building):
+        if current >= resources.storage_max_tier(
+                node, building, under=_node_under(world, node)):
             return f"{node.name}'s {label} is already at its highest tier."
         return f"Work on {node.name}'s {label} is already underway."
-    cost = storage_build_cost(node, building, to_tier)
+    cost = storage_build_cost(node, building, to_tier,
+                              under=_node_under(world, node))
     if cost is None:
         return f"A {label} can't be built there."
     if not can_afford(nation, cost, world):
@@ -932,7 +949,7 @@ def _pay_cost(nation, cost, world):
             res[resource] = res.get(resource, 0) - amount
 
 
-def start_settlement(world, nation, pos, kind):
+def start_settlement(world, nation, pos, kind, layer=L.SURFACE):
     """Validate and kick off building a City, Town, or Castle at `pos` for
     `nation`'s own faction (works for the player or an AI nation alike —
     see run_settlement_ai). Returns a message describing what happened
@@ -941,10 +958,19 @@ def start_settlement(world, nation, pos, kind):
     if not (0 <= x < world.w and 0 <= y < world.h):
         return "That's outside the map."
     faction_idx = world.factions.index(nation)
-    if world.owner[y][x] != faction_idx:
-        return "You can only build within your own territory."
-    region_id = world.region_grid[y][x]
-    if region_id < 0:
+    # Ownership and the region are per-layer: below ground the sparse
+    # `under_owner` map and layers.region_at answer for the gallery, and the
+    # dense surface grid says nothing about it (the mountainside above a
+    # hall usually belongs to nobody, or to a different realm).
+    if layer == L.SURFACE:
+        if world.owner[y][x] != faction_idx:
+            return "You can only build within your own territory."
+        region_id = world.region_grid[y][x]
+    else:
+        if L.owner_at(world, x, y, L.UNDER) != faction_idx:
+            return "You can only build within your own territory."
+        region_id = L.region_at(world, x, y, L.UNDER)
+    if region_id is None:
         return "That location isn't part of any region."
     if any(st.pos == pos for st in world.settlements):
         return "There's already a settlement there."
@@ -958,7 +984,11 @@ def start_settlement(world, nation, pos, kind):
 
     _pay_cost(nation, cost, world)
 
-    routes = _find_road_routes(world, faction_idx, pos)
+    # A settlement underground needs no road project: the galleries ARE the
+    # roads (movement already prices haulage -- layers.UNDER_MOVE_COST), so
+    # a town under a mountain is connected the moment it exists. Only a
+    # surface settlement has to physically build its way in.
+    routes = _find_road_routes(world, faction_idx, pos) if layer == L.SURFACE else []
     tier, road_path = routes[0] if routes else (None, None)
     road = RoadProject(faction_idx, road_path) if tier == "land" else None
     sea_lane = road_path if tier == "sea" else None
@@ -975,7 +1005,9 @@ def start_settlement(world, nation, pos, kind):
     for extra_tier, extra_path in routes[1:]:
         if extra_tier == "land":
             world.road_projects.append(RoadProject(faction_idx, extra_path))
-    return (f"Construction begins on a new {kind} — estimated "
+    from app.world import holds
+    label = holds.region_kind_name(world, world.regions[region_id], kind)
+    return (f"Construction begins on a new {label} — estimated "
             f"{project.total_turns} turns.")
 
 
@@ -993,11 +1025,17 @@ def _finish_settlement(world, project):
     # Chronicle: building a settlement outright (the expensive shortcut,
     # as opposed to raising a village) is rare enough to be history.
     from app.world import chronicle
+    from app.world import holds
     chronicle.log(world, faction,
-                  f"{st.name} is founded as a {kind.capitalize()} — "
+                  f"{st.name} is founded as a "
+                  f"{holds.node_kind_name(world, st)} — "
                   "built from nothing rather than raised from a village.")
     world.settlements.append(st)
-    _mark_occupied_both(world, *project.pos)
+    if L.region_layer(world.regions[project.region_id]) == L.SURFACE:
+        # Surface occupancy hashes only: an underground settlement's cell
+        # belongs to the under grid, and marking the surface cell would
+        # wrongly keep a future surface village off that mountainside.
+        _mark_occupied_both(world, *project.pos)
     faction.meta.setdefault("settlements", []).append(st.id)
     if 0 <= project.region_id < len(world.regions):
         region = world.regions[project.region_id]
@@ -1069,9 +1107,11 @@ def _finish_settlement_upgrade(world, project):
     st.character = getattr(project, "character", None)
     from app.world import chronicle
     from app.world.resources import CHARACTER_NAMES
+    from app.world import holds
     chronicle.log(world, world.factions[st.faction_idx],
-                  f"{st.name} rises to a "
-                  f"{CHARACTER_NAMES.get(st.character, '')} City.")
+                  f"{st.name} rises into a "
+                  f"{CHARACTER_NAMES.get(st.character, '')} "
+                  f"{holds.node_kind_name(world, st)}.")
 
 
 def _found_village_projects(world):
@@ -1093,15 +1133,19 @@ def _raise_village_projects(world):
     return lst
 
 
-def start_found_village(world, nation, pos):
+def start_found_village(world, nation, pos, layer=L.SURFACE):
     """Pay the cost and start founding a village at `pos`. Returns a message
     ("" on success, why-not otherwise). Requires an owned, free cell in a
     region that still has village capacity -- the settlement-first gate that
     makes founding the organic growth rung of the ladder (found a village,
-    raise it to a Town, raise the Town to a City)."""
+    raise it to a Town, raise the Town to a City).
+
+    `layer` says which layer `pos` is on: the same (x, y) exists on both,
+    and the region is looked up per-layer (layers.region_at), so the ladder
+    works in the galleries exactly as it does above ground."""
     faction_idx = world.factions.index(nation)
-    region_id = world.region_grid[pos[1]][pos[0]]
-    if region_id < 0:
+    region_id = L.region_at(world, pos[0], pos[1], layer)
+    if region_id is None:
         return "That location isn't part of any region."
     region = world.regions[region_id]
     if region.faction_idx != faction_idx:
@@ -1146,34 +1190,39 @@ def _finish_found_village(world, project):
     # land), still connect it to the realm -- a road to the faction's
     # nearest other village, or its nearest settlement if it has no other
     # village yet -- the same "never an island" rule the kingdom bridge
-    # applies to settlement-less regions.
-    from app.world.resources import (_connect_new_village_to_region, _dist2)
-    from app.world.worldgen import _local_road_path
-    linked = _connect_new_village_to_region(world, region, v)
-    if linked == 0:
-        others = [o for o in world.villages
-                  if o.faction_idx == region.faction_idx and o.id != v.id]
-        if not others:
-            others = [s for s in world.settlements
-                      if s.faction_idx == region.faction_idx]
-        if others:
-            target = min(others, key=lambda o: _dist2(o.pos, v.pos))
-            path = _local_road_path(world, v.pos, target.pos,
-                                    faction_idx=region.faction_idx,
-                                    allow_fallback=False)
-            if path is not None:
-                from app.world.worldgen import add_road_segments
-                add_road_segments(world, region.id,
-                                  list(zip(path, path[1:])), "dirt")
+    # applies to settlement-less regions. Below ground the galleries ARE
+    # the roads (layers.UNDER_MOVE_COST), so an under-village needs no
+    # surface road carved through a mountain.
+    if not L.is_under(region):
+        from app.world.resources import (_connect_new_village_to_region, _dist2)
+        from app.world.worldgen import _local_road_path
+        linked = _connect_new_village_to_region(world, region, v)
+        if linked == 0:
+            others = [o for o in world.villages
+                      if o.faction_idx == region.faction_idx and o.id != v.id]
+            if not others:
+                others = [s for s in world.settlements
+                          if s.faction_idx == region.faction_idx]
+            if others:
+                target = min(others, key=lambda o: _dist2(o.pos, v.pos))
+                path = _local_road_path(world, v.pos, target.pos,
+                                        faction_idx=region.faction_idx,
+                                        allow_fallback=False)
+                if path is not None:
+                    from app.world.worldgen import add_road_segments
+                    add_road_segments(world, region.id,
+                                      list(zip(path, path[1:])), "dirt")
     # Chronicle: the realm's FIRST founded village is a milestone (the
     # moment the ladder truly begins); later ones are routine and stay out
     # of the history.
     from app.world import chronicle
+    from app.world import holds
     founded = faction.meta.get("villages_founded", 0) + 1
     faction.meta["villages_founded"] = founded
     if founded == 1:
         chronicle.log(world, faction,
-                      f"Your settlers found {v.name} — the first village "
+                      f"Your settlers found {v.name} — the first "
+                      f"{holds.node_kind_name(world, v).lower()} "
                       "built by the realm's own hands.")
     return v
 
@@ -1248,10 +1297,11 @@ def _finish_raise_village(world, project):
     v.raised_into = st.id
     from app.world import chronicle
     from app.world.resources import CHARACTER_NAMES
+    from app.world import holds
     chronicle.log(world, nation,
-                  f"{v.name} rises to a "
+                  f"{v.name} rises into a "
                   f"{CHARACTER_NAMES.get(getattr(project, 'character', None), '')} "
-                  "Town.")
+                  f"{holds.node_kind_name(world, st)}.")
     return st
 
 
@@ -1405,7 +1455,8 @@ def _ai_found_village(world, nation, fac_idx):
     pos = _region_settlement_pos(world, best_region, "town")
     if pos is None:
         return False
-    return not start_found_village(world, nation, pos)
+    return not start_found_village(world, nation, pos,
+                                   layer=L.region_layer(best_region))
 
 
 # --- AI construction/expansion pacing ----------------------------------------
@@ -1538,7 +1589,8 @@ def run_settlement_ai(world):
                     continue
                 pos = _region_settlement_pos(world, region, kind)
                 if pos is not None:
-                    start_settlement(world, nation, pos, kind)
+                    start_settlement(world, nation, pos, kind,
+                                     layer=L.region_layer(region))
                 break
 
 
@@ -1692,13 +1744,21 @@ def run_storage_ai(world):
             # only way a village on marginal land (no crop biomes in its own
             # catchment) feeds itself -- without one it lives on imports, which
             # is exactly how a realm ends up with starved dead-adult villages.
-            if getattr(node, "kind", "") == "village":
+            kind = getattr(node, "kind", "")
+            under = (kind != "village") and _node_under(world, node)
+            if kind == "village" or under:
                 region = world.regions[node.region_id]
-                counts = getattr(region, "biome_counts", None) or {}
+                if kind == "village":
+                    counts = getattr(region, "biome_counts", None) or {}
+                else:
+                    # An under-SETTLEMENT (a mining town) reads its land from
+                    # the rock overhead, exactly like the yield does.
+                    counts, _climate, _fert = resources.village_local_sample(
+                        world, node, region)
                 for building, (biomes, _sample, _label) in resources.OUTSTATIONS.items():
                     if resources.storage_tier(node, building) > 0:
                         continue
-                    if not resources.storage_max_tier(node, building):
+                    if not resources.storage_max_tier(node, building, under=under):
                         continue
                     if any(counts.get(b, 0) > 0 for b in biomes):
                         pressured.append((1.1, node, building))
