@@ -445,10 +445,11 @@ def start_shipyard(world, nation, settlement):
     city. Returns a message describing what happened (success or why not)."""
     if not can_build_shipyard(world, settlement):
         return "A shipyard can't be built there."
-    if not can_afford(nation, SHIPYARD_COST, world):
+    if not can_afford(nation, SHIPYARD_COST, world,
+                      region_id=settlement.region_id):
         return "You don't have enough resources to start construction."
 
-    _pay_cost(nation, SHIPYARD_COST, world)
+    _pay_cost(nation, SHIPYARD_COST, world, region_id=settlement.region_id)
 
     project = ShipyardProject(settlement.faction_idx, settlement.id)
     world.shipyard_projects.append(project)
@@ -610,10 +611,10 @@ def start_storage_building(world, nation, node, building):
                               under=_node_under(world, node))
     if cost is None:
         return f"A {label} can't be built there."
-    if not can_afford(nation, cost, world):
+    if not can_afford(nation, cost, world, region_id=node.region_id):
         return "You don't have enough resources to start construction."
 
-    _pay_cost(nation, cost, world)
+    _pay_cost(nation, cost, world, region_id=node.region_id)
     _storage_projects(world).append(StorageProject(
         node.faction_idx, _node_kind_of(node), node.id, building, to_tier,
         storage_build_turns(node, building, to_tier)))
@@ -652,10 +653,11 @@ def start_granary(world, nation, settlement):
 def _start_granary_legacy(world, nation, settlement):
     if not can_build_granary(world, settlement):
         return "A granary can't be built there."
-    if not can_afford(nation, GRANARY_COST, world):
+    if not can_afford(nation, GRANARY_COST, world,
+                      region_id=settlement.region_id):
         return "You don't have enough resources to start construction."
 
-    _pay_cost(nation, GRANARY_COST, world)
+    _pay_cost(nation, GRANARY_COST, world, region_id=settlement.region_id)
 
     project = GranaryProject(settlement.faction_idx, settlement.id)
     world.granary_projects.append(project)
@@ -894,7 +896,62 @@ def _pay_food(nation, amount, world):
     return amount - remaining
 
 
-def can_afford(nation, cost, world):
+# --- Dry-stone construction ------------------------------------------------
+# A region whose land can never produce timber -- no forest/taiga/jungle
+# cells anywhere in it (mountain and highland homelands especially, and the
+# underground, where there are no trees at all) -- still has to build:
+# storage, camps, mines, towns. Its stone is the timber of such a land, so
+# a building project there pays its Logs line as Stone instead, at
+# DRY_STONE_LOG_RATIO. This is the construction sibling of winter's
+# Firewood->Coal fuel substitution (a mining town must not freeze on its own
+# seam): a mountain realm must not stall its whole early game on a forest
+# it does not have, while sitting on all the stone a builder could want.
+#
+# Deliberately per-REGION at the build site, not per-faction: what
+# substitutes is what that particular ground can actually provide, which is
+# also exactly what the player sees in that region's build menu. Forest
+# realms never see it anywhere; a timberless realm's costs read as Stone
+# wherever it builds. Only the raw Logs line converts -- Planks are a
+# manufactured good and a mid-game trade decision, not a local building
+# material, and every other cost line is untouched.
+DRY_STONE_LOG_RATIO = 2.0     # one Log becomes this much Stone. Timber is
+                              # lighter to haul than dressed stone, so a
+                              # stone-built project costs more tonnage than
+                              # a timber one -- unblocked, not free (and a
+                              # forest realm's Logs stay the cheaper way).
+
+
+def timberless_region(world, region_id):
+    """True when `region_id`'s land can grow or cut no timber at all: zero
+    forest/taiga/jungle cells in the whole region, so no Woodcutters' Camp
+    anywhere in it could ever work a tree. Regions with no biome counts (an
+    underground gallery, an old save) count as timberless -- rock has no
+    trees. None (no region context) is NOT timberless, so the generic
+    no-region call sites below stay plain Logs costs."""
+    if region_id is None:
+        return False
+    region = world.regions[region_id]
+    return (resources.region_outstation_cells(world, region,
+                                              resources.WOODCUTTERS_CAMP)
+            == 0)
+
+
+def resolve_timber_cost(cost, world, region_id=None):
+    """`cost` with its Logs line paid as Stone (DRY_STONE_LOG_RATIO each)
+    when the project sits in a timberless region, else `cost` unchanged.
+    Never mutates the input -- returns a fresh dict only when something
+    actually changed, so a forest realm pays literally the listed cost."""
+    if region_id is None or "Logs" not in cost:
+        return cost
+    if not timberless_region(world, region_id):
+        return cost
+    resolved = dict(cost)
+    resolved["Stone"] = resolved.get("Stone", 0) + round(
+        resolved.pop("Logs") * DRY_STONE_LOG_RATIO)
+    return resolved
+
+
+def can_afford(nation, cost, world, region_id=None):
     """Anything in _SETTLEMENT_STORAGE_RESOURCES (as of Phase 12, that
     includes Logs/Stone/Iron -- see resources.py's Industry Specialization
     section; as of the Currency overhaul, Gold too -- see resources.py's
@@ -903,7 +960,12 @@ def can_afford(nation, cost, world):
     dicts falls in that last bucket any more, but this stays generic
     rather than assuming that never changes). Food ("Food") is a first-
     class cost resource too -- provisions for settlers, see _pay_claim --
-    checked against the faction's aggregate edible stock."""
+    checked against the faction's aggregate edible stock.
+
+    `region_id` is the build site's region: in a timberless one, the cost
+    is resolved dry-stone first (see resolve_timber_cost), so a mountain
+    realm's Stone pays for what a forest realm pays in Logs."""
+    cost = resolve_timber_cost(cost, world, region_id)
     for resource, amount in cost.items():
         if resource in _SETTLEMENT_STORAGE_RESOURCES:
             if _faction_settlement_stock(nation, resource, world) < amount:
@@ -916,7 +978,7 @@ def can_afford(nation, cost, world):
     return True
 
 
-def _pay_cost(nation, cost, world):
+def _pay_cost(nation, cost, world, region_id=None):
     """Deduct `cost` from `nation`, the spending half of can_afford -- a
     settlement-storage resource (Gold included, as of the Currency
     overhaul) spread across whichever of the faction's Settlements AND
@@ -925,7 +987,9 @@ def _pay_cost(nation, cost, world):
     aggregate-economy assumption trade.py's sellable_surplus already
     makes, see _faction_nodes above for why Villages count too), anything
     else from the old shared pool. Caller must have already confirmed
-    can_afford."""
+    can_afford. `region_id` resolves the cost dry-stone exactly like
+    can_afford does, so the two halves always agree on what is paid."""
+    cost = resolve_timber_cost(cost, world, region_id)
     for resource, amount in cost.items():
         if resource in _SETTLEMENT_STORAGE_RESOURCES:
             remaining = amount
@@ -979,10 +1043,10 @@ def start_settlement(world, nation, pos, kind, layer=L.SURFACE):
     if any(v.pos == pos for v in world.villages):
         return "There's already a village there."
     cost = SETTLEMENT_BUILD_COST[kind]
-    if not can_afford(nation, cost, world):
+    if not can_afford(nation, cost, world, region_id=region_id):
         return "You don't have enough resources to start construction."
 
-    _pay_cost(nation, cost, world)
+    _pay_cost(nation, cost, world, region_id=region_id)
 
     # A settlement underground needs no road project: the galleries ARE the
     # roads (movement already prices haulage -- layers.UNDER_MOVE_COST), so
@@ -1080,9 +1144,9 @@ def start_settlement_upgrade(world, nation, settlement, character=None):
            for p in _upgrade_projects(world)):
         return "An upgrade is already under way there."
     cost = SETTLEMENT_UPGRADE_COST
-    if not can_afford(nation, cost, world):
+    if not can_afford(nation, cost, world, region_id=settlement.region_id):
         return "You don't have enough resources to start the upgrade."
-    _pay_cost(nation, cost, world)
+    _pay_cost(nation, cost, world, region_id=settlement.region_id)
     _upgrade_projects(world).append(
         SettlementUpgradeProject(faction_idx, settlement.id, character))
     return ""
@@ -1193,16 +1257,26 @@ def _finish_found_village(world, project):
     # applies to settlement-less regions. Below ground the galleries ARE
     # the roads (layers.UNDER_MOVE_COST), so an under-village needs no
     # surface road carved through a mountain.
+    #
+    # The fallback pool is SAME-LAYER ONLY. The realm it connects to may
+    # have under-villages at (x, y) positions on the mountainside beside
+    # its gate town, and a surface road anchored at one of those would end
+    # beside the gate -- reported as "the road connects out to the side of
+    # the city on the mountain gate" -- instead of at the gate town that
+    # actually sits on the door. An under node is not addressable from the
+    # surface at all, so it must never be the anchor of a surface road.
     if not L.is_under(region):
         from app.world.resources import (_connect_new_village_to_region, _dist2)
         from app.world.worldgen import _local_road_path
         linked = _connect_new_village_to_region(world, region, v)
         if linked == 0:
             others = [o for o in world.villages
-                      if o.faction_idx == region.faction_idx and o.id != v.id]
+                      if o.faction_idx == region.faction_idx and o.id != v.id
+                      and not L.is_under(world.regions[o.region_id])]
             if not others:
                 others = [s for s in world.settlements
-                          if s.faction_idx == region.faction_idx]
+                          if s.faction_idx == region.faction_idx
+                          and not L.is_under(world.regions[s.region_id])]
             if others:
                 target = min(others, key=lambda o: _dist2(o.pos, v.pos))
                 path = _local_road_path(world, v.pos, target.pos,
@@ -1585,7 +1659,8 @@ def run_settlement_ai(world):
         if empty_regions:
             region = random.choice(empty_regions)
             for kind in ("city", "castle", "town"):
-                if not can_afford(nation, SETTLEMENT_BUILD_COST[kind], world):
+                if not can_afford(nation, SETTLEMENT_BUILD_COST[kind], world,
+                                  region_id=region.id):
                     continue
                 pos = _region_settlement_pos(world, region, kind)
                 if pos is not None:
@@ -1785,7 +1860,8 @@ def run_storage_ai(world):
             if to_tier is None:
                 continue
             cost = storage_build_cost(node, building, to_tier)
-            if cost is None or not can_afford(nation, cost, world):
+            if cost is None or not can_afford(nation, cost, world,
+                                              region_id=node.region_id):
                 continue
             start_storage_building(world, nation, node, building)
             break

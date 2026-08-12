@@ -20,6 +20,15 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 119,
+        "title": "Dry Stone",
+        "items": [
+            "WORLD: timberless land builds in stone — a region with no forest, taiga or jungle anywhere (a mountain or highland homeland, tundra, desert, or the underground) pays every building's Logs line as Stone instead, at 2 Stone per Log. A mountain realm can now build its first storage, camps and towns on the stone it actually has, instead of deadlocking on a forest it cannot grow — its stone is its timber.",
+            "RULE: buildings only — a ship's hull is genuinely wood, so shipbuilding still costs real Logs and a timberless realm must trade for them.",
+            "AI: the same rule applies to every realm — the AI's camps, storage and towns go up in stone in timberless regions too, and the build menu says so out loud where it happens.",
+        ],
+    },
+    {
         "version": 118,
         "title": "Time and Tide",
         "items": [

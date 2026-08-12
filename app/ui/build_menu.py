@@ -588,6 +588,9 @@ class BuildMenuWindow(tk.Toplevel):
 
         page.text(_format_cost(option.cost),
                   fill=theme.INK if option.affordable else theme.BAD)
+        if option.dry_stone:
+            page.text("Dry stone — this region has no timber, so Logs are "
+                      "paid as Stone.", fill=theme.MUTED)
         page.text(f"{option.turns} days to build", fill=theme.MUTED)
         verb = "Upgrade" if option.current_tier > 0 else "Build"
         # Drawn either way. An unaffordable building is DISABLED, not missing:

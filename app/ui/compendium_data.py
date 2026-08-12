@@ -1363,6 +1363,20 @@ def _construction_article():
             "storage, spread across whichever settlements actually have "
             "the goods, largest stockpile first."
         ),
+        (
+            "A region with no timber at all — no forest, taiga or jungle "
+            "anywhere in it (a mountain or highland homeland, or the "
+            "underground) — builds in stone instead: there, every Logs "
+            "line in a building cost is paid as "
+            f"{construction.DRY_STONE_LOG_RATIO:g} Stone per Log, the "
+            "same way such a region burns coal for heat in Winter. Stone "
+            "is what a timberless land is rich in, so its early buildings "
+            "stay buildable rather than deadlocking on a forest it does "
+            "not have — but dressed stone weighs more than timber, so the "
+            "cost in tonnage is real. Ships are the exception: a hull is "
+            "genuinely wood, so a ship's Logs cost is never substituted "
+            "and a timberless realm must trade for it."
+        ),
         "SETTLEMENTS (City / Castle / Town)",
         "\n".join([
             f"  Town:   {_cost_line(sc['town'])} — {st['town']} turns at full speed",

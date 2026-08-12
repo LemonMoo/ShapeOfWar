@@ -4904,9 +4904,10 @@ class MapView(tk.Frame):
             for kind in ("city", "town", "castle"):
                 if kind in building_kinds:
                     continue
-                cost = construction.SETTLEMENT_BUILD_COST[kind]
+                cost = construction.resolve_timber_cost(
+                    construction.SETTLEMENT_BUILD_COST[kind], wd, region.id)
                 turns = construction.SETTLEMENT_BUILD_TURNS[kind]
-                afford = construction.can_afford(player, cost, self.world)
+                afford = construction.can_afford(player, cost, wd)
                 label = holds.region_kind_name(wd, region, kind)
                 self._panel_text(f"{label} — Cost: {_format_resources(cost)}\n"
                               f"Build time: {turns} turns", fg=theme.INK)
@@ -5419,7 +5420,8 @@ class MapView(tk.Frame):
                 f"{construction.TOWN_UPGRADE_POPULATION_FRACTION:.0%}). ",
                 fg=theme.MUTED)
             return
-        cost = construction.SETTLEMENT_UPGRADE_COST
+        cost = construction.resolve_timber_cost(
+            construction.SETTLEMENT_UPGRADE_COST, self.world, st.region_id)
         turns = construction.SETTLEMENT_UPGRADE_TURNS
         in_flight = any(p.settlement_id == st.id
                         for p in getattr(self.world, "settlement_upgrade_projects", ()))
@@ -6266,7 +6268,9 @@ class MapView(tk.Frame):
             cost = construction.VILLAGE_BUILD_COST
             turns = construction.VILLAGE_BUILD_TURNS
         else:
-            cost = construction.SETTLEMENT_BUILD_COST[kind]
+            cost = construction.resolve_timber_cost(
+                construction.SETTLEMENT_BUILD_COST[kind], self.world,
+                region.id)
             turns = construction.SETTLEMENT_BUILD_TURNS[kind]
         self._page_begin(None)
         verb = "carving" if layers.is_under(region) else "building"

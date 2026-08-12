@@ -52,7 +52,7 @@ class BuildOption:
     def __init__(self, building, label, category, current_tier, max_tier,
                  to_tier=None, cost=None, turns=0, affordable=False,
                  blocked=None, in_progress=None, effects=(),
-                 priority="idle", reason="", score=0.0):
+                 priority="idle", reason="", score=0.0, dry_stone=False):
         self.building = building          # key, e.g. "granary"
         self.label = label                # "Granary"
         self.category = category          # "Storage" | "Food" | "Livestock" | "Naval"
@@ -68,6 +68,11 @@ class BuildOption:
         self.priority = priority          # "urgent" | "useful" | "idle" | "blocked"
         self.reason = reason              # one line: why this node wants it
         self.score = score                # for ordering within a priority
+        # Dry-stone construction: True when this node's region has no timber
+        # at all and the cost shown is the resolved Stone version of what
+        # would be a Logs cost elsewhere (see construction.resolve_timber_cost).
+        # The menu draws a one-line note when it is set.
+        self.dry_stone = dry_stone
 
     @property
     def buildable(self):
@@ -668,7 +673,9 @@ def _shipyard_option(world, node, nation):
             blocked = "This city is not on the coast."
         else:
             to_tier = 1
-    cost = dict(construction.SHIPYARD_COST) if to_tier else {}
+    base_cost = dict(construction.SHIPYARD_COST) if to_tier else {}
+    cost = construction.resolve_timber_cost(base_cost, world, node.region_id)
+    dry_stone = cost is not base_cost
     priority, reason, score = ("idle", "", 0.0)
     if to_tier:
         priority, reason, score = _verdict(world, node, "shipyard")
@@ -678,7 +685,8 @@ def _shipyard_option(world, node, nation):
         affordable=bool(to_tier) and construction.can_afford(nation, cost, world),
         blocked=blocked, in_progress=progress,
         effects=["Ships launch free and sail faster from here"],
-        priority="blocked" if blocked else priority, reason=reason, score=score)
+        priority="blocked" if blocked else priority, reason=reason, score=score,
+        dry_stone=dry_stone)
 
 
 def build_options(world, node, nation):
@@ -719,8 +727,12 @@ def build_options(world, node, nation):
         max_tier = resources.storage_max_tier(node, building, under=under)
         progress = _in_progress(world, node, building)
         to_tier = construction.storage_next_tier(world, node, building)
-        cost = (construction.storage_build_cost(node, building, to_tier, under=under)
-                if to_tier is not None else None) or {}
+        base_cost = (construction.storage_build_cost(node, building, to_tier,
+                                                     under=under)
+                     if to_tier is not None else None) or {}
+        cost = construction.resolve_timber_cost(base_cost, world,
+                                                node.region_id)
+        dry_stone = cost is not base_cost
         blocked = None
         if progress is not None:
             pass          # already building; not blocked, just busy
@@ -739,7 +751,8 @@ def build_options(world, node, nation):
             affordable=bool(cost) and construction.can_afford(nation, cost, world),
             blocked=blocked, in_progress=progress,
             effects=_storage_effect_lines(node, building, to_tier),
-            priority=priority, reason=reason, score=score))
+            priority=priority, reason=reason, score=score,
+            dry_stone=dry_stone))
     options.sort(key=lambda o: o.sort_key)
     return options
 
