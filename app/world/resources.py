@@ -3100,6 +3100,17 @@ def _region_has_forest(world, node):
     return region.biome_counts.get("forest", 0) > 0
 
 
+def _ensure_winter_fuel(world):
+    """The per-faction winter fuel tally ({idx: {"coal": n, "scrounged": n}}),
+    lazily created for saves written before it existed. Reset to a fresh
+    tally whenever Winter begins (see day_steps), so the "you burned coal to
+    keep warm this winter" alert reports one winter, not all of history."""
+    tally = getattr(world, "_winter_fuel", None)
+    if tally is None:
+        tally = world._winter_fuel = {}
+    return tally
+
+
 def _firewood_scrounge_fraction(world, node):
     """Fraction of a Firewood deficit a region can cover by scrounging (dung,
     scrub, deadfall) -- full NO_FOREST_SUBSISTENCE_FRACTION with no forest at
@@ -3467,8 +3478,19 @@ def _consume_node_needs(node, season, world):
             if coal_use > 0:
                 res["Coal"] = res["Coal"] - coal_use
                 wood_had += coal_use
+                # Counted so the realm can be told, once a winter, that it
+                # kept itself warm on coal (see faction_alerts) -- a real
+                # resource decision that used to happen with no signal at all.
+                fuel = _ensure_winter_fuel(world)
+                fuel.setdefault(node.faction_idx, {})["coal"] = (
+                    fuel.get(node.faction_idx, {}).get("coal", 0) + coal_use)
         if wood_had < wood_needed:
-            wood_had += (wood_needed - wood_had) * _firewood_scrounge_fraction(world, node)
+            scrounged = (wood_needed - wood_had) * _firewood_scrounge_fraction(world, node)
+            wood_had += scrounged
+            if scrounged > 0:
+                fuel = _ensure_winter_fuel(world)
+                fuel.setdefault(node.faction_idx, {})["scrounged"] = (
+                    fuel.get(node.faction_idx, {}).get("scrounged", 0) + scrounged)
         if wood_needed > 0 and wood_had < wood_needed:
             # FREEZE_GRACE_TURNS -- same reasoning as Food's grace period
             # above: a Winter-long cold snap shouldn't be an instant,
@@ -3678,6 +3700,30 @@ def faction_alerts(world, faction_idx):
             for alert in node_alerts(v, world):
                 alert["node"] = v
                 out.append(alert)
+
+    # The realm kept itself warm on coal or scrounging this Winter -- a real
+    # resource decision (coal burned is coal not sold or stored; scrounging
+    # means the region's own forest couldn't cover it) that used to happen
+    # with no signal at all. One alert for the whole winter, not one per day;
+    # anchored on the capital so the alerts UI's node jump has somewhere to
+    # go. Reported while Winter is still on, since that's when the player can
+    # still do something about next winter.
+    if world.season == "Winter":
+        fuel = getattr(world, "_winter_fuel", {})
+        used = fuel.get(faction_idx)
+        if used:
+            parts = []
+            if used.get("coal"):
+                parts.append(f"burned {used['coal']:,} coal for warmth")
+            if used.get("scrounged"):
+                parts.append(f"scrounged {used['scrounged']:,.0f} firewood")
+            if parts:
+                sids = nation.meta.get("settlements", [])
+                anchor = world.settlements[sids[0]] if sids else (
+                    next((v for v in world.villages if v.faction_idx == faction_idx), None))
+                out.append({"kind": "winter_fuel", "severity": "warning",
+                            "message": f"Your realm {', '.join(parts)} this winter",
+                            "node": anchor})
     return out
 
 
@@ -4703,6 +4749,39 @@ def has_region_outstation_land(world, village, building):
     the same trap applies to every other kind of country."""
     return region_outstation_cells(
         world, world.regions[village.region_id], building) > 0
+
+
+def blocked_industry_resources(world, fac_idx):
+    """{resource: building} -- raw industry resources this faction's land
+    offers but NO owned village extracts, because the matching outstation
+    camp was never built (see the family-by-family gate in
+    _village_terrain_potential). The silent gate made visible: Logs sits at
+    zero not because the forest is empty but because there is no Woodcutters'
+    Camp. Faction-level on purpose -- one village with the camp unblocks the
+    family realm-wide, exactly as the production gate behaves."""
+    owned = [v for v in world.villages if v.faction_idx == fac_idx]
+    if not owned:
+        return {}
+    surface = [world.regions[v.region_id] for v in owned
+               if not layers.is_under(world.regions[v.region_id])]
+    blocked = {}
+    for building, (biomes, sample, _label) in OUTSTATIONS.items():
+        if sample != OUTSTATION_INDUSTRY:
+            continue
+        # Land for this family anywhere in the realm? (Region land is what
+        # gates buildability, see has_region_outstation_land.)
+        has_land = any(
+            any((getattr(r, "biome_counts", None) or {}).get(b, 0) > 0
+                for b in biomes)
+            for r in surface)
+        if not has_land:
+            continue
+        if any(storage_tier(v, building) > 0 for v in owned):
+            continue
+        for b in biomes:
+            for resource in _INDUSTRY_SHARES_BY_BIOME.get(b, {}):
+                blocked[resource] = building
+    return blocked
 
 
 def has_region_mountain(world, village):
@@ -7110,6 +7189,115 @@ def gold_ledger(world, fac_idx):
     return [e for e in getattr(world, "gold_ledger", {}).get(fac_idx, [])]
 
 
+# --- the economy ledger -----------------------------------------------------
+# The gold ledger above is the model, generalised: where it records only coin,
+# this records EVERY resource a faction owns, attributed to the same kind of
+# cause (produced, consumed, converted, spoiled, traded, built, raided). One
+# ledger for the whole economy, so "where does my Wood go" has a single answer
+# surface instead of a stockpile total and a guess.
+#
+# Same measurement trick as gold: bracket the phases of the day that can move
+# resources, snapshot the faction totals before and after, and charge the
+# difference to that phase's cause. Nothing is instrumented by hand, so the
+# parts always reconcile exactly to the total change -- the panel's invariant.
+ECON_LEDGER_HISTORY_TURNS = 24   # window, matching gold; enough for a trend
+
+
+def faction_resource_snapshot(world, fac_idx):
+    """Every unit of every resource a faction actually holds, across its
+    settlements AND villages -- the world-side twin of the resource bar's
+    _current_resource_snapshot, and deliberately the same node pool that
+    construction._faction_nodes defines (settlements from meta + owned
+    villages), so a ledger net and a bar delta can never disagree."""
+    nation = world.factions[fac_idx]
+    snap = dict(nation.stats.get("resources", {}))
+    for sid in nation.meta.get("settlements", []):
+        for resource, amount in (getattr(world.settlements[sid], "resources", None)
+                                 or {}).items():
+            snap[resource] = snap.get(resource, 0) + amount
+    for v in world.villages:
+        if v.faction_idx == fac_idx:
+            for resource, amount in (getattr(v, "resources", None) or {}).items():
+                snap[resource] = snap.get(resource, 0) + amount
+    return snap
+
+
+def _econ_snapshot(world):
+    """[fac_idx][resource] -> total, for every faction in one pass."""
+    snaps = [dict(f.stats.get("resources", {})) for f in world.factions]
+    for st in world.settlements:
+        fac = st.faction_idx
+        if fac < 0 or fac >= len(snaps):
+            continue
+        snap = snaps[fac]
+        for resource, amount in (getattr(st, "resources", None) or {}).items():
+            snap[resource] = snap.get(resource, 0) + amount
+    for v in world.villages:
+        fac = v.faction_idx
+        if fac < 0 or fac >= len(snaps):
+            continue
+        snap = snaps[fac]
+        for resource, amount in (getattr(v, "resources", None) or {}).items():
+            snap[resource] = snap.get(resource, 0) + amount
+    return snaps
+
+
+def _record_econ(world, cause, before):
+    """Attribute each faction's per-resource change since `before` to `cause`.
+    Returns the fresh snapshot, so callers chain: mark = _record_econ(...).
+
+    A world with the ledger switched off (dev/test_econ_ledger.py's A/B
+    observation-only proof) still takes the snapshot so the day runs exactly
+    as it would with the ledger on -- recording nothing, perturbing nothing."""
+    now = _econ_snapshot(world)
+    if not getattr(world, "_econ_ledger_enabled", True):
+        return now
+    turn_ledger = world._econ_turn
+    for fac_idx, (prev, cur) in enumerate(zip(before, now)):
+        for resource in set(prev) | set(cur):
+            delta = cur.get(resource, 0) - prev.get(resource, 0)
+            if delta:
+                entry = turn_ledger.setdefault(fac_idx, {}).setdefault(resource, {})
+                entry[cause] = entry.get(cause, 0) + delta
+    return now
+
+
+def _close_econ_ledger(world):
+    """Commit this turn's per-faction, per-resource breakdown to
+    world.econ_ledger (windowed) and world.econ_year (rolled to the year),
+    so the panel can show both a recent trend and this year's totals."""
+    ledger = getattr(world, "econ_ledger", None)
+    if ledger is None:
+        ledger = world.econ_ledger = {}
+    year = getattr(world, "econ_year", None)
+    if year is None:
+        year = world.econ_year = {}
+    for fac_idx, resources in getattr(world, "_econ_turn", {}).items():
+        for resource, causes in resources.items():
+            if not causes:
+                continue
+            entry = {"turn": world.turn, "resource": resource, **causes}
+            entry["net"] = sum(v for k, v in causes.items())
+            history = ledger.setdefault(fac_idx, {}).setdefault(resource, [])
+            history.append(entry)
+            del history[:-ECON_LEDGER_HISTORY_TURNS]
+            yc = year.setdefault(fac_idx, {}).setdefault(resource, {})
+            for k, v in causes.items():
+                yc[k] = yc.get(k, 0) + v
+    world._econ_turn = {}
+
+
+def economy_year(world, fac_idx):
+    """{resource: {cause: qty}} for the current year, for the Ledger panel."""
+    return getattr(world, "econ_year", {}).get(fac_idx, {})
+
+
+def economy_recent(world, fac_idx, resource):
+    """[{turn, causes..., net}, ...] most recent last, for a resource row."""
+    return [e for e in getattr(world, "econ_ledger", {}).get(fac_idx, {})
+            .get(resource, [])]
+
+
 def _close_gold_ledger(world):
     """Commit this turn's per-faction breakdown to world.gold_ledger, keeping
     only the recent window (GOLD_LEDGER_HISTORY_TURNS) so saves don't grow
@@ -7288,6 +7476,11 @@ def day_steps(world):
     """
     world.turn += 1
     world.season = SEASONS[((world.turn - 1) // TURNS_PER_SEASON) % len(SEASONS)]
+    # A fresh winter fuel tally every Winter (see _ensure_winter_fuel): the
+    # "you burned coal to keep warm this winter" alert should report this
+    # winter's burn, not a running total since the world was made.
+    if world.season == "Winter" and _is_new_season(world.turn):
+        world._winter_fuel = {}
     # Season news beats: on the first turn of a season, compress the last
     # season's chronicle entries into one line of world news for the UI's
     # bottom banner (app/world/news.py). Rides world.season_news_turn so the
@@ -7307,6 +7500,13 @@ def day_steps(world):
     # adds up to the real change with nothing unaccounted for.
     world._gold_turn = defaultdict(dict)
     _gold_mark = _gold_snapshot(world)
+    # Economy ledger for this turn -- the same measurement trick, for every
+    # resource (see the economy-ledger section above). New year: start the
+    # "this year" totals fresh.
+    if _is_new_year(world.turn):
+        world.econ_year = {}
+    world._econ_turn = {}
+    _econ_mark = _econ_snapshot(world)
     yield "season"
 
     production_value = defaultdict(float)
@@ -7331,6 +7531,7 @@ def day_steps(world):
     # once-a-year region-level path is gone, along with the meat spike it made.
     for fac_idx, value in advance_herds(world).items():
         production_value[fac_idx] += value
+    _econ_mark = _record_econ(world, "produced", _econ_mark)
     yield "herds"
 
     for fac_idx, nation in enumerate(world.factions):
@@ -7339,11 +7540,14 @@ def day_steps(world):
         _apply_spoilage(res)
         _clamp_to_storage(nation)
         _recompute_military(nation, world, fac_idx)
+    _econ_mark = _record_econ(world, "spoiled", _econ_mark)
     yield "stockpiles"
 
     advance_local_shipments(world)          # deliver anything in transit before it's needed
     _produce_fishing(world)                 # Fish lands directly at water-adjacent nodes
+    _econ_mark = _record_econ(world, "produced", _econ_mark)  # fishing
     advance_preservation(world)             # cure perishables before they spoil
+    _econ_mark = _record_econ(world, "converted", _econ_mark)  # curing
     yield "shipments"
 
     advance_production_chains(world)
@@ -7351,6 +7555,7 @@ def day_steps(world):
     advance_fungus_galleries(world)         # substrate into food, in the beds
     _record_gold(world, "minted", _gold_mark)   # Gold struck from Gold Ore
     _gold_mark = _gold_snapshot(world)
+    _econ_mark = _record_econ(world, "converted", _econ_mark)
     yield "workshops"
 
     yield from run_local_logistics(world)   # dispatch new shipments from this turn's fresh stock
@@ -7362,6 +7567,10 @@ def day_steps(world):
     yield from run_gate_logistics(world)
     advance_settlement_storage(world)
     consumption_value = advance_settlement_consumption(world)
+    # Logistics and gate shipments move goods between this faction's OWN nodes
+    # (zero net on the faction total); consumption is the only thing here that
+    # changes what the faction holds, so the whole group charges to it.
+    _econ_mark = _record_econ(world, "consumed", _econ_mark)
     yield "households"
 
     _update_prosperity(world, production_value, consumption_value)
@@ -7374,6 +7583,7 @@ def day_steps(world):
     # day's empty store, not yesterday's.
     from app.world.holds import advance_raids
     advance_raids(world)      # marks its victims; see node_alerts
+    _econ_mark = _record_econ(world, "raided", _econ_mark)
     yield "raids"
 
     # Autonomous trade (app/world/trade.py): move existing caravans first —
@@ -7399,6 +7609,7 @@ def day_steps(world):
     world.trade_events = events
     _record_gold(world, "foreign trade", _gold_mark)
     _gold_mark = _gold_snapshot(world)
+    _econ_mark = _record_econ(world, "traded", _econ_mark)
     yield "foreign trade"
 
     # Phase 11: domestic cross-region settlement trade -- run after
@@ -7419,6 +7630,7 @@ def day_steps(world):
     world.regional_trade_events += yield from trade.run_sell_to_city(world)
     _record_gold(world, "domestic trade", _gold_mark)
     _gold_mark = _gold_snapshot(world)
+    _econ_mark = _record_econ(world, "traded", _econ_mark)
     yield "sell to city"
 
     # Player/AI-built settlements + their connecting roads
@@ -7448,6 +7660,7 @@ def day_steps(world):
     construction.run_storage_ai(world)
     _record_gold(world, "construction", _gold_mark)
     _gold_mark = _gold_snapshot(world)
+    _econ_mark = _record_econ(world, "built", _econ_mark)
     yield "construction"
 
     # Progressive expansion: claims-in-progress on UNCLAIMED land
@@ -7464,6 +7677,7 @@ def day_steps(world):
     expansion.ensure_interregion_roads(world)
     _record_gold(world, "expansion", _gold_mark)
     _gold_mark = _gold_snapshot(world)
+    _econ_mark = _record_econ(world, "built", _econ_mark)
     yield "interregion roads"
 
     # Commanders: walk any active move order, count down ship construction
@@ -7480,6 +7694,7 @@ def day_steps(world):
     # any surveying parties out in the field.
     advance_cartographers(world)
     world.survey_events = advance_surveys(world)
+    _econ_mark = _record_econ(world, "built", _econ_mark)   # survey expeditions
     yield "surveys"
 
     # Frontier events on newly-claimed land (app/world/frontier.py): the
@@ -7488,6 +7703,7 @@ def day_steps(world):
     # end so a claim resolved earlier in the day starts its window at once.
     from app.world import frontier
     frontier.advance_frontier_events(world)
+    _econ_mark = _record_econ(world, "gained", _econ_mark)  # frontier spoils/losses
     yield "frontier"
 
     # Fog of war: reveal whatever's now in range as territory changes hands
@@ -7501,4 +7717,5 @@ def day_steps(world):
     # that's a genuine signal there's a gold flow worth naming.
     _record_gold(world, "other", _gold_mark)
     _close_gold_ledger(world)
+    _close_econ_ledger(world)
     yield "day end"

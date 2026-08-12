@@ -266,6 +266,7 @@ class Page:
         self._next_tag = 0
         self._handlers = {}
         self._pending_finish = None
+        self._tip_label = None
 
     # -- surface -----------------------------------------------------------
     def begin(self, height=None):
@@ -281,6 +282,8 @@ class Page:
         still works and simply wins the race."""
         self.canvas.delete("all")
         self._handlers.clear()
+        if self._tip_label is not None:
+            self._tip_label.place_forget()
         self.y = 12
         self._height = height or self._height
         self._sheet()
@@ -556,19 +559,65 @@ class Page:
                                 font=(theme.FONT_FAMILY_HEAD, 10, "bold"))
         self.y += 20
 
-    def hit_last_row(self, command):
+    def hit_last_row(self, command, tip=None):
         """Make the row just drawn clickable.
 
         For the handful of places where the CONTROL is the row itself -- a
         stockpile line whose value cycles when you click it -- rather than a
         plaque underneath it. Keeps those rows reading as data instead of
-        turning a list of twelve goods into a list of twelve buttons."""
+        turning a list of twelve goods into a list of twelve buttons.
+
+        `tip`, when given, is a hover explanation shown while the pointer is
+        over the row (see _bind_tip) -- the row is data, but data that can
+        explain itself."""
         tag = self._tag()
         rect = self.canvas.create_rectangle(0, self.y - ROW_H - 4, self.width,
                                             self.y - 2, fill="", outline="",
                                             tags=(tag,))
         self.canvas.tag_lower(rect)
         self._bind(tag, lambda _e=None: command())
+        if tip:
+            self._bind_tip(tag, tip)
+
+    def tip(self, text, command=None):
+        """Attach a hover explanation to the row just drawn, with no click
+        action of its own -- the storage-card spoil line and similar. (A row
+        that is BOTH hover-explainable and clickable uses hit_last_row's tip
+        argument instead, so the two bindings share one region.)"""
+        tag = self._tag()
+        rect = self.canvas.create_rectangle(0, self.y - ROW_H - 4, self.width,
+                                            self.y - 2, fill="", outline="",
+                                            tags=(tag,))
+        self.canvas.tag_lower(rect)
+        if command is not None:
+            self._bind(tag, lambda _e=None: command())
+        self._bind_tip(tag, text)
+
+    def _bind_tip(self, tag, text):
+        """Show a small floating explanation while the pointer is over `tag`.
+        One label per page, lazily made and reused, so hover help costs one
+        widget no matter how many rows carry it."""
+        def _label():
+            if self._tip_label is None:
+                self._tip_label = tk.Label(
+                    self.canvas, bg=theme.PANEL_ALT, fg=theme.INK,
+                    font=theme.FONT_SMALL, relief="solid",
+                    borderwidth=1, padx=6, pady=3, justify="left")
+            return self._tip_label
+
+        def _show(e):
+            lab = _label()
+            lab.config(text=text)
+            lab.place(x=min(e.x + 14, self.width - 24),
+                      y=max(e.y + 12, 4))
+            lab.lift()
+
+        def _hide(_e=None):
+            if self._tip_label is not None:
+                self._tip_label.place_forget()
+
+        self.canvas.tag_bind(tag, "<Enter>", _show)
+        self.canvas.tag_bind(tag, "<Leave>", _hide)
 
     def mark(self):
         """The current y cursor, to bound a clickable region with (see

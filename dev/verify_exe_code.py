@@ -143,6 +143,8 @@ MARKERS = [
     ("app.core.changelog", "The Realm's Own Door", "const"),
     # v0.18.21 -- rivers that meander.
     ("app.core.changelog", "Rivers That Meander", "const"),
+    # v0.18.26.2 -- the economy is readable.
+    ("app.core.changelog", "The Economy Is Readable", "const"),
     # v0.18.26.1 -- a lighter day.
     ("app.core.changelog", "A Lighter Day", "const"),
     # v0.18.25 -- weather you can see; lakes are water.

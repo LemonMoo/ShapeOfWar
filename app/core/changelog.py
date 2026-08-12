@@ -20,6 +20,17 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 116,
+        "title": "The Economy Is Readable",
+        "items": [
+            "ECONOMY: a new Ledger panel (RESOURCES bar header, or click any resource row) answers \"where does my Wood go\" -- every resource a faction holds is accounted for by cause across the year (produced, consumed, converted, spoiled, traded, built, raided), summed into a ledger that always reconciles to the real stock change, with the recent day-by-day breakdown one fold away.",
+            "ECONOMY: the resource bar's rows now explain themselves. Hover any row for this year's cause breakdown, or why a raw material sits at zero (\"Blocked -- no Woodcutters' Camp\"); storage cards show spoilage rates and the live production throttle; village production cards show the ground-familiarity yield modifier and any camp-gated land left unworked.",
+            "ECONOMY: the silent rules got voices. A realm that burns coal for warmth or scrounges firewood is told once a winter, with the quantities; the camp gate that silently zeroes timber/ore is now a visible todo; the mint shows up in the ledger.",
+            "ECONOMY: the food-safety margin is now a player dial. The Ledger's \"Food reserve\" slider sets how many turns of need trade.py holds back before anything is sellable (default 8, the game's original rule) -- so \"why won't my caravan sell this\" is answered and adjustable.",
+            "UI: first hover-help in the game -- a floating tip layer on resource rows, storage cards and village production cards (no more guessing what a number means).",
+        ],
+    },
+    {
         "version": 115,
         "title": "A Lighter Day",
         "items": [

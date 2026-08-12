@@ -1054,6 +1054,7 @@ class MapView(tk.Frame):
         self._build_alerts_panel()
         self._build_panel()
         self._build_treasury_panel()
+        self._build_ledger_panel()
         self._build_edge_tabs()
         self._left_collapsed = False
         self._right_collapsed = False
@@ -1170,6 +1171,9 @@ class MapView(tk.Frame):
         # Treasury is an in-game panel that can be left open across End Turn,
         # so it has to be rebuilt here to show the turn's new figures.
         self._refresh_treasury()
+        # Same for the Ledger: it can be left open and watched, which is the
+        # only way to see a resource leave the realm as it happens.
+        self._refresh_ledger()
         # The commander panel used to be force-redrawn here every refresh
         # (~once a second while time runs). On an idle scout nothing on it ever
         # changes, so that redraw -- and the two-paint flicker Page.begin's
@@ -1953,6 +1957,7 @@ class MapView(tk.Frame):
         "food_shortage": "food shortage",
         "firewood_shortage": "firewood shortage",
         "no_firewood_source": "no local firewood source",
+        "winter_fuel": "winter fuel",
     }
 
     def _render_alerts(self):
@@ -2086,6 +2091,12 @@ class MapView(tk.Frame):
                  font=theme.FONT_SMALL).pack(side="right")
         for wdg in (head,) + tuple(head.winfo_children()):
             wdg.bind("<Button-1>", lambda e: self._toggle_left_panel())
+        # The Ledger entry: the whole bar is one click-to-collapse header, so
+        # this glyph is bound AFTER the loop above, which is what lets it win.
+        ledger_btn = tk.Label(head, text="Ledger", bg=theme.PANEL, fg=theme.MUTED,
+                              cursor="hand2", font=theme.FONT_SMALL)
+        ledger_btn.pack(side="right", padx=(0, 12))
+        ledger_btn.bind("<Button-1>", lambda e: self.toggle_ledger())
 
         scroll_area = tk.Frame(rb, bg=theme.PANEL)
         scroll_area.pack(fill="both", expand=True, padx=(10, 0))
@@ -2270,7 +2281,34 @@ class MapView(tk.Frame):
             # explain itself: most of it is minted silently from Gold Ore, some
             # is out on a caravan's return leg, and some is held back by the
             # trade reserve. Click through for the real accounting.
-            page.hit_last_row(self.toggle_treasury)
+            page.hit_last_row(self.toggle_treasury,
+                              tip=self._resource_tip_text(resource))
+        else:
+            # Every other row opens the Ledger focused on that resource -- the
+            # answer to "where does my Wood go" is one click away.
+            page.hit_last_row(
+                lambda r=resource: self.open_ledger(r),
+                tip=self._resource_tip_text(resource))
+
+    def _resource_tip_text(self, resource):
+        """The hover explanation for a resource-bar row: what moved the
+        number this year (from the economy ledger), or why it is at zero."""
+        player = self._player_faction()
+        if player is None:
+            return None
+        wd = self.world
+        fac_idx = wd.factions.index(player)
+        year = resources.economy_year(wd, fac_idx).get(resource)
+        if year:
+            causes = " · ".join(
+                f"{k} {v:+,}" for k, v in sorted(
+                    year.items(), key=lambda kv: -abs(kv[1])))
+            return f"This year: {causes}"
+        blocked = resources.blocked_industry_resources(wd, fac_idx).get(resource)
+        if blocked:
+            return (f"Blocked — this land could yield {resource}, but no "
+                    f"{blocked.replace('_', ' ')} is built")
+        return None
 
     # --- treasury ------------------------------------------------------------
     def _build_treasury_panel(self):
@@ -2460,6 +2498,242 @@ class MapView(tk.Frame):
                                   width=w, height=h)
         self.treasury_frame.lift()
 
+    # --- ledger ------------------------------------------------------------
+    # THE LEDGER: the treasury pattern, generalised to every resource. Where
+    # the Treasury answers "where did my GOLD go", the Ledger answers the same
+    # question for the whole economy -- "where does my Wood go" -- from the
+    # per-cause accounting resources.py records every day (see the economy-
+    # ledger section there). Opened from the RESOURCES bar header or by
+    # clicking any resource row; a reserve slider lets the player widen or
+    # narrow the food-safety margin trade.py sells against.
+    _LEDGER_CAUSE_HELP = {
+        "produced": "grown, felled, mined, fished",
+        "consumed": "eaten, burned, worn out",
+        "converted": "made into something else",
+        "spoiled": "spoiled or lost to overflowing storage",
+        "traded": "sold or bought",
+        "built": "spent on buildings, claims and roads",
+        "raided": "carried off by raiders",
+        "gained": "found, granted or taken from others",
+    }
+
+    def _build_ledger_panel(self):
+        """The Ledger as an in-game overlay panel, same idiom as the
+        Treasury: draggable by its header, drawn as a page, kept in place
+        while you pan/zoom, refreshed in step with the turn."""
+        self._ledger_open = False
+        self._ledger_cards_open = {}
+        self._ledger_focus = None
+        f = tk.Frame(self, bg=theme.PANEL, width=_TREASURY_W)
+        self.ledger_frame = f
+
+        # The header is the DRAG HANDLE -- a real widget, for cursor and
+        # press/motion bindings; everything below it is a drawn page.
+        head = tk.Frame(f, bg=theme.PANEL_ALT, cursor="fleur")
+        head.pack(fill="x")
+        tk.Label(head, text="LEDGER", bg=theme.PANEL_ALT, fg=theme.ACCENT,
+                 font=theme.FONT_HEADER).pack(side="left", padx=8, pady=4)
+        close = tk.Label(head, text="✕", bg=theme.PANEL_ALT, fg=theme.MUTED,
+                         font=theme.FONT_SMALL, cursor="hand2")
+        close.pack(side="right", padx=8)
+        close.bind("<Button-1>", lambda e: self.close_ledger())
+        for wdg in (head,) + tuple(head.winfo_children()):
+            if wdg is close:
+                continue
+            wdg.bind("<ButtonPress-1>", self._ledger_drag_start)
+            wdg.bind("<B1-Motion>", self._ledger_drag)
+
+        # The food-reserve slider: how many turns of need trade.py holds
+        # back before anything is sellable (see trade._safety_reserve).
+        reserve_row = tk.Frame(f, bg=theme.PANEL_ALT)
+        reserve_row.pack(fill="x")
+        tk.Label(reserve_row, text="Food reserve:", bg=theme.PANEL_ALT,
+                 fg=theme.MUTED, font=theme.FONT_SMALL).pack(
+                     side="left", padx=8)
+        self._reserve_scale = tk.Scale(
+            reserve_row, from_=1, to=30, orient="horizontal",
+            bg=theme.PANEL_ALT, fg=theme.INK, highlightthickness=0,
+            bd=0, troughcolor=theme.PANEL, font=theme.FONT_SMALL,
+            command=lambda v: self._set_trade_reserve(int(v)))
+        self._reserve_scale.pack(side="right", fill="x", expand=True,
+                                 padx=6, pady=2)
+        tk.Label(reserve_row, text="turns", bg=theme.PANEL_ALT,
+                 fg=theme.MUTED, font=theme.FONT_SMALL).pack(
+                     side="right", padx=8)
+
+        self._ledger_page = parchment.Page(f, _TREASURY_W - 2, seed=14)
+        self._ledger_page.canvas.pack(fill="both", expand=True)
+        self._ledger_pos = None
+
+    def _ledger_drag_start(self, event):
+        self._ledger_grab = (event.x_root, event.y_root,
+                             self.ledger_frame.winfo_x(),
+                             self.ledger_frame.winfo_y())
+
+    def _ledger_drag(self, event):
+        grab = getattr(self, "_ledger_grab", None)
+        if grab is None:
+            return
+        gx, gy, ox, oy = grab
+        x = ox + (event.x_root - gx)
+        y = oy + (event.y_root - gy)
+        self._ledger_pos = self._clamp_to_view(
+            x, y, self.ledger_frame.winfo_width(),
+            self.ledger_frame.winfo_height())
+        self.ledger_frame.place(x=self._ledger_pos[0], y=self._ledger_pos[1])
+
+    def open_ledger(self, resource=None):
+        self._ledger_open = True
+        self._ledger_focus = resource
+        player = self._player_faction()
+        if player is not None:
+            self._reserve_scale.set(
+                player.meta.get("trade_reserve_turns", 8))
+        self._refresh_ledger()
+
+    def close_ledger(self):
+        self._ledger_open = False
+        self.ledger_frame.place_forget()
+
+    def toggle_ledger(self, resource=None):
+        if getattr(self, "_ledger_open", False):
+            self.close_ledger()
+        else:
+            self.open_ledger(resource)
+
+    def _set_trade_reserve(self, turns):
+        """The slider's write side: widen or narrow this realm's food-safety
+        margin. Trade reads it next time it prices a sale (see trade.py's
+        _safety_reserve)."""
+        player = self._player_faction()
+        if player is None:
+            return
+        player.meta["trade_reserve_turns"] = turns
+        # The treasury's "held back" line and the trade panel's numbers
+        # depend on the reserve, so refresh what's open.
+        self._refresh_treasury()
+
+    def _refresh_ledger(self):
+        """Rebuild the Ledger contents in place. Called when it is opened,
+        when a resource row is clicked, and from refresh() after every turn
+        so it can be left open and watched -- the only way to see Wood leave
+        the realm as consumption, trade and spoilage land as they happen."""
+        if not getattr(self, "_ledger_open", False):
+            return
+        player = self._player_faction()
+        if player is None:
+            self.close_ledger()
+            return
+        wd = self.world
+        fac_idx = wd.factions.index(player)
+        page = self._ledger_page
+        page.begin(420)
+        page.gap(2)
+
+        def section(title, key, default_open=True):
+            return page if page.card(key, title, self._ledger_cards_open,
+                                     on_toggle=self._refresh_ledger,
+                                     default_open=default_open) else None
+
+        def line(parent, text, fg=None, bold=False):
+            page.text(text, fill=fg or (theme.ACCENT if bold else theme.INK),
+                      font=theme.FONT_SMALL_BOLD if bold else None)
+
+        year = resources.economy_year(wd, fac_idx)
+
+        # THIS YEAR -- the whole realm's causes, aggregated across resources,
+        # sorted by how much they moved. The reconciliation line ("sum of
+        # causes == net") is the ledger's invariant, shown so the player can
+        # trust the panel the way the Treasury's own net line is trusted.
+        sec = section("THIS YEAR", "year")
+        if sec is not None:
+            if not year:
+                line(sec, "  Nothing recorded yet — let a day pass.", theme.MUTED)
+            else:
+                agg = {}
+                for res, causes in year.items():
+                    for cause, qty in causes.items():
+                        agg[cause] = agg.get(cause, 0) + qty
+                for cause, value in sorted(agg.items(), key=lambda kv: -abs(kv[1])):
+                    line(sec, f"    {value:+,}  {cause}",
+                         theme.GOOD if value > 0 else theme.BAD)
+                    line(sec, f"        {self._LEDGER_CAUSE_HELP.get(cause, '')}",
+                         theme.MUTED)
+                net = sum(agg.values())
+                line(sec, f"    {net:+,}  net across all resources", None, bold=True)
+
+        # PER RESOURCE -- one foldable card per resource that moved this year
+        # (plus the focused resource, even if quiet), each with its own cause
+        # breakdown. Sorted by |net| so the movers float to the top.
+        focus = self._ledger_focus
+        items = sorted(year.items(), key=lambda kv: -abs(sum(kv[1].values())))
+        if focus and focus not in year:
+            items.append((focus, {}))
+        if items:
+            sec = section("PER RESOURCE", "resources")
+            if sec is not None:
+                for resource, causes in items[:40]:
+                    net = sum(causes.values())
+                    open_key = ("res:" + resource)
+                    expanded = section(
+                        open_key, resource, default_open=(resource == focus))
+                    if expanded is None:
+                        continue
+                    if not causes:
+                        line(expanded, "  nothing recorded this year",
+                             theme.MUTED)
+                    for cause in ("produced", "consumed", "converted",
+                                  "spoiled", "traded", "built", "raided",
+                                  "gained"):
+                        v = causes.get(cause, 0)
+                        if v:
+                            line(expanded, f"    {v:+,}  {cause}",
+                                 theme.GOOD if v > 0 else theme.BAD)
+                            line(expanded,
+                                 f"        {self._LEDGER_CAUSE_HELP.get(cause, '')}",
+                                 theme.MUTED)
+                    line(expanded, f"    {net:+,}  net", None, bold=True)
+                    blocked_building = resources.blocked_industry_resources(
+                        wd, fac_idx).get(resource)
+                    if blocked_building:
+                        line(expanded,
+                             f"    blocked — no {blocked_building.replace('_', ' ')}",
+                             theme.WARN)
+
+        # RECENT TURNS for the focused resource -- the day-by-day read that
+        # answers "why did the number move today".
+        if focus:
+            recent = resources.economy_recent(wd, fac_idx, focus)
+            sec = section("RECENT TURNS", "recent", default_open=False)
+            if sec is not None:
+                if not recent:
+                    line(sec, "  Nothing recorded yet — let a day pass.",
+                         theme.MUTED)
+                for entry in recent[-6:]:
+                    causes = "  ".join(
+                        f"{k} {v:+,}" for k, v in entry.items()
+                        if k not in ("turn", "resource", "net"))
+                    line(sec, f"  {self._date_text_for_turn(entry['turn'])}: "
+                              f"{entry['net']:+,}   {causes}", theme.MUTED)
+
+        page.finish()
+
+        # Default dock: beside the Treasury, off the side panel.
+        self.ledger_frame.update_idletasks()
+        w = _TREASURY_W
+        h = min(self.ledger_frame.winfo_reqheight(),
+                max(200, self.winfo_height() - 90))
+        self.ledger_frame.configure(height=h)
+        self.ledger_frame.pack_propagate(False)
+        if self._ledger_pos is None:
+            right = (_RIGHT_PANEL_W if not getattr(self, "_right_collapsed", False)
+                     else _EDGE_TAB_W)
+            self._ledger_pos = self._clamp_to_view(
+                self.winfo_width() - right - w - 12 - w - 8, 40, w, h)
+        self.ledger_frame.place(x=self._ledger_pos[0], y=self._ledger_pos[1],
+                                width=w, height=h)
+        self.ledger_frame.lift()
+
     # --- panel -------------------------------------------------------------
     def _build_panel(self):
         p = tk.Frame(self, bg=theme.PANEL, width=_RIGHT_PANEL_W)
@@ -2545,6 +2819,8 @@ class MapView(tk.Frame):
                     self._toggle_currents)
         page.button("View: Surface" if self.layer == layers.UNDER
                     else "View: Underworld", self.toggle_layer)
+        page.button("Treasury", self.toggle_treasury)
+        page.button("Ledger", self.toggle_ledger)
         page.button("Compendium (F1)", self.open_compendium)
         page.button("Chronicle", self.open_chronicle)
         page.finish()
@@ -4877,6 +5153,31 @@ class MapView(tk.Frame):
         four storage pools read as four bars instead of four sentences."""
         self._page.bar(label, used, cap, warn_at)
 
+    def _pool_throttle_tip(self, node, pool):
+        """The hover explanation for a storage-pool bar: what the pool is
+        full of, and whether fullness is throttling the node's production of
+        that pool's goods right now -- the storage-throttle rule
+        (resources.storage_throttle) made visible instead of a bare
+        "slowing" suffix."""
+        cap = resources.node_pool_capacity(node, pool)
+        stock = resources.node_pool_stock(node, pool)
+        mult = resources.storage_throttle(node)
+        if mult < 1.0:
+            return (f"Pool {stock:,.0f} / {cap:,.0f} space "
+                    f"({stock / cap:.0%} full) — production slowed to "
+                    f"{mult:.0%} rate")
+        return (f"Pool {stock:,.0f} / {cap:,.0f} space — production at "
+                f"full rate")
+
+    def _spoil_tip(self, resource):
+        """The hover explanation for a HELD row: that good's storage spoil
+        rate (resources._SPOIL_RATE), the invisible tax on holding it."""
+        rate = resources.RESOURCES.get(resource, {}).get("spoil_rate", 0)
+        if rate <= 0:
+            return f"{resource} does not spoil in storage"
+        return (f"{resource} spoils at {rate:.0%}/turn in storage — "
+                f"convert or sell it before it rots")
+
     def _storage_pool_lines(self, node):
         """One line per typed storage pool (see resources.STORAGE_POOLS) --
         which building holds what, how much SPACE it's using, what's taking
@@ -5178,12 +5479,14 @@ class MapView(tk.Frame):
                 tier = resources.storage_tier(st, building)
                 label = f"{building.title()}{f' T{tier}' if tier else ''}"
                 self._bar_row(body, label, resources.node_pool_stock(st, pool), cap)
+                self._page.tip(self._pool_throttle_tip(st, pool))
 
         body = self._card("HELD", f"{len(stock)} kinds", key="held",
                           default_open=False)
         if body is not None:
             for res_name, amount in sorted(stock.items(), key=lambda kv: -kv[1]):
                 self._kv(body, res_name, f"{amount:,}")
+                self._page.tip(self._spoil_tip(res_name))
 
         self._build_stockpile_card(st, own)
 
@@ -5539,6 +5842,22 @@ class MapView(tk.Frame):
             self._panel_divider()
             for res_name, amount in sorted(yield_.items(), key=lambda kv: -kv[1]):
                 self._kv(body, res_name, f"{amount:,}/yr")
+            # Acclimatisation: the terrain-aptitude multiplier on this
+            # village's yield (resources.terrain_aptitude) -- real, moving,
+            # and until now shown nowhere.
+            apt = resources.terrain_aptitude(wd, v)
+            if apt != 1.0:
+                self._kv(body, "Ground familiarity",
+                         f"{apt - 1.0:+.0%} yield", fg=theme.MUTED)
+            # The camp gate, shown where the gate lives: land this village
+            # owns but cannot work yet.
+            blocked = resources.blocked_industry_resources(wd, v.faction_idx)
+            if own and blocked:
+                camps = sorted(set(blocked.values()))
+                for camp in camps:
+                    self._panel_text(
+                        f"Blocked: no {camp.replace('_', ' ')} — "
+                        f"land left unworked", fg=theme.WARN)
 
         stock = {r: a for r, a in (getattr(v, "resources", {}) or {}).items() if a}
         body = self._card("STORAGE", f"{len(stock)} kinds held", key="storage")
@@ -5551,6 +5870,7 @@ class MapView(tk.Frame):
                 tier = resources.storage_tier(v, building)
                 label = f"{building.title()}{f' T{tier}' if tier else ''}"
                 self._bar_row(body, label, resources.node_pool_stock(v, pool), cap)
+                self._page.tip(self._pool_throttle_tip(v, pool))
 
 
         body = self._card("HELD", f"{len(stock)} kinds", key="held",
@@ -5558,6 +5878,7 @@ class MapView(tk.Frame):
         if body is not None:
             for res_name, amount in sorted(stock.items(), key=lambda kv: -kv[1]):
                 self._kv(body, res_name, f"{amount:,}")
+                self._page.tip(self._spoil_tip(res_name))
 
         self._build_stockpile_card(v, own)
 
