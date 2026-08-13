@@ -20,6 +20,15 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 123,
+        "title": "Governance & Development",
+        "items": [
+            "PROGRESSION: every realm now has an age — Homestead, Age of Villages, Age of Towns, Age of Cities, Age of Kingdoms, Age of Empire — reached by real milestones on the settlement ladder (raise a village to a Town, a Town to a City, raise a Castle, arm a levy, hold land and stock craft goods). The region panel shows your realm's age and what builds the next rung.",
+            "RULE: expansion is no longer a flat gate. A claim is always legal if you can pay it — but past your governance capacity (each settlement governs land: a City +3 regions, a Castle +2, a Town +1, plus your capital's foothold), every claim costs more settlers and provisions and runs slower. Build Towns, raise them to Cities, and raise Castles to govern more land.",
+            "UI: the claim panel says why — a stretched realm is told how many regions it can govern and that its claim is slow and dear, and a crowded realm (its villages nearly full) is told its people need land.",
+        ],
+    },
+    {
         "version": 122,
         "title": "Dressed Stone",
         "items": [

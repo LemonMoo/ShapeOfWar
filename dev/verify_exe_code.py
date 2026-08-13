@@ -21,6 +21,14 @@ from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
 EXE = sys.argv[1] if len(sys.argv) > 1 else "dist/ShapesOfWar.exe"
 MARKERS = [
     # (module, marker, kind) -- update the version markers with each release.
+    # v1.0.2 -- governance & development: realm ages + a soft governance limit
+    # on expansion (replaces the flat CLAIM_DEVELOPMENT_FRACTION gate).
+    ("app.world.progression", "governance_capacity", "name"),
+    ("app.world.progression", "claim_overstretch", "name"),
+    ("app.world.progression", "Age of Empire", "const"),
+    ("app.world.expansion", "GOVERNANCE_OVERSTRETCH_SETTLER_STEP", "name"),
+    ("app.ui.map_view", "you hold more land than", "const"),
+    ("app.core.changelog", "Governance & Development", "const"),
     # v1.0.0 -- natural map generation: geography-driven climate + treeline.
     ("app.world.worldgen", "_compute_orography", "name"),
     ("app.world.worldgen", "_latitude_moisture", "name"),
@@ -50,7 +58,7 @@ MARKERS = [
     ("app.core.changelog", "The Road to the Gate", "const"),
     # v0.18.0 -- the settlement-first world.
     ("app.ui.map_view", "Choose its character", "const"),
-    ("app.world.expansion", "Your realm is still growing", "const"),
+    ("app.world.expansion", "holds more land than", "const"),
     ("app.core.changelog", "The Settlement-First World", "const"),
     ("app.core.changelog", "burns its coal in Winter", "const"),
     # v0.18.1 -- the ladder.
@@ -60,7 +68,7 @@ MARKERS = [
     ("app.core.changelog", "The Ladder", "const"),
     # v0.18.2 -- the compendium pass.
     ("app.ui.compendium_data", "Founding & Growth", "const"),
-    ("app.ui.compendium_data", "THE DEVELOPMENT GATE", "const"),
+    ("app.ui.compendium_data", "GOVERNANCE", "const"),
     ("app.core.changelog", "The Compendium Pass", "const"),
     # v0.18.3 -- dated ledger.
     ("app.ui.map_view", "Season/day/year for any turn number", "const"),
@@ -108,7 +116,6 @@ MARKERS = [
     ("app.core.changelog", "Rivers Run True", "const"),
     # v0.18.11 -- claims + village roads.
     ("app.world.expansion", "A claim is already underway there.", "const"),
-    ("app.world.expansion", "CLAIM_DEVELOPMENT_FRACTION", "name"),
     ("app.world.expansion", "advance_claims_steps", "name"),
     ("app.world.commander", "commander_can_reach", "name"),
     ("app.world.construction", "_connect_new_village_to_region", "name"),

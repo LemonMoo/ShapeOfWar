@@ -4821,6 +4821,12 @@ class MapView(tk.Frame):
         self._panel_text(f"{region.name}\nRegion of {country.name}"
                                + (f"\n{flavour}" if flavour else "")
                                + ("\nForeign territory" if is_foreign else ""), fg=theme.INK)
+        # Realm progression (slice 1): which age this region's owner is in,
+        # and what builds the next rung -- the legible spine that replaces
+        # the flat expansion gate (see app/world/progression.py).
+        from app.world import progression
+        self._panel_text(progression.age_label(wd, region.faction_idx),
+                         fg=theme.MUTED, font=theme.FONT_SMALL)
 
 
         body = self._card("SUMMARY")
@@ -5010,18 +5016,36 @@ class MapView(tk.Frame):
         # A claim is colonisation: settlers and the food to see them through
         # (see expansion.claim_cost). Both figures are shown against what the
         # realm actually has, since "80 settlers" means nothing on its own.
-        settlers = expansion.claim_settlers(region, sea_only)
-        provisions = expansion.claim_cost(region, sea_only)["Food"]
+        from app.world import progression
+        overstretch = progression.claim_overstretch(self.world, faction_idx)
+        settlers = expansion.claim_settlers(region, sea_only, overstretch)
+        provisions = expansion.claim_cost(region, sea_only, overstretch)["Food"]
         have_settlers = expansion.faction_available_settlers(self.world, faction_idx)
         have_food = expansion._faction_food_stock(self.world, faction_idx)
-        blocked = expansion.can_afford_claim(self.world, faction_idx, region, sea_only)
+        blocked = expansion.can_afford_claim(self.world, faction_idx, region,
+                                             sea_only, overstretch)
         self._panel_text(f"Settlers: {settlers:,} (you can spare {have_settlers:,})\n"
                       f"Provisions: {provisions:,} food (you hold {have_food:,})\n"
-                      f"Journey: {expansion.claim_turns(region)} turns", fg=theme.INK)
+                      f"Journey: {expansion.claim_turns(region, overstretch)} turns", fg=theme.INK)
         # Settlers are working-age people, and population is the workforce
         # (Phase 14) -- saying so stops this reading as a free number.
         self._panel_text("Settlers are drawn from your nearest places and come "
                       "off their workforce.", fg=theme.MUTED, font=theme.FONT_SMALL)
+        # Governance (progression slice 2): holding more land than your
+        # settlements can govern well makes a claim slow and dear -- say why,
+        # with the number that explains the premium, instead of a flat wall.
+        if overstretch > 0:
+            cap = progression.governance_capacity(self.world, faction_idx)
+            self._panel_text(
+                f"Stretched — you hold more land than your {cap}-region "
+                f"government can govern well, so this claim is slow and dear. "
+                f"Build Towns, Cities or Castles to govern more.",
+                fg=theme.MUTED, font=theme.FONT_SMALL)
+        # The positive reason to expand (progression slice 2): a crowded
+        # realm is a realm with a call to reach for new land.
+        pressure = progression.expansion_pressure(self.world, faction_idx)
+        if pressure:
+            self._panel_text(pressure, fg=theme.GOOD, font=theme.FONT_SMALL)
         # Winning pays real coin -- show that up front, or the cost reads as
         # pure expenditure and nobody expands early.
         spoils = expansion.claim_spoils(self.world, region)

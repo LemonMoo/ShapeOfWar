@@ -1288,18 +1288,20 @@ def _expansion_article():
             "moving, rather than every kingdom simply starting with a heap "
             "of it."
         ),
-        "THE DEVELOPMENT GATE",
+        "GOVERNANCE",
         (
-            "A realm may only reach for new land once its own is genuinely "
-            f"full of villages: your owned regions must average at least "
-            f"{_pct(expansion.CLAIM_DEVELOPMENT_FRACTION)} of their "
-            "village capacity (see Settlements & Villages' VILLAGE "
-            "CAPACITY) before a claim can even start. Expansion is the "
-            "reward for filling your land — raise settlements, upgrade "
-            "them to Cities, and the region panel's \"n/m villages\" "
-            "readout climbing is what unlocks the frontier. Amphibious "
-            "claims are the exception: fleets and islands are a different "
-            "kind of expansion and are exempt from the gate."
+            "Expansion is never outright refused for a realm that can pay "
+            "for it — but a realm can only govern so much land well. Each "
+            "settlement is a seat of government: a City governs provinces, "
+            "a Castle holds a frontier, a Town administers its district, "
+            "and the capital's foothold counts too. Together they set how "
+            "many regions you can hold well. Past that, a claim is still "
+            "legal but costs more settlers and provisions and runs slower, "
+            "because you are stretching a government past what it can run. "
+            "Build Towns, raise them to Cities, and raise Castles to govern "
+            "more land — the claim panel shows your capacity and whether "
+            "you are stretched. When your own villages are nearly full, "
+            "that crowding is the call to expand."
         ),
         "ODDS",
         (

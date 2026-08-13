@@ -95,6 +95,13 @@ WILDLAND_COMBAT_STRENGTH_MULT = 0.9
 # early/mid/late military ratings from real games, not picked by feel.
 CLAIM_ODDS_EXPONENT = 1.75
 
+# Governance (progression slice 2): past a realm's governance capacity, claims
+# stay legal but cost more settlers/provisions and run slower -- a soft,
+# self-correcting brake instead of the old flat CLAIM_DEVELOPMENT_FRACTION
+# wall. Each region held beyond capacity adds this much on top of the base.
+GOVERNANCE_OVERSTRETCH_SETTLER_STEP = 0.30   # +30% settlers per region over
+GOVERNANCE_OVERSTRETCH_TURN_STEP = 0.25      # +25% claim time per region over
+
 
 def frontier_id_sets(world, faction_idx):
     """({land-adjacent region ids}, {naval-reachable region ids}) for this
@@ -137,14 +144,19 @@ def is_sea_only_claim(world, faction_idx, region, frontier=None):
     return region.id in naval
 
 
-def claim_settlers(region, sea_only=False):
-    """How many people this claim takes out of the realm."""
+def claim_settlers(region, sea_only=False, overstretch=0):
+    """How many people this claim takes out of the realm. `overstretch` is
+    the realm's regions-held-beyond-governance (see progression.py) -- each
+    one past capacity makes the expedition dearer."""
     base = SEA_ONLY_SETTLERS_BASE if sea_only else CLAIM_SETTLERS_BASE
     per_cell = SEA_ONLY_SETTLERS_PER_CELL if sea_only else CLAIM_SETTLERS_PER_CELL
-    return max(1, round(base + per_cell * len(region.cells)))
+    settlers = max(1, round(base + per_cell * len(region.cells)))
+    if overstretch > 0:
+        settlers = round(settlers * (1 + GOVERNANCE_OVERSTRETCH_SETTLER_STEP * overstretch))
+    return max(1, settlers)
 
 
-def claim_cost(region, sea_only=False):
+def claim_cost(region, sea_only=False, overstretch=0):
     """The GOODS half of a claim -- provisions for the settlers, and nothing
     else. Returned as a {resource: amount} dict for the same reason it
     always was: every caller (the UI's cost line, the AI's affordability
@@ -155,7 +167,7 @@ def claim_cost(region, sea_only=False):
     already works -- so this does NOT go through construction.can_afford /
     _pay_cost, which look resources up by literal name. See
     can_afford_claim / _pay_claim below."""
-    settlers = claim_settlers(region, sea_only)
+    settlers = claim_settlers(region, sea_only, overstretch)
     return {"Food": settlers * CLAIM_PROVISIONS_PER_SETTLER}
 
 
@@ -200,29 +212,40 @@ def _faction_food_stock(world, faction_idx):
     return total
 
 
-def can_afford_claim(world, faction_idx, region, sea_only=False):
+def can_afford_claim(world, faction_idx, region, sea_only=False, overstretch=None):
     """None if this claim can be funded, else why not. Replaces the plain
     construction.can_afford call this used to make -- settlers are people,
-    not stock, and provisions are a pooled food draw."""
-    settlers = claim_settlers(region, sea_only)
+    not stock, and provisions are a pooled food draw. `overstretch` defaults
+    to the realm's current governance overstretch (see progression.py)."""
+    if overstretch is None:
+        from app.world import progression
+        overstretch = progression.claim_overstretch(world, faction_idx)
+    settlers = claim_settlers(region, sea_only, overstretch)
     if faction_available_settlers(world, faction_idx) < settlers:
+        if overstretch > 0:
+            return (f"Not enough people to settle it — this expedition needs "
+                    f"{settlers:,} settlers, and the realm already holds more "
+                    f"land than it can govern well.")
         return (f"Not enough people to settle it — this expedition needs "
                 f"{settlers:,} settlers.")
-    needed = claim_cost(region, sea_only)["Food"]
+    needed = claim_cost(region, sea_only, overstretch)["Food"]
     if _faction_food_stock(world, faction_idx) < needed:
         return (f"Not enough food to provision {settlers:,} settlers — "
                 f"needs {needed:,}.")
     return None
 
 
-def _pay_claim(world, faction_idx, region, sea_only=False):
+def _pay_claim(world, faction_idx, region, sea_only=False, overstretch=None):
     """Take the settlers and the provisions. Settlers come from the nodes
     nearest the region first -- people go to the frontier from the edge of
     the realm, not from the capital on the far side of it -- each giving up
     at most its own spare share. Returns (settlers_taken, food_taken)."""
     from app.world.resources import _FOOD_SOURCES, _consume_from_pool
     from app.world import wrap
-    settlers = claim_settlers(region, sea_only)
+    if overstretch is None:
+        from app.world import progression
+        overstretch = progression.claim_overstretch(world, faction_idx)
+    settlers = claim_settlers(region, sea_only, overstretch)
     cx, cy = region.cells[len(region.cells) // 2]
 
     nodes = sorted(_faction_population_nodes(world, faction_idx),
@@ -241,7 +264,7 @@ def _pay_claim(world, faction_idx, region, sea_only=False):
         node.adults = max(0, adults - give)
         taken += give
 
-    needed = claim_cost(region, sea_only)["Food"]
+    needed = claim_cost(region, sea_only, overstretch)["Food"]
     food_taken = 0
     for node in nodes:
         if food_taken >= needed:
@@ -253,8 +276,14 @@ def _pay_claim(world, faction_idx, region, sea_only=False):
     return taken, food_taken
 
 
-def claim_turns(region):
-    return max(1, round(CLAIM_BASE_TURNS + CLAIM_TURNS_PER_CELL * len(region.cells)))
+def claim_turns(region, overstretch=0):
+    """How long the claim takes. `overstretch` is regions-held-beyond-
+    governance (see progression.py) -- a stretched realm's expeditions are
+    slower, not just dearer."""
+    turns = max(1, round(CLAIM_BASE_TURNS + CLAIM_TURNS_PER_CELL * len(region.cells)))
+    if overstretch > 0:
+        turns = round(turns * (1 + GOVERNANCE_OVERSTRETCH_TURN_STEP * overstretch))
+    return max(1, turns)
 
 
 def claim_odds(nation, region, sea_only=False):
@@ -303,13 +332,15 @@ class ClaimProject:
     and waits for the player to fight an interactive battle against the
     garrison — see app/ui/app.py's stage_wildland_battle."""
 
-    def __init__(self, faction_idx, region, sea_only=False):
+    def __init__(self, faction_idx, region, sea_only=False, overstretch=0):
         self.faction_idx = faction_idx
         self.region_id = region.id
-        self.total_turns = claim_turns(region)
+        self.total_turns = claim_turns(region, overstretch)
         self.progress_turns = 0.0
         self.sea_only = sea_only   # amphibious claim -> tougher garrison in the
                                    # resolving battle (see stage_wildland_battle)
+        self.overstretch = overstretch   # how stretched the realm was when it
+                                         # began -- recorded for the UI/log
 
     @property
     def turns_left(self):
@@ -341,53 +372,34 @@ def start_claim(world, faction_idx, region):
         return blocked
 
     sea_only = is_sea_only_claim(world, faction_idx, region)
-    if not sea_only:
-        # Settlement-first expansion (phase 5): a realm reaches for new land
-        # when its own is genuinely full of villages, not on a whim. Claims
-        # require the faction's owned regions to average >=
-        # CLAIM_DEVELOPMENT_FRACTION of their village capacity -- the natural
-        # "we need more land" moment, shown filling up in the region panel's
-        # "n/m villages" readout. Sea claims (fleets/islands) are a different
-        # kind of expansion and are exempt. AI and player share this gate --
-        # one code path.
-        from app.world.resources import region_village_capacity
-        cap_sum = vills_sum = 0
-        # NOTE: iterate as `r`, NEVER reuse `region` here -- the target
-        # region is live below this gate, and rebinding it (a real bug that
-        # shipped) made every claim project start on the faction's LAST
-        # owned region instead of the wildland target: claims never began,
-        # the duplicate guard never matched, and repeated clicks piled up
-        # dead projects on the wrong region.
-        for r in world.regions:
-            if r.faction_idx != faction_idx:
-                continue
-            cap_sum += region_village_capacity(world, r)
-            vills_sum += len(getattr(r, "villages", []))
-        if cap_sum and vills_sum / cap_sum < CLAIM_DEVELOPMENT_FRACTION:
-            return ("Your realm is still growing -- fill your village lands "
-                    "(raise settlements to Cities for more room) before "
-                    "reaching for new territory.")
-    blocked = can_afford_claim(world, faction_idx, region, sea_only)
+    # Governance (progression slice 2) replaces the old flat development
+    # gate. A realm can always reach for new land -- but past its governance
+    # capacity (how many regions its settlements can hold *well*), each claim
+    # costs more settlers/provisions and runs slower, so over-expansion is a
+    # self-correcting tax rather than a wall. The legible "why is this dear"
+    # answer is the settlement ladder itself: build Towns/Cities/Castles to
+    # govern more land. AI and player share this path -- one code path.
+    from app.world import progression
+    overstretch = progression.claim_overstretch(world, faction_idx)
+    blocked = can_afford_claim(world, faction_idx, region, sea_only, overstretch)
     if blocked:
         return blocked
 
-    _pay_claim(world, faction_idx, region, sea_only)
+    _pay_claim(world, faction_idx, region, sea_only, overstretch)
 
-    project = ClaimProject(faction_idx, region, sea_only)
+    project = ClaimProject(faction_idx, region, sea_only, overstretch)
     world.claim_projects.append(project)
+    if overstretch > 0:
+        cap = progression.governance_capacity(world, faction_idx)
+        return (f"Expansion begins into {region.name} — estimated "
+                f"{project.total_turns} days. Your realm is stretched: it "
+                f"holds more land than its {cap}-region government can govern "
+                f"well, so this claim is slow and dear.")
     return (f"Expansion begins into {region.name} — estimated "
             f"{project.total_turns} days.")
 
 
 _NO_FREE_SETTLEMENT = {"city": 0, "town": 0, "castle": 0}   # see _place_settlements_for_faction
-
-# Settlement-first expansion gate (see start_claim): a realm may only reach
-# for new land once its OWN regions average at least this fraction of their
-# village capacity -- the "we need more land" moment. 0.5 keeps the early
-# game moving (a fresh foothold is already close to half full) while making
-# claim-spam without development impossible. Tune here; the AI uses the same
-# gate through start_claim.
-CLAIM_DEVELOPMENT_FRACTION = 0.5
 
 WILDLAND_VILLAGE_MIN = 0   # a freshly claimed region is BARE -- no villages
                            # are handed out with it (you found your own, or
