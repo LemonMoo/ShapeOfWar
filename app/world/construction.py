@@ -901,8 +901,10 @@ def _pay_food(nation, amount, world):
 # cells anywhere in it (mountain and highland homelands especially, and the
 # underground, where there are no trees at all) -- still has to build:
 # storage, camps, mines, towns. Its stone is the timber of such a land, so
-# a building project there pays its Logs line as Stone instead, at
-# DRY_STONE_LOG_RATIO. This is the construction sibling of winter's
+# a building project there pays every timber-derived cost line as Stone
+# instead, following the resource tier progression: Logs (raw timber) at
+# DRY_STONE_LOG_RATIO, Planks (manufactured timber, one full value tier up)
+# at DRY_STONE_PLANK_RATIO. This is the construction sibling of winter's
 # Firewood->Coal fuel substitution (a mining town must not freeze on its own
 # seam): a mountain realm must not stall its whole early game on a forest
 # it does not have, while sitting on all the stone a builder could want.
@@ -911,14 +913,21 @@ def _pay_food(nation, amount, world):
 # substitutes is what that particular ground can actually provide, which is
 # also exactly what the player sees in that region's build menu. Forest
 # realms never see it anywhere; a timberless realm's costs read as Stone
-# wherever it builds. Only the raw Logs line converts -- Planks are a
-# manufactured good and a mid-game trade decision, not a local building
-# material, and every other cost line is untouched.
+# wherever it builds. The substitution follows the game's own value ladder
+# (BASE_VALUE_BY_TIER): one Plank is worth three Stone, so a tier-2
+# building -- which in a forest realm is timber-framed with sawn planks --
+# is dressed stonework in a timberless region, and costs exactly its value
+# in the stone that region actually digs. Bricks and every non-timber line
+# stay as listed: the rule substitutes timber, not clay.
 DRY_STONE_LOG_RATIO = 2.0     # one Log becomes this much Stone. Timber is
                               # lighter to haul than dressed stone, so a
                               # stone-built project costs more tonnage than
                               # a timber one -- unblocked, not free (and a
                               # forest realm's Logs stay the cheaper way).
+DRY_STONE_PLANK_RATIO = 3.0   # one Plank becomes this much Stone -- the
+                              # value-tier exchange (Planks are tier 4 at
+                              # 9 gold, Stone tier 2 at 3 gold), the raw
+                              # rate plus one manufacturing step.
 
 
 def timberless_region(world, region_id):
@@ -937,17 +946,20 @@ def timberless_region(world, region_id):
 
 
 def resolve_timber_cost(cost, world, region_id=None):
-    """`cost` with its Logs line paid as Stone (DRY_STONE_LOG_RATIO each)
-    when the project sits in a timberless region, else `cost` unchanged.
-    Never mutates the input -- returns a fresh dict only when something
-    actually changed, so a forest realm pays literally the listed cost."""
-    if region_id is None or "Logs" not in cost:
+    """`cost` with its timber-derived lines paid as Stone when the project
+    sits in a timberless region: Logs at DRY_STONE_LOG_RATIO each, Planks
+    at DRY_STONE_PLANK_RATIO each. Else `cost` unchanged. Never mutates the
+    input -- returns a fresh dict only when something actually changed, so
+    a forest realm pays literally the listed cost."""
+    if region_id is None or ("Logs" not in cost and "Planks" not in cost):
         return cost
     if not timberless_region(world, region_id):
         return cost
     resolved = dict(cost)
-    resolved["Stone"] = resolved.get("Stone", 0) + round(
-        resolved.pop("Logs") * DRY_STONE_LOG_RATIO)
+    stone = (resolved.pop("Logs", 0) * DRY_STONE_LOG_RATIO
+             + resolved.pop("Planks", 0) * DRY_STONE_PLANK_RATIO)
+    if stone:
+        resolved["Stone"] = resolved.get("Stone", 0) + round(stone)
     return resolved
 
 

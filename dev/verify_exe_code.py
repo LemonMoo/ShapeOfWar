@@ -35,12 +35,16 @@ MARKERS = [
     ("app.world.resources", "Yields \"households\" between region chunks", "const"),
     ("app.ui.map_view", "the frame that runs one of the day's unsplittable phases", "const"),
     ("app.core.changelog", "The World Is Thinking", "const"),
+    # v1.0.1 -- dressed stone: the dry-stone rule follows the tier ladder.
+    ("app.world.construction", "DRY_STONE_PLANK_RATIO", "name"),
+    ("app.ui.build_menu", "Logs and Planks are paid as Stone", "const"),
+    ("app.core.changelog", "Dressed Stone", "const"),
     # v0.19.0 -- dry stone: timberless land builds in stone.
     ("app.world.construction", "DRY_STONE_LOG_RATIO", "name"),
     ("app.world.construction", "resolve_timber_cost", "name"),
     ("app.world.construction", "timberless_region", "name"),
     ("app.world.buildings", "dry_stone", "name"),
-    ("app.ui.build_menu", "Dry stone — this region has no timber", "const"),
+    ("app.ui.build_menu", "this region has no timber", "const"),
     ("app.core.changelog", "Dry Stone", "const"),
     # v0.20.0 -- the road to the gate: surface roads anchor at surface nodes.
     ("app.core.changelog", "The Road to the Gate", "const"),

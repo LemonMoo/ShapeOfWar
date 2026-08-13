@@ -33,6 +33,8 @@ from app.world import resources as R
 
 TOWN = dict(C.SETTLEMENT_BUILD_COST["town"])     # {"Logs": 1000, "Stone": 500, "Gold": 750}
 CAMP = {"Logs": 200, "Stone": 120, "Gold": 160}   # tier-1 Mining Camp
+GRANARY_T2 = {"Planks": 260, "Bricks": 180, "Stone": 220, "Gold": 420}
+CAMP_T2 = {"Planks": 300, "Stone": 320, "Tools": 120, "Gold": 600}
 
 
 def make_world():
@@ -53,7 +55,7 @@ def make_world():
     return world, nation, st
 
 
-print("--- resolve_timber_cost: Logs -> Stone, and only where timberless ---")
+print("--- resolve_timber_cost: Logs/Planks -> Stone, only where timberless ---")
 w, _n, _s = make_world()
 # Timberless mountain region: Logs 200 -> Stone 400, added to the existing 120.
 resolved = C.resolve_timber_cost(CAMP, w, 0)
@@ -65,19 +67,39 @@ same = C.resolve_timber_cost(CAMP, w, 1)
 assert same is CAMP, "a forest region must pay the literal Logs cost"
 # No region context: no-op (ships, generic checks).
 assert C.resolve_timber_cost(CAMP, w, None) is CAMP
-# No Logs line: no-op even in a timberless region.
+# No timber line at all: no-op even in a timberless region.
 raise_cost = {"Stone": 250, "Food": 500}
 assert C.resolve_timber_cost(raise_cost, w, 0) is raise_cost
 # Town cost: 1000 Logs -> 2000 Stone on top of the existing 500.
 town_resolved = C.resolve_timber_cost(TOWN, w, 0)
 assert town_resolved == {"Stone": 2500, "Gold": 750}, town_resolved
 assert C.resolve_timber_cost(TOWN, w, 1) is TOWN
-print("  ok    ratio, identity no-op on timbered land, no mutation, no "
-      "region / no Logs no-ops")
+print("  ok    logs ratio, identity no-op on timbered land, no mutation, no "
+      "region / no timber no-ops")
+
+print("\n--- tier-2+ Planks -> Stone at the value-tier rate (3:1) ---")
+# Granary tier 2: 260 Planks (9g each) -> 780 Stone (3g each), plus its own
+# 180 Bricks and 220 Stone lines untouched.
+g2 = C.resolve_timber_cost(GRANARY_T2, w, 0)
+assert g2 == {"Stone": 1000, "Bricks": 180, "Gold": 420}, g2
+assert g2["Stone"] == 260 * 3 + 220, g2
+assert C.resolve_timber_cost(GRANARY_T2, w, 1) is GRANARY_T2, \
+    "a forest region's tier-2 cost must keep its Planks"
+assert C.resolve_timber_cost(GRANARY_T2, w, None) is GRANARY_T2
+# Camp tier 2: Planks 300 -> 900 Stone on top of 320.
+c2 = C.resolve_timber_cost(CAMP_T2, w, 0)
+assert c2 == {"Stone": 1220, "Tools": 120, "Gold": 600}, c2
+# Mixed Logs + Planks in one cost resolve together.
+mixed = C.resolve_timber_cost({"Logs": 100, "Planks": 50}, w, 0)
+assert mixed == {"Stone": 350}, mixed  # 100*2 + 50*3
+assert CAMP_T2 == {"Planks": 300, "Stone": 320, "Tools": 120, "Gold": 600}, \
+    "tier-2 input cost must not be mutated"
+print("  ok    planks at 3:1, bricks/stone lines untouched, mixed costs, "
+      "no mutation")
 
 print("\n--- can_afford / _pay_cost agree on the resolved cost ---")
 w, nation, st = make_world()
-st.resources = {"Stone": 5000, "Gold": 500}      # plenty of stone, ZERO logs
+st.resources = {"Stone": 5000, "Gold": 500, "Bricks": 9999}  # stone, ZERO logs/planks
 # Without region context the Logs cost is unaffordable...
 assert not C.can_afford(nation, CAMP, w), \
     "should not afford Logs the realm does not have"
@@ -87,9 +109,19 @@ assert C.can_afford(nation, CAMP, w, region_id=0), \
 # A forest region still demands the real Logs it cannot produce.
 assert not C.can_afford(nation, CAMP, w, region_id=1)
 C._pay_cost(nation, CAMP, w, region_id=0)
-assert st.resources == {"Stone": 5000 - 520, "Gold": 500 - 160}, st.resources
+assert st.resources == {"Stone": 5000 - 520, "Gold": 500 - 160,
+                        "Bricks": 9999}, st.resources
 assert st.resources.get("Logs", 0) == 0, "no Logs may be spent"
-print("  ok    Stone pays for what Logs would have, Logs never spent")
+# Tier-2: Planks cost pays as Stone at the same node.
+st.resources = {"Stone": 5000, "Gold": 500, "Bricks": 9999}
+assert not C.can_afford(nation, GRANARY_T2, w), \
+    "without a region, Planks are still required"
+assert C.can_afford(nation, GRANARY_T2, w, region_id=0)
+C._pay_cost(nation, GRANARY_T2, w, region_id=0)
+assert st.resources == {"Stone": 5000 - 1000, "Gold": 500 - 420,
+                        "Bricks": 9999 - 180}, st.resources  # bricks line stays
+assert st.resources.get("Planks", 0) == 0, "no Planks may be spent"
+print("  ok    Stone pays for what Logs AND Planks would have; neither spent")
 
 print("\n--- build menu options carry the flag exactly where it applies ---")
 PATH = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
@@ -128,7 +160,7 @@ for node in timberless_nodes:
         if not opt.to_tier:
             continue
         # The BASE cost (what a timbered region would pay) tells us whether
-        # this building is Logs-priced at all -- the option's own cost has
+        # this building is timber-priced at all -- the option's own cost has
         # already been resolved dry-stone here.
         if opt.building == "shipyard":
             base = dict(C.SHIPYARD_COST)
@@ -136,23 +168,25 @@ for node in timberless_nodes:
             base = (C.storage_build_cost(node, opt.building, opt.to_tier,
                                          under=B._node_is_under(world, node))
                     or {})
-        if "Logs" not in base:
+        if "Logs" not in base and "Planks" not in base:
             continue
         logs_bearing += 1
         assert opt.dry_stone, f"{opt.label} at {node.name}: dry_stone not set"
         assert "Logs" not in opt.cost, f"{opt.label} still priced in Logs"
+        assert "Planks" not in opt.cost, f"{opt.label} still priced in Planks"
         assert opt.cost.get("Stone", 0) > 0, opt.cost
 for node in timbered_nodes:
     for opt in B.build_options(world, node, nation):
-        if "Logs" in opt.cost:
+        if "Logs" in opt.cost or "Planks" in opt.cost:
             assert not opt.dry_stone, \
                 f"{opt.label} at {node.name}: dry_stone on timbered land"
-assert logs_bearing > 0, "no Logs-bearing build options found at all"
-print(f"  ok    {logs_bearing} Logs-bearing options on timberless land all "
+assert logs_bearing > 0, "no timber-bearing build options found at all"
+print(f"  ok    {logs_bearing} timber-bearing options on timberless land all "
       f"resolved to Stone and flagged; timbered land untouched")
 
-print("\n--- every timberless region's town is log-free on a real world ---")
-count = 0
+print("\n--- every timberless region's town AND tier-2 granary are log-free "
+      "on a real world ---")
+count = tier2 = 0
 for region in world.regions:
     if not getattr(region, "cells", None):
         continue
@@ -163,10 +197,17 @@ for region in world.regions:
     if timberless:
         assert "Logs" not in cost and cost["Stone"] == 2500, (region.id, cost)
         count += 1
+        g2 = C.resolve_timber_cost(GRANARY_T2, world, region.id)
+        assert "Planks" not in g2, (region.id, g2)
+        assert g2["Stone"] == 260 * 3 + 220, (region.id, g2)
+        assert g2["Bricks"] == 180, (region.id, g2)   # non-timber line untouched
+        tier2 += 1
     else:
         assert cost is TOWN, "timbered region's town cost must not change"
-assert count > 0
-print(f"  ok    {count} timberless regions build towns in stone; "
-      f"{len(world.regions) - count} timbered regions pay logs")
+        assert C.resolve_timber_cost(GRANARY_T2, world, region.id) is GRANARY_T2
+assert count > 0 and tier2 > 0
+print(f"  ok    {count} timberless regions build towns in stone and "
+      f"{tier2} tier-2 granaries in plank-free stone; timbered regions "
+      f"pay logs and planks")
 
 print("\nALL DRY-STONE TESTS PASSED")

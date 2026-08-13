@@ -20,6 +20,15 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 122,
+        "title": "Dressed Stone",
+        "items": [
+            "WORLD: dry-stone goes deep — in a timberless region (mountain and highland homelands, tundra, desert, the underground), the tier-2+ timber good Planks is now paid as Stone too, at 3 Stone per Plank — exactly Planks' value on the resource ladder. A mountain realm's tier-2 storage, camps and guild halls rise as dressed stonework on its own quarry output, instead of stalling on a sawmill it cannot run.",
+            "RULE: the stone rule substitutes timber, not clay — Bricks and every non-timber cost line stay as listed, and ships are still the exception (a hull is genuinely wood, so its Logs cost is never substituted).",
+            "AI: the AI's tier-2 buildings go up in stone in timberless regions too, and the build menu says so out loud wherever it happens.",
+        ],
+    },
+    {
         "version": 121,
         "title": "The Living Land",
         "items": [
