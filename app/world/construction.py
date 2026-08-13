@@ -1098,6 +1098,7 @@ def _finish_settlement(world, project):
     st = Settlement(len(world.settlements), kind, namer(kind, species),
                     project.pos, project.faction_idx, project.region_id, tax_income,
                     population, adults, children, prosperity, max_population)
+    _record_demote_baseline(world, st)
     # Chronicle: building a settlement outright (the expensive shortcut,
     # as opposed to raising a village) is rare enough to be history.
     from app.world import chronicle
@@ -1151,7 +1152,9 @@ def start_settlement_upgrade(world, nation, settlement, character=None):
         need = round(max_pop * TOWN_UPGRADE_POPULATION_FRACTION)
         return (f"{settlement.name} isn't populous enough yet -- a Town "
                 f"needs {need:,} souls to rise to a City, and it has "
-                f"{settlement.population:,}. Keep it fed and growing.")
+                f"{settlement.population:,}. Keep it fed and thriving: only "
+                "a Town that out-earns its region keeps attracting the "
+                "people it needs to grow.")
     if any(p.settlement_id == settlement.id
            for p in _upgrade_projects(world)):
         return "An upgrade is already under way there."
@@ -1177,6 +1180,7 @@ def _finish_settlement_upgrade(world, project):
     st.kind = "city"
     st.tax_income = round(random.uniform(*SETTLEMENT_TAX_INCOME["city"]))
     st.max_population = round(random.uniform(*POPULATION_RANGE["city"]))
+    _record_demote_baseline(world, st)
     # The ladder's choice at this rung carries onto the finished City (the
     # AI picks one; the player picks in the panel). None = no bonus (e.g.
     # direct-built settlements or pre-character saves).
@@ -1325,8 +1329,9 @@ def start_raise_village(world, nation, village, character=None):
         need = round(max_pop * VILLAGE_RAISE_POPULATION_FRACTION)
         return (f"{village.name} isn't big enough yet -- a village needs "
                 f"{need:,} souls to grow into a Town, and it has "
-                f"{village.population:,}. Feed and shelter it and it will "
-                "grow.")
+                f"{village.population:,}. Feed and shelter it, and make it "
+                "thrive: a village that out-earns its neighbours attracts "
+                "settlers and grows, while a marginal one stays small.")
     if any(p.village_id == village.id for p in _raise_village_projects(world)):
         return "That village is already being raised."
     cost = RAISE_VILLAGE_COST
@@ -1365,6 +1370,7 @@ def _finish_raise_village(world, project):
                     getattr(v, "max_population", None))
     st.character = getattr(project, "character", None)
     st.resources = dict(getattr(v, "resources", {}))
+    _record_demote_baseline(world, st)
     world.settlements.append(st)
     nation = world.factions[v.faction_idx]
     nation.meta.setdefault("settlements", []).append(st.id)
@@ -1389,6 +1395,157 @@ def _finish_raise_village(world, project):
                   f"{CHARACTER_NAMES.get(getattr(project, 'character', None), '')} "
                   f"{holds.node_kind_name(world, st)}.")
     return st
+
+
+def _record_demote_baseline(world, st):
+    """Record the population below which this settlement demotes a rung (see
+    demote_settlements): a share of the population it had when it was founded
+    or promoted -- stable, and independent of the re-rolled ceiling, so a
+    node demotes only when it has genuinely shed a large part of the
+    community that earned it the rank -- plus the turn for the no-demotion
+    grace period."""
+    from app.world.resources import DEMOTE_RETENTION_FRACTION
+    st.demote_threshold = round(getattr(st, "population", 0) * DEMOTE_RETENTION_FRACTION)
+    st.promoted_at_turn = getattr(world, "turn", None)
+
+
+def demote_settlements(world):
+    """The ladder's decline half: fall a City back to a Town, or a Town back
+    to a Village, once its population has declined below its recorded
+    demote threshold (see _record_demote_baseline). Called every turn from
+    resources._update_prosperity, after the growth/decline pass, so a
+    settlement that keeps shedding people falls back instead of quietly
+    keeping a rank its community can no longer sustain.
+
+    Mirrors the raise path in reverse: the settlement is neutralized (its
+    list index must not shift -- see _finish_raise_village), and the village
+    it was raised from is reactivated (or a fresh one founded)."""
+    from app.world.resources import PROMOTION_DEMOTE_GRACE_TURNS
+    turn = getattr(world, "turn", 0) or 0
+    demoted = []
+    for st in world.settlements:
+        if st.faction_idx < 0 or st.kind not in ("city", "town"):
+            continue
+        promoted_at = getattr(st, "promoted_at_turn", None)
+        if promoted_at is not None and turn - promoted_at < PROMOTION_DEMOTE_GRACE_TURNS:
+            continue
+        threshold = getattr(st, "demote_threshold", None)
+        if threshold is None or st.population >= threshold:
+            continue
+        demoted.append(st)
+    for st in demoted:
+        if st.kind == "city":
+            _demote_city(world, st)
+        elif st.kind == "town":
+            _demote_town(world, st)
+
+
+def _demote_city(world, st):
+    """A City that has declined below its floor falls back to a Town: kind
+    and kind-derived stats re-roll to town scale, everything else (people,
+    stores, prosperity, character) carries over."""
+    st.kind = "town"
+    st.tax_income = round(random.uniform(*SETTLEMENT_TAX_INCOME["town"]))
+    st.max_population = round(random.uniform(*POPULATION_RANGE["town"]))
+    if st.population > st.max_population:
+        st.max_population = st.population
+    st.has_shipyard = False       # a Town can't keep a city-only shipyard
+    _record_demote_baseline(world, st)
+    from app.world import chronicle
+    from app.world import holds
+    chronicle.log(world, world.factions[st.faction_idx],
+                  f"{st.name} declines from a City back into a "
+                  f"{holds.node_kind_name(world, st)}.")
+
+
+def _demote_town(world, st):
+    """A Town that has declined below its floor falls back to a Village. The
+    original village it was raised from (still in world.villages, neutralized
+    with `raised_into`) is reactivated with the town's people and stores; a
+    directly-built town founds a fresh village instead. The settlement is
+    then neutralized -- the same "never renumber list indices" trick as
+    _finish_raise_village."""
+    region = world.regions[st.region_id]
+    faction = world.factions[st.faction_idx]
+    species = faction.meta.get("species", "Humans")
+
+    old = next((v for v in world.villages
+                if v.faction_idx < 0 and getattr(v, "raised_into", None) == st.id),
+               None)
+    if old is not None:
+        v = old
+        v.faction_idx = st.faction_idx
+        v.raised_into = None
+        v.population = st.population
+        v.adults = st.adults
+        v.children = st.children
+        v.resources = dict(getattr(st, "resources", {}))
+        v.prosperity = getattr(st, "prosperity", 0.0)
+        v.turns_without_food = getattr(st, "turns_without_food", 0)
+        v.turns_without_firewood = getattr(st, "turns_without_firewood", 0)
+        if not getattr(v, "max_population", None):
+            v.max_population = round(random.uniform(*POPULATION_RANGE["village"]))
+        if v.population > v.max_population:
+            v.max_population = v.population
+        vid = v.id
+    else:
+        from app.world.worldgen import spawn_village
+        v = spawn_village(world, random, region, st.pos,
+                          make_settlement_namer(random), species)
+        v.name = st.name
+        v.population = st.population
+        v.adults = st.adults
+        v.children = st.children
+        v.prosperity = getattr(st, "prosperity", 0.0)
+        v.resources = dict(getattr(st, "resources", {}))
+        if v.population > getattr(v, "max_population", 0):
+            v.max_population = v.population
+        vid = v.id
+
+    if not hasattr(region, "villages"):
+        region.villages = []
+    if vid not in region.villages:
+        region.villages.append(vid)
+
+    nation = world.factions[st.faction_idx]
+    if st.id in nation.meta.get("settlements", []):
+        nation.meta["settlements"].remove(st.id)
+    if hasattr(region, "meta_settlements") and st.id in region.meta_settlements:
+        region.meta_settlements.remove(st.id)
+    st.faction_idx = -1
+    st.demoted_into = vid
+    st.kind = None
+    st.resources = {}
+
+    _repoint_demoted_settlement(world, st.id, vid)
+
+    from app.world import chronicle
+    chronicle.log(world, nation,
+                  f"{st.name} declines from a Town back into a Village.")
+
+
+def _repoint_demoted_settlement(world, old_sid, new_vid):
+    """A demoted Town is no longer a Settlement, so anything still in transit
+    that names its id must follow it: caravans fall back to the capital (they
+    can only deliver to settlements, never to a village), and regional/local
+    shipments re-target the new village in the shared node-id space instead of
+    pointing at the neutralized settlement entry."""
+    for c in getattr(world, "trade_caravans", []):
+        if getattr(c, "dest_settlement_id", None) == old_sid:
+            c.dest_settlement_id = None
+        if getattr(c, "origin_settlement_id", None) == old_sid:
+            c.origin_settlement_id = None
+    for shipments in (getattr(world, "regional_shipments", []),
+                      getattr(world, "local_shipments", [])):
+        for s in shipments:
+            if (getattr(s, "origin_kind", None) == "settlement"
+                    and getattr(s, "origin_id", None) == old_sid):
+                s.origin_kind = "village"
+                s.origin_id = new_vid
+            if (getattr(s, "dest_kind", None) == "settlement"
+                    and getattr(s, "dest_id", None) == old_sid):
+                s.dest_kind = "village"
+                s.dest_id = new_vid
 
 
 def _finish_road(world, road):

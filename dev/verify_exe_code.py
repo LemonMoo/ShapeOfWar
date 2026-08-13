@@ -21,6 +21,16 @@ from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
 EXE = sys.argv[1] if len(sys.argv) > 1 else "dist/ShapesOfWar.exe"
 MARKERS = [
     # (module, marker, kind) -- update the version markers with each release.
+    # v1.0.3 -- boom and bust: wealth-relative population growth/decline and
+    # the ladder's decline half (City->Town, Town->Village).
+    ("app.world.resources", "POPULATION_MIGRATION_RATE", "name"),
+    ("app.world.resources", "WEALTH_SPREAD", "name"),
+    ("app.world.resources", "_advance_demographics", "name"),
+    ("app.world.construction", "demote_settlements", "name"),
+    ("app.world.construction", "_record_demote_baseline", "name"),
+    ("app.world.construction", "_repoint_demoted_settlement", "name"),
+    ("app.world.construction", "declines from a City", "const"),
+    ("app.core.changelog", "Boom and Bust", "const"),
     # v1.0.2 -- governance & development: realm ages + a soft governance limit
     # on expansion (replaces the flat CLAIM_DEVELOPMENT_FRACTION gate).
     ("app.world.progression", "governance_capacity", "name"),

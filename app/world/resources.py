@@ -3326,6 +3326,34 @@ ADULT_REGROWTH_FRACTION = 0.4    # adult fraction kept when a node's adults
 # the deliberately-glacial population growth (see _grow_population).
 ADULT_MATURITY_RATE = 0.02
 
+# --- demographics: population now moves BOTH ways, and the village/town/
+# city pyramid is kept from flattening into "everything is a city" ----------
+# Natural increase (the growth rates above) still applies while a node is fed
+# and warm, but net MIGRATION adds a signed term proportional to how far the
+# node's own wealth stands above or below its region's and kingdom's
+# averages. A settlement that clearly out-earns its surroundings attracts
+# people (grows toward its ceiling); one that is clearly marginal loses them
+# (declines toward the population floor). This is the force that makes
+# upgrading a genuine achievement instead of an inevitability: only nodes
+# that truly thrive relative to their context keep growing into the next
+# rung of the ladder, so the top of the pyramid stays rare.
+POPULATION_MIGRATION_RATE = 0.006   # max signed migration rate (fraction of the
+                                     # relevant gap per turn) at ±1 relative wealth
+WEALTH_SPREAD = 20.0                # prosperity points from the context average
+                                     # that read as "clearly" thriving/marginal
+# Demotion: a promoted node that declines far enough falls back a rung (a
+# City to a Town, a Town to a Village -- see construction.demote_settlements).
+# The threshold is a share of the population the node had when it was
+# promoted (or founded), recorded as `demote_threshold`: stable, and
+# independent of the higher ceiling the promotion re-rolled -- so a node
+# demotes only when it has genuinely shed a large part of the community that
+# earned it the rank, never merely for growing slowly.
+DEMOTE_RETENTION_FRACTION = 0.6
+PROMOTION_DEMOTE_GRACE_TURNS = 40   # a freshly promoted node can't demote for
+                                     # this long (mirrors the starvation-grace
+                                     # idea: time to grow into its new ceiling
+                                     # before demotion can trigger)
+
 
 def _apply_population_loss(settlement, loss):
     """Remove `loss` head from a settlement, split proportionally between
@@ -3347,45 +3375,82 @@ def _apply_population_loss(settlement, loss):
     settlement.children = max(0, settlement.children - child_loss)
 
 
-def _grow_population(node):
-    """Slow organic growth toward this node's own max_population ceiling
-    (see worldgen._roll_population/POPULATION_GROWTH_RATE) -- only while
-    it isn't currently in a food/firewood shortfall grace period (see
-    _consume_node_needs, which calls this after updating turns_without_
-    food/turns_without_firewood for the turn). A small village's fair
-    share of the gap (e.g. 0.2 head/turn) would just silently round down
-    to zero forever if computed fresh each turn -- node._pop_growth_accum
-    is a hidden fractional carry so those tiny amounts genuinely
-    accumulate into a real head of population every several turns instead
-    of never growing at all. Old saves predating max_population (None/
-    missing) simply never grow, matching their prior no-growth behavior."""
+def _grow_population(node, region_avg=None, faction_avg=None):
+    """Organic growth toward, or decline away from, this node's own
+    max_population ceiling (see worldgen._roll_population) -- no longer a
+    one-way climb. The net per-turn rate is the natural increase (the old
+    POPULATION_GROWTH_RATE/FRONTIER_POPULATION_GROWTH_RATE, only while the
+    node isn't in a food/firewood shortfall grace period) PLUS a signed
+    migration term proportional to how far the node's own wealth stands above
+    or below its region's and kingdom's averages (see _advance_demographics,
+    which stashes `_wealth_target` on every node and passes the averages).
+    A thriving node grows toward the ceiling; a marginal one declines toward
+    the population floor, so it can never cross the ladder's population
+    thresholds and climb a rung it hasn't earned.
+
+    A small village's fair share of the gap (e.g. 0.2 head/turn) would just
+    silently round down to zero forever if computed fresh each turn --
+    node._pop_growth_accum is a hidden fractional carry so those tiny
+    amounts genuinely accumulate into a real head of population every several
+    turns instead of never moving at all. Old saves predating max_population
+    (None/missing) simply never grow, matching their prior no-growth
+    behavior."""
     max_pop = getattr(node, "max_population", None)
-    if not max_pop or node.population >= max_pop:
+    if not max_pop:
         return
     if getattr(node, "turns_without_food", 0) > 0 or getattr(node, "turns_without_firewood", 0) > 0:
         return
-    rate = (FRONTIER_POPULATION_GROWTH_RATE
-            if getattr(node, "kind", "") == "town"
-            or hasattr(node, "farm_output")   # Villages: the codebase's
-                                              # village-detection idiom is
-                                              # `not hasattr(node, "kind")`,
-                                              # and farm_output is the one
-                                              # attribute only Villages have
-            or (getattr(node, "is_capital", False)
-                and not getattr(node, "under_capital", False))
-                                              # the seat of the realm draws
-                                              # people -- but an UNDERGROUND
-                                              # capital (under_capital, see
-                                              # holds.settle_underworld) does
-                                              # not: its food is hard-capped
-                                              # by terraces and fungus, so
-                                              # growth must come from
-                                              # breaking out, not magic
-            else POPULATION_GROWTH_RATE)
+    base_rate = (FRONTIER_POPULATION_GROWTH_RATE
+                 if getattr(node, "kind", "") == "town"
+                 or hasattr(node, "farm_output")   # Villages: the codebase's
+                                                   # village-detection idiom is
+                                                   # `not hasattr(node, "kind")`,
+                                                   # and farm_output is the one
+                                                   # attribute only Villages have
+                 or (getattr(node, "is_capital", False)
+                     and not getattr(node, "under_capital", False))
+                                                   # the seat of the realm draws
+                                                   # people -- but an UNDERGROUND
+                                                   # capital (under_capital, see
+                                                   # holds.settle_underworld) does
+                                                   # not: its food is hard-capped
+                                                   # by terraces and fungus, so
+                                                   # growth must come from
+                                                   # breaking out, not magic
+                 else POPULATION_GROWTH_RATE)
+    # Migration: +1 when this node clearly out-earns its context, -1 when it
+    # is clearly marginal, ~0 when it is average -- the relative-wealth pull
+    # that keeps the top of the settlement pyramid rare. Averages default to
+    # the node's own wealth, so a lone node (no region/kingdom context)
+    # experiences no migration, only natural increase.
+    own = getattr(node, "_wealth_target", getattr(node, "prosperity", 0.0))
+    reg = region_avg.get(node.region_id, own) if region_avg else own
+    king = faction_avg.get(node.faction_idx, own) if faction_avg else own
+    rel_region = max(-1.0, min(1.0, (own - reg) / WEALTH_SPREAD))
+    rel_kingdom = max(-1.0, min(1.0, (own - king) / WEALTH_SPREAD))
+    rate = base_rate + 0.5 * (rel_region + rel_kingdom) * POPULATION_MIGRATION_RATE
+
+    if rate >= 0:
+        if node.population >= max_pop:
+            return
+        gap = max_pop - node.population
+    else:
+        floor = round(max_pop * POPULATION_MIN_FRACTION)
+        gap = node.population - floor
+        if gap <= 0:
+            return
+
     accum = getattr(node, "_pop_growth_accum", 0.0)
-    accum += (max_pop - node.population) * rate
+    accum += gap * rate
     gain = int(accum)
     node._pop_growth_accum = accum - gain
+    if gain < 0:
+        # Decline: emigration, split across adults/children by _apply_
+        # population_loss (which also respects the POPULATION_MIN_FRACTION
+        # floor). Maturation is a recovery mechanic, so it only runs on the
+        # growth path below; a declining node sheds people as they leave.
+        _apply_population_loss(node, -gain)
+        return
     if gain <= 0:
         return
     gain = min(gain, max_pop - node.population)
@@ -3544,7 +3609,9 @@ def _consume_node_needs(node, season, world):
     node.prosperity_shortfall = shortfall
     node.prosperity_luxury = luxury_fulfilled
 
-    _grow_population(node)
+    # Population growth/decline moved out of here: it now depends on the
+    # wealth signal _update_prosperity computes (see _advance_demographics),
+    # which runs after every node's prosperity target is known.
     return value
 
 
@@ -4503,6 +4570,8 @@ def advance_settlement_production_chains(world):
     scarcest-input / first-available-alternative rules as the faction-
     level version."""
     for settlement in world.settlements:
+        if settlement.faction_idx < 0:
+            continue    # demoted (neutralized) -- see construction.demote_settlements
         if not hasattr(settlement, "resources"):
             settlement.resources = {}
         res = settlement.resources
@@ -5292,6 +5361,8 @@ def advance_cartographers(world):
     having its progress depend on who is looking would be a mess the first time
     a save changed hands."""
     for st in world.settlements:
+        if st.faction_idx < 0:
+            continue    # demoted (neutralized) -- see construction.demote_settlements
         tier = min(storage_tier(st, CARTOGRAPHER), len(CARTOGRAPHER_SURVEY_PER_TURN) - 1)
         if tier <= 0:
             continue
@@ -6766,10 +6837,18 @@ def _faction_health_factor(production_value, consumption_value):
 def _update_prosperity(world, production_value, consumption_value):
     """Ease every settlement's and village's prosperity meter toward this
     turn's target — called once per turn from advance_turn, after
-    production/consumption for every faction is known."""
+    production/consumption for every faction is known. Also stashes each
+    node's instantaneous wealth (`_wealth_target`, the unlagged target the
+    meter is easing toward) and the region/kingdom averages of it, then runs
+    the demographic pass (growth/decline + demotion) off those signals."""
     villages_by_fac = defaultdict(list)
     for v in world.villages:
         villages_by_fac[v.faction_idx].append(v)
+
+    region_sum = defaultdict(float)
+    region_cnt = defaultdict(int)
+    faction_sum = defaultdict(float)
+    faction_cnt = defaultdict(int)
 
     for fac_idx, nation in enumerate(world.factions):
         health = _faction_health_factor(production_value.get(fac_idx, 0.0),
@@ -6783,10 +6862,45 @@ def _update_prosperity(world, production_value, consumption_value):
                                       if settlement_character(st) == "cathedral"
                                       else 1.0)
             st.prosperity += (target - st.prosperity) * ease
+            st._wealth_target = target
+            region_sum[st.region_id] += target
+            region_cnt[st.region_id] += 1
+            faction_sum[fac_idx] += target
+            faction_cnt[fac_idx] += 1
         for v in villages_by_fac.get(fac_idx, []):
             target = _prosperity_target(village_goods_wealth_value(v),
                                         health, _prosperity_condition(v))
             v.prosperity += (target - v.prosperity) * PROSPERITY_EASE
+            v._wealth_target = target
+            region_sum[v.region_id] += target
+            region_cnt[v.region_id] += 1
+            faction_sum[fac_idx] += target
+            faction_cnt[fac_idx] += 1
+
+    _advance_demographics(world, region_sum, region_cnt, faction_sum, faction_cnt)
+
+
+def _advance_demographics(world, region_sum, region_cnt, faction_sum, faction_cnt):
+    """Grow or decline every node's population off its wealth relative to its
+    region and kingdom, then demote any settlement that has declined below
+    its recorded floor. Runs after _update_prosperity has computed every
+    node's `_wealth_target`, so the signal is this turn's real wealth, not
+    the lagged prosperity meter (which trails a fresh node's actual output by
+    ~100 turns and would read every new village as destitute)."""
+    region_avg = {rid: region_sum[rid] / region_cnt[rid] for rid in region_cnt}
+    faction_avg = {f: faction_sum[f] / faction_cnt[f] for f in faction_cnt}
+    for st in world.settlements:
+        if st.faction_idx < 0:
+            continue
+        _grow_population(st, region_avg, faction_avg)
+    for v in world.villages:
+        if v.faction_idx < 0:
+            continue
+        _grow_population(v, region_avg, faction_avg)
+    # Demotion is the ladder's business (construction.py), local-imported to
+    # avoid a module cycle: resources.py is imported by construction.py.
+    from app.world import construction
+    construction.demote_settlements(world)
 
 
 # --- city-driven village growth: a city with a full prosperity meter -------

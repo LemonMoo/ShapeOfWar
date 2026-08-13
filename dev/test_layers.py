@@ -40,6 +40,12 @@ old = pickle.load(open(PATH, "rb"))
 for attr in ("under_cells", "under_kind", "under_owner", "under_region", "gates"):
     if hasattr(old, attr):
         delattr(old, attr)          # a world pickled before any of this existed
+# A pre-layers save also predates Region.layer -- under regions were only
+# stamped later (underworld._partition_regions), so strip that too or the
+# modern dev world's galleries would still read as UNDER after the migration.
+for region in old.regions:
+    if hasattr(region, "layer"):
+        delattr(region, "layer")
 L.ensure_layers(old)
 assert old.under_cells == set() and old.gates == []
 L.ensure_layers(old)                # idempotent

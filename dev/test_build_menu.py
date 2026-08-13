@@ -170,12 +170,15 @@ else:
 print("\n--- a needed building is flagged, and sorts first ---")
 orig = dict(getattr(village, "resources", {}) or {})
 herd_orig = dict(getattr(village, "herds", None) or {})
+fish_orig = getattr(village, "fish_yield", 0)
 try:
-    # A real herd emergency (fodder running short for winter) outranks a
-    # full pool in the urgency sort, and which villages own herds depends on
-    # the world -- clear the herd so THIS test is only about the pool.
+    # A real herd emergency (fodder running short for winter) or a coastal
+    # catch (perishables to preserve) outranks a full pool in the urgency
+    # sort, and which villages have either depends on the world -- clear
+    # both so THIS test is only about the pool.
     if hasattr(village, "herds"):
         village.herds = {}
+    village.fish_yield = 0
     cap = R.node_pool_capacity(village, "household")
     village.resources = {"Barley": int(cap / R.resource_bulk("Barley")) + 10}
     win = build_menu.BuildMenuWindow(_root, w, village, nation)
@@ -191,6 +194,7 @@ finally:
     village.resources = orig
     if hasattr(village, "herds"):
         village.herds = herd_orig
+    village.fish_yield = fish_orig
 
 print("\n--- the Build button actually starts a project, once ---")
 cost = construction.storage_build_cost(village, "granary", 1)

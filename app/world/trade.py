@@ -645,6 +645,8 @@ def _coastal_factions(world):
         world._settle_coast_d = coast_d
     coastal = set()
     for st in world.settlements:
+        if st.faction_idx < 0:
+            continue    # demoted (neutralized) -- see construction.demote_settlements
         x, y = st.pos
         if coast_d[y][x] <= _SEA_COAST_REACH:
             coastal.add(st.faction_idx)

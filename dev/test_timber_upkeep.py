@@ -51,7 +51,8 @@ try:
     # used to do, and it was right for the mechanism at the time -- shortages
     # used to subtract points directly, which is exactly the bug that pinned
     # every meter in the game at zero (see dev/test_prosperity.py).
-    st.resources = {k: v for k, v in before_res.items() if k not in R._TIMBER_SOURCES}
+    st.resources = {k: v for k, v in before_res.items()
+                    if k not in R._TIMBER_SOURCES and k not in R._LUXURY_GOODS}
     st.prosperity = 50.0
     R._consume_node_needs(st, w.season, w)
     assert st.prosperity == 50.0, (

@@ -82,11 +82,11 @@ assert not c.paused, "a disabled auto-pause rule stopped the clock anyway"
 print("  ok    first reason wins, disabled rules do nothing")
 
 print("\n--- every reason has player-facing text ---")
-for reason in (C.MANUAL, C.BATTLE, C.ATTACKED, C.PROJECT_DONE):
+for reason in (C.MANUAL, C.BATTLE, C.ATTACKED, C.PROJECT_DONE, C.FRONTIER):
     assert reason in C.PAUSE_REASON_TEXT, reason
-assert set(C.DEFAULT_AUTO_PAUSE) == {C.BATTLE, C.ATTACKED, C.PROJECT_DONE}, (
+assert set(C.DEFAULT_AUTO_PAUSE) == {C.BATTLE, C.ATTACKED, C.PROJECT_DONE, C.FRONTIER}, (
     "an auto-pause rule exists that the player was never asked about")
-print("  ok    four reasons, three of them rules, all of them speakable")
+print("  ok    five reasons, four of them rules, all of them speakable")
 
 print("\n--- pressing a speed while paused runs at that speed ---")
 c = C.Clock()

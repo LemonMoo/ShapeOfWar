@@ -20,6 +20,15 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 124,
+        "title": "Boom and Bust",
+        "items": [
+            "WORLD: population now moves BOTH ways. A settlement or village that clearly out-earns its region and kingdom attracts people and grows toward its ceiling; one that is clearly poorer than its neighbours sheds people and declines toward the floor. Natural increase (births) still applies while a node is fed and warm — wealth decides whether it grows fast, or shrinks.",
+            "RULE: the ladder gains a decline half. A City that keeps losing people falls back to a Town, and a Town back to a Village — carrying its people, stores and name — so a realm stays a pyramid of many villages, some towns and few cities instead of drifting toward cities everywhere. Only a settlement that genuinely thrives in its region ever grows populous enough to rise, and its trade follows it back down.",
+            "UI: the build menu and the raise/upgrade prompts say so — a village that won't grow is told to make it thrive (out-earn its neighbours), not just keep it fed.",
+        ],
+    },
+    {
         "version": 123,
         "title": "Governance & Development",
         "items": [

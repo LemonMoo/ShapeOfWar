@@ -134,6 +134,14 @@ world.commanders = [c for c in world.commanders if c is not None]
 world.under_fog = set()
 for c in list(world.commanders):
     world.commanders.remove(c)
+# "Nothing held": the realm must own no hall below either. A cave player
+# (Dwarves/Goblins) starts holding its own galleries, so relinquish those
+# before asserting a realm with nothing underground sees nothing.
+meta_regions = world.factions[world.player_faction_idx].meta.get("regions", [])
+for cid in list(meta_regions):
+    if L.is_under(world.regions[cid]):
+        world.regions[cid].faction_idx = -2
+        meta_regions.remove(cid)
 vision.recompute_under(world)
 assert not world.under_fog, (
     "the underworld was revealed with nobody down there and nothing held")

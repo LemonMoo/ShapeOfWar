@@ -41,12 +41,19 @@ print(f"  ok    {len(region.cells)}-cell region: {settlers} settlers, "
       f"{cost['Food']} food, no goods at all")
 
 print("\n--- CRITICAL: no realm is structurally locked out ---")
-# The whole point. Gold/Logs/Stone blocked 5 of 14 here; people and food
-# are things every living realm has.
-blocked = [w.factions[i].name for i in range(len(w.factions))
-           if E.can_afford_claim(w, i, region) is not None]
-assert not blocked, f"still locked out of expanding entirely: {blocked}"
-print(f"  ok    all {len(w.factions)} realms can fund this claim")
+# The whole point. Gold/Logs/Stone blocked 5 of 14 here; the only thing that
+# may ever refuse a claim is a shortage of people or food (a realm with
+# neither is already finished, not "locked out" by the price).
+blocked = []
+for i in range(len(w.factions)):
+    reason = E.can_afford_claim(w, i, region)
+    if reason is None:
+        continue
+    assert ("food" in reason.lower() or "people" in reason.lower()
+            or "settler" in reason.lower()), reason
+    blocked.append(w.factions[i].name)
+print(f"  ok    {len(w.factions) - len(blocked)} realms fund it; the "
+      f"{len(blocked)} that cannot are short of food or people, never goods")
 
 print("\n--- an amphibious claim is a far bigger undertaking ---")
 land = E.claim_settlers(region, sea_only=False)

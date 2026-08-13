@@ -63,8 +63,15 @@ print(f"  ok    shipyard is settlement-only; herd buildings are village-only")
 
 print("\n--- a full pool makes its building urgent, an empty one does not ---")
 orig = dict(getattr(v, "resources", {}) or {})
+orig_herds = dict(getattr(v, "herds", None) or {})
+orig_fish = getattr(v, "fish_yield", 0)
 try:
+    # Isolate the pool-pressure signal: a herd (barn) or a coastal catch
+    # (preserving house) would legitimately outrank the granary, and the
+    # claim under test is only about the full pool.
     v.resources = {}
+    v.herds = {}
+    v.fish_yield = 0
     empty = {o.building: o for o in B.build_options(w, v, nation)}
     assert empty["granary"].priority == "idle", empty["granary"]
     assert "no pressure" in empty["granary"].reason.lower(), empty["granary"].reason
@@ -87,13 +94,19 @@ try:
     print("  ok    the urgent card sorts to the front")
 finally:
     v.resources = orig
+    v.herds = orig_herds
+    v.fish_yield = orig_fish
 
 print("\n--- a fishing village is told to build a Preserving House ---")
 # Any faction's village will do -- the verdict is about the node's own
 # production, not about who owns it.
 fishers = sorted((x for x in w.villages if x.faction_idx >= 0),
                  key=lambda x: -(getattr(x, "fish_yield", 0) or 0))
-fishers = [x for x in fishers if (getattr(x, "fish_yield", 0) or 0) >= 20]
+# A village that already built its house offers nothing to build (blocked);
+# the claim under test is the one still told to build, so skip those.
+fishers = [x for x in fishers
+           if (getattr(x, "fish_yield", 0) or 0) >= 20
+           and R.storage_tier(x, R.PRESERVING_HOUSE) == 0]
 if fishers:
     f = fishers[0]
     opt = next(o for o in B.build_options(w, f, w.factions[f.faction_idx])

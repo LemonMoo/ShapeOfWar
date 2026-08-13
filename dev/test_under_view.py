@@ -37,7 +37,13 @@ def noop(*a, **k):
 
 
 world = generate_world(560, 340, seed=7, n_factions=6)
-world.player_faction_idx = 0
+# This test is about the SURFACE default. Cave peoples (Dwarves, Goblins)
+# open on the UNDER layer by design (see MapView.set_world), so pin the
+# player to a surface species or the "starts on the surface" premise is void.
+from app.world.holds import UNDERGROUND_SPECIES
+world.player_faction_idx = next(
+    i for i, f in enumerate(world.factions)
+    if f.meta.get("species") not in UNDERGROUND_SPECIES)
 print(f"world: {world.under_summary}")
 assert world.under_cells and world.gates, "this seed carved nothing to look at"
 

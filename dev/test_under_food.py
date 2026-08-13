@@ -43,8 +43,13 @@ print(f"world: {world.under_summary}")
 
 # An underground region with a door of its own -- the shape a hold will have.
 mouths = {tuple(g["under"]) for g in world.gates}
+# Pick a gallery with a door but NO other villages: the test plants one hold
+# and exercises it in isolation, and herd output is split across a region's
+# villages, so a door-region already full of a cave faction's warren villages
+# would leak their muck into the planted hold.
 region = next(r for r in world.regions
-              if L.is_under(r) and set(r.cells) & mouths)
+              if L.is_under(r) and set(r.cells) & mouths
+              and not getattr(r, "villages", []))
 region.faction_idx = 0
 cell = next(p for p in region.cells
             if L.kind_at(world, p[0], p[1], L.UNDER) == L.CAVERN)

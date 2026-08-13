@@ -23,9 +23,19 @@ world = generate_world(1100, 660, seed=4242, n_factions=14,
                        player_color=None, player_ruler=None, player_start=None)
 
 # A warren is UNDER the ground: surface goblin villages must not count.
-surface = next(v for v in world.villages
-               if v.faction_idx == 0
-               and not L.is_under(world.regions[v.region_id]))
+surface = next((v for v in world.villages
+                if v.faction_idx == 0
+                and not L.is_under(world.regions[v.region_id])), None)
+if surface is None:
+    # The player's warren start can leave it with no surface holding at all;
+    # plant one so the "surface goblins are not warrens" precondition is real.
+    sreg = next(r for r in world.regions
+                if r.faction_idx == 0 and not L.is_under(r))
+    surface = Village(len(world.villages), sreg.id, 0, "Surface Steading",
+                      sreg.cells[0], farm_output=10, population=100,
+                      adults=60, children=40, prosperity=50, max_population=300)
+    world.villages.append(surface)
+    sreg.villages = list(getattr(sreg, "villages", [])) + [surface.id]
 assert holds.node_is_warren(world, surface), "precondition: goblin species"
 assert not L.is_under(world.regions[surface.region_id])
 print("  ok    a surface goblin village is not treated as a warren")

@@ -43,7 +43,7 @@ def _recompute_settle_proximity(world, region):
     cx = sum(x for x, y in region.cells) / len(region.cells)
     cy = sum(y for x, y in region.cells) / len(region.cells)
     best = min(wrap.dist_wrap((cx, cy), st.pos, world.w)
-               for st in world.settlements)
+               for st in world.settlements if st.faction_idx >= 0)
     region.settle_proximity = math.exp(-best / 10.0)
 
 

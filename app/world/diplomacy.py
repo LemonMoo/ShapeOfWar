@@ -103,6 +103,8 @@ def run_proximity_contact(world):
     wm = world.world_map
     by_fac = {}
     for s in world.settlements:
+        if s.faction_idx < 0:
+            continue    # a demoted (neutralized) settlement -- see construction.demote_settlements
         by_fac.setdefault(s.faction_idx, []).append(s.pos)
     facs = sorted(by_fac)
     r2 = PROXIMITY_CONTACT_RANGE ** 2

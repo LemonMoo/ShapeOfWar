@@ -10,8 +10,11 @@ w = pickle.load(open(sys.argv[1], "rb"))
 C.ensure_faction_commanders(w)
 # play as a faction that borders someone
 from app.world.territory import bordering_regions
-pidx = next(i for i in range(len(w.factions))
-            if any(bordering_regions(w, i, j) for j in range(len(w.factions)) if j != i))
+pidx = next((i for i in range(len(w.factions))
+             if any(bordering_regions(w, i, j) for j in range(len(w.factions)) if j != i)),
+            None)
+if pidx is None:
+    print("SKIP: this world has no bordering factions"); sys.exit()
 w.player_faction_idx = pidx
 vision.init_fog(w)
 player = w.factions[pidx]
