@@ -2116,7 +2116,41 @@ def _water_distance(world):
     return dist
 
 
-_MOISTURE_OCTAVES = [(0.045, 1.0), (0.10, 0.5), (0.20, 0.25)]
+# --- Climate fields (biome overhaul, phase F) --------------------------------
+# The rainfall field used to be pure isotropic value noise, which — combined
+# with the hard-step classifier — produced the monolithic "just a jungle,
+# then just mountains" look. This replaces that noise with the real drivers
+# of where moisture falls, each a SMOOTH field so biomes grade into one
+# another instead of switching:
+#   1. latitude moisture profile  -- wet equator, a dry subtropical belt,
+#                                    wet mid-latitudes, drier poles
+#   2. coastal moisture           -- wet near any coast, drying inland
+#                                    (the continental-interior aridity)
+#   3. orographic rain shadow     -- a mountain wrings moisture out of the
+#                                    air on its windward slope and leaves a
+#                                    dry lee; wind direction comes from
+#                                    currents.wind_field's latitude bands
+#   4. a low-amplitude texture noise so the result isn't dead flat
+_MOISTURE_BASE = 0.48         # temperate baseline rainfall
+_SUBTROPIC_DRY = 0.22         # depth of the dry subtropical belt
+_SUBTROPIC_CENTER = 0.28      # distance-from-equator (0..1) of that belt
+_SUBTROPIC_WIDTH = 0.15       # half-width of the dry belt
+_EQUATOR_BOOST = 0.16         # extra rainfall right at the equator
+_EQUATOR_BOOST_WIDTH = 0.25   # how wide the equatorial rain band is
+_POLE_DROP = 0.16             # the polar fringe is drier (cold air holds little)
+_POLE_DROP_START = 0.6        # ...but only from here on, so the boreal belt
+                              #     between stays moist (taiga, not tundra)
+_COASTAL_MOISTURE = 0.26      # moisture boost right at the shoreline
+_COASTAL_FALLOFF = 16.0       # cells over which the boost decays to ~1/e
+_RIPARIAN_MOISTURE = 0.18     # rivers/lakes make their banks wet (wetlands)
+_RIPARIAN_FALLOFF = 3.0       # cells over which that bank wetness decays
+_OROGRAPHIC_RAIN_RELIEF = 0.30      # relief above which a rising slope reads as wet
+_OROGRAPHIC_BARRIER_RELIEF = 0.45   # relief above which a cell casts a lee shadow
+_OROGRAPHIC_RAIN_STRENGTH = 0.20    # max moisture boost on a wet windward flank
+_OROGRAPHIC_SHADOW_STRENGTH = 0.30  # max moisture deficit at the lee base
+_OROGRAPHIC_SHADOW_LENGTH = 28.0    # cells over which a shadow fades to ~1/e
+_MOISTURE_NOISE_GAIN = 0.16   # texture-noise amplitude
+_MOISTURE_NOISE_OCTAVES = [(0.05, 1.0), (0.11, 0.5), (0.24, 0.25)]
 
 
 def _moisture_seed(nseed):
@@ -2131,29 +2165,106 @@ def _periodic_octaves(width, octaves):
     return [(*_periodic_freq(width, f), f, a) for f, a in octaves]
 
 
-def _quick_moisture(x, y, mseed, moisture_octaves):
-    """The same per-cell moisture formula _compute_moisture fills the real
-    world.moisture grid with, callable standalone for a handful of cells
-    before that grid exists yet — see _capital_has_nearby_farmland, which
-    needs it well before step 5's full moisture pass runs.
-    `moisture_octaves` is precomputed via _periodic_octaves(width,
-    _MOISTURE_OCTAVES) by the caller, once, not per cell."""
-    m = sum(amp * _vnoise(x * eff_freq, y * freq, mseed, period_x)
-           for eff_freq, period_x, freq, amp in moisture_octaves)
-    return max(0.0, min(1.0, m / 1.75))
+def _latitude_moisture(height):
+    """Per-row latitude moisture (0..1): wet equator, a wide DRY subtropical
+    belt, moist mid-latitudes, drier poles -- the classic three-band profile,
+    as a smooth function of distance-from-equator (0 at the equator, 1 at
+    the poles)."""
+    t = np.abs(np.arange(height, dtype=np.float64) / height - 0.5) * 2.0
+    dry = _SUBTROPIC_DRY * np.exp(-((t - _SUBTROPIC_CENTER) / _SUBTROPIC_WIDTH) ** 2)
+    wet = _EQUATOR_BOOST * np.exp(-(t / _EQUATOR_BOOST_WIDTH) ** 2)
+    pole = _POLE_DROP * np.clip((t - _POLE_DROP_START) / (1.0 - _POLE_DROP_START),
+                                0.0, 1.0) ** 2
+    return (_MOISTURE_BASE - dry + wet - pole).reshape(-1, 1)   # (height, 1)
 
 
-def _compute_moisture(world, nseed):
-    """Fill world.moisture (0..1 rainfall noise), land cells only. Factored
-    out of fertility so biome/climate classification can share it too."""
+def _compute_orography(world, land):
+    """Orographic rain-shadow field, land cells only, roughly centred on 0:
+    positive on a mountain's rising (windward) flank, negative on its lee
+    side, ~0 on flat ground. Two per-row passes along the prevailing wind
+    direction (per latitude band, from currents.wind_field):
+
+      * WET  -- a rising slope on high-enough ground is rained on.
+      * DRY  -- crossing a high ridge starts a shadow that fades downwind
+                (the lee), until the next ridge or the ocean resets it.
+
+    The shadow is a LOCAL feature behind each barrier, so it doesn't dry out
+    a whole continent the way a cumulative moisture-shedding sweep would."""
     w, h = world.w, world.h
-    mseed = _moisture_seed(nseed)
-    moisture_octaves = _periodic_octaves(w, _MOISTURE_OCTAVES)
+    sea = world.sea_level
+    span = (1.0 - sea) or 1.0
+    height = np.asarray(world.height, dtype=np.float64)
+    land_np = np.asarray(land, dtype=bool)
+    wind_u, _ = currents.wind_field(w, h)
+    wet = np.zeros((h, w), dtype=np.float64)
+    shadow = np.zeros((h, w), dtype=np.float64)
+    INF = 10 ** 9
     for y in range(h):
+        direction = 1 if wind_u[y, 0] >= 0.0 else -1
+        xs = range(w) if direction > 0 else range(w - 1, -1, -1)
+
+        # WET pass: rain on rising, high-enough flanks.
+        prev = height[y, xs[0]]
+        for x in xs:
+            e = height[y, x]
+            if land_np[y, x]:
+                relief = (e - sea) / span
+                slope = e - prev          # + means rising in the wind direction
+                if slope > 0.0 and relief > _OROGRAPHIC_RAIN_RELIEF:
+                    wet[y, x] = _OROGRAPHIC_RAIN_STRENGTH * min(1.0, slope * 20.0)
+            prev = e
+
+        # DRY pass: distance downwind from the last high ridge.
+        dist = INF
+        for x in xs:
+            e = height[y, x]
+            if not land_np[y, x]:
+                dist = INF               # ocean re-humidifies the air
+            else:
+                relief = (e - sea) / span
+                if relief > _OROGRAPHIC_BARRIER_RELIEF:
+                    dist = 0            # this ridge casts a fresh shadow
+                elif dist < INF:
+                    dist += 1
+            if dist < INF:
+                shadow[y, x] = _OROGRAPHIC_SHADOW_STRENGTH * math.exp(
+                    -dist / _OROGRAPHIC_SHADOW_LENGTH)
+
+    return wet - shadow
+
+
+def _compute_moisture(world, land, nseed):
+    """Fill world.moisture (0..1 rainfall), land cells only, and stash
+    world.coast_distance (BFS steps to the nearest ocean) for the biome/
+    climate classifier and the capital farmland check to share. Runs AFTER
+    hydrology so the riparian term can credit riverbanks/lakeshores with
+    local wetness (which is what makes wetlands form); lake cells keep their
+    (later ignored) moisture."""
+    w, h = world.w, world.h
+    ocean_cells = [(x, y) for y in range(h) for x in range(w) if not land[y][x]]
+    world.coast_distance = _bfs_distance(world, ocean_cells)
+    cd = np.asarray(world.coast_distance, dtype=np.float64)
+
+    lat = _latitude_moisture(h)                                  # (h, 1)
+    coastal = _COASTAL_MOISTURE * np.exp(-cd / _COASTAL_FALLOFF)
+    water_d = _bfs_distance(world, list(world.river_cells | world.lake_cells))
+    wd = np.asarray(water_d, dtype=np.float64)
+    riparian = _RIPARIAN_MOISTURE * np.exp(-wd / _RIPARIAN_FALLOFF)
+    oro = _compute_orography(world, land)                        # (h, w)
+    mseed = _moisture_seed(nseed)
+    octaves = _periodic_octaves(w, _MOISTURE_NOISE_OCTAVES)
+    tex = noise.fbm_grid(w, h, mseed, octaves)
+    tex = tex / max(1e-9, tex.max())                             # 0..1
+    field = (lat + coastal + riparian + oro
+             + _MOISTURE_NOISE_GAIN * (tex - 0.5))
+    field = np.clip(field, 0.0, 1.0)
+
+    for y in range(h):
+        mrow = world.moisture[y]
+        lrow = land[y]
         for x in range(w):
-            if world.owner[y][x] == OCEAN or (x, y) in world.lake_cells:
-                continue
-            world.moisture[y][x] = _quick_moisture(x, y, mseed, moisture_octaves)
+            if lrow[x]:
+                mrow[x] = float(field[y, x])
 
 
 def _compute_fertility(world, nseed):
@@ -2175,33 +2286,43 @@ def _compute_fertility(world, nseed):
             world.fertility[y][x] = max(0.0, min(1.0, fert))
 
 
+# Temperature drops with altitude (a lapse rate): high ground is cold even
+# at the equator, which is what makes a treeline exist at all -- a forest
+# climbing a mountain meets a band where it is too cold to grow and gives
+# way to bare alpine ground. Applied to the latitude temperature before it
+# reaches classify_biome / classify_climate.
+_ELEVATION_LAPSE = 0.45
+
+
 def _classify_biomes_and_climate(world):
     """Fill world.biome_grid / world.climate_grid (land cells only) from
     elevation relief, moisture, distance to the coast/rivers-and-lakes, and
-    a latitude-style "temperature" gradient (warm at the map's vertical
-    middle, cold at the top/bottom edges — a stand-in for a real pole
-    system, since this world has no globe to wrap around)."""
+    temperature. Temperature is the latitude gradient (warm at the map's
+    vertical middle, cold at the top/bottom edges — a stand-in for a real
+    pole system, since this world has no globe to wrap around) COOLED by the
+    elevation lapse rate, so high ground reads colder than low ground on the
+    same latitude."""
     from app.world.resources import classify_biome, classify_climate
 
     w, h, sea = world.w, world.h, world.sea_level
     span = (1.0 - sea) or 1.0
-    ocean_cells = [(x, y) for y in range(h) for x in range(w)
-                   if world.owner[y][x] == OCEAN]
-    coast_d = _bfs_distance(world, ocean_cells) if ocean_cells else None
+    coast_d = world.coast_distance
     water_d = _bfs_distance(world, list(world.river_cells | world.lake_cells))
 
     for y in range(h):
-        latitude_temp = 1.0 - abs(y / h - 0.5) * 2.0
+        latitude_temp = 1.0 - abs(y / h - 0.5) * 2.0   # warm mid, cold poles
         for x in range(w):
             if world.owner[y][x] == OCEAN or (x, y) in world.lake_cells:
                 continue
             relief = max(0.0, min(1.0, (world.height[y][x] - sea) / span))
             moisture = world.moisture[y][x]
+            temperature = max(0.0, min(1.0,
+                                       latitude_temp - _ELEVATION_LAPSE * relief))
             cd = coast_d[y][x] if coast_d is not None else 10 ** 9
             wd = water_d[y][x]
             world.biome_grid[y][x] = classify_biome(relief, moisture, cd, wd,
-                                                    latitude_temp)
-            world.climate_grid[y][x] = classify_climate(latitude_temp, moisture)
+                                                    temperature)
+            world.climate_grid[y][x] = classify_climate(temperature, moisture)
 
 
 class World:
@@ -2212,7 +2333,9 @@ class World:
         self.owner = [[OCEAN] * w for _ in range(h)]   # faction index or OCEAN
         self.height = [[0.0] * w for _ in range(h)]     # elevation, 0..1
         self.fertility = [[0.0] * w for _ in range(h)]  # 0..1 (land); 0 = water
-        self.moisture = [[0.0] * w for _ in range(h)]   # 0..1 rainfall noise (land)
+        self.moisture = [[0.0] * w for _ in range(h)]   # 0..1 rainfall (land)
+        self.coast_distance = None   # BFS steps to nearest ocean (land cells);
+                                     # filled by _compute_moisture before any reader
         # Ocean surface current (see app/world/currents.py), [y][x] -> a
         # signed float; 0 over land and wherever no current was ever solved.
         # Left as None here rather than pre-filled with zero grids: a world
@@ -2372,16 +2495,15 @@ _CAPITAL_COASTAL_EXCLUDE_REACH = 3   # matches classify_biome's own coastal
 _CAPITAL_MIN_FOOD_CELL_FRACTION = 0.15   # of the sampled neighborhood
 
 
-def _capital_has_nearby_farmland(world, x, y, mseed, land_set, coast_d):
+def _capital_has_nearby_farmland(world, x, y, land_set):
     """Whether real Crop-supporting land (moderate elevation, not
     desert-dry or rainforest-wet, not coastal, not open water) exists near
     (x, y) -- a lightweight standalone stand-in for the real biome
     classification (_classify_biomes_and_climate), which doesn't run until
-    much later in world-gen and needs data (a full moisture grid) that
-    doesn't exist yet at capital-placement time. `coast_d` (a one-time
-    _bfs_distance pass computed before the whole capital-placement loop
-    runs) gives an exact, cheap coast-distance lookup instead of re-
-    scanning each sample's own neighborhood for ocean on every call.
+    much later in world-gen. Reads the geography-driven world.moisture and
+    world.coast_distance grids _compute_moisture already filled, so the
+    farmland question and the real biome classification agree on what
+    "moderate rainfall" means.
     Doesn't try to be exact (no swamp exception for Rice) -- just close
     enough to stop a faction spawning in the dead middle of a mountain
     range, desert, or coastline with nothing farmable anywhere close by."""
@@ -2389,7 +2511,7 @@ def _capital_has_nearby_farmland(world, x, y, mseed, land_set, coast_d):
     span = (1.0 - sea) or 1.0
     hits = total = 0
     r = _CAPITAL_FOOD_CHECK_RADIUS
-    moisture_octaves = _periodic_octaves(world.w, _MOISTURE_OCTAVES)
+    coast_d = world.coast_distance
     for dy in range(-r, r + 1, _CAPITAL_FOOD_CHECK_STEP):
         for dx in range(-r, r + 1, _CAPITAL_FOOD_CHECK_STEP):
             cx, cy = x + dx, y + dy
@@ -2403,7 +2525,7 @@ def _capital_has_nearby_farmland(world, x, y, mseed, land_set, coast_d):
             relief = max(0.0, min(1.0, (world.height[cy][cx] - sea) / span))
             if relief >= _CAPITAL_MAX_RELIEF_FOR_FARMLAND:
                 continue
-            moisture = _quick_moisture(cx, cy, mseed, moisture_octaves)
+            moisture = world.moisture[cy][cx]
             if not (_CAPITAL_MIN_MOISTURE_FOR_FARMLAND <= moisture
                     <= _CAPITAL_MAX_MOISTURE_FOR_FARMLAND):
                 continue
@@ -2843,23 +2965,25 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     world.total_land_cells = len(land_cells)
 
     # 2. hydrology: fill basins, form lakes, and route flow-accumulated rivers
-    #    to the sea. Done before fertility so water can irrigate nearby land.
+    #    to the sea. Done before moisture so the climate pass can credit
+    #    riverbanks and lakeshores with the extra wetness that makes wetlands.
     _generate_hydrology(world, land, rng)
+
+    # 2c. climate moisture: the geography-driven rainfall field (latitude
+    #     bands + coastal wetness + orographic rain shadow + riparian wetness
+    #     + texture noise), computed before capitals so the farmland check and
+    #     the later biome classification both read the same field. Also fills
+    #     world.coast_distance for both to share.
+    _compute_moisture(world, land, nseed)
 
     # 3. scatter capitals with a minimum spacing, each one required to have
     #    real farmland somewhere nearby (see _capital_has_nearby_farmland) --
     #    otherwise a faction could spawn in the dead middle of a mountain
     #    range, desert, or coastline with no Crop-capable land anywhere
-    #    close to its starting foothold. world.owner isn't populated with
-    #    real OCEAN-vs-land data until step 4 below (it defaults to OCEAN
-    #    everywhere in World.__init__), so ocean cells for this one-time
-    #    coast-distance pass come from `land`/`land_cells` directly instead.
+    #    close to its starting foothold. The moisture/coast-distance grids it
+    #    reads were filled by _compute_moisture above.
     min_dist = max(6.0, math.sqrt(len(land_cells) / n_factions) * 0.9)
     land_set = set(land_cells)
-    ocean_cells = [(x, y) for y in range(height) for x in range(width)
-                  if not land[y][x]]
-    coast_d = _bfs_distance(world, ocean_cells)
-    mseed = _moisture_seed(nseed)
     # A player-chosen start is pinned first, so rivals space away from it and
     # it survives the affinity ordering below. It is NOT farmland-gated: free
     # placement onto poor ground is allowed on purpose (the New Game screen
@@ -2882,7 +3006,7 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
     while len(capitals) < n_factions and tries < 6000:
         tries += 1
         x, y = rng.choice(dry_land)
-        if not _capital_has_nearby_farmland(world, x, y, mseed, land_set, coast_d):
+        if not _capital_has_nearby_farmland(world, x, y, land_set):
             continue
         if all((x - px) ** 2 + (y - py) ** 2 >= min_dist ** 2 for px, py in capitals):
             capitals.append((x, y))
@@ -2893,7 +3017,7 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
         # unplaced; if even that comes up empty, fall back to any land cell
         # at all so world-gen never simply fails.
         farmable = [c for c in dry_land
-                   if _capital_has_nearby_farmland(world, c[0], c[1], mseed, land_set, coast_d)]
+                   if _capital_has_nearby_farmland(world, c[0], c[1], land_set)]
         capitals.append(rng.choice(farmable) if farmable else rng.choice(dry_land))
 
     # 4. mark every land cell UNCLAIMED (distinct from OCEAN) before anyone
@@ -2906,7 +3030,7 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
         world.owner[y][x] = UNCLAIMED
 
     # 5. ecology: fertility from moisture + elevation + distance to water/rivers.
-    _compute_moisture(world, nseed)
+    #    (moisture was already computed above, after hydrology / before capitals.)
     _compute_fertility(world, nseed)
     _classify_biomes_and_climate(world)
 

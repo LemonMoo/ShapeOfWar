@@ -20,6 +20,15 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 121,
+        "title": "The Living Land",
+        "items": [
+            "WORLD: biomes now follow real geography instead of a noise blob — rainfall comes from latitude bands (wet equator, dry subtropics, moist temperate, dry polar fringe), coast proximity, mountain rain shadows (a ridge is wet on its windward side and dry on its lee, from the same wind bands that drive the currents) and riverbanks, so jungle grows at the equator, desert in rain shadows, taiga in the boreal belt and tundra at the poles, instead of one biome covering a whole stretch of map.",
+            "WORLD: temperature now falls with altitude — high ground reads cold, so a mountain grades up through forest and foothills into bare alpine tundra at the treeline instead of appearing as a solid wall.",
+            "WORLD: biomes blend into one another through transitional zones — savannah between desert and jungle, steppe between desert and plains, highland foothills between plains and mountain — so the land changes gradually rather than switching at a hard edge.",
+        ],
+    },
+    {
         "version": 120,
         "title": "The Road to the Gate",
         "items": [

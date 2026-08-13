@@ -21,6 +21,12 @@ from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
 EXE = sys.argv[1] if len(sys.argv) > 1 else "dist/ShapesOfWar.exe"
 MARKERS = [
     # (module, marker, kind) -- update the version markers with each release.
+    # v1.0.0 -- natural map generation: geography-driven climate + treeline.
+    ("app.world.worldgen", "_compute_orography", "name"),
+    ("app.world.worldgen", "_latitude_moisture", "name"),
+    ("app.world.worldgen", "_ELEVATION_LAPSE", "name"),
+    ("app.world.worldgen", "_RIPARIAN_MOISTURE", "name"),
+    ("app.core.changelog", "The Living Land", "const"),
     ("app.ui.map_view", "parked in _pending_tracks", "const"),
     ("app.ui.gl_flatmap", "wglSwapIntervalEXT", "const"),
     ("app.ui.app", "timeBeginPeriod", "name"),

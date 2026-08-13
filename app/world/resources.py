@@ -6385,6 +6385,13 @@ def classify_biome(relief, moisture, coast_dist, water_dist, temperature=0.6):
     if relief > _MOUNTAIN_RELIEF:
         return "mountain"
     if relief > _HIGHLAND_RELIEF:
+        # Above the treeline a foothill is bare alpine tundra, not the
+        # temperate grazing "highland" reads as. The elevation lapse has
+        # already cooled `temperature`, so this reuses the same threshold the
+        # matrix's cold band does: a cold highland is tundra, while a cold
+        # flatland falls through to the matrix's tundra/taiga the same way.
+        if temperature < _TEMP_BANDS[0]:
+            return "tundra"
         return "highland"
     if coast_dist <= _COASTAL_REACH:
         return "coastal"
