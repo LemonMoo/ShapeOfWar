@@ -31,11 +31,14 @@ from app.world import commander
 from app.world import expansion
 from app.world import diplomacy
 from app.world import rivers
+from app.world import governance
 from app.world.worldgen import (POPULATION_RANGE, SETTLEMENT_TAX_INCOME,
                                 CHILDREN_FRACTION_RANGE,
                                 STARTING_POPULATION_FRACTION_RANGE,
                                 ROAD_TRAVEL_SPEEDUP)
-from app.world.lexicon import SPECIES, species_trait_summary
+from app.world.lexicon import (SPECIES, species_trait_summary,
+                               GOVERNMENT_FORMS, SPECIES_GOVERNMENT_AFFINITY,
+                               DEFAULT_GOVERNMENT)
 
 RESOURCE_CATEGORIES = ["Crops", "Livestock", "Forestry", "Mining", "Fishing",
                        "Food Products", "Manufactured Goods", "Luxury Goods",
@@ -1962,6 +1965,64 @@ def _founding_article():
     return "\n\n".join(parts)
 
 
+def _governance_article():
+    aff_values = [v for aff in SPECIES_GOVERNMENT_AFFINITY.values()
+                  for v in aff.values()]
+    aff_min, aff_max = min(aff_values), max(aff_values)
+    form_lines = [
+        f"  {f['name']}: {f['desire']}" for f in GOVERNMENT_FORMS.values()]
+    default_lines = [
+        f"  {sp}: {GOVERNMENT_FORMS[form]['name']} "
+        f"(affinity {SPECIES_GOVERNMENT_AFFINITY[sp][form]:+d})"
+        for sp, form in DEFAULT_GOVERNMENT.items()]
+    parts = [
+        "Governance & Loyalty",
+        (
+            "Every realm is ruled under a government form — the way its people "
+            "organise power. Each species' general populace has a natural "
+            "preference: a form its people trust is stable and cheap to keep, "
+            "while one they despise is rule against the grain."
+        ),
+        "GOVERNMENT FORMS",
+        "\n".join(form_lines),
+        "WHO PREFERS WHAT",
+        (
+            "A realm is born under its species' preferred form (below). Each "
+            "species also carries an affinity toward every other form, scored "
+            f"{aff_min:+d}..{aff_max:+d} — the same scale as inter-species "
+            "diplomacy affinity. Its default is the form it scores highest."
+        ),
+        "\n".join(default_lines),
+        "LOYALTY",
+        (
+            "Loyalty is how the people feel about the current form. It starts "
+            f"at {governance.LOYALTY_BASE} plus "
+            f"{governance.LOYALTY_AFFINITY_WEIGHT} per point of affinity — a "
+            f"preferred form sits at "
+            f"{governance.LOYALTY_BASE + 2 * governance.LOYALTY_AFFINITY_WEIGHT}, "
+            f"a despised one at "
+            f"{governance.LOYALTY_BASE - 2 * governance.LOYALTY_AFFINITY_WEIGHT} — "
+            f"clamped to {governance.LOYALTY_FLOOR}..{governance.LOYALTY_CEIL}."
+        ),
+        (
+            "Loyalty then MOVES, easing toward a target that rewards the realm "
+            "for behaving as its government's people want: a Warband that raids "
+            "and keeps no foreign trade is content; an Elder Council pushed "
+            "into sprawl and war is not. Reforming to another form costs "
+            "loyalty, scaled by how far the species' affinity moves."
+        ),
+        (
+            "Loyalty is not cosmetic. It scales the economy (a loyal realm's "
+            "settlements are wealthier — and the species' long-hidden eco "
+            "stat now matters) and the levy it can muster; it adds or removes "
+            "regions of governance capacity; and a realm whose loyalty falls "
+            f"below {governance.REVOLT_LOYALTY_FLOOR} risks its frontier "
+            "regions rising in revolt and breaking away."
+        ),
+    ]
+    return "\n\n".join(parts)
+
+
 def _overview_article():
     parts = [
         "Shapes of War — Compendium",
@@ -2036,6 +2097,7 @@ ARTICLES = {
     "regional_markets": ("Regional Markets", _regional_markets_article()),
     "foreign_trade": ("Foreign Trade", _foreign_trade_article()),
     "diplomacy": ("Diplomacy", _diplomacy_article()),
+    "governance": ("Governance & Loyalty", _governance_article()),
     "expansion": ("Expansion & Claiming Wildland", _expansion_article()),
     "construction": ("Construction", _construction_article()),
     "commanders": ("Commanders & Ships", _commanders_article()),
@@ -2066,6 +2128,7 @@ NAV = [
     ("regional_markets", "Regional Markets", "article"),
     ("foreign_trade", "Foreign Trade", "article"),
     ("diplomacy", "Diplomacy", "article"),
+    ("governance", "Governance & Loyalty", "article"),
     ("expansion", "Expansion & Claiming Wildland", "article"),
     ("construction", "Construction", "article"),
     ("commanders", "Commanders & Ships", "article"),

@@ -89,11 +89,13 @@ print(f"  ok    {base:.1f} -> pop {more_pop:.1f} / settle {more_settle:.1f} "
 
 print("\n--- governance: capacity, overstretch, and the soft brake ---")
 from app.world import expansion as E
-# Capacity is the settlement ladder: base 1 + 3/city + 2/castle + 1/town.
-assert P.governance_capacity(_world(cities=1), 0) == 4
-assert P.governance_capacity(_world(cities=1, towns=2, castles=1), 0) == 8
+# Capacity is the settlement ladder (base 1 + 3/city + 2/castle + 1/town) plus
+# a loyalty term (slice 4): a Human realm in its default monarchy sits at
+# loyalty 70, worth +1 region of governance.
+assert P.governance_capacity(_world(cities=1), 0) == 5
+assert P.governance_capacity(_world(cities=1, towns=2, castles=1), 0) == 9
 # Overstretch is regions held past capacity, and never negative.
-assert P.claim_overstretch(_world(cities=1, regions=6), 0) == 2
+assert P.claim_overstretch(_world(cities=1, regions=6), 0) == 1
 assert P.claim_overstretch(_world(cities=1, regions=3), 0) == 0
 # A stretched realm pays more settlers and takes longer -- a tax, not a wall.
 region = NS(cells=[(0, 0)] * 100)
@@ -102,7 +104,7 @@ over_settlers = E.claim_settlers(region, overstretch=3)
 assert over_settlers > base_settlers, (base_settlers, over_settlers)
 assert E.claim_turns(region, overstretch=3) > E.claim_turns(region)
 assert E.claim_cost(region, overstretch=3)["Food"] > E.claim_cost(region)["Food"]
-print(f"  ok    capacity 4 (1 city) / 8 (city+2 towns+castle); overstretch 2/0")
+print(f"  ok    capacity 5 (1 city, loyal) / 9 (city+2 towns+castle, loyal); overstretch 1/0")
 print(f"  ok    overstretch 3: {base_settlers} -> {over_settlers} settlers, "
       f"{E.claim_turns(region)} -> {E.claim_turns(region, overstretch=3)} turns")
 

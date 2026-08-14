@@ -66,6 +66,12 @@ class App(tk.Tk):
         self._battle_outcome = None
         self._current_screen = None
         self._paused = False
+        # A modal in-game dialog is up (the frontier event overlay, see
+        # app/ui/frontier_dialog.py). While set, the global shortcuts below
+        # are inert: the world is paused for the decision and the player is
+        # expected to make it, not to toggle the clock or open the pause
+        # menu from behind a blocker that does not move.
+        self._modal_open = False
         self._save_id = None
         self._save_created_at = None
         self._pending_elimination = None   # see _on_faction_eliminated
@@ -459,6 +465,8 @@ class App(tk.Tk):
         """Global shortcut for the Compendium (see MapView.open_compendium) —
         works from any game screen, not just the map, since the content
         doesn't depend on world state."""
+        if self._modal_open:
+            return
         if self.map_view is not None:
             self.map_view.open_compendium()
 
@@ -485,7 +493,7 @@ class App(tk.Tk):
         Same gating End Turn had: only while actually looking at the map, and
         never while typing (a faction name on the New Game screen contains
         spaces)."""
-        if self._is_typing(event):
+        if self._modal_open or self._is_typing(event):
             return
         if self._current_screen == "map" and not self._paused:
             self.map_view._toggle_pause()
@@ -494,7 +502,7 @@ class App(tk.Tk):
         """E: run one whole day right now, whatever the clock is doing --
         the old End Turn cadence, kept because stepping the world by hand is
         how most of this project's testing is done."""
-        if self._is_typing(event):
+        if self._modal_open or self._is_typing(event):
             return
         if self._current_screen == "map" and not self._paused:
             self.map_view.skip_a_day()
@@ -505,13 +513,18 @@ class App(tk.Tk):
         Also inert while a background turn is processing (MapView.render()
         would just no-op it anyway -- skipping the call keeps the key
         feeling inert rather than silently swallowed)."""
-        if self._is_typing(event):
+        if self._modal_open or self._is_typing(event):
             return
         if self._current_screen == "map" and not self._paused:
             self.map_view._toggle_mode()
 
     # --- pause menu (world map only) ----------------------------------------
     def _on_escape(self, event):
+        # Ignored while a modal dialog (a frontier event) is up -- Escape is
+        # that dialog's key, and the pause menu must not open from behind a
+        # blocker the player cannot see past.
+        if self._modal_open:
+            return
         # Ignored outright while a turn is processing in the background: the
         # only things Escape can reach from here -- entering the pause menu
         # (whose Save writes `world` to disk) and _resume_from_pause's

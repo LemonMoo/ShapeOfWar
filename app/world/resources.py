@@ -6669,6 +6669,12 @@ def _recompute_military(nation, world, fac_idx=None):
         strength *= 1.0 + CAVALRY_BONUS * min(armed, horses) / armed
     strength *= 1.0 + species.get("mil", 0) / 100.0
 
+    # Governance (slice 3): a loyal realm musters more of its levy than a
+    # disloyal one -- loyalty_effect_mult is 1.0 at 50 and spans 0.6..1.4.
+    if fac_idx is not None:
+        from app.world import governance
+        strength *= governance.loyalty_effect_mult(world, fac_idx)
+
     nation.stats["military"] = max(_MILITARY_FLOOR,
                                    min(_MILITARY_CEILING, int(strength)))
 
@@ -6850,13 +6856,21 @@ def _update_prosperity(world, production_value, consumption_value):
     faction_sum = defaultdict(float)
     faction_cnt = defaultdict(int)
 
+    from app.world import governance
     for fac_idx, nation in enumerate(world.factions):
         health = _faction_health_factor(production_value.get(fac_idx, 0.0),
                                         consumption_value.get(fac_idx, 0.0))
+        # Governance (slice 3): loyalty scales a realm's economic wealth, and
+        # the species' eco stat -- long declared but never read -- gets its
+        # first real job as an economy multiplier alongside it.
+        species_eco = SPECIES.get(nation.meta.get("species"), {}).get("eco", 0)
+        economy_mult = governance.loyalty_effect_mult(world, fac_idx) \
+            * (1.0 + species_eco / 100.0)
         for sid in nation.meta.get("settlements", []):
             st = world.settlements[sid]
             target = _prosperity_target(
-                settlement_goods_wealth_value(st, world.season, st.tax_income),
+                settlement_goods_wealth_value(st, world.season, st.tax_income)
+                * economy_mult,
                 health, _prosperity_condition(st))
             ease = PROSPERITY_EASE * (CATHEDRAL_EASE_MULT
                                       if settlement_character(st) == "cathedral"
@@ -6868,7 +6882,7 @@ def _update_prosperity(world, production_value, consumption_value):
             faction_sum[fac_idx] += target
             faction_cnt[fac_idx] += 1
         for v in villages_by_fac.get(fac_idx, []):
-            target = _prosperity_target(village_goods_wealth_value(v),
+            target = _prosperity_target(village_goods_wealth_value(v) * economy_mult,
                                         health, _prosperity_condition(v))
             v.prosperity += (target - v.prosperity) * PROSPERITY_EASE
             v._wealth_target = target
@@ -7888,6 +7902,15 @@ def day_steps(world):
     frontier.advance_frontier_events(world)
     _econ_mark = _record_econ(world, "gained", _econ_mark)  # frontier spoils/losses
     yield "frontier"
+
+    # Governance (app/world/governance.py): loyalty eases toward its target
+    # (slice 2) and, below the floor, frontier regions revolt (slice 5). Runs
+    # late so it reads this turn's final military/trade/expansion state; the
+    # eased loyalty takes effect next turn.
+    from app.world import governance
+    governance.apply_loyalty_drift(world)
+    governance.apply_revolts(world)
+    yield "loyalty"
 
     # Fog of war: reveal whatever's now in range as territory changes hands
     # (app/world/vision.py).

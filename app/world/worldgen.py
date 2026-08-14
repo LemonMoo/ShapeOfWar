@@ -25,6 +25,7 @@ from app.world import noise
 from app.world import currents
 from app.world import plates
 from app.world.lexicon import (SPECIES, SPECIES_BIOME_AFFINITY,
+                               DEFAULT_GOVERNMENT,
                                make_faction_namer, make_region_namer,
                                make_ruler_namer, make_settlement_namer,
                                ruler_title)
@@ -3147,6 +3148,7 @@ def generate_world(width=1100, height=660, seed=None, n_factions=14,
             stats={"military": military, "morale": morale},
             ruler=ruler,
             meta={"species": species, "trait": traits["trait"],
+                  "government": DEFAULT_GOVERNMENT.get(species, "monarchy"),
                   "base_color": base_color,
                   "cells": cells, "capital": capitals[idx],
                   "fertility": round(100 * fert_sum / cells),  # avg %, 0..100
@@ -3278,6 +3280,9 @@ def apply_player_identity(world, species=None, name=None, color=None, ruler=None
     if species and species != nation.meta.get("species"):
         nation.meta["species"] = species
         nation.meta["trait"] = SPECIES.get(species, {}).get("trait", "")
+        # Government follows the people: a species switch resets the realm to
+        # the new species' default form, alongside the names below.
+        nation.meta["government"] = DEFAULT_GOVERNMENT.get(species, "monarchy")
         # Settlement and village names are species-flavoured (see
         # make_settlement_namer), so a realm that switched species would
         # otherwise keep a stranger's place names.

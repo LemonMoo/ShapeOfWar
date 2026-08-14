@@ -40,6 +40,7 @@ from app.world import expansion
 from app.world import holds
 from app.world import commander
 from app.world import buildings
+from app.world import governance
 # Sector names as the player sees them, shared with the build menu so the two
 # surfaces can never drift into calling the same thing different names.
 from app.ui.build_menu import SECTOR_LABEL
@@ -4555,6 +4556,35 @@ class MapView(tk.Frame):
             self._show_region(region)
         self.render()
 
+    def _show_reform_section(self, nation):
+        """The player's own-realm action: switch government form (slice 2).
+        Each form is an inline button naming its species affinity and the
+        loyalty it would cost -- the same informed-choice idiom as the
+        settlement character picker (see _show_character_choice)."""
+        from app.world.lexicon import GOVERNMENT_FORMS, SPECIES_GOVERNMENT_AFFINITY
+        fac_idx = self.world.factions.index(nation)
+        species = nation.meta.get("species", "Humans")
+        current = governance.government_form(self.world, fac_idx)
+        self._panel_gap(4)
+        self._panel_text("Reform government — each form is what its people "
+                         "want, and every reform costs loyalty.", fg=theme.MUTED)
+        for form, info in GOVERNMENT_FORMS.items():
+            if form == current:
+                continue
+            aff = SPECIES_GOVERNMENT_AFFINITY.get(species, {}).get(form, 0)
+            cost = governance.reform_cost(self.world, fac_idx, form)
+            self._panel_button(
+                f"{info['name']} (affinity {aff:+d}, costs {cost} loyalty)",
+                lambda f=form: self._do_reform(nation, f))
+
+    def _do_reform(self, nation, form):
+        fac_idx = self.world.factions.index(nation)
+        msg = governance.reform_government(self.world, fac_idx, form)
+        self.show_bottom_message(msg)
+        if self.selected is nation:
+            self._show_faction(nation)
+        self.render()
+
     def _show_faction(self, nation):
         self._hide_prosperity_bar()
         self._hide_storage_bar()
@@ -4597,8 +4627,11 @@ class MapView(tk.Frame):
 
         body = self._card("SUMMARY")
         if body is not None:
+            fac_idx = self.world.factions.index(nation)
             self._kv(body, "Military", f"{s['military']}")
             self._kv(body, "Morale", f"{s['morale']}")
+            self._kv(body, "Government", governance.government_name(self.world, fac_idx))
+            self._kv(body, "Loyalty", f"{round(governance.government_loyalty(self.world, fac_idx))}")
             self._kv(body, "Gold", f"{gold:,}")
             self._kv(body, "Avg fertility", f"{nation.meta['fertility']}%")
             self._kv(body, "Population", f"{self._total_population(nation):,}")
@@ -4634,6 +4667,7 @@ class MapView(tk.Frame):
         elif own:
             self._panel_text("This is your realm. Select a rival "
                      "nation on the map to consider attacking it.", fg=theme.MUTED)
+            self._show_reform_section(nation)
         else:
             rel = self.world.world_map.get_relationship(player.id, nation.id)
             if rel["stance"] == Stance.ENEMY:

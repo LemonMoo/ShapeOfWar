@@ -20,6 +20,16 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 126,
+        "title": "The Consent of the Governed",
+        "items": [
+            "GOVERNANCE: every realm now has a government form -- Elder Council, Clan Council, Guild Oligarchy, Theocracy, Feudal Monarchy, Republic, Warband, Gang-Boss -- and every species prefers some over others, born under the form its people score highest. A realm's loyalty toward its form starts there and then MOVES, easing each day toward a target that rewards behaving as that form's people want: a warband that raids and keeps no foreign trade is content; an elder council pushed into war and sprawl is not.",
+            "REFORM: you can change a realm's government -- your realm panel lists every form with its species affinity and the loyalty it costs, and reforming against your people's grain is dear while reforming with it is cheap.",
+            "LOYALTY IS NOT COSMETIC: loyalty scales the economy (a loyal realm's settlements are wealthier, and the species' long-hidden economy stat now matters), the levy it musters, and how much land it can govern well -- and a realm whose loyalty sinks far enough risks its frontier regions rising in revolt and breaking away.",
+            "UI: a frontier event now appears as an in-game overlay instead of a separate OS window -- drawn over a full-window blocker on the game's own window, with the global shortcuts inert until you choose, so the decision can no longer open unfocused or fall behind the map.",
+        ],
+    },
+    {
         "version": 125,
         "title": "The Ledger Balances",
         "items": [

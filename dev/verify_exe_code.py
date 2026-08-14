@@ -21,6 +21,18 @@ from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
 EXE = sys.argv[1] if len(sys.argv) > 1 else "dist/ShapesOfWar.exe"
 MARKERS = [
     # (module, marker, kind) -- update the version markers with each release.
+    # v1.2.0 -- the consent of the governed: per-species government forms and
+    # a live loyalty that scales economy/army/governance and can revolt; the
+    # frontier event dialog became an in-game overlay (no separate OS window).
+    ("app.world.governance", "apply_loyalty_drift", "name"),
+    ("app.world.governance", "reform_government", "name"),
+    ("app.world.governance", "secede_region", "name"),
+    ("app.world.lexicon", "GOVERNMENT_FORMS", "name"),
+    ("app.world.lexicon", "SPECIES_GOVERNMENT_AFFINITY", "name"),
+    ("app.ui.frontier_dialog", "_redraw_blocker", "name"),
+    ("app.ui.frontier_dialog", "full-window blocker", "const"),
+    ("app.ui.app", "_modal_open", "name"),
+    ("app.core.changelog", "The Consent of the Governed", "const"),
     # v1.1.0 -- the ledger balances: the reconciliation test measures the
     # run's own econ_ledger window (a warm dev save carries year-to-date
     # econ_year history); the ledger is proven to reconcile day by day.

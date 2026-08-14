@@ -218,12 +218,16 @@ GOVERNANCE_PER_KIND = {"city": 3, "castle": 2, "town": 1}
 
 def governance_capacity(world, faction_idx):
     """Regions this faction can govern well -- the sum of its settlements'
-    governance, plus a base foothold. A fresh realm (capital City, no Towns)
-    governs 4 regions; every Town raised, Castle built, or City founded after
-    that adds more."""
+    governance, plus a base foothold, plus a loyalty term (slice 4): a loyal
+    realm holds its land well, a disloyal one thins at the edges. A fresh
+    realm (capital City, no Towns) governs 4 regions; every Town raised,
+    Castle built, or City founded after that adds more."""
     kinds = _kind_counts(world, faction_idx)
-    return GOVERNANCE_BASE_REGIONS + sum(
+    capacity = GOVERNANCE_BASE_REGIONS + sum(
         GOVERNANCE_PER_KIND.get(k, 0) * count for k, count in kinds.items())
+    from app.world import governance
+    capacity += governance.loyalty_gov_bonus(world, faction_idx)
+    return max(0, capacity)
 
 
 def claim_overstretch(world, faction_idx):

@@ -192,6 +192,77 @@ SPECIES_BIOME_AFFINITY = {
     "Goblins": {"swamp": 1.0, "jungle": 0.8, "tundra": 0.6},
 }
 
+# --- government forms (GOVERNANCE_PLAN.md) ----------------------------------
+# One shared menu of government forms every realm draws its current form from.
+# `name` is the display name; `title` is the ruler's style under that form
+# (DISPLAY ONLY for now -- the throne's actual title still comes from
+# RULER_TITLES below, which names the default form for each species); `desire`
+# is the one-line "what this form's people want". In slice 2+ `desire` drives
+# the behavior-match loyalty drift; in slice 1 it is surfaced as flavor only.
+GOVERNMENT_FORMS = {
+    "elder_council": {"name": "Elder Council", "title": "Archon",
+                      "desire": "conservation, slow growth, peace, tradition",
+                      "wants": {"military": -1.0, "trade": -0.5,
+                                "faith": 0.5, "expansion": -1.0}},
+    "clan_council":  {"name": "Clan Council", "title": "Thane",
+                      "desire": "self-sufficiency, mining and smithing, honor, holds",
+                      "wants": {"military": 0.5, "trade": -0.5,
+                                "faith": 0.0, "expansion": -0.5}},
+    "guild":         {"name": "Guild Oligarchy", "title": "Master",
+                      "desire": "trade, craft, coin, law by contract",
+                      "wants": {"military": -0.5, "trade": 1.0,
+                                "faith": 0.0, "expansion": 0.5}},
+    "theocracy":     {"name": "Theocracy", "title": "Hierophant",
+                      "desire": "faith, tithes, holy sites, scripture",
+                      "wants": {"military": 0.0, "trade": -0.5,
+                                "faith": 1.0, "expansion": 0.0}},
+    "monarchy":      {"name": "Feudal Monarchy", "title": "King / Queen",
+                      "desire": "a landed nobility, castles, farms, order",
+                      "wants": {"military": 0.5, "trade": 0.0,
+                                "faith": 0.5, "expansion": 1.0}},
+    "republic":      {"name": "Republic", "title": "Consul",
+                      "desire": "elected rule, open trade, law by debate",
+                      "wants": {"military": -0.5, "trade": 1.0,
+                                "faith": 0.0, "expansion": 0.5}},
+    "warband":       {"name": "Warband", "title": "Warlord",
+                      "desire": "raid and war, glory, tribute, the strongest leads",
+                      "wants": {"military": 1.0, "trade": -1.0,
+                                "faith": -0.5, "expansion": 1.0}},
+    "gang":          {"name": "Gang-Boss", "title": "Boss",
+                      "desire": "scavenge and swindle, tribute, the den over all",
+                      "wants": {"military": 0.5, "trade": -0.5,
+                                "faith": -1.0, "expansion": 0.0}},
+}
+
+# Per-species affinity toward each form, -2..+2 (the same scale as
+# diplomacy.SPECIES_AFFINITY). This is "what the species' general populace
+# wants": a form its people trust is cheap and stable, one they despise is a
+# reform against the grain. First-pass numbers, judge-in-play (see the plan's
+# §7 table) -- not implemented into any simulated result until slice 2.
+SPECIES_GOVERNMENT_AFFINITY = {
+    "Humans":  {"monarchy": 2, "republic": 2, "theocracy": 1, "guild": 1,
+                "elder_council": 0, "clan_council": 0, "warband": -1, "gang": -2},
+    "Elves":   {"elder_council": 2, "clan_council": 1, "republic": 1,
+                "guild": 0, "theocracy": 0, "monarchy": 0, "warband": -2, "gang": -2},
+    "Dwarves": {"clan_council": 2, "elder_council": 1, "guild": 1,
+                "theocracy": 0, "monarchy": 0, "republic": 0, "warband": -1, "gang": -1},
+    "Orcs":    {"warband": 2, "gang": 1, "clan_council": 0,
+                "elder_council": -2, "guild": -2, "theocracy": -1, "monarchy": -1, "republic": -2},
+    "Goblins": {"gang": 2, "warband": 1, "clan_council": 0,
+                "elder_council": -2, "guild": -2, "theocracy": -2, "monarchy": -2, "republic": -1},
+}
+
+# The form each species is born under: its highest-affinity form. Humans
+# tie-break to Feudal Monarchy -- their "adaptable" identity is expressed by
+# the affinity SPREAD above, not by a single archetype.
+DEFAULT_GOVERNMENT = {
+    "Humans": "monarchy",
+    "Elves": "elder_council",
+    "Dwarves": "clan_council",
+    "Orcs": "warband",
+    "Goblins": "gang",
+}
+
 # Every species trait, with the "no modifier" value each defaults to. Anything
 # without an entry in SPECIES above (notably the neutral Wildland Garrison,
 # which has no species at all) falls through to these and fights at the plain
