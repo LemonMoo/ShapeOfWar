@@ -7315,6 +7315,11 @@ def seed_initial_stockpiles(world):
             for sid in sids:
                 st = world.settlements[sid]
                 st.resources["Gold"] = st.resources.get("Gold", 0) + round(share)
+        # The kingdom treasury (TAXATION_PLAN): a starting reserve for the
+        # crown so turn-1 construction isn't frozen while the first taxes
+        # land. Separate from the settlement coin above, which is trade
+        # liquidity, not a development fund.
+        nation.stats["treasury"] = STARTING_TREASURY_PER_FACTION
         _clamp_to_storage(nation)     # the seeded reserve mustn't itself exceed the cap
         _recompute_military(nation, world)
 
@@ -7384,6 +7389,113 @@ def gold_in_transit(world, fac_idx):
 def gold_ledger(world, fac_idx):
     """[{turn, causes...}, ...] most recent last, for the Treasury panel."""
     return [e for e in getattr(world, "gold_ledger", {}).get(fac_idx, [])]
+
+
+# --- the kingdom treasury ---------------------------------------------------
+# The gold ledger above tracks a faction's coin WHERE IT LIVES (per settlement
+# and village). The treasury is a separate, central pot per faction: taxes land
+# in it, and it is what pays for buildings, settlements, ships, tunnels and the
+# village ladder. The two are deliberately distinct -- a settlement's own gold
+# is what it mints and trades; the treasury is what the crown has collected.
+#
+# Taxes are REDISTRIBUTION, never minting (the project's standing "gold only
+# enters via mining / real trade" rule, HANDOFF 16.2): income tax drains coin
+# a settlement already holds, and the transaction tax takes its cut out of
+# coin already in flight in a trade. Nothing here creates gold out of nothing.
+STARTING_TREASURY_PER_FACTION = 2000   # one-time starting reserve for the
+                                       # crown (see seed_initial_stockpiles) --
+                                       # development runway before the first
+                                       # taxes land, not derived from a stock
+                                       # turn like the other seeds.
+TREASURY_LEDGER_HISTORY_TURNS = 24     # window, matching the gold ledger
+
+
+def faction_treasury(world, fac_idx):
+    """Gold in a faction's central treasury -- the tax-fed pot that pays for
+    development. Absent on old saves, hence the `.get` default of 0."""
+    return world.factions[fac_idx].stats.get("treasury", 0)
+
+
+def migrate_treasury(world):
+    """One-time migration for saves predating the treasury (TAXATION_PLAN):
+    give every faction its starting reserve. Fresh worlds get it in
+    seed_initial_stockpiles; an old save arrives with no `treasury` key at
+    all, and without one a realm could not pay the Gold line of anything
+    until taxes accumulated. Called from load_game (app/core/save.py) --
+    reads `"treasury" in stats` rather than a truthy value, so a realm that
+    has genuinely spent its treasury to zero is never re-seeded on reload."""
+    for nation in world.factions:
+        if "treasury" not in nation.stats:
+            nation.stats["treasury"] = STARTING_TREASURY_PER_FACTION
+
+
+def _record_treasury(world, fac_idx, amount, cause):
+    """Move `amount` of gold into (positive) or out of (negative) `fac_idx`'s
+    treasury and attribute it to `cause` in this turn's treasury ledger. The
+    balance is floored at 0 -- callers that spend must have already checked
+    affordability (construction.can_afford) the same way _pay_cost assumes."""
+    if not amount or fac_idx < 0:
+        return
+    stats = world.factions[fac_idx].stats
+    stats["treasury"] = max(0, stats.get("treasury", 0) + amount)
+    ledger = getattr(world, "_treasury_turn", None)
+    if ledger is None:
+        ledger = world._treasury_turn = defaultdict(dict)
+    entry = ledger.get(fac_idx)
+    if entry is None:
+        entry = ledger[fac_idx] = {}
+    entry[cause] = entry.get(cause, 0) + amount
+
+
+def collect_income_tax(world):
+    """One turn of income tax: every settlement pays min(tax_income, the gold
+    it actually holds) into its faction's treasury. Revives the dead
+    `Settlement.tax_income` (rolled at founding, see worldgen) as a real,
+    redistributive flow -- the coin is drained from settlement stock, never
+    minted, so a settlement holding no gold pays no tax and nothing goes
+    negative. Villages carry no tax of their own (see village_goods_wealth_
+    value). Returns {fac_idx: gold collected} for the caller's ledger mark."""
+    collected = defaultdict(int)
+    for st in world.settlements:
+        fac = st.faction_idx
+        if fac < 0:
+            continue
+        owed = getattr(st, "tax_income", 0) or 0
+        if owed <= 0:
+            continue
+        res = getattr(st, "resources", None)
+        if not res:
+            continue
+        held = res.get("Gold", 0)
+        pay = int(min(owed, held))
+        if pay <= 0:
+            continue
+        res["Gold"] = held - pay
+        _record_treasury(world, fac, pay, "income tax")
+        collected[fac] += pay
+    return dict(collected)
+
+
+def treasury_ledger(world, fac_idx):
+    """[{turn, causes...}, ...] most recent last, for the Treasury panel --
+    the treasury's own twin of gold_ledger."""
+    return [e for e in getattr(world, "treasury_ledger", {}).get(fac_idx, [])]
+
+
+def _close_treasury_ledger(world):
+    """Commit this turn's per-faction treasury flows to world.treasury_ledger,
+    keeping only the recent window so saves don't grow without bound -- the
+    same shape and discipline as _close_gold_ledger."""
+    ledger = getattr(world, "treasury_ledger", None)
+    if ledger is None:
+        ledger = world.treasury_ledger = {}
+    for fac_idx, causes in getattr(world, "_treasury_turn", {}).items():
+        entry = {"turn": world.turn, "net": sum(causes.values())}
+        entry.update(causes)
+        history = ledger.setdefault(fac_idx, [])
+        history.append(entry)
+        del history[:-TREASURY_LEDGER_HISTORY_TURNS]
+    world._treasury_turn = defaultdict(dict)
 
 
 # --- the economy ledger -----------------------------------------------------
@@ -7696,6 +7808,7 @@ def day_steps(world):
     # that can move coin is bracketed by a snapshot, so the breakdown always
     # adds up to the real change with nothing unaccounted for.
     world._gold_turn = defaultdict(dict)
+    world._treasury_turn = defaultdict(dict)
     _gold_mark = _gold_snapshot(world)
     # Economy ledger for this turn -- the same measurement trick, for every
     # resource (see the economy-ledger section above). New year: start the
@@ -7830,6 +7943,18 @@ def day_steps(world):
     _econ_mark = _record_econ(world, "traded", _econ_mark)
     yield "sell to city"
 
+    # Taxation (TAXATION_PLAN): settlements pay income tax into the kingdom
+    # treasury. Runs after trade (so it taxes this turn's proceeds) and before
+    # construction (so the treasury is full when development spends it). The
+    # node-gold side of the drain is attributed to a "tax" cause so the gold
+    # ledger still reconciles; the treasury side is recorded by
+    # collect_income_tax itself into the treasury ledger.
+    world._income_tax_collected = collect_income_tax(world)
+    _record_gold(world, "tax", _gold_mark)
+    _gold_mark = _gold_snapshot(world)
+    _econ_mark = _record_econ(world, "tax", _econ_mark)
+    yield "tax"
+
     # Player/AI-built settlements + their connecting roads
     # (app/world/construction.py).
     from app.world import construction
@@ -7923,5 +8048,6 @@ def day_steps(world):
     # that's a genuine signal there's a gold flow worth naming.
     _record_gold(world, "other", _gold_mark)
     _close_gold_ledger(world)
+    _close_treasury_ledger(world)
     _close_econ_ledger(world)
     yield "day end"

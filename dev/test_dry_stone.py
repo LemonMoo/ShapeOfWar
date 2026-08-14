@@ -48,7 +48,7 @@ def make_world():
     st = SimpleNamespace(id=0, kind="town", name="Mines", pos=(1, 1),
                          faction_idx=0, region_id=0, resources={})
     nation = SimpleNamespace(name="Realm", meta={"settlements": [0]},
-                             stats={"resources": {}})
+                             stats={"resources": {}, "treasury": 5000})
     world = SimpleNamespace(regions=[region_tl, region_fo],
                             settlements=[st], villages=[], factions=[nation],
                             region_grid={}, under_region={})
@@ -109,17 +109,22 @@ assert C.can_afford(nation, CAMP, w, region_id=0), \
 # A forest region still demands the real Logs it cannot produce.
 assert not C.can_afford(nation, CAMP, w, region_id=1)
 C._pay_cost(nation, CAMP, w, region_id=0)
-assert st.resources == {"Stone": 5000 - 520, "Gold": 500 - 160,
+# Gold is paid from the kingdom treasury, not node stock (TAXATION_PLAN) --
+# only the Stone line drains the node here.
+assert st.resources == {"Stone": 5000 - 520, "Gold": 500,
                         "Bricks": 9999}, st.resources
+assert nation.stats["treasury"] == 5000 - 160, nation.stats["treasury"]
 assert st.resources.get("Logs", 0) == 0, "no Logs may be spent"
 # Tier-2: Planks cost pays as Stone at the same node.
 st.resources = {"Stone": 5000, "Gold": 500, "Bricks": 9999}
+nation.stats["treasury"] = 5000
 assert not C.can_afford(nation, GRANARY_T2, w), \
     "without a region, Planks are still required"
 assert C.can_afford(nation, GRANARY_T2, w, region_id=0)
 C._pay_cost(nation, GRANARY_T2, w, region_id=0)
-assert st.resources == {"Stone": 5000 - 1000, "Gold": 500 - 420,
+assert st.resources == {"Stone": 5000 - 1000, "Gold": 500,
                         "Bricks": 9999 - 180}, st.resources  # bricks line stays
+assert nation.stats["treasury"] == 5000 - 420, nation.stats["treasury"]
 assert st.resources.get("Planks", 0) == 0, "no Planks may be spent"
 print("  ok    Stone pays for what Logs AND Planks would have; neither spent")
 

@@ -22,6 +22,8 @@ PATH = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     os.path.dirname(__file__), "worlds", "dev560.pkl")
 
 w = pickle.load(open(PATH, "rb"))
+R.migrate_treasury(w)   # pre-treasury saves have none; development is funded
+                        # from it (TAXATION_PLAN), so seed it for the build below
 pidx = w.player_faction_idx if w.player_faction_idx is not None else 0
 nation = w.factions[pidx]
 villages = [v for v in w.villages if v.faction_idx == pidx]

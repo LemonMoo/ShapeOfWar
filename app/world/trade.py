@@ -191,6 +191,14 @@ def _settlement_gold(st):
 # when a real opportunity (a wildland claim, say) comes along.
 GOLD_TRADE_RESERVE = 200
 
+# Transaction tax (TAXATION_PLAN): the fraction of every Gold payment the
+# crown skims into the seller's kingdom treasury when a sale is credited
+# (see _deliver_payment). Redistribution, not minting -- the coin was already
+# collected from the buyer, this just splits the seller's receipt between the
+# settlement and the treasury. Foreign trade is Gold-first so it is where the
+# tax mostly bites; domestic trade is barter-first so it rarely pays coin.
+TRADE_TAX_RATE = 0.10
+
 
 def _spendable_gold(st):
     """Gold a settlement will actually put toward a trade, after holding
@@ -348,12 +356,23 @@ def _collect_payment(payer_st, price, world, season, barter_first=False, allow_g
     return taken
 
 
-def _deliver_payment(payee_st, paid):
+def _deliver_payment(world, payee_st, paid):
     if payee_st is None or not paid:
         return
     if not hasattr(payee_st, "resources"):
         payee_st.resources = {}
     for resource, qty in paid:
+        if resource == "Gold" and qty > 0:
+            # Transaction tax (TAXATION_PLAN): the crown skims TRADE_TAX_RATE
+            # of the gold into the payee's faction treasury instead of the
+            # payee's own stock. Redistribution, never minting -- the coin
+            # was already collected from the buyer in _collect_payment, this
+            # just splits the seller's receipt.
+            tax = int(round(qty * TRADE_TAX_RATE))
+            if tax > 0:
+                resources._record_treasury(world, payee_st.faction_idx,
+                                           tax, "trade tax")
+                qty -= tax
         payee_st.resources[resource] = payee_st.resources.get(resource, 0) + qty
 
 
@@ -1052,7 +1071,7 @@ def advance_caravans(world):
                         else _faction_capital_settlement(seller, world))
             payment, bonus_gold = _with_gold_bonus(
                 c.payment, _species_gold_bonus(world, c.seller_idx))
-            _deliver_payment(seller_st, payment)
+            _deliver_payment(world, seller_st, payment)
             events.append({"type": "paid", "seller_idx": c.seller_idx, "buyer_idx": c.buyer_idx,
                           "resource": c.resource, "quantity": c.quantity, "price": c.total_price,
                           "payment": payment, "bonus_gold": bonus_gold})
@@ -1938,7 +1957,7 @@ def advance_regional_shipments(world):
         # at dispatch time (see run_regional_trade) -- credited to `origin`
         # (the seller) here, real Gold and/or a barter good, same shape as
         # foreign trade's return leg.
-        _deliver_payment(origin, s.payment)
+        _deliver_payment(world, origin, s.payment)
         events.append({"type": "regional_delivered", "faction_idx": s.faction_idx,
                       "resource": s.resource, "quantity": s.quantity, "price": s.total_price,
                       "payment": s.payment,

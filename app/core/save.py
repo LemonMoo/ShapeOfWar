@@ -95,6 +95,10 @@ def load_game(save_id):
     # a top-level import would be circular.
     from app.world.resources import migrate_legacy_overflow
     migrate_legacy_overflow(world)
+    # Saves predating the kingdom treasury (TAXATION_PLAN) have none -- seed
+    # the crown's starting reserve so a realm can still pay for development.
+    from app.world.resources import migrate_treasury
+    migrate_treasury(world)
     # Saves predating "every faction has a commander" have only the player's.
     from app.world.commander import ensure_faction_commanders
     ensure_faction_commanders(world)

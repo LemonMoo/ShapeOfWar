@@ -2428,7 +2428,14 @@ class MapView(tk.Frame):
         "domestic trade": "transfers between your own settlements (mostly barter)",
         "construction": "buildings, shipyards and storage works",
         "expansion": "wildland claims",
+        "tax": "income tax drained from your settlements into the treasury",
         "other": "anything not covered above",
+    }
+
+    _TREASURY_TAX_CAUSE_HELP = {
+        "income tax": "settlements pay a share of the gold they hold each turn",
+        "trade tax": "the crown's cut of gold that changes hands in trade",
+        "spent": "paid out for buildings, settlements, ships and the village ladder",
     }
 
     def _refresh_treasury(self):
@@ -2477,6 +2484,33 @@ class MapView(tk.Frame):
             if transit:
                 line(sec, f"{transit:,} in transit \u2014 sold, still on the road home",
                      theme.WARN)
+
+        # The kingdom treasury (TAXATION_PLAN): a separate central pot from
+        # the coin in settlements above -- taxes fill it, development spends
+        # it. Shown here because this panel is where a player already looks
+        # to answer "where is my money".
+        treasury = resources.faction_treasury(wd, fac_idx)
+        sec = section("KINGDOM TREASURY", "kingdom")
+        if sec is not None:
+            line(sec, f"{treasury:,} gold", bold=True)
+            line(sec, "funds buildings, villages, towns, cities and ships",
+                 theme.MUTED)
+            tledger = resources.treasury_ledger(wd, fac_idx)
+            if not tledger:
+                line(sec, "  Nothing collected yet \u2014 end a turn.", theme.MUTED)
+            else:
+                agg = {}
+                for entry in tledger:
+                    for cause, value in entry.items():
+                        if cause not in ("turn", "net"):
+                            agg[cause] = agg.get(cause, 0) + value
+                line(sec, f"  over the last {len(tledger)} turns:", theme.MUTED)
+                for cause, value in sorted(agg.items(), key=lambda kv: -abs(kv[1])):
+                    line(sec, f"    {value:+,}  {cause}",
+                         theme.GOOD if value > 0 else theme.BAD)
+                    line(sec, f"        {self._TREASURY_TAX_CAUSE_HELP.get(cause, '')}",
+                         theme.MUTED)
+                line(sec, f"    {sum(agg.values()):+,}  net", None, bold=True)
 
         sec = section("WHERE IT IS", "where", default_open=False)
         if sec is not None:
@@ -2553,6 +2587,7 @@ class MapView(tk.Frame):
         "built": "spent on buildings, claims and roads",
         "raided": "carried off by raiders",
         "gained": "found, granted or taken from others",
+        "tax": "income tax drained from your settlements into the treasury",
     }
 
     def _build_ledger_panel(self):

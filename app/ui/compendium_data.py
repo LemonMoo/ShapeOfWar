@@ -338,16 +338,17 @@ def _settlements_article():
             "total are children) — the ranges below:"
         ),
         "\n".join([
-            f"  City:   {pop['city'][0]:,}–{pop['city'][1]:,} max pop, civic wealth {tax['city'][0]}–{tax['city'][1]}/turn",
-            f"  Castle: {pop['castle'][0]:,}–{pop['castle'][1]:,} max pop, civic wealth {tax['castle'][0]}–{tax['castle'][1]}/turn",
-            f"  Town:   {pop['town'][0]:,}–{pop['town'][1]:,} max pop, civic wealth {tax['town'][0]}–{tax['town'][1]}/turn",
+            f"  City:   {pop['city'][0]:,}–{pop['city'][1]:,} max pop, income tax {tax['city'][0]}–{tax['city'][1]}/turn",
+            f"  Castle: {pop['castle'][0]:,}–{pop['castle'][1]:,} max pop, income tax {tax['castle'][0]}–{tax['castle'][1]}/turn",
+            f"  Town:   {pop['town'][0]:,}–{pop['town'][1]:,} max pop, income tax {tax['town'][0]}–{tax['town'][1]}/turn",
         ]),
         (
             "(A Castle's population ceiling skews toward garrison over "
             "civilians, hence the lower range despite outbuilding a Town.) "
-            "Civic wealth doesn't generate any actual Gold any more (see "
-            "Currency) — it's purely a Prosperity input now, folded into "
-            "how big a settlement's target meter is."
+            "Income tax is the crown's cut: each turn a settlement pays up "
+            "to that much gold into the kingdom treasury, drawn from the "
+            "gold it actually holds — never minted (see Currency). It still "
+            "feeds Prosperity as the size of a settlement's target meter."
         ),
         "CHARACTERS (MARKET / GARRISON / CATHEDRAL)",
         (
@@ -595,14 +596,24 @@ def _currency_article():
     parts = [
         "Currency",
         (
-            "Gold is a real Manufactured Good now, not a flat per-turn tax "
+            "Gold is a real Manufactured Good, not a flat per-turn tax "
             "draw — it has to be mined and minted like anything else, "
             "stockpiled at specific settlements (see Storage & Spoilage), "
-            "and physically spent from wherever it's actually sitting. "
-            "There's no faction-wide treasury any more: a settlement can "
-            "be Gold-rich while another of the same faction's own "
+            "and spent from wherever it's actually sitting. A settlement "
+            "can be Gold-rich while another of the same faction's own "
             "settlements is Gold-poor, exactly like every other "
             "settlement-storage resource."
+        ),
+        "THE KINGDOM TREASURY",
+        (
+            "On top of the coin in its settlements, every realm keeps a "
+            "central kingdom treasury. Taxes fill it: each settlement pays "
+            "an income tax (the rate listed under Settlements) out of the gold it "
+            "holds, and a cut of every gold trade — the transaction tax — "
+            "is skimmed into it too. The treasury is what pays the Gold "
+            "line of development: buildings, villages, towns, cities and "
+            "ships (see below). Taxes only ever move coin that already "
+            "exists; they never mint it."
         ),
         "MINING AND MINTING",
         (
@@ -631,7 +642,10 @@ def _currency_article():
             "genuinely spendable, how much is riding home on a caravan, "
             "which settlements are holding it, and a per-cause breakdown of "
             "every coin gained or spent over recent turns — minting, "
-            "foreign trade, domestic trade, construction and expansion."
+            "foreign trade, domestic trade, construction, expansion and "
+            "tax. Its KINGDOM TREASURY section shows the crown's own pot: "
+            "the balance, and the income tax, trade tax and development "
+            "spend that moved it."
         ),
         "MONEY IN TRANSIT",
         (
@@ -649,16 +663,15 @@ def _currency_article():
         ),
         "WHAT IT'S SPENT ON",
         (
-            "Everything that used to draw from the old treasury still "
-            "costs Gold exactly the same way — settlement/road/ship/"
-            "shipyard construction — it's just paid "
-            "out of the faction's settlement storage now (spread across "
-            "whichever settlements actually have it, largest stockpile "
-            "first, same rule Iron/Logs/Stone already followed). Claims "
+            "The Gold line of development — settlement/road/ship/shipyard "
+            "construction and the village ladder — is paid out of the "
+            "kingdom treasury, not the settlements' own stock. Taxes are "
+            "what keep it full (see THE KINGDOM TREASURY above). Claims "
             "are the exception: they cost settlers and provisions, no Gold "
             "(see Expansion). Trade (see Regional Markets/Foreign Trade) "
             "pays and collects "
-            "it at the specific settlements actually making the deal."
+            "it at the specific settlements actually making the deal, and "
+            "the transaction tax is skimmed off each such payment."
         ),
         "BARTER",
         (
@@ -1370,10 +1383,10 @@ def _construction_article():
         (
             "Every building costs real resources and takes real turns — "
             "nothing is free, and (except a Shipyard-launched ship, see "
-            "Commanders & Ships) nothing is instant. Costs, Gold included "
-            "(see Currency), are paid from the faction's settlement "
-            "storage, spread across whichever settlements actually have "
-            "the goods, largest stockpile first."
+            "Commanders & Ships) nothing is instant. Goods costs are paid "
+            "from the faction's settlement storage, spread across whichever "
+            "settlements actually have them, largest stockpile first; the "
+            "Gold line is paid from the kingdom treasury (see Currency)."
         ),
         (
             "A region with no timber at all — no forest, taiga or jungle "

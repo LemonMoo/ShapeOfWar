@@ -47,6 +47,9 @@ def fund():
             node.resources = dict(node.resources or {})
             for r in ("Stone", "Food", "Logs", "Iron", "Gold"):
                 node.resources[r] = node.resources.get(r, 0) + 20000
+    # Development's Gold line is paid from the kingdom treasury (TAXATION_
+    # PLAN), not node stock -- fund that too.
+    nation.stats["treasury"] = nation.stats.get("treasury", 0) + 20000
 
 
 print("\n--- rung 1: found a village in a gallery ---")

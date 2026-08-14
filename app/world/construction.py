@@ -58,23 +58,30 @@ SETTLEMENT_UPGRADE_COST = SETTLEMENT_BUILD_COST["city"]
 # and roads already exist), and the existing Town->City upgrade closes the
 # ladder. Tuned so a fresh realm's first village is a real but affordable
 # commitment, and a raise is a strategic step, not a formality.
-VILLAGE_BUILD_COST = {"Food": 300}   # provisions for the settlers -- people,
-                                      # not timber; a claim's settlers eat the
-                                      # same way (see _pay_claim), and Food is
-                                      # abundant where the ladder starts.
-                                      # "Food" is a first-class cost resource
-                                      # -- see can_afford/_pay_cost.
+VILLAGE_BUILD_COST = {"Food": 300, "Gold": 200}   # provisions for the settlers
+                                      # -- people, not timber; a claim's
+                                      # settlers eat the same way (see
+                                      # _pay_claim), and Food is abundant where
+                                      # the ladder starts. "Food" is a first-
+                                      # class cost resource -- see can_afford/
+                                      # _pay_cost. The Gold line is the crown's
+                                      # fee (TAXATION_PLAN): development is
+                                      # funded from the kingdom treasury, so
+                                      # founding a village costs coin too.
 VILLAGE_BUILD_TURNS = 8
-RAISE_VILLAGE_COST = {"Stone": 250, "Food": 500}   # the town's public stonework
-                                                    # and feeding a town's worth
-                                                    # of people -- deliberately
+RAISE_VILLAGE_COST = {"Stone": 250, "Food": 500, "Gold": 400}   # the town's
+                                                    # public stonework and
+                                                    # feeding a town's worth of
+                                                    # people -- deliberately
                                                     # log-free: the AI spends its
                                                     # scarce Logs on camp upgrades
                                                     # (industry is gated on them),
                                                     # and a raise that competed
                                                     # for timber would stall the
                                                     # whole ladder for a log-poor
-                                                    # realm.
+                                                    # realm. Gold is the treasury
+                                                    # draw (TAXATION_PLAN), same
+                                                    # as every other rung.
 RAISE_VILLAGE_TURNS = 12
 # Population gates on the ladder -- growth is the real currency, not just
 # resources. A Village must reach half its population ceiling before it can
@@ -976,10 +983,19 @@ def can_afford(nation, cost, world, region_id=None):
 
     `region_id` is the build site's region: in a timberless one, the cost
     is resolved dry-stone first (see resolve_timber_cost), so a mountain
-    realm's Stone pays for what a forest realm pays in Logs."""
+    realm's Stone pays for what a forest realm pays in Logs.
+
+    Gold is the one settlement-storage resource that is NOT paid from
+    per-node stock: it is drawn from the faction's kingdom treasury (see
+    TAXATION_PLAN) -- taxes fund development, so the crown, not the
+    individual settlements, pays the coin line of a build."""
     cost = resolve_timber_cost(cost, world, region_id)
+    fac_idx = world.factions.index(nation)
     for resource, amount in cost.items():
-        if resource in _SETTLEMENT_STORAGE_RESOURCES:
+        if resource == "Gold":
+            if resources.faction_treasury(world, fac_idx) < amount:
+                return False
+        elif resource in _SETTLEMENT_STORAGE_RESOURCES:
             if _faction_settlement_stock(nation, resource, world) < amount:
                 return False
         elif resource == "Food":
@@ -1002,8 +1018,13 @@ def _pay_cost(nation, cost, world, region_id=None):
     can_afford. `region_id` resolves the cost dry-stone exactly like
     can_afford does, so the two halves always agree on what is paid."""
     cost = resolve_timber_cost(cost, world, region_id)
+    fac_idx = world.factions.index(nation)
     for resource, amount in cost.items():
-        if resource in _SETTLEMENT_STORAGE_RESOURCES:
+        if resource == "Gold":
+            # Paid from the kingdom treasury, not per-node stock (TAXATION_
+            # PLAN) -- and recorded in the treasury ledger as "spent".
+            resources._record_treasury(world, fac_idx, -amount, "spent")
+        elif resource in _SETTLEMENT_STORAGE_RESOURCES:
             remaining = amount
             ordered = sorted(_faction_nodes(nation, world),
                              key=lambda node: getattr(node, "resources", {}).get(resource, 0),

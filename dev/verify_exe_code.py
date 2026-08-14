@@ -21,6 +21,16 @@ from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
 EXE = sys.argv[1] if len(sys.argv) > 1 else "dist/ShapesOfWar.exe"
 MARKERS = [
     # (module, marker, kind) -- update the version markers with each release.
+    # v1.3.0 -- the crown's due: a kingdom treasury fed by an income tax and a
+    # transaction tax, which funds the Gold line of development.
+    ("app.world.resources", "collect_income_tax", "name"),
+    ("app.world.resources", "faction_treasury", "name"),
+    ("app.world.resources", "migrate_treasury", "name"),
+    ("app.world.resources", "STARTING_TREASURY_PER_FACTION", "name"),
+    ("app.world.trade", "TRADE_TAX_RATE", "name"),
+    ("app.ui.map_view", "KINGDOM TREASURY", "const"),
+    ("app.ui.map_view", "_TREASURY_TAX_CAUSE_HELP", "name"),
+    ("app.core.changelog", "The Crown's Due", "const"),
     # v1.2.0 -- the consent of the governed: per-species government forms and
     # a live loyalty that scales economy/army/governance and can revolt; the
     # frontier event dialog became an in-game overlay (no separate OS window).

@@ -20,6 +20,16 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 127,
+        "title": "The Crown's Due",
+        "items": [
+            "TREASURY: every realm now keeps a kingdom treasury — a central pot apart from the coin in its settlements. Two taxes fill it: an income tax (each settlement pays up to its civic-wealth rate, drawn from the gold it actually holds) and a transaction tax (10% of the gold that changes hands in a sale, skimmed off the seller's receipt).",
+            "RULE: taxes redistribute, never mint — a settlement holding no gold pays no tax, and collecting tax leaves a realm's total coin unchanged. Gold still only enters through mining and real trade.",
+            "RULE: the treasury funds development — the Gold line of buildings, settlements, ships, tunnels and the village ladder is now paid from the treasury instead of settlement stock, and founding or raising a village costs coin too.",
+            "UI: the Treasury panel gains a KINGDOM TREASURY section — the balance, and its own income-tax / trade-tax / spend ledger over recent turns.",
+        ],
+    },
+    {
         "version": 126,
         "title": "The Consent of the Governed",
         "items": [
