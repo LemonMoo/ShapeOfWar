@@ -21,6 +21,10 @@ from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
 EXE = sys.argv[1] if len(sys.argv) > 1 else "dist/ShapesOfWar.exe"
 MARKERS = [
     # (module, marker, kind) -- update the version markers with each release.
+    # v1.1.0 -- the ledger balances: the reconciliation test measures the
+    # run's own econ_ledger window (a warm dev save carries year-to-date
+    # econ_year history); the ledger is proven to reconcile day by day.
+    ("app.core.changelog", "The Ledger Balances", "const"),
     # v1.0.3 -- boom and bust: wealth-relative population growth/decline and
     # the ladder's decline half (City->Town, Town->Village).
     ("app.world.resources", "POPULATION_MIGRATION_RATE", "name"),

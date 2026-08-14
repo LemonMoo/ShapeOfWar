@@ -20,6 +20,14 @@ _SEEN_PATH = _app_root() / "changelog_seen.json"
 # (that's what the in-game Compendium, F1, is for).
 CHANGELOG_ENTRIES = [
     {
+        "version": 125,
+        "title": "The Ledger Balances",
+        "items": [
+            "FIX: the economy ledger's numbers are now proven against the world. Every resource the ledger shows (this-year and day-by-day) is attributed at phase boundaries and reconciled to the realm's real stock — the check measures a run's own window now, so a save loaded mid-year no longer looks wrong when it isn't. Every faction, every resource, every day adds up.",
+            "FIX: the ledger's observation-only proof is green again on the regenerated dev worlds — recording the ledger changes nothing in the simulated world, the year-rollover leak test passes, and the ledger panel renders with data and with an empty ledger.",
+        ],
+    },
+    {
         "version": 124,
         "title": "Boom and Bust",
         "items": [
