@@ -8,7 +8,9 @@ The load-bearing claims of ECONOMY_PLAN.md's Part A, in order:
    sum to that resource's real stock change over the run. This is the whole
    point of measuring at phase boundaries instead of instrumenting by hand:
    the panel's numbers are the world's numbers, and if a phase is ever missed
-   the invariant breaks and this test goes red.
+   the invariant breaks and this test goes red. Measured over the run's own
+   econ_ledger window (turn-filtered): a warm dev save carries year-to-date
+   econ_year history, so the year window cannot measure a short run.
 
 2. OBSERVATION-ONLY -- a world run with the ledger recording runs to an
    identical fingerprint as the same world with it switched off
@@ -70,16 +72,28 @@ def faction_snapshots(world):
 
 print(f"--- 1. the ledger reconciles to the real stock change ({DAYS} days) ---")
 world = load()
+start_turn = world.turn
 before = faction_snapshots(world)
 for _ in range(DAYS):
     R.advance_turn(world)
 after = faction_snapshots(world)
-# The ledger is windowed; sum the whole window for each faction/resource and
-# compare against the run's real change.
+# Reconcile over the RUN's own window: sum the windowed entries (econ_ledger)
+# whose turn falls inside the run. The year window (econ_year) cannot measure
+# a 10-day run on a dev world -- make_dev_world.py warms the save 560 turns,
+# so econ_year already holds pre-run history, and a year boundary inside the
+# run would cut the window in half. The run-window sum is the exact claim:
+# the ledger's causes sum to that resource's real stock change over the run.
+assert DAYS <= R.ECON_LEDGER_HISTORY_TURNS, (
+    f"run window {DAYS} exceeds the ledger history window "
+    f"{R.ECON_LEDGER_HISTORY_TURNS} -- entries would be evicted mid-run")
 for fac_idx in range(len(world.factions)):
-    year = R.economy_year(world, fac_idx)
+    run_net = {}
+    for resource, entries in world.econ_ledger.get(fac_idx, {}).items():
+        for entry in entries:
+            if start_turn < entry.get("turn", 0) <= world.turn:
+                run_net[resource] = run_net.get(resource, 0) + entry.get("net", 0)
     for resource, start in before[fac_idx].items():
-        ledger_net = sum(year.get(resource, {}).values())
+        ledger_net = run_net.get(resource, 0)
         real_change = after[fac_idx].get(resource, 0) - start
         if real_change or ledger_net:
             print(f"  {world.factions[fac_idx].name:24s} {resource:14s} "
@@ -90,7 +104,7 @@ for fac_idx in range(len(world.factions)):
     # Resources that appeared during the run.
     for resource in after[fac_idx]:
         if resource not in before[fac_idx]:
-            ledger_net = sum(year.get(resource, {}).values())
+            ledger_net = run_net.get(resource, 0)
             assert ledger_net == after[fac_idx][resource], (
                 f"new resource {resource} for {world.factions[fac_idx].name}: "
                 f"ledger {ledger_net:+,} vs stock {after[fac_idx][resource]:+,}")
